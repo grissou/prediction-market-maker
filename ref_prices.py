@@ -1,0 +1,389 @@
+#!/usr/bin/env python3
+"""
+Reference prices from real-money prediction markets (Polymarket, and optionally Kalshi), used by
+mm_bot.py as an independent sanity check on the tournament's own order books.
+
+WHY
+    The tournament's books are seeded by a house market maker that follows real-money markets, and
+    anyone can watch Polymarket move before the tournament book catches up. So mm_bot treats
+    Polymarket as the better estimate of the true price (see the REFERENCE PRICES settings there):
+      - fair value leans toward it (ref_weight),
+      - if it disagrees with the tournament book by more than ref_guard_gap, the side it says is
+        mispriced isn't quoted,
+      - if it jumps suddenly (ref_jump_threshold), that market's quotes are pulled for a while, so a
+        real move doesn't catch us with stale quotes and a random spike doesn't drag our prices.
+
+HOW mm_bot USES IT (automatic when ref_map.json exists next to the bot)
+    refs = ReferencePrices("ref_map.json"); refs.start()      # refreshes every 30 s in the background
+    refs.get()   ->  {"Ohio Senate|Republican": 0.405, ...}     cached; never waits; never raises
+
+COMMANDS
+    python ref_prices.py suggest            match every tournament race to a Polymarket "election
+                                            winner" market by name and add it to ref_map.json.
+                                            Existing entries are kept. REVIEW THE RESULT: it's name matching.
+    python ref_prices.py search "Ohio Senate"   list candidate markets (ids, prices) to fix an entry by hand
+    python ref_prices.py check              every mapped market: tournament price vs reference price
+
+MAPPING FILE (ref_map.json): one entry per tournament contract, keyed "<race>|<party>":
+    "Ohio Senate|Republican": {"source": "polymarket", "id": "631058", "note": "Jon Husted (R) - Ohio Senate Election Winner"}
+    "Ohio Senate|Democratic": {"source": "kalshi", "id": "SENATEOHS-26-D", "note": "added by hand"}
+    Delete an entry, or set "id" to null, to use no reference for that contract.
+"""
+
+import json
+import logging
+import os
+import re
+import sys
+import threading
+import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
+
+import requests
+
+# =============================================================================================
+# SETTINGS
+# =============================================================================================
+
+@dataclass
+class RefConfig:
+    refresh_seconds: float = 30.0      # re-download reference prices this often (Polymarket's own API, so this
+                                       #   doesn't use the tournament's request budget). mm_bot overrides it with
+                                       #   its own ref_refresh_seconds (5 s) while trading
+    max_age_seconds: float = 300.0     # stop using a price this old (i.e. downloads have been failing), so the
+                                       #   bot falls back to the tournament book instead of trusting stale data
+    max_spread: float = 0.10           # an external bid/ask wider than this isn't a reliable price...
+    use_last_trade: bool = True        # ...so fall back to its last trade price instead (False = no price)
+    request_timeout: float = 10.0      # seconds per HTTP request
+    batch_size: int = 50               # market ids per request
+    search_pause: float = 0.3          # pause between searches in `suggest` (be polite to the API)
+    polymarket_url: str = "https://gamma-api.polymarket.com"
+    kalshi_url: str = "https://api.elections.kalshi.com/trade-api/v2"
+
+
+REF = RefConfig()
+
+# =============================================================================================
+# FIXED FACTS
+# =============================================================================================
+
+# How each tournament party shows up in Polymarket market names, e.g. "Jon Husted (R)".
+PARTY_TAGS = {"Republican": ("(R)", "Republican"),
+              "Democratic": ("(D)", "Democrat"),        # also matches "Democratic"
+              "Independent": ("(I)", "Independent")}
+
+log = logging.getLogger("mm.ref")
+
+
+def ref_key(race, party):
+    """The key used in ref_map.json and by mm_bot: 'Ohio Senate|Republican'."""
+    return f"{race}|{party}"
+
+# =============================================================================================
+# FETCHING PRICES
+# =============================================================================================
+
+def http_get(url, params=None):
+    r = requests.get(url, params=params, timeout=REF.request_timeout,
+                     headers={"User-Agent": "mm_bot-reference-prices"})
+    r.raise_for_status()
+    return r.json()
+
+
+def to_float(x):
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return None
+
+
+def market_quote(bid, ask, last=None):
+    """(probability, spread) for an external market: the bid/ask mid-point and its spread if it's a
+    real two-sided market with a sensible spread, else (optionally) (last trade price, None), else
+    (None, None). spread=None tells mm_bot the price is only a last trade, which may be old."""
+    bid, ask, last = to_float(bid), to_float(ask), to_float(last)
+    if bid is not None and ask is not None and 0 < bid < ask < 1 and ask - bid <= REF.max_spread:
+        return (bid + ask) / 2, ask - bid
+    if REF.use_last_trade and last is not None and 0 < last < 1:
+        return last, None
+    return None, None
+
+
+def market_price(bid, ask, last=None):
+    """Just the probability from market_quote."""
+    return market_quote(bid, ask, last)[0]
+
+
+def chunks(items, n):
+    return [items[i:i + n] for i in range(0, len(items), n)]
+
+
+def fetch_polymarket(ids):
+    """{market id: (probability, spread)} for Polymarket markets (Gamma API; public, no account needed)."""
+    out = {}
+    for chunk in chunks(ids, REF.batch_size):
+        params = [("id", i) for i in chunk] + [("limit", len(chunk))]
+        for m in http_get(f"{REF.polymarket_url}/markets", params):
+            if m.get("closed"):
+                continue                      # already resolved: not a live opinion any more
+            p, spread = market_quote(m.get("bestBid"), m.get("bestAsk"), m.get("lastTradePrice"))
+            if p is not None:
+                out[str(m["id"])] = (p, spread)
+    return out
+
+
+def fetch_kalshi(tickers):
+    """{ticker: (probability, spread)} for Kalshi markets (public market data; no account needed)."""
+    out = {}
+    for chunk in chunks(tickers, REF.batch_size):
+        for m in http_get(f"{REF.kalshi_url}/markets", {"tickers": ",".join(chunk)}).get("markets", []):
+            if m.get("status") not in ("active", "open"):
+                continue
+            p, spread = market_quote(m.get("yes_bid_dollars"), m.get("yes_ask_dollars"), m.get("last_price_dollars"))
+            if p is not None:
+                out[m["ticker"]] = (p, spread)
+    return out
+
+
+FETCHERS = {"polymarket": fetch_polymarket, "kalshi": fetch_kalshi}
+
+# =============================================================================================
+# THE CLASS mm_bot USES
+# =============================================================================================
+
+def load_map(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+
+
+def save_map(path, mapping):
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(dict(sorted(mapping.items())), f, indent=2)
+    os.replace(tmp, path)
+
+
+class ReferencePrices:
+    """Cached reference prices for everything in a mapping file.
+
+    Two ways to run it:
+      - start() (what mm_bot does when trading): a background thread refreshes every
+        refresh_seconds, so get() never waits for the network.
+      - without start() (commands, tests): get() refreshes itself when the prices are older than
+        refresh_seconds.
+    get() never raises: if a source fails, the last good prices are kept until they're older than
+    max_age_seconds, then dropped, so mm_bot simply quotes off the tournament book instead.
+
+    For mm_bot's jump guard, every refresh bumps `version` and stores `last_moves`: how far each
+    price moved since the previous reading.
+    """
+
+    def __init__(self, map_path, cfg=REF):
+        self.cfg, self.map_path = cfg, map_path
+        self.mapping = {k: v for k, v in load_map(map_path).items() if v and v.get("id")}
+        self.prices = {}                      # key -> (probability, time.monotonic() when fetched)
+        self.spread = {}                      # key -> bid/ask spread, or None if the price is a last trade
+        self.last_try = -1e9
+        self.lock = threading.Lock()          # the background thread writes, mm_bot reads
+        self.version = 0                      # +1 after every refresh (so mm_bot can spot a new reading)
+        self.last_moves = {}                  # key -> |price change| at the latest refresh
+        self.background = False
+        self.stopped = threading.Event()
+        self.on_refresh = None                # optional callback(moves) after every refresh (mm_bot wakes its loop)
+
+    def start(self):
+        """From now on, refresh in a background thread every refresh_seconds."""
+        if not self.background:
+            self.background = True
+            threading.Thread(target=self._loop, name="ref-prices", daemon=True).start()
+
+    def stop(self):
+        self.stopped.set()
+
+    def _loop(self):
+        while not self.stopped.is_set():
+            t0 = time.monotonic()
+            self.refresh()
+            # refresh_seconds from START to start (the download itself takes ~1 s)
+            self.stopped.wait(max(0.0, self.cfg.refresh_seconds - (time.monotonic() - t0)))
+
+    def get(self):
+        now = time.monotonic()
+        if not self.background and now - self.last_try >= self.cfg.refresh_seconds:
+            self.last_try = now
+            self.refresh()
+        with self.lock:
+            return {k: p for k, (p, t) in self.prices.items() if now - t <= self.cfg.max_age_seconds}
+
+    def spreads(self):
+        """{key: Polymarket bid/ask spread} (None where the price is only a last trade). mm_bot only
+        leans on a price, and sizes with Kelly, where this is tight."""
+        with self.lock:
+            return dict(self.spread)
+
+    def refresh(self):
+        wanted = {}                           # source -> [ids]
+        for entry in self.mapping.values():
+            wanted.setdefault(entry.get("source", "polymarket"), []).append(str(entry["id"]))
+        fetched = {}
+        for source, ids in wanted.items():
+            try:
+                fetched[source] = FETCHERS[source](ids)
+            except Exception as e:            # network, bad JSON, unknown source...: keep old prices
+                log.warning("reference prices from %s failed: %s", source, e)
+        now, moves = time.monotonic(), {}
+        with self.lock:
+            for key, entry in self.mapping.items():
+                quote = fetched.get(entry.get("source", "polymarket"), {}).get(str(entry["id"]))
+                if quote is None:
+                    continue
+                p, spread = quote
+                if key in self.prices:
+                    moves[key] = abs(p - self.prices[key][0])
+                self.prices[key], self.spread[key] = (p, now), spread
+            self.last_moves, self.version = moves, self.version + 1
+        if self.on_refresh:
+            try:
+                self.on_refresh(moves)
+            except Exception as e:            # a problem in the caller must never stop the price thread
+                log.warning("on_refresh callback failed: %s", e)
+        log.debug("reference prices: %d of %d mapped markets priced", len(self.prices), len(self.mapping))
+
+# =============================================================================================
+# BUILDING THE MAPPING (command line)
+# =============================================================================================
+
+def search_polymarket(query):
+    return http_get(f"{REF.polymarket_url}/public-search", {"q": query, "limit_per_type": 10}).get("events") or []
+
+
+def find_winner_event(race):
+    """The Polymarket 'election winner' event for a tournament race name such as 'Ohio Senate' or
+    'TN-05 House race'. Skips primaries, margin-of-victory markets and resolved (past) elections."""
+    name = re.sub(r"\s+race$", "", race).strip()
+    exact = f"{name} election winner".lower()
+    now = datetime.now(timezone.utc).isoformat()
+    candidates = []
+    for ev in search_polymarket(f"{name} election winner"):
+        slug, title = (ev.get("slug") or "").lower(), (ev.get("title") or "").lower()
+        if ev.get("closed") or "winner" not in slug or "primary" in slug or name.lower() not in title:
+            continue
+        if ":" in title:
+            continue                          # a sub-market, e.g. "Florida Senate Election: Miami-Dade County Winner"
+        # Several can match. Prefer: the exact title "<race> Election Winner", then events not already
+        # over (a missing end date counts as not over), then the most traded.
+        ends = ev.get("endDate")
+        candidates.append((title == exact, ends is None or ends >= now, float(ev.get("volume") or 0), ev))
+    candidates.sort(key=lambda c: c[:3], reverse=True)
+    return candidates[0][3] if candidates else None
+
+
+def party_market(event, party):
+    """The market inside a winner event for one party, e.g. 'Jon Husted (R)' for Republican."""
+    tags = [t.lower() for t in PARTY_TAGS.get(party, ())]
+    matches = [m for m in event.get("markets") or []
+               if not m.get("closed") and any(t in (m.get("groupItemTitle") or m.get("question") or "").lower() for t in tags)]
+    # One candidate per party in a general election; if not, take the most likely one.
+    return max(matches, key=lambda m: to_float(m.get("bestBid")) or 0, default=None)
+
+
+def tournament_contracts():
+    """(race, party, exchange id) for every race contract in the tournament, using mm_bot's client."""
+    import mm_bot
+    api = mm_bot.Api(mm_bot.CFG, live=False)
+    out = []
+    for m in api.markets():
+        x = mm_bot.RACE_TITLE.match(m.get("title", ""))
+        if x and len(m.get("exchanges", [])) == 1:
+            out.append((x.group(2), x.group(1), str(m["exchanges"][0]["id"])))
+    return api, out
+
+
+def tournament_mids(api, eids):
+    """Mid-price of each tournament book (bid/ask from the bulk endpoint)."""
+    import mm_bot
+    tid = api.tournament()["id"]
+    mids = {}
+    for chunk in chunks(eids, mm_bot.BULK_MAX_IDS):
+        for eid, (b, a) in api.bulk_prices(chunk, tid).items():
+            mids[eid] = (b + a) / 2 if b is not None and a is not None else None
+    return mids
+
+
+def fmt(p):
+    return f"{p:.3f}" if p is not None else "  -  "
+
+
+def cmd_suggest(map_path):
+    api, contracts = tournament_contracts()
+    mapping = load_map(map_path)
+    races = sorted({race for race, _, _ in contracts})
+    added = missing = 0
+    for race in races:
+        todo = [(p, e) for r, p, e in contracts if r == race and ref_key(race, p) not in mapping]
+        if not todo:
+            continue
+        ev = find_winner_event(race)
+        time.sleep(REF.search_pause)
+        for party, _ in todo:
+            m = party_market(ev, party) if ev else None
+            if m is None:
+                missing += 1
+                print(f"  no match   {race} | {party}")
+                continue
+            mapping[ref_key(race, party)] = {"source": "polymarket", "id": str(m["id"]),
+                                             "note": f"{m.get('groupItemTitle')} - {ev.get('title')}"}
+            added += 1
+    save_map(map_path, mapping)
+    print(f"\nadded {added} entries, {missing} without a match -> {map_path}")
+    print("NEXT: run `python ref_prices.py check` and look for big differences - they're often a wrong match.")
+
+
+def cmd_search(query):
+    for ev in search_polymarket(query):
+        print(f"\nEVENT {ev.get('slug')}  |  {ev.get('title')}  |  closed={ev.get('closed')}  ends={ev.get('endDate')}")
+        for m in (ev.get("markets") or [])[:12]:
+            print(f"   id {m.get('id'):>9}  {str(m.get('groupItemTitle') or m.get('question'))[:45]:<45} "
+                  f"bid {m.get('bestBid')}  ask {m.get('bestAsk')}  closed={m.get('closed')}")
+
+
+def cmd_check(map_path):
+    import mm_bot
+    api, contracts = tournament_contracts()
+    refs = ReferencePrices(map_path)
+    prices = refs.get()
+    mids = tournament_mids(api, [e for _, _, e in contracts])
+    gap = mm_bot.CFG.ref_guard_gap
+    print(f"{'contract':<38} {'tournament':>10} {'reference':>10} {'diff':>7}")
+    flagged = 0
+    for race, party, eid in sorted(contracts):
+        key = ref_key(race, party)
+        t, r = mids.get(eid), prices.get(key)
+        diff = (r - t) if (r is not None and t is not None) else None
+        flag = "  <-- bot will only quote one side" if diff is not None and abs(diff) > gap else ""
+        flagged += bool(flag)
+        print(f"{key[:38]:<38} {fmt(t):>10} {fmt(r):>10} {('%+.3f' % diff) if diff is not None else '   -  ':>7}{flag}")
+    print(f"\n{len(prices)} of {len(contracts)} contracts have a reference price; {flagged} differ by more than {gap}")
+
+
+def main():
+    logging.basicConfig(level=logging.INFO, format="%(levelname)-7s %(message)s")
+    here = os.path.dirname(os.path.abspath(__file__))
+    map_path = os.path.join(here, "ref_map.json")
+    cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+    if cmd == "suggest":
+        cmd_suggest(map_path)
+    elif cmd == "search" and len(sys.argv) > 2:
+        cmd_search(" ".join(sys.argv[2:]))
+    elif cmd == "check":
+        cmd_check(map_path)
+    else:
+        print(__doc__)
+
+
+if __name__ == "__main__":
+    main()

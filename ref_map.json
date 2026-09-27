@@ -1,0 +1,1147 @@
+{
+  "AL-02 House race|Democratic": {
+    "source": "polymarket",
+    "id": "1280801",
+    "note": "Shomari Figures (D) - AL-02 House Election Winner"
+  },
+  "AL-02 House race|Republican": {
+    "source": "polymarket",
+    "id": "1280800",
+    "note": "Rhett Marques (R) - AL-02 House Election Winner"
+  },
+  "AZ-01 House race|Democratic": {
+    "source": "polymarket",
+    "id": "942084",
+    "note": "Amish Shah (D) - AZ-01 House Election Winner"
+  },
+  "AZ-01 House race|Republican": {
+    "source": "polymarket",
+    "id": "942082",
+    "note": "Jay Feely (R) - AZ-01 House Election Winner"
+  },
+  "AZ-06 House race|Democratic": {
+    "source": "polymarket",
+    "id": "942162",
+    "note": "JoAnna Mendoza (D) - AZ-06 House Election Winner"
+  },
+  "AZ-06 House race|Republican": {
+    "source": "polymarket",
+    "id": "942159",
+    "note": "Juan Ciscomani (R) - AZ-06 House Election Winner"
+  },
+  "Alabama Governor|Democratic": {
+    "source": "polymarket",
+    "id": "629270",
+    "note": "Doug Jones (D) - Alabama Governor Election Winner"
+  },
+  "Alabama Governor|Republican": {
+    "source": "polymarket",
+    "id": "629271",
+    "note": "Tommy Tuberville (R) - Alabama Governor Election Winner"
+  },
+  "Alabama Senate|Democratic": {
+    "source": "polymarket",
+    "id": "630627",
+    "note": "Everett Wess (D) - Alabama Senate Election Winner"
+  },
+  "Alabama Senate|Republican": {
+    "source": "polymarket",
+    "id": "630628",
+    "note": "Barry Moore (R) - Alabama Senate Election Winner"
+  },
+  "Arizona Governor|Democratic": {
+    "source": "polymarket",
+    "id": "629183",
+    "note": "Katie Hobbs (D) - Arizona Governor Election Winner"
+  },
+  "Arizona Governor|Republican": {
+    "source": "polymarket",
+    "id": "629184",
+    "note": "Andy Biggs (R) - Arizona Governor Election Winner"
+  },
+  "Arkansas Governor|Democratic": {
+    "source": "polymarket",
+    "id": "629283",
+    "note": "Fredrick Love (D) - Arkansas Governor Election Winner"
+  },
+  "Arkansas Governor|Republican": {
+    "source": "polymarket",
+    "id": "629284",
+    "note": "Sarah Huckabee Sanders (R) - Arkansas Governor Election Winner"
+  },
+  "Arkansas Senate|Democratic": {
+    "source": "polymarket",
+    "id": "630653",
+    "note": "Hallie Shoffner (D) - Arkansas Senate Election Winner"
+  },
+  "Arkansas Senate|Republican": {
+    "source": "polymarket",
+    "id": "630654",
+    "note": "Tom Cotton (R)  - Arkansas Senate Election Winner"
+  },
+  "CA-48 House race|Democratic": {
+    "source": "polymarket",
+    "id": "1282825",
+    "note": "Marni von Wilpert (D) - CA-48 House Election Winner"
+  },
+  "CA-48 House race|Republican": {
+    "source": "polymarket",
+    "id": "1282824",
+    "note": "Jim Desmond (R) - CA-48 House Election Winner"
+  },
+  "CO-03 House race|Democratic": {
+    "source": "polymarket",
+    "id": "942304",
+    "note": "Dwayne Romero (D) - CO-03 House Election Winner"
+  },
+  "CO-03 House race|Republican": {
+    "source": "polymarket",
+    "id": "942301",
+    "note": "Jeff Hurd (R) - CO-03 House Election Winner"
+  },
+  "CO-04 House race|Democratic": {
+    "source": "polymarket",
+    "id": "1282881",
+    "note": "Eileen Laubacher (D) - CO-04 House Election Winner"
+  },
+  "CO-04 House race|Republican": {
+    "source": "polymarket",
+    "id": "1282880",
+    "note": "Lauren Boebert (R) - CO-04 House Election Winner"
+  },
+  "CO-08 House race|Democratic": {
+    "source": "polymarket",
+    "id": "942325",
+    "note": "Manny Rutinel (D) - CO-08 House Election Winner"
+  },
+  "CO-08 House race|Republican": {
+    "source": "polymarket",
+    "id": "942324",
+    "note": "Gabe Evans (R) - CO-08 House Election Winner"
+  },
+  "Colorado Governor|Democratic": {
+    "source": "polymarket",
+    "id": "629296",
+    "note": "Phil Weiser (D) - Colorado Governor Election Winner"
+  },
+  "Colorado Governor|Republican": {
+    "source": "polymarket",
+    "id": "629297",
+    "note": "Victor Marx (R) - Colorado Governor Election Winner"
+  },
+  "Colorado Senate|Democratic": {
+    "source": "polymarket",
+    "id": "630666",
+    "note": "John Hickenlooper (D) - Colorado Senate Election Winner"
+  },
+  "Colorado Senate|Republican": {
+    "source": "polymarket",
+    "id": "630667",
+    "note": "Mark Baisley (R) - Colorado Senate Election Winner"
+  },
+  "Connecticut Governor|Democratic": {
+    "source": "polymarket",
+    "id": "629311",
+    "note": "Ned Lamont (D) - Connecticut Governor Election Winner"
+  },
+  "Connecticut Governor|Republican": {
+    "source": "polymarket",
+    "id": "629312",
+    "note": "Ryan Fazio (R) - Connecticut Governor Election Winner"
+  },
+  "Delaware Senate|Democratic": {
+    "source": "polymarket",
+    "id": "630679",
+    "note": "Democrat - Delaware Senate Election Winner"
+  },
+  "Delaware Senate|Republican": {
+    "source": "polymarket",
+    "id": "630680",
+    "note": "Republican - Delaware Senate Election Winner"
+  },
+  "FL-07 House race|Democratic": {
+    "source": "polymarket",
+    "id": "1283001",
+    "note": "Bale Dalton (D) - FL-07 House Election Winner"
+  },
+  "FL-07 House race|Republican": {
+    "source": "polymarket",
+    "id": "1283000",
+    "note": "Ryan Elijah (R) - FL-07 House Election Winner"
+  },
+  "FL-09 House race|Democratic": {
+    "source": "polymarket",
+    "id": "1283017",
+    "note": "Darren Soto (D) - FL-09 House Election Winner"
+  },
+  "FL-09 House race|Republican": {
+    "source": "polymarket",
+    "id": "1283016",
+    "note": "Dan Green (R) - FL-09 House Election Winner"
+  },
+  "FL-13 House race|Democratic": {
+    "source": "polymarket",
+    "id": "942401",
+    "note": "Leela Gray (D) - FL-13 House Election Winner"
+  },
+  "FL-13 House race|Republican": {
+    "source": "polymarket",
+    "id": "942400",
+    "note": "Anna Paulina Luna (R) - FL-13 House Election Winner"
+  },
+  "FL-16 House race|Democratic": {
+    "source": "polymarket",
+    "id": "1283065",
+    "note": "Kelly Kirschner (D) - FL-16 House Election Winner"
+  },
+  "FL-16 House race|Republican": {
+    "source": "polymarket",
+    "id": "1283064",
+    "note": "Sydney Gruters (R) - FL-16 House Election Winner"
+  },
+  "FL-20 House race|Democratic": {
+    "source": "polymarket",
+    "id": "1283097",
+    "note": "Debbie Wasserman Schultz (D) - FL-20 House Election Winner"
+  },
+  "FL-20 House race|Republican": {
+    "source": "polymarket",
+    "id": "1283096",
+    "note": "Brent Andersen (R) - FL-20 House Election Winner"
+  },
+  "FL-22 House race|Democratic": {
+    "source": "polymarket",
+    "id": "1283113",
+    "note": "Pia Dandiya (D) - FL-22 House Election Winner"
+  },
+  "FL-22 House race|Republican": {
+    "source": "polymarket",
+    "id": "1283112",
+    "note": "Casey Askar (R) - FL-22 House Election Winner"
+  },
+  "Florida Governor|Democratic": {
+    "source": "polymarket",
+    "id": "629324",
+    "note": "David Jolly (D) - Florida Governor Election Winner"
+  },
+  "Florida Governor|Republican": {
+    "source": "polymarket",
+    "id": "629325",
+    "note": "Byron Donalds (R)  - Florida Governor Election Winner"
+  },
+  "Florida Senate|Democratic": {
+    "source": "polymarket",
+    "id": "631044",
+    "note": "Angie Nixon (D) - Florida Senate Election Winner"
+  },
+  "Florida Senate|Republican": {
+    "source": "polymarket",
+    "id": "631045",
+    "note": "Ashley Moody (R) - Florida Senate Election Winner"
+  },
+  "Georgia Governor|Democratic": {
+    "source": "polymarket",
+    "id": "629337",
+    "note": "Keisha Lance Bottoms (D) - Georgia Governor Election Winner"
+  },
+  "Georgia Governor|Republican": {
+    "source": "polymarket",
+    "id": "629338",
+    "note": "Rick Jackson (R) - Georgia Governor Election Winner"
+  },
+  "Georgia Senate|Democratic": {
+    "source": "polymarket",
+    "id": "630692",
+    "note": "Jon Ossoff (D)  - Georgia Senate Election Winner"
+  },
+  "Georgia Senate|Republican": {
+    "source": "polymarket",
+    "id": "630693",
+    "note": "Mike Collins (R) - Georgia Senate Election Winner"
+  },
+  "Hawaii Governor|Democratic": {
+    "source": "polymarket",
+    "id": "629350",
+    "note": "Josh Green (D) - Hawaii Governor Election Winner"
+  },
+  "Hawaii Governor|Republican": {
+    "source": "polymarket",
+    "id": "629351",
+    "note": "Gary Cordery (R) - Hawaii Governor Election Winner"
+  },
+  "IA-01 House race|Democratic": {
+    "source": "polymarket",
+    "id": "942433",
+    "note": "Christina Bohannan (D) - IA-01 House Election Winner"
+  },
+  "IA-01 House race|Republican": {
+    "source": "polymarket",
+    "id": "942432",
+    "note": "Mariannette Miller-Meeks (R) - IA-01 House Election Winner"
+  },
+  "IA-02 House race|Democratic": {
+    "source": "polymarket",
+    "id": "1283289",
+    "note": "Lindsay James (D) - IA-02 House Election Winner"
+  },
+  "IA-02 House race|Republican": {
+    "source": "polymarket",
+    "id": "1283288",
+    "note": "Joe Mitchell (R) - IA-02 House Election Winner"
+  },
+  "IA-03 House race|Democratic": {
+    "source": "polymarket",
+    "id": "942445",
+    "note": "Sarah Trone Garriott (D) - IA-03 House Election Winner"
+  },
+  "IA-03 House race|Republican": {
+    "source": "polymarket",
+    "id": "942444",
+    "note": "Zach Nunn (R) - IA-03 House Election Winner"
+  },
+  "Idaho Governor|Democratic": {
+    "source": "polymarket",
+    "id": "629363",
+    "note": "Terri Pickens (D) - Idaho Governor Election Winner"
+  },
+  "Idaho Governor|Republican": {
+    "source": "polymarket",
+    "id": "629364",
+    "note": "Brad Little (R) - Idaho Governor Election Winner"
+  },
+  "Idaho Senate|Democratic": {
+    "source": "polymarket",
+    "id": "630705",
+    "note": "Democrat - Idaho Senate Election Winner"
+  },
+  "Idaho Senate|Republican": {
+    "source": "polymarket",
+    "id": "630706",
+    "note": "Jim Risch (R) - Idaho Senate Election Winner"
+  },
+  "Illinois Governor|Democratic": {
+    "source": "polymarket",
+    "id": "629376",
+    "note": "JB Pritzker (D) - Illinois Governor Election Winner"
+  },
+  "Illinois Governor|Republican": {
+    "source": "polymarket",
+    "id": "629377",
+    "note": "Darren Bailey (R) - Illinois Governor Election Winner"
+  },
+  "Illinois Senate|Democratic": {
+    "source": "polymarket",
+    "id": "630720",
+    "note": "Juliana Stratton (D) - Illinois Senate Election Winner"
+  },
+  "Illinois Senate|Republican": {
+    "source": "polymarket",
+    "id": "630721",
+    "note": "Don Tracy (R) - Illinois Senate Election Winner"
+  },
+  "Iowa Governor|Democratic": {
+    "source": "polymarket",
+    "id": "629397",
+    "note": "Rob Sand (D) - Iowa Governor Election Winner"
+  },
+  "Iowa Governor|Republican": {
+    "source": "polymarket",
+    "id": "629398",
+    "note": "Zach Lahn (R) - Iowa Governor Election Winner"
+  },
+  "Iowa Senate|Democratic": {
+    "source": "polymarket",
+    "id": "630733",
+    "note": "Josh Turek (D) - Iowa Senate Election Winner"
+  },
+  "Iowa Senate|Republican": {
+    "source": "polymarket",
+    "id": "630734",
+    "note": "Ashley Hinson (R) - Iowa Senate Election Winner"
+  },
+  "KY-04 House race|Democratic": {
+    "source": "polymarket",
+    "id": "1283569",
+    "note": "Melissa Strange (D) - KY-04 House Election Winner"
+  },
+  "KY-04 House race|Republican": {
+    "source": "polymarket",
+    "id": "1283568",
+    "note": "Ed Gallrein (R) - KY-04 House Election Winner"
+  },
+  "Kansas Governor|Democratic": {
+    "source": "polymarket",
+    "id": "629412",
+    "note": "Cindy Holscher (D) - Kansas Governor Election Winner"
+  },
+  "Kansas Governor|Republican": {
+    "source": "polymarket",
+    "id": "629413",
+    "note": "Ty Masterson (R) - Kansas Governor Election Winner"
+  },
+  "Kansas Senate|Democratic": {
+    "source": "polymarket",
+    "id": "630746",
+    "note": "Adam Hamilton (D) - Kansas Senate Election Winner"
+  },
+  "Kansas Senate|Republican": {
+    "source": "polymarket",
+    "id": "630747",
+    "note": "Roger Marshall (R) - Kansas Senate Election Winner"
+  },
+  "Kentucky Senate|Democratic": {
+    "source": "polymarket",
+    "id": "630759",
+    "note": "Charles Booker (D) - Kentucky Senate Election Winner"
+  },
+  "Kentucky Senate|Republican": {
+    "source": "polymarket",
+    "id": "630760",
+    "note": "Andy Barr (R) - Kentucky Senate Election Winner"
+  },
+  "Louisiana Senate|Democratic": {
+    "source": "polymarket",
+    "id": "634878",
+    "note": "Jamie Davis (D) - Louisiana Senate Election Winner"
+  },
+  "Louisiana Senate|Republican": {
+    "source": "polymarket",
+    "id": "634879",
+    "note": "Julia Letlow (R) - Louisiana Senate Election Winner"
+  },
+  "ME-02 House race|Democratic": {
+    "source": "polymarket",
+    "id": "3006483",
+    "note": "Matthew Dunlap (D) - ME-02 House Election Winner"
+  },
+  "ME-02 House race|Republican": {
+    "source": "polymarket",
+    "id": "3006482",
+    "note": "Paul LePage (R) - ME-02 House Election Winner"
+  },
+  "MI-07 House race|Democratic": {
+    "source": "polymarket",
+    "id": "942722",
+    "note": "William Lawrence (D) - MI-07 House Election Winner"
+  },
+  "MI-07 House race|Republican": {
+    "source": "polymarket",
+    "id": "942721",
+    "note": "Tom Barrett (R) - MI-07 House Election Winner"
+  },
+  "MI-10 House race|Democratic": {
+    "source": "polymarket",
+    "id": "942776",
+    "note": "Christina Hines (D) - MI-10 House Election Winner"
+  },
+  "MI-10 House race|Republican": {
+    "source": "polymarket",
+    "id": "942774",
+    "note": "Mike Bouchard (R) - MI-10 House Election Winner"
+  },
+  "MN-01 House race|Democratic": {
+    "source": "polymarket",
+    "id": "1283849",
+    "note": "Jake Johnson (D) - MN-01 House Election Winner"
+  },
+  "MN-01 House race|Republican": {
+    "source": "polymarket",
+    "id": "1283848",
+    "note": "Brad Finstad (R) - MN-01 House Election Winner"
+  },
+  "MN-02 House race|Democratic": {
+    "source": "polymarket",
+    "id": "942820",
+    "note": "Matt Little (D) - MN-02 House Election Winner"
+  },
+  "MN-02 House race|Republican": {
+    "source": "polymarket",
+    "id": "942819",
+    "note": "Eric Pratt (R) - MN-02 House Election Winner"
+  },
+  "MN-05 House race|Democratic": {
+    "source": "polymarket",
+    "id": "1283873",
+    "note": "Ilhan Omar (D) - MN-05 House Election Winner"
+  },
+  "MN-05 House race|Republican": {
+    "source": "polymarket",
+    "id": "1283872",
+    "note": "John Nagel (R) - MN-05 House Election Winner"
+  },
+  "MT-01 House race|Democratic": {
+    "source": "polymarket",
+    "id": "942843",
+    "note": "Sam Forstag (D) - MT-01 House Election Winner"
+  },
+  "MT-01 House race|Republican": {
+    "source": "polymarket",
+    "id": "942841",
+    "note": "Aaron Flint (R) - MT-01 House Election Winner"
+  },
+  "Maine Governor|Democratic": {
+    "source": "polymarket",
+    "id": "629425",
+    "note": "Hannah Pingree (D) - Maine Governor Election Winner"
+  },
+  "Maine Governor|Republican": {
+    "source": "polymarket",
+    "id": "629426",
+    "note": "Robert Charles (R) - Maine Governor Election Winner"
+  },
+  "Maine Senate|Democratic": {
+    "source": "polymarket",
+    "id": "630772",
+    "note": "Troy Jackson (D) - Maine Senate Election Winner"
+  },
+  "Maine Senate|Republican": {
+    "source": "polymarket",
+    "id": "630773",
+    "note": "Susan Collins (R) - Maine Senate Election Winner"
+  },
+  "Maryland Governor|Democratic": {
+    "source": "polymarket",
+    "id": "629438",
+    "note": "Wes Moore (D) - Maryland Governor Election Winner"
+  },
+  "Maryland Governor|Republican": {
+    "source": "polymarket",
+    "id": "629439",
+    "note": "Dan Cox (R) - Maryland Governor Election Winner"
+  },
+  "Massachusetts Governor|Democratic": {
+    "source": "polymarket",
+    "id": "629451",
+    "note": "Maura Healey (D) - Massachusetts Governor Election Winner"
+  },
+  "Massachusetts Governor|Republican": {
+    "source": "polymarket",
+    "id": "629452",
+    "note": "Michael Minogue (R) - Massachusetts Governor Election Winner"
+  },
+  "Massachusetts Senate|Democratic": {
+    "source": "polymarket",
+    "id": "630790",
+    "note": "Ed Markey (D) - Massachusetts Senate Election Winner"
+  },
+  "Massachusetts Senate|Republican": {
+    "source": "polymarket",
+    "id": "630791",
+    "note": "John Deaton (R) - Massachusetts Senate Election Winner"
+  },
+  "Michigan Governor|Democratic": {
+    "source": "polymarket",
+    "id": "629464",
+    "note": "Jocelyn Benson (D) - Michigan Governor Election Winner"
+  },
+  "Michigan Governor|Republican": {
+    "source": "polymarket",
+    "id": "629465",
+    "note": "John James (R) - Michigan Governor Election Winner"
+  },
+  "Michigan Senate|Democratic": {
+    "source": "polymarket",
+    "id": "630805",
+    "note": "Abdul El-Sayed (D) - Michigan Senate Election Winner"
+  },
+  "Michigan Senate|Republican": {
+    "source": "polymarket",
+    "id": "630806",
+    "note": "Mike Rogers (R) - Michigan Senate Election Winner"
+  },
+  "Minnesota Governor|Democratic": {
+    "source": "polymarket",
+    "id": "629477",
+    "note": "Amy Klobuchar (D) - Minnesota Governor Election Winner"
+  },
+  "Minnesota Governor|Republican": {
+    "source": "polymarket",
+    "id": "629478",
+    "note": "Lisa Demuth (R) - Minnesota Governor Election Winner"
+  },
+  "Minnesota Senate|Democratic": {
+    "source": "polymarket",
+    "id": "630818",
+    "note": "Peggy Flanagan (D) - Minnesota Senate Election Winner"
+  },
+  "Minnesota Senate|Republican": {
+    "source": "polymarket",
+    "id": "630819",
+    "note": "Michele Tafoya (R) - Minnesota Senate Election Winner"
+  },
+  "Mississippi Senate|Democratic": {
+    "source": "polymarket",
+    "id": "631017",
+    "note": "Scott Colom (D) - Mississippi Senate Election Winner"
+  },
+  "Mississippi Senate|Republican": {
+    "source": "polymarket",
+    "id": "631018",
+    "note": "Cindy Hyde-Smith (R) - Mississippi Senate Election Winner"
+  },
+  "Montana Senate|Democratic": {
+    "source": "polymarket",
+    "id": "630831",
+    "note": "Alani Bankhead (D) - Montana Senate Election Winner"
+  },
+  "Montana Senate|Independent": {
+    "source": "polymarket",
+    "id": "630833",
+    "note": "Independent - Montana Senate Election Winner"
+  },
+  "Montana Senate|Republican": {
+    "source": "polymarket",
+    "id": "630832",
+    "note": "Kurt Alme (R)  - Montana Senate Election Winner"
+  },
+  "NE-02 House race|Democratic": {
+    "source": "polymarket",
+    "id": "942878",
+    "note": "Denise Powell (D) - NE-02 House Election Winner"
+  },
+  "NE-02 House race|Republican": {
+    "source": "polymarket",
+    "id": "942877",
+    "note": "Brinker Harding (R) - NE-02 House Election Winner"
+  },
+  "NH-01 House race|Democratic": {
+    "source": "polymarket",
+    "id": "942910",
+    "note": "Stefany Shaheen (D) - NH-01 House Election Winner"
+  },
+  "NH-01 House race|Republican": {
+    "source": "polymarket",
+    "id": "942909",
+    "note": "Anthony DiLorenzo (R) - NH-01 House Election Winner"
+  },
+  "NJ-07 House race|Democratic": {
+    "source": "polymarket",
+    "id": "942979",
+    "note": "Rebecca Bennett (D) - NJ-07 House Election Winner"
+  },
+  "NJ-07 House race|Republican": {
+    "source": "polymarket",
+    "id": "942978",
+    "note": "Thomas Kean Jr. (R) - NJ-07 House Election Winner"
+  },
+  "NY-13 House race|Democratic": {
+    "source": "polymarket",
+    "id": "1284299",
+    "note": "Darializa Avila Chevalier (D) - NY-13 House Election Winner"
+  },
+  "NY-13 House race|Republican": {
+    "source": "polymarket",
+    "id": "1284298",
+    "note": "Jomo Williams (R) - NY-13 House Election Winner"
+  },
+  "NY-17 House race|Democratic": {
+    "source": "polymarket",
+    "id": "943441",
+    "note": "Cait Conley (D) - NY-17 House Election Winner"
+  },
+  "NY-17 House race|Republican": {
+    "source": "polymarket",
+    "id": "943440",
+    "note": "Mike Lawler (R) - NY-17 House Election Winner"
+  },
+  "Nebraska Governor|Democratic": {
+    "source": "polymarket",
+    "id": "629490",
+    "note": "Lynne Walz (D) - Nebraska Governor Election Winner"
+  },
+  "Nebraska Governor|Republican": {
+    "source": "polymarket",
+    "id": "629491",
+    "note": "Jim Pillen (R) - Nebraska Governor Election Winner"
+  },
+  "Nebraska Senate|Democratic": {
+    "source": "polymarket",
+    "id": "634891",
+    "note": "Democrat - Nebraska Senate Election Winner  "
+  },
+  "Nebraska Senate|Independent": {
+    "source": "polymarket",
+    "id": "634893",
+    "note": "Independent - Nebraska Senate Election Winner  "
+  },
+  "Nebraska Senate|Republican": {
+    "source": "polymarket",
+    "id": "634892",
+    "note": "Pete Ricketts (R) - Nebraska Senate Election Winner  "
+  },
+  "Nevada Governor|Democratic": {
+    "source": "polymarket",
+    "id": "629505",
+    "note": "Aaron Ford (D) - Nevada Governor Election Winner"
+  },
+  "Nevada Governor|Republican": {
+    "source": "polymarket",
+    "id": "629506",
+    "note": "Joe Lombardo (R) - Nevada Governor Election Winner"
+  },
+  "New Hampshire Governor|Democratic": {
+    "source": "polymarket",
+    "id": "629518",
+    "note": "Cinde Warmington (D) - New Hampshire Governor Election Winner"
+  },
+  "New Hampshire Governor|Republican": {
+    "source": "polymarket",
+    "id": "629519",
+    "note": "Kelly Ayotte (R) - New Hampshire Governor Election Winner"
+  },
+  "New Hampshire Senate|Democratic": {
+    "source": "polymarket",
+    "id": "630844",
+    "note": "Chris Pappas (D) - New Hampshire Senate Election Winner"
+  },
+  "New Hampshire Senate|Republican": {
+    "source": "polymarket",
+    "id": "630845",
+    "note": "John E. Sununu (R) - New Hampshire Senate Election Winner"
+  },
+  "New Jersey Senate|Democratic": {
+    "source": "polymarket",
+    "id": "630857",
+    "note": "Cory Booker (D) - New Jersey Senate Election Winner"
+  },
+  "New Jersey Senate|Republican": {
+    "source": "polymarket",
+    "id": "630858",
+    "note": "Justin Murphy (R) - New Jersey Senate Election Winner"
+  },
+  "New Mexico Governor|Democratic": {
+    "source": "polymarket",
+    "id": "629531",
+    "note": "Deb Haaland (D) - New Mexico Governor Election Winner"
+  },
+  "New Mexico Governor|Republican": {
+    "source": "polymarket",
+    "id": "629532",
+    "note": "Gregg Hull (R) - New Mexico Governor Election Winner"
+  },
+  "New Mexico Senate|Democratic": {
+    "source": "polymarket",
+    "id": "630870",
+    "note": "Ben Ray Luj\u00e1n (D) - New Mexico Senate Election Winner"
+  },
+  "New Mexico Senate|Republican": {
+    "source": "polymarket",
+    "id": "630871",
+    "note": "Larry Marker (R) - New Mexico Senate Election Winner"
+  },
+  "New York Governor|Democratic": {
+    "source": "polymarket",
+    "id": "629544",
+    "note": "Kathy Hochul (D) - New York Governor Election Winner"
+  },
+  "New York Governor|Republican": {
+    "source": "polymarket",
+    "id": "629545",
+    "note": "Bruce Blakeman (R) - New York Governor Election Winner"
+  },
+  "North Carolina Senate|Democratic": {
+    "source": "polymarket",
+    "id": "630883",
+    "note": "Roy Cooper (D) - North Carolina Senate Election Winner"
+  },
+  "North Carolina Senate|Republican": {
+    "source": "polymarket",
+    "id": "630884",
+    "note": "Michael Whatley (R) - North Carolina Senate Election Winner"
+  },
+  "Oklahoma Governor|Democratic": {
+    "source": "polymarket",
+    "id": "629570",
+    "note": "Cyndi Munson (D) - Oklahoma Governor Election Winner"
+  },
+  "Oklahoma Governor|Republican": {
+    "source": "polymarket",
+    "id": "629571",
+    "note": "Mike Mazzei (R) - Oklahoma Governor Election Winner"
+  },
+  "Oklahoma Senate|Democratic": {
+    "source": "polymarket",
+    "id": "631030",
+    "note": "N\u2019Kiyla \u201cJasmine\u201d Thomas (D) - Oklahoma Senate Election Winner"
+  },
+  "Oklahoma Senate|Republican": {
+    "source": "polymarket",
+    "id": "631031",
+    "note": "Kevin Hern (R) - Oklahoma Senate Election Winner"
+  },
+  "Oregon Governor|Democratic": {
+    "source": "polymarket",
+    "id": "629583",
+    "note": "Tina Kotek (D) - Oregon Governor Election Winner"
+  },
+  "Oregon Governor|Republican": {
+    "source": "polymarket",
+    "id": "629584",
+    "note": "Christine Drazan (R) - Oregon Governor Election Winner"
+  },
+  "Oregon Senate|Democratic": {
+    "source": "polymarket",
+    "id": "630898",
+    "note": "Jeff Merkley (D) - Oregon Senate Election Winner"
+  },
+  "Oregon Senate|Republican": {
+    "source": "polymarket",
+    "id": "630899",
+    "note": "David Brock Smith (R) - Oregon Senate Election Winner"
+  },
+  "PA-01 House race|Democratic": {
+    "source": "polymarket",
+    "id": "943749",
+    "note": "Bob Harvie (D) - PA-01 House Election Winner"
+  },
+  "PA-01 House race|Republican": {
+    "source": "polymarket",
+    "id": "943748",
+    "note": "Brian Fitzpatrick (R) - PA-01 House Election Winner"
+  },
+  "PA-07 House race|Democratic": {
+    "source": "polymarket",
+    "id": "943797",
+    "note": "Bob Brooks (D) - PA-07 House Election Winner"
+  },
+  "PA-07 House race|Republican": {
+    "source": "polymarket",
+    "id": "943796",
+    "note": "Ryan Mackenzie (R) - PA-07 House Election Winner"
+  },
+  "PA-08 House race|Democratic": {
+    "source": "polymarket",
+    "id": "943943",
+    "note": "Paige Cognetti (D) - PA-08 House Election Winner"
+  },
+  "PA-08 House race|Republican": {
+    "source": "polymarket",
+    "id": "943942",
+    "note": "Rob Bresnahan (R) - PA-08 House Election Winner"
+  },
+  "PA-10 House race|Democratic": {
+    "source": "polymarket",
+    "id": "943955",
+    "note": "Janelle Stelson (D) - PA-10 House Election Winner"
+  },
+  "PA-10 House race|Republican": {
+    "source": "polymarket",
+    "id": "943954",
+    "note": "Scott Perry (R) - PA-10 House Election Winner"
+  },
+  "Pennsylvania Governor|Democratic": {
+    "source": "polymarket",
+    "id": "629614",
+    "note": "Josh Shapiro (D) - Pennsylvania Governor Election Winner"
+  },
+  "Pennsylvania Governor|Republican": {
+    "source": "polymarket",
+    "id": "629615",
+    "note": "Stacy Garrity (R) - Pennsylvania Governor Election Winner"
+  },
+  "Rhode Island Governor|Democratic": {
+    "source": "polymarket",
+    "id": "629627",
+    "note": "Helena Foulkes (D) - Rhode Island Governor Election Winner"
+  },
+  "Rhode Island Governor|Independent": {
+    "source": "polymarket",
+    "id": "629629",
+    "note": "Independent - Rhode Island Governor Election Winner"
+  },
+  "Rhode Island Governor|Republican": {
+    "source": "polymarket",
+    "id": "629628",
+    "note": "Republican - Rhode Island Governor Election Winner"
+  },
+  "Rhode Island Senate|Democratic": {
+    "source": "polymarket",
+    "id": "630911",
+    "note": "Jack Reed (D) - Rhode Island Senate Election Winner"
+  },
+  "Rhode Island Senate|Republican": {
+    "source": "polymarket",
+    "id": "630912",
+    "note": "Raymond McKay (R) - Rhode Island Senate Election Winner"
+  },
+  "SC-01 House race|Democratic": {
+    "source": "polymarket",
+    "id": "1284672",
+    "note": "Nancy Lacore (D) - SC-01 House Election Winner"
+  },
+  "SC-01 House race|Republican": {
+    "source": "polymarket",
+    "id": "1284671",
+    "note": "Jenny Costa Honeycutt (R) - SC-01 House Election Winner"
+  },
+  "South Carolina Governor|Democratic": {
+    "source": "polymarket",
+    "id": "629640",
+    "note": "Jermaine Johnson (D) - South Carolina Governor Election Winner"
+  },
+  "South Carolina Governor|Republican": {
+    "source": "polymarket",
+    "id": "629641",
+    "note": "Alan Wilson (R) - South Carolina Governor Election Winner"
+  },
+  "South Carolina Senate|Democratic": {
+    "source": "polymarket",
+    "id": "630924",
+    "note": "Annie Andrews (D) - South Carolina Senate Election Winner"
+  },
+  "South Carolina Senate|Republican": {
+    "source": "polymarket",
+    "id": "630925",
+    "note": "Darline Graham Nordone (R) - South Carolina Senate Election Winner"
+  },
+  "South Dakota Governor|Democratic": {
+    "source": "polymarket",
+    "id": "629653",
+    "note": "Dan Ahlers (D) - South Dakota Governor Election Winner"
+  },
+  "South Dakota Governor|Republican": {
+    "source": "polymarket",
+    "id": "629654",
+    "note": "Larry Rhoden (R) - South Dakota Governor Election Winner"
+  },
+  "South Dakota Senate|Democratic": {
+    "source": "polymarket",
+    "id": "630937",
+    "note": "Democrat - South Dakota Senate Election Winner"
+  },
+  "South Dakota Senate|Republican": {
+    "source": "polymarket",
+    "id": "630938",
+    "note": "Mike Rounds (R) - South Dakota Senate Election Winner"
+  },
+  "TN-05 House race|Democratic": {
+    "source": "polymarket",
+    "id": "1284768",
+    "note": "Chaz Molder (D) - TN-05 House Election Winner"
+  },
+  "TN-05 House race|Republican": {
+    "source": "polymarket",
+    "id": "1284767",
+    "note": "Charlie Hatcher (R) - TN-05 House Election Winner"
+  },
+  "TX-15 House race|Democratic": {
+    "source": "polymarket",
+    "id": "944201",
+    "note": "Bobby Pulido (D) - TX-15 House Election Winner"
+  },
+  "TX-15 House race|Republican": {
+    "source": "polymarket",
+    "id": "944199",
+    "note": "Monica De La Cruz (R) - TX-15 House Election Winner"
+  },
+  "TX-23 House race|Democratic": {
+    "source": "polymarket",
+    "id": "1284960",
+    "note": "Katy Padilla Stout (D) - TX-23 House Election Winner"
+  },
+  "TX-23 House race|Republican": {
+    "source": "polymarket",
+    "id": "1284959",
+    "note": "Brandon Herrera (R) - TX-23 House Election Winner"
+  },
+  "TX-28 House race|Democratic": {
+    "source": "polymarket",
+    "id": "944222",
+    "note": "Henry Cuellar (D) - TX-28 House Election Winner"
+  },
+  "TX-28 House race|Republican": {
+    "source": "polymarket",
+    "id": "944221",
+    "note": "Tano Tijerina (R) - TX-28 House Election Winner"
+  },
+  "Tennessee Governor|Democratic": {
+    "source": "polymarket",
+    "id": "629666",
+    "note": "Jerri Green (D) - Tennessee Governor Election Winner"
+  },
+  "Tennessee Governor|Republican": {
+    "source": "polymarket",
+    "id": "629667",
+    "note": "Marsha Blackburn (R) - Tennessee Governor Election Winner"
+  },
+  "Tennessee Senate|Democratic": {
+    "source": "polymarket",
+    "id": "630950",
+    "note": "Marquita Bradshaw (D) - Tennessee Senate Election Winner"
+  },
+  "Tennessee Senate|Republican": {
+    "source": "polymarket",
+    "id": "630951",
+    "note": "Bill Hagerty (R) - Tennessee Senate Election Winner"
+  },
+  "Texas Governor|Democratic": {
+    "source": "polymarket",
+    "id": "629690",
+    "note": "Gina Hinojosa (D)  - Texas Governor Election Winner"
+  },
+  "Texas Governor|Republican": {
+    "source": "polymarket",
+    "id": "629691",
+    "note": "Greg Abbott (R) - Texas Governor Election Winner"
+  },
+  "Texas Senate|Democratic": {
+    "source": "polymarket",
+    "id": "630963",
+    "note": "James Talarico (D) - Texas Senate Election Winner"
+  },
+  "Texas Senate|Republican": {
+    "source": "polymarket",
+    "id": "630964",
+    "note": "Ken Paxton (R) - Texas Senate Election Winner"
+  },
+  "U.S. House|Democratic": {
+    "source": "polymarket",
+    "id": "562802",
+    "note": "Democratic Party - Which party will win the House in 2026? (added by hand)"
+  },
+  "U.S. House|Republican": {
+    "source": "polymarket",
+    "id": "562803",
+    "note": "Republican Party - Which party will win the House in 2026? (added by hand)"
+  },
+  "U.S. Senate|Democratic": {
+    "source": "polymarket",
+    "id": "562793",
+    "note": "Democratic Party - Which party will win the Senate in 2026? (added by hand)"
+  },
+  "U.S. Senate|Republican": {
+    "source": "polymarket",
+    "id": "562794",
+    "note": "Republican Party - Which party will win the Senate in 2026? (added by hand)"
+  },
+  "VA-01 House race|Democratic": {
+    "source": "polymarket",
+    "id": "944282",
+    "note": "Shannon Taylor (D) - VA-01 House Election Winner"
+  },
+  "VA-01 House race|Republican": {
+    "source": "polymarket",
+    "id": "944281",
+    "note": "Rob Wittman (R) - VA-01 House Election Winner"
+  },
+  "VA-02 House race|Democratic": {
+    "source": "polymarket",
+    "id": "944290",
+    "note": "Elaine Luria (D) - VA-02 House Election Winner"
+  },
+  "VA-02 House race|Republican": {
+    "source": "polymarket",
+    "id": "944289",
+    "note": "Jen Kiggans (R) - VA-02 House Election Winner"
+  },
+  "VA-05 House race|Democratic": {
+    "source": "polymarket",
+    "id": "1285080",
+    "note": "Tom Perriello (D) - VA-05 House Election Winner"
+  },
+  "VA-05 House race|Republican": {
+    "source": "polymarket",
+    "id": "1285079",
+    "note": "John McGuire (R) - VA-05 House Election Winner"
+  },
+  "VA-07 House race|Democratic": {
+    "source": "polymarket",
+    "id": "944298",
+    "note": "Eugene Vindman (D) - VA-07 House Election Winner"
+  },
+  "VA-07 House race|Republican": {
+    "source": "polymarket",
+    "id": "944297",
+    "note": "Doug Ollivant (R) - VA-07 House Election Winner"
+  },
+  "Vermont Governor|Democratic": {
+    "source": "polymarket",
+    "id": "629707",
+    "note": "Amanda Janoo (D) - Vermont Governor Election Winner"
+  },
+  "Vermont Governor|Republican": {
+    "source": "polymarket",
+    "id": "629708",
+    "note": "Phil Scott (R) - Vermont Governor Election Winner"
+  },
+  "Virginia Senate|Democratic": {
+    "source": "polymarket",
+    "id": "630976",
+    "note": "Mark Warner (D) - Virginia Senate Election Winner"
+  },
+  "Virginia Senate|Republican": {
+    "source": "polymarket",
+    "id": "630977",
+    "note": "Bert Mizusawa (R) - Virginia Senate Election Winner"
+  },
+  "WA-03 House race|Democratic": {
+    "source": "polymarket",
+    "id": "944314",
+    "note": "Marie Gluesenkamp Perez (D) - WA-03 House Election Winner"
+  },
+  "WA-03 House race|Republican": {
+    "source": "polymarket",
+    "id": "944313",
+    "note": "John Braun (R) - WA-03 House Election Winner"
+  },
+  "WI-01 House race|Democratic": {
+    "source": "polymarket",
+    "id": "944334",
+    "note": "Mitchell Berman (D) - WI-01 House Election Winner"
+  },
+  "WI-01 House race|Republican": {
+    "source": "polymarket",
+    "id": "944333",
+    "note": "Bryan Steil (R) - WI-01 House Election Winner"
+  },
+  "WI-03 House race|Democratic": {
+    "source": "polymarket",
+    "id": "944342",
+    "note": "Rebecca Cooke (D) - WI-03 House Election Winner"
+  },
+  "WI-03 House race|Republican": {
+    "source": "polymarket",
+    "id": "944341",
+    "note": "Derrick Van Orden (R) - WI-03 House Election Winner"
+  },
+  "West Virginia Senate|Democratic": {
+    "source": "polymarket",
+    "id": "630989",
+    "note": "Rachel Fetty Anderson (D) - West Virginia Senate Election Winner"
+  },
+  "West Virginia Senate|Republican": {
+    "source": "polymarket",
+    "id": "630990",
+    "note": "Shelley Moore Capito (R) - West Virginia Senate Election Winner"
+  },
+  "Wisconsin Governor|Democratic": {
+    "source": "polymarket",
+    "id": "629720",
+    "note": "David Crowley (D) - Wisconsin Governor Election Winner"
+  },
+  "Wisconsin Governor|Republican": {
+    "source": "polymarket",
+    "id": "629721",
+    "note": "Tom Tiffany (R) - Wisconsin Governor Election Winner"
+  },
+  "Wyoming Governor|Democratic": {
+    "source": "polymarket",
+    "id": "629733",
+    "note": "Kenneth Casner (D) - Wyoming Governor Election Winner"
+  },
+  "Wyoming Governor|Republican": {
+    "source": "polymarket",
+    "id": "629734",
+    "note": "Eric Barlow (R) - Wyoming Governor Election Winner"
+  },
+  "Wyoming Senate|Democratic": {
+    "source": "polymarket",
+    "id": "631002",
+    "note": "James W. Byrd (D) - Wyoming Senate Election Winner"
+  },
+  "Wyoming Senate|Republican": {
+    "source": "polymarket",
+    "id": "631003",
+    "note": "Harriet Hageman (R)  - Wyoming Senate Election Winner"
+  }
+}
