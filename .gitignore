@@ -1,0 +1,13 @@
+.venv/
+.env
+__pycache__/
+
+# files the bot writes while running (your data - not code)
+fills.csv
+fills.csv.old
+mm_bot.log*
+status.json
+order_notes.json
+kill_switch.tripped
+market_data.sqlite*
+*.tmp
