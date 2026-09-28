@@ -857,6 +857,13 @@ shrunk = plan_sizes(many, {"H1", "H2", "H3", "H4"}, 80_000, _live)
 check("everything scales with the account, party-control quotes included (150k -> 15,000, 80k -> 8,000)",
       grown["H1"] == 15_000 and shrunk["H1"] == 8_000 and grown["m0"] > p2["m0"] > shrunk["m0"],
       (grown["H1"], shrunk["H1"], grown["m0"], p2["m0"], shrunk["m0"]))
+up5 = plan_sizes(many, {"H1", "H2", "H3", "H4"}, 105_000, _live, prev=p2, prev_bankroll=100_000)
+check("a 5% account step moves every size with it (the 25% rule only holds back activity shifts)",
+      up5["H1"] == 10_500 and all(abs(up5[e] - p2[e] * 1.05) <= 50 for e in p2), {e: (p2[e], up5[e]) for e in list(p2)[:3]})
+q = exit_quote(0.5, 8000, 0.49, 0.52, _live, 100_000)
+q2 = exit_quote(0.5, 8000, 0.49, 0.52, _live, 100_000, max_size=10_000)
+check("election-night exit: a big position leaves in planned-size pieces, not 1,000-SUSQie ones",
+      q.ask_size == 1960 and q2.ask_size == 8000, (q.ask_size, q2.ask_size))
 check("no activity data at all: markets share equally",
       len(set(plan_sizes({"a": 0, "b": 0, "c": 0}, set(), 100_000, _live).values())) == 1)
 
@@ -882,6 +889,15 @@ b.size_plan_time = -1e9
 b.update_size_plan(time.monotonic(), {e: 0.5 for e in b.ex})
 check("tournament trades shift the plan: the market people actually trade gets the big quote",
       b.size_plan["21"] == 2000 and b.size_plan["11"] == 100, b.size_plan)
+
+a, b = make_bot(books=books6, extra_markets=[market("9", "91", "Republican", "U.S. House"), market("10", "92", "Democratic", "U.S. House")])
+b.cfg.size_by_activity, b.refs = True, VolRefs()
+b.cycle()
+b.self_test()
+check("self-test runs on the quietest ordinary market, never a party-control one (their quotes stay put)",
+      [n for _, _, n in a.ours("91")] == [10000, 10000] and [n for _, _, n in a.ours("92")] == [10000, 10000],
+      (a.ours("91"), a.ours("92")))
+check("status.json shows the size plan", b.health.get("biggest_quotes", {}).get("Rep U.S. House") == 10000, b.health.get("biggest_quotes"))
 
 print("--- parallel requests")
 a, b = make_bot()

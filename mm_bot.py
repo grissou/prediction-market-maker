@@ -990,12 +990,14 @@ def quote_lock(fv, cfg=CFG):
     return 1 - 2 * cfg.min_edge
 
 
-def plan_sizes(activity, headline, bankroll, cfg=CFG, prev=None, lock=None):
+def plan_sizes(activity, headline, bankroll, cfg=CFG, prev=None, lock=None, prev_bankroll=None):
     """Shares per quote for each exchange: {eid: shares}.
 
     activity   {eid: how busy the market is} for the markets being quoted (any non-negative scale)
     headline   eids of the party-control markets: they get headline_size_frac, the biggest by far
     prev       the current plan: a market keeps its size unless the new one differs by > size_plan_step
+    prev_bankroll   the account value prev was planned for: prev is rescaled to today's account first,
+                    so sizes always follow the account, and only activity shifts are held back
     lock       {eid: cash one share of quotes there locks} (see quote_lock); missing = 1 (the most it can be)
 
     Everything else shares what's left of the capital budget (quote_capital_frac of the account) in
@@ -1030,12 +1032,15 @@ def plan_sizes(activity, headline, bankroll, cfg=CFG, prev=None, lock=None):
         k_lo, k_hi = (mid, k_hi) if total(mid) <= left else (k_lo, mid)
     for e in others:
         plan[e] = min(hi, max(lo, k_lo * weight[e]))
+    grow = bankroll / prev_bankroll if prev_bankroll else 1.0
     out = {}
     for e, size in plan.items():
         size = int(size // 50 * 50) if size >= 50 else int(size)
         old = (prev or {}).get(e)
-        if old and abs(size / old - 1) <= cfg.size_plan_step:
-            size = old                                     # small change: keep the size (and the queue spots)
+        if old:
+            old = int(old * grow // 50 * 50) if old * grow >= 50 else int(old * grow)   # the account moved: follow it
+            if old and abs(size / old - 1) <= cfg.size_plan_step:
+                size = old                                 # small activity shift: keep the size (and queue spots)
         out[e] = size
     return out
 
@@ -1123,7 +1128,7 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
     return Quote(bid if bid_size else None, bid_size, ask if ask_size else None, ask_size, bid_limit, ask_limit)
 
 
-def exit_quote(fv, inv, best_bid, best_ask, cfg=CFG, bankroll=None):
+def exit_quote(fv, inv, best_bid, best_ask, cfg=CFG, bankroll=None, max_size=None):
     """Election-night exit: get this market flat, trading against other orders if needed.
 
     Long -> sell at the best other bid (an immediate trade), but never below fv - exit_max_slippage;
@@ -1135,12 +1140,12 @@ def exit_quote(fv, inv, best_bid, best_ask, cfg=CFG, bankroll=None):
     if inv >= 1:
         price = max(best_bid if best_bid is not None else 0.0, fv - cfg.exit_max_slippage)
         price = ceil_tick(price)
-        size = int(min(inv, cfg.max_order_cash_frac * bankroll / max(1 - price, TICK)))
+        size = int(min(inv, max(cfg.max_order_cash_frac * bankroll / max(1 - price, TICK), max_size or 0)))
         return Quote(ask=price, ask_size=size) if size >= 1 else NO_QUOTE
     if inv <= -1:
         price = min(best_ask if best_ask is not None else 1.0, fv + cfg.exit_max_slippage)
         price = floor_tick(price)
-        size = int(min(-inv, cfg.max_order_cash_frac * bankroll / max(price, TICK)))
+        size = int(min(-inv, max(cfg.max_order_cash_frac * bankroll / max(price, TICK), max_size or 0)))
         return Quote(bid=price, bid_size=size) if size >= 1 else NO_QUOTE
     return NO_QUOTE
 
@@ -1357,6 +1362,7 @@ class Bot:
         self.size_bank = self.initial_balance or DEFAULT_BANKROLL   # account value sizes are based on (see bankroll)
         self.size_plan = {}               # eid -> shares per quote (see update_size_plan)
         self.size_plan_time = -1e9
+        self.size_plan_bank = None        # account value the plan was made for
         self.last_slow_poll = -1e9        # when P&L and fills were last read
         self.last_full_check = -1e9       # when the last full check (bulk prices, positions, orders) ran
         self.feed = None                  # RealtimeFeed, started by run() (None = polling only)
@@ -1568,6 +1574,10 @@ class Bot:
                 if len(members) > 1:
                     fvs.update(normalise({e: fvs[e] for e in members}))
 
+        # 3b. How many shares to quote in each market (every size_plan_seconds, or on an account step) ----
+        if cfg.size_by_activity:
+            self.update_size_plan(now_m, fvs)
+
         # 4. Fills (every slow_poll_seconds, and straight after a fill) --------------------------------
         if read_fills:
             self.log_fills(fvs)
@@ -1601,6 +1611,9 @@ class Bot:
                        "realtime": "connected" if realtime else ("reconnecting" if self.feed else "off"),
                        "realtime_events": self.feed.events if self.feed else 0,
                        "takes_total": self.takes_total,
+                       "quote_capital_planned": round(getattr(self, "plan_capital", 0.0)),
+                       "biggest_quotes": {self.ex[e].label: s for e, s in sorted(self.size_plan.items(),
+                                          key=lambda kv: -kv[1])[:6] if e in self.ex},
                        "positions": {self.ex[e].label: q for e, q in inv.items() if q and e in self.ex}}
 
         # 6b. Take tournament quotes that Polymarket says are clearly stale (confirmed over 2 readings) ---
@@ -1608,8 +1621,6 @@ class Bot:
                  if self.running else set())
 
         # 7. Decide + reconcile each exchange; cancels happen now, new orders are batched ------------
-        if cfg.size_by_activity:
-            self.update_size_plan(now_m, fvs)
         new_orders = []
         for eid, ex in list(self.ex.items()):
             if not self.running:          # Ctrl+C: stop touching the book immediately
@@ -1874,7 +1885,9 @@ class Bot:
             anchor = next((x for x in (fv, ex.last_fv, ref) if x is not None), None)
             if fv is not None:
                 ex.last_fv = fv
-            return exit_quote(anchor, ex.inv, best_bid, best_ask, cfg, self.bankroll()) if anchor is not None else NO_QUOTE
+            planned = self.size_plan.get(ex.eid) if cfg.size_by_activity else None   # big positions leave in big pieces
+            return (exit_quote(anchor, ex.inv, best_bid, best_ask, cfg, self.bankroll(), max_size=planned)
+                    if anchor is not None else NO_QUOTE)
         if fv is None:
             return NO_QUOTE                                   # no trustworthy price
 
@@ -1926,8 +1939,9 @@ class Bot:
         trades count more as they accumulate: fully (live_activity_max_weight) after live_activity_trades.
         A market that gets a fair value between plans quotes the minimum until the next plan."""
         cfg = self.cfg
-        if self.size_plan and now_m - self.size_plan_time < cfg.size_plan_seconds:
-            return
+        if (self.size_plan and now_m - self.size_plan_time < cfg.size_plan_seconds
+                and self.size_plan_bank == self.bankroll()):
+            return                                         # (a 5% account step re-plans at once)
         quoted = [e for e in self.ex if fvs.get(e) is not None]
         vols = self.refs.volumes() if self.refs and hasattr(self.refs, "volumes") else {}
         poly = {e: float(vols.get(f"{self.ex[e].group}|{self.ex[e].party}") or 0.0) for e in quoted}
@@ -1939,9 +1953,11 @@ class Bot:
                     for e in quoted}
         headline = {e for e in quoted if self.ex[e].group in cfg.headline_races}
         lock = {e: quote_lock(fvs[e], cfg) for e in quoted}
-        new = plan_sizes(activity, headline, self.bankroll(), cfg, prev=self.size_plan, lock=lock)
+        new = plan_sizes(activity, headline, self.bankroll(), cfg, prev=self.size_plan, lock=lock,
+                         prev_bankroll=self.size_plan_bank)
         changed = sum(1 for e, s in new.items() if self.size_plan.get(e) != s)
-        self.size_plan, self.size_plan_time = new, now_m
+        self.size_plan, self.size_plan_time, self.size_plan_bank = new, now_m, self.bankroll()
+        self.plan_capital = sum(s * lock[e] for e, s in new.items())
         top = sorted(new.items(), key=lambda kv: -kv[1])[:6]
         log.info("size plan: %d markets quoted, locking up to %s (cap %.0f), %d changed, tournament trades weigh %.0f%% | "
                  "biggest: %s", len(new), f"{sum(s * lock[e] for e, s in new.items()):,.0f}",
@@ -2591,7 +2607,10 @@ class Bot:
         A network blip gets one retry."""
         if not self.cfg.selftest_enabled or not self.api.live or not self.ex:
             return True
-        eid = sorted(self.ex)[0]
+        # On the quietest ordinary market: the test's clean-up cancels our quotes there too, and that must not
+        # cost a big market its place in line at the open.
+        quiet = [e for e in sorted(self.ex) if self.ex[e].group not in self.cfg.headline_races] or sorted(self.ex)
+        eid = min(quiet, key=lambda e: self.size_plan.get(e, 0))
         ttl, retried = self.cfg.order_ttl, False
         for _ in range(3):
             problems, transient, rejected = [], False, False

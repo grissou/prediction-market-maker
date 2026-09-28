@@ -37,7 +37,7 @@ Each cycle the bot:
 | Control | What it does |
 |---|---|
 | Position sizing | **Quarter Kelly** per market and side, using Polymarket as the true probability, capped at 2% of the account per market. All other sizes are fractions of account value too, so the bot sizes up after gains and down after losses (in 5% steps, so small wobbles don't resize every order) |
-| Quote sizes by activity | Capital goes where the trades are: party control of the House and Senate get 10,000-share quotes (10% of the starting balance), busy races up to 2,000, quiet ones 100, ranked by Polymarket volume and then by the tournament's own trades (re-planned every 30 min). All resting quotes together lock at most 60% of the account, and every size scales with the account |
+| Quote sizes by activity | Capital goes where the trades are: party control of the House and Senate get 10,000-share quotes and a flat 10,000-share position limit (10% of the account), busy races up to 2,000, quiet ones 100, ranked by Polymarket volume and then by the tournament's own trades (re-planned every 30 min). All resting quotes together lock at most 60% of the account, and every size scales with the account |
 | Kill switch | Stops and cancels everything if account value falls a set % below the starting balance. Needs 2 readings in a row, is corrected for cash locked in open orders, and leaves a marker file so nothing can auto-restart trading |
 | Worst-case loss cap | Reduce-only everywhere if the worst settlement outcome would cost more than 30% of the account |
 | National-swing cap | Net Republican-vs-Democrat exposure summed over all races: quotes are shaded against it (up to 1.5c), so it sheds while still quoting both sides; at 5% of the account the side that would add to it is blocked |

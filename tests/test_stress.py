@@ -272,12 +272,15 @@ def run_seed(seed, steps):
         bank = bot.bankroll()
         fvs = {e: ex.last_fv for e, ex in bot.ex.items()}
         worst = bot.total_worst_case(api.inv, fvs)
-        max_q = max(list(bot.size_plan.values()) + [bot.cfg.order_size_frac * bank])   # biggest quote size
-        slack = len(eids) * max(bot.cfg.max_order_cash_frac * bank, max_q) * 2
+        size_of = {e: bot.size_plan.get(e, bot.cfg.order_size_frac * bank) for e in eids}   # each market's quote size
+        slack = sum(max(bot.cfg.max_order_cash_frac * bank, q) for q in size_of.values())  # fills in flight
+        for e in eids:                                  # party-control markets: flat position limit
+            if eids[e][0] in bot.cfg.headline_races and abs(api.inv.get(e, 0)) > bot.cfg.headline_position_frac * bank + size_of[e]:
+                problems.append(f"step {cycles}: {eids[e][0]} position {api.inv.get(e, 0):+.0f} ran past its limit")
         if worst > bot.cfg.max_worst_case_frac * bank + slack:
             problems.append(f"step {cycles}: worst-case loss {worst:.0f} ran away past the cap")
         delta = sum(PARTY_SIGN.get(eids[e][1], 0) * q for e, q in api.inv.items())
-        if abs(delta) > bot.cfg.max_party_delta_frac * bank + len(eids) * max_q * 2:
+        if abs(delta) > bot.cfg.max_party_delta_frac * bank + sum(size_of.values()):
             problems.append(f"step {cycles}: national-swing exposure {delta:+.0f} ran away past the cap")
 
     # 1. A normal session with faults.
