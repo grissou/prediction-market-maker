@@ -120,7 +120,8 @@ def chunks(items, n):
 
 
 def fetch_polymarket(ids):
-    """{market id: (probability, spread)} for Polymarket markets (Gamma API; public, no account needed)."""
+    """{market id: (probability, spread, all-time volume in $)} for Polymarket markets (Gamma API; public,
+    no account needed). The volume tells mm_bot which markets people actually trade."""
     out = {}
     for chunk in chunks(ids, REF.batch_size):
         params = [("id", i) for i in chunk] + [("limit", len(chunk))]
@@ -129,7 +130,7 @@ def fetch_polymarket(ids):
                 continue                      # already resolved: not a live opinion any more
             p, spread = market_quote(m.get("bestBid"), m.get("bestAsk"), m.get("lastTradePrice"))
             if p is not None:
-                out[str(m["id"])] = (p, spread)
+                out[str(m["id"])] = (p, spread, to_float(m.get("volumeNum")) or to_float(m.get("volume")))
     return out
 
 
@@ -187,6 +188,7 @@ class ReferencePrices:
         self.mapping = {k: v for k, v in load_map(map_path).items() if v and v.get("id")}
         self.prices = {}                      # key -> (probability, time.monotonic() when fetched)
         self.spread = {}                      # key -> bid/ask spread, or None if the price is a last trade
+        self.volume = {}                      # key -> all-time traded volume ($), where the source reports it
         self.last_try = -1e9
         self.lock = threading.Lock()          # the background thread writes, mm_bot reads
         self.version = 0                      # +1 after every refresh (so mm_bot can spot a new reading)
@@ -219,6 +221,11 @@ class ReferencePrices:
         with self.lock:
             return {k: p for k, (p, t) in self.prices.items() if now - t <= self.cfg.max_age_seconds}
 
+    def volumes(self):
+        """{key: all-time traded volume in $} - how busy each market is (mm_bot sizes its quotes by it)."""
+        with self.lock:
+            return dict(self.volume)
+
     def spreads(self):
         """{key: Polymarket bid/ask spread} (None where the price is only a last trade). mm_bot only
         leans on a price, and sizes with Kelly, where this is tight."""
@@ -241,7 +248,9 @@ class ReferencePrices:
                 quote = fetched.get(entry.get("source", "polymarket"), {}).get(str(entry["id"]))
                 if quote is None:
                     continue
-                p, spread = quote
+                p, spread = quote[0], quote[1]
+                if len(quote) > 2 and quote[2] is not None:
+                    self.volume[key] = quote[2]
                 if key in self.prices:
                     moves[key] = abs(p - self.prices[key][0])
                 self.prices[key], self.spread[key] = (p, now), spread

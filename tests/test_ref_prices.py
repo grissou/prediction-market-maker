@@ -34,7 +34,7 @@ seen = {}
 def fake_get(url, params=None):
     seen["url"], seen["params"] = url, params
     if "polymarket" in url or "gamma" in url:
-        return [{"id": "1", "bestBid": 0.40, "bestAsk": 0.42, "closed": False},
+        return [{"id": "1", "bestBid": 0.40, "bestAsk": 0.42, "closed": False, "volumeNum": 12345},
                 {"id": "2", "bestBid": 0.99, "bestAsk": 1.0, "closed": True}]        # resolved -> ignored
     return {"markets": [{"ticker": "K-R", "status": "active", "yes_bid_dollars": "0.3000", "yes_ask_dollars": "0.3200"},
                         {"ticker": "K-D", "status": "settled", "yes_bid_dollars": "0.9", "yes_ask_dollars": "1"}]}
@@ -43,6 +43,7 @@ pm = R.fetch_polymarket(["1", "2"])
 check("Polymarket: open market priced (price, spread), resolved one skipped",
       set(pm) == {"1"} and abs(pm["1"][0] - 0.41) < 1e-9 and abs(pm["1"][1] - 0.02) < 1e-9, pm)
 check("Polymarket: ids sent as repeated ?id= parameters", ("id", "1") in seen["params"] and ("id", "2") in seen["params"], seen)
+check("Polymarket: all-time volume comes along too (mm_bot sizes quotes by it)", len(pm["1"]) == 3 and pm["1"][2] == 12345.0, pm)
 ka = R.fetch_kalshi(["K-R", "K-D"])
 check("Kalshi: active market priced (price, spread), settled one skipped",
       set(ka) == {"K-R"} and abs(ka["K-R"][0] - 0.31) < 1e-9, ka)
@@ -98,6 +99,10 @@ check("on_refresh is called after every reading, with the moves (mm_bot wakes it
 refs.on_refresh = lambda moves: 1 / 0
 refs.refresh()
 check("a failing callback never breaks the price thread", refs.version == 3)
+R.FETCHERS.update(polymarket=lambda ids: {"1": (0.40, 0.01, 5e6)}, kalshi=lambda ids: {})
+refs.on_refresh = None
+refs.refresh()
+check("volumes() reports each market's volume by key", refs.volumes().get(key) == 5e6, refs.volumes())
 R.FETCHERS.clear(); R.FETCHERS.update(real_fetchers)
 
 print("--- matching tournament races to Polymarket")

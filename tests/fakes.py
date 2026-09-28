@@ -176,6 +176,14 @@ def lvl(price, qty):
     return {"price": price, "quantity": qty}
 
 
+def pin_test_sizes(cfg):
+    """The unit tests check exact sizes worked out with 100-share quotes, 1,000-share position limits and
+    a 2,000-share national-swing cap. Pin those, so changing the live defaults doesn't rewrite every
+    expected number (test_stress.py runs with the real defaults)."""
+    cfg.order_size_frac, cfg.max_position_frac, cfg.max_party_delta_frac = 0.001, 0.01, 0.02
+    cfg.size_by_activity = False                          # activity-based sizes have their own tests
+
+
 def make_bot(live=True, only="", books=None, extra_markets=()):
     """Two races (Ohio, Utah), each Republican + Democrat, house quotes 8c wide. All files in a temp dir."""
     api = FakeApi(live)
@@ -191,7 +199,8 @@ def make_bot(live=True, only="", books=None, extra_markets=()):
     d = tempfile.mkdtemp()
     cfg.fills_csv, cfg.status_file, cfg.order_notes_file, cfg.kill_file = (
         os.path.join(d, n) for n in ("fills.csv", "status.json", "notes.json", "kill.tripped"))
-    cfg.record_file, cfg.ref_map_file, cfg.summary_every_hours = "", "", 0   # opt-in per test
+    cfg.record_file, cfg.ref_map_file, cfg.summary_every_hours = "", "", 0
+    pin_test_sizes(cfg)   # opt-in per test
     cfg.slow_poll_seconds = 0             # read P&L and fills every cycle, so each test cycle sees them
     cfg.realtime_enabled = False          # no network in tests; realtime is tested with a FakeFeed
     return api, Bot(api, cfg)

@@ -113,14 +113,15 @@ class Config:
     sizing_step_frac: float = 0.05        # ...but the account value they're a fraction of only moves in steps: it's
                                           #   updated once the real value is 5% away. Otherwise a 10-SUSQie dip turns
                                           #   every 100-share order into a 99-share one and replaces all of them
-    max_party_delta_frac: float = 0.02    # hard cap on |net Republican-minus-Democrat YES shares| over all races
-                                          #   (national swing): 2% of account = 2,000 shares at 100k. At the cap,
+    max_party_delta_frac: float = 0.15    # hard cap on |net Republican-minus-Democrat YES shares| over all races
+                                          #   (national swing): 15% of account = 15,000 shares at 100k, room for
+                                          #   the 10,000-share positions in the party-control markets. At the cap,
                                           #   the side that would add to it is blocked on every Rep/Dem market
     party_skew_at_cap: float = 0.015      # before that: as the net exposure builds, shade every Rep/Dem quote
                                           #   against it, growing to 1.5c at the cap, so the bot sheds it while
                                           #   still quoting both sides (0 = off, hard cap only)
-    max_position_frac: float = 0.01       # limit on |net YES shares| per exchange WITHOUT a liquid Polymarket
-                                          #   price: 1,000 shares at 100k. With one, Kelly sizing sets the limit
+    max_position_frac: float = 0.03       # limit on |net YES shares| per exchange WITHOUT a liquid Polymarket
+                                          #   price: 3,000 shares at 100k. With one, Kelly sizing sets the limit
     max_order_cash_frac: float = 0.01     # max cash tied up in a single order: 1,000 at 100k
     tail_low: float = 0.05                # fair value below this: don't SELL YES (risks ~95c a share to earn ~1c)...
     tail_high: float = 0.95               # ...above this: don't BUY YES. Either side still allowed to shrink a position
@@ -138,12 +139,33 @@ class Config:
     # --- QUOTING -----------------------------------------------------------------------------
     min_edge: float = 0.01                # never quote closer than this to our reservation price
     max_half_spread: float = 0.04         # never quote further than this from it
-    order_size_frac: float = 0.001        # shares per order as a fraction of account value: 100 shares at 100k
+    order_size_frac: float = 0.005        # shares per order when size_by_activity is off (and before the first
+                                          #   plan): 500 shares at 100k. Normally QUOTE SIZES BY ACTIVITY decides
     skew_per_share: float = 0.00003       # reservation price moves 0.3c per 100 shares of race-adjusted inventory
     keep_fraction: float = 0.5            # keep a partly-filled order (and its queue spot) while >= 50% remains
     reprice_tolerance_ticks: int = 1      # leave an order alone if its target price moved by at most this many
                                           #   ticks (0.5c each) and it still keeps min_edge without crossing anyone:
                                           #   saves a cancel + replace and keeps our place in line (0 = always move)
+
+    # --- QUOTE SIZES BY MARKET ACTIVITY -------------------------------------------------------
+    # Trading is concentrated (9 of 113 races hold 80% of Polymarket's volume) and tournament trades are big,
+    # so capital goes where the trades are: busy markets get big quotes, quiet ones small, and all resting
+    # quotes together lock at most quote_capital_frac of the account (a two-sided quote locks ~1 a share).
+    # Activity = Polymarket volume before the open, shifting toward the tournament's own trades as they come.
+    size_by_activity: bool = True         # False = every market quotes order_size_frac
+    quote_capital_frac: float = 0.60      # resting quotes lock at most 60% of account value; the rest stays free
+                                          #   for positions, arbitrage and the election-night exit
+    size_min_frac: float = 0.001          # quietest markets: 100 shares at 100k (still present, still earning)
+    size_max_frac: float = 0.02           # busiest ordinary markets: up to 2,000 shares at 100k
+    headline_races: tuple = ("U.S. House", "U.S. Senate")   # party control of Congress: by far the most traded
+    headline_size_frac: float = 0.10      # quotes of 10,000 shares there (10% of account value; like every size,
+                                          #   it grows and shrinks with the account)...
+    headline_position_frac: float = 0.10  # ...and positions up to 10,000 shares there (a flat limit, not Kelly)
+    size_plan_seconds: float = 1800.0     # re-plan every 30 min, as tournament trades come in
+    size_plan_step: float = 0.25          # a market's size only changes when a new plan moves it by more than
+                                          #   25%, so re-planning doesn't replace orders (and queue spots) for nothing
+    live_activity_trades: int = 1000      # tournament trades seen before they count fully...
+    live_activity_max_weight: float = 0.8 # ...which is 80%; Polymarket volume keeps at least 20%
 
     # --- FAIR VALUE --------------------------------------------------------------------------
     fv_min_depth: int = 200               # skip price levels until this many shares have accumulated (anti-spoofing)
@@ -639,6 +661,7 @@ class RealtimeFeed:
         self.stopping = False
         self.last_revision = {}           # topic -> last revision number accepted
         self.events = 0                   # messages received (shown in status.json)
+        self.trade_counts = defaultdict(int)   # exchange -> tournament trades seen (all traders)
         self.thread = threading.Thread(target=lambda: asyncio.run(self._run()), name="realtime", daemon=True)
 
     # --- used by the main loop -------------------------------------------------------------
@@ -689,6 +712,9 @@ class RealtimeFeed:
             for item in (data.get("bookDirty") or []) + (data.get("trades") or []):
                 if item.get("exchangeId") is not None and item.get("tournamentId") in (None, self.tid):
                     self.dirty.add(str(item["exchangeId"]))
+            for item in data.get("trades") or []:              # how busy each market is (sizes quotes by it)
+                if item.get("exchangeId") is not None and item.get("tournamentId") in (None, self.tid):
+                    self.trade_counts[str(item["exchangeId"])] += 1
             if data.get("marketSettled"):
                 self.settled = True
         self.wake.set()
@@ -953,8 +979,70 @@ def kelly_position(p, price, bankroll, cfg=CFG, yes=True):
     return max(allowance, int(stake / cost))
 
 
+def quote_lock(fv, cfg=CFG):
+    """Cash one share of our quotes on a market locks. Two-sided: a bid at fv - x locks fv - x and an ask
+    at fv + x (really a NO buy at 1 - fv - x) locks 1 - fv - x: together 1 - 2x, at most 1 - 2 * min_edge.
+    Near 0 or 1 the tail guard leaves one cheap side: a bid near 0 locks ~fv, an ask near 1 locks ~1 - fv."""
+    if fv < cfg.tail_low:
+        return max(fv, 0.01)
+    if fv > cfg.tail_high:
+        return max(1 - fv, 0.01)
+    return 1 - 2 * cfg.min_edge
+
+
+def plan_sizes(activity, headline, bankroll, cfg=CFG, prev=None, lock=None):
+    """Shares per quote for each exchange: {eid: shares}.
+
+    activity   {eid: how busy the market is} for the markets being quoted (any non-negative scale)
+    headline   eids of the party-control markets: they get headline_size_frac, the biggest by far
+    prev       the current plan: a market keeps its size unless the new one differs by > size_plan_step
+    lock       {eid: cash one share of quotes there locks} (see quote_lock); missing = 1 (the most it can be)
+
+    Everything else shares what's left of the capital budget (quote_capital_frac of the account) in
+    proportion to the SQUARE ROOT of activity, so busy markets get much more but no single one swallows
+    everything, clamped to [size_min_frac, size_max_frac]. If the headline markets alone would leave
+    the rest less than their minimum, they're scaled down to fit. Sizes are rounded down to 50 shares.
+    """
+    lock = lock or {}
+    cost = {e: lock.get(e, 1.0) for e in activity}
+    budget = cfg.quote_capital_frac * bankroll
+    lo, hi = cfg.size_min_frac * bankroll, cfg.size_max_frac * bankroll
+    others = [e for e in activity if e not in headline]
+    plan = {e: cfg.headline_size_frac * bankroll for e in activity if e in headline}
+    floor = sum(lo * cost[e] for e in others)
+    left = budget - sum(s * cost[e] for e, s in plan.items())
+    if plan and left < floor:                              # headline markets would starve the rest
+        scale = max(0.0, budget - floor) / sum(s * cost[e] for e, s in plan.items())
+        plan = {e: s * scale for e, s in plan.items()}
+        left = budget - sum(s * cost[e] for e, s in plan.items())
+    weight = {e: math.sqrt(max(float(activity.get(e) or 0.0), 0.0)) for e in others}
+    if others and not any(weight.values()):
+        weight = dict.fromkeys(others, 1.0)                # no activity data at all: share equally
+
+    def total(k):
+        return sum(min(hi, max(lo, k * weight[e])) * cost[e] for e in others)
+
+    k_lo, k_hi = 0.0, 1.0                                  # find k so that the others use exactly what's left
+    while total(k_hi) < left and k_hi < 1e15:
+        k_hi *= 2
+    for _ in range(80):
+        mid = (k_lo + k_hi) / 2
+        k_lo, k_hi = (mid, k_hi) if total(mid) <= left else (k_lo, mid)
+    for e in others:
+        plan[e] = min(hi, max(lo, k_lo * weight[e]))
+    out = {}
+    for e, size in plan.items():
+        size = int(size // 50 * 50) if size >= 50 else int(size)
+        old = (prev or {}).get(e)
+        if old and abs(size / old - 1) <= cfg.size_plan_step:
+            size = old                                     # small change: keep the size (and the queue spots)
+        out[e] = size
+    return out
+
+
 def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=False, no_bid=False, no_ask=False,
-                  bid_cap=None, ask_cap=None, kelly_p=None, bankroll=None, shift=0.0):
+                  bid_cap=None, ask_cap=None, kelly_p=None, bankroll=None, shift=0.0, order_size=None,
+                  position_limit=None):
     """
     fv         fair YES probability
     inv        our net YES shares on THIS exchange (negative = net NO); drives the hard position limit
@@ -968,10 +1056,15 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
                        instead of max_position_frac
     bankroll           account value; every size is a fraction of it (None = DEFAULT_BANKROLL)
     shift              extra amount to lower the reservation price by (national-swing shading; see decide)
+    order_size         shares per quote for this market (from the activity-based size plan); None = order_size_frac
+    position_limit     flat limit on |net shares| here instead of Kelly / max_position_frac (party-control markets)
     """
     bankroll = bankroll or DEFAULT_BANKROLL
-    order_size = cfg.order_size_frac * bankroll
     max_order_cash = cfg.max_order_cash_frac * bankroll
+    if order_size is None:
+        order_size = cfg.order_size_frac * bankroll
+    else:
+        max_order_cash = max(max_order_cash, order_size)   # a planned size has already been capital-checked
     # 1. Reservation price = fair value shifted against our inventory. Long -> lower r -> we bid
     #    less eagerly and offer more eagerly, which pushes the position back toward flat.
     r = fv - cfg.skew_per_share * eff_inv - shift
@@ -997,7 +1090,9 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
     # 5. Size: shrink toward the position limit on each side, and cap the cash tied up per order.
     #    Limits: Kelly sizing when we have a liquid Polymarket price, else max_position_frac of the account.
     long_limit = short_limit = cfg.max_position_frac * bankroll
-    if kelly_p is not None:
+    if position_limit is not None:
+        long_limit = short_limit = position_limit
+    elif kelly_p is not None:
         long_limit = kelly_position(kelly_p, bid, bankroll, cfg, yes=True)     # most YES we'd hold
         short_limit = kelly_position(kelly_p, ask, bankroll, cfg, yes=False)   # most NO we'd hold
     bid_size = min(order_size, long_limit - inv)
@@ -1260,6 +1355,8 @@ class Bot:
         self.last_reload = 0.0
         self.last_equity = None           # latest account value (read every slow_poll_seconds)
         self.size_bank = self.initial_balance or DEFAULT_BANKROLL   # account value sizes are based on (see bankroll)
+        self.size_plan = {}               # eid -> shares per quote (see update_size_plan)
+        self.size_plan_time = -1e9
         self.last_slow_poll = -1e9        # when P&L and fills were last read
         self.last_full_check = -1e9       # when the last full check (bulk prices, positions, orders) ran
         self.feed = None                  # RealtimeFeed, started by run() (None = polling only)
@@ -1511,6 +1608,8 @@ class Bot:
                  if self.running else set())
 
         # 7. Decide + reconcile each exchange; cancels happen now, new orders are batched ------------
+        if cfg.size_by_activity:
+            self.update_size_plan(now_m, fvs)
         new_orders = []
         for eid, ex in list(self.ex.items()):
             if not self.running:          # Ctrl+C: stop touching the book immediately
@@ -1811,9 +1910,43 @@ class Bot:
         inv_for_quote = ex.inv if hrs <= cfg.flatten_per_market_hours else ex.eff
         # Kelly position limits, only with a liquid Polymarket price and a known account value.
         kelly_p = ref if (ref is not None and ref_liquid) else None
+        # Size: this market's share of the capital plan; the party-control markets get a flat position limit.
+        planned = self.size_plan.get(ex.eid, cfg.size_min_frac * self.bankroll()) if cfg.size_by_activity else None
+        headline_limit = (cfg.headline_position_frac * self.bankroll()
+                          if cfg.size_by_activity and ex.group in cfg.headline_races else None)
         return compute_quote(fv, ex.inv, inv_for_quote, best_bid, best_ask, cfg, reduce_only, no_bid, no_ask,
                              bid_cap, ask_cap, kelly_p=kelly_p, bankroll=self.bankroll(),
-                             shift=self.party_shift(ex, party_delta))
+                             shift=self.party_shift(ex, party_delta), order_size=planned, position_limit=headline_limit)
+
+    def update_size_plan(self, now_m, fvs):
+        """Every size_plan_seconds: work out how many shares to quote in each market (see plan_sizes).
+        Only markets that have a fair value (i.e. will be quoted) get capital, each at what its quotes
+        really lock (quote_lock). Activity = each market's share of Polymarket's traded volume, blended
+        with its share of the tournament trades the realtime feed has reported. The tournament's own
+        trades count more as they accumulate: fully (live_activity_max_weight) after live_activity_trades.
+        A market that gets a fair value between plans quotes the minimum until the next plan."""
+        cfg = self.cfg
+        if self.size_plan and now_m - self.size_plan_time < cfg.size_plan_seconds:
+            return
+        quoted = [e for e in self.ex if fvs.get(e) is not None]
+        vols = self.refs.volumes() if self.refs and hasattr(self.refs, "volumes") else {}
+        poly = {e: float(vols.get(f"{self.ex[e].group}|{self.ex[e].party}") or 0.0) for e in quoted}
+        live = dict(getattr(self.feed, "trade_counts", None) or {}) if self.feed else {}
+        live = {e: live.get(e, 0) for e in quoted}
+        tot_p, tot_l = sum(poly.values()), sum(live.values())
+        w_live = min(cfg.live_activity_max_weight, tot_l / cfg.live_activity_trades) if tot_l else 0.0
+        activity = {e: (1 - w_live) * (poly[e] / tot_p if tot_p else 0.0) + w_live * (live[e] / tot_l if tot_l else 0.0)
+                    for e in quoted}
+        headline = {e for e in quoted if self.ex[e].group in cfg.headline_races}
+        lock = {e: quote_lock(fvs[e], cfg) for e in quoted}
+        new = plan_sizes(activity, headline, self.bankroll(), cfg, prev=self.size_plan, lock=lock)
+        changed = sum(1 for e, s in new.items() if self.size_plan.get(e) != s)
+        self.size_plan, self.size_plan_time = new, now_m
+        top = sorted(new.items(), key=lambda kv: -kv[1])[:6]
+        log.info("size plan: %d markets quoted, locking up to %s (cap %.0f), %d changed, tournament trades weigh %.0f%% | "
+                 "biggest: %s", len(new), f"{sum(s * lock[e] for e, s in new.items()):,.0f}",
+                 cfg.quote_capital_frac * self.bankroll(), changed, 100 * w_live,
+                 ", ".join(f"{self.ex[e].label} {s:,}" for e, s in top))
 
     def party_shift(self, ex, party_delta):
         """National-swing shading: how much to lower this market's reservation price. Net long Republican

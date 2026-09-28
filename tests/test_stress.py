@@ -147,7 +147,7 @@ class FlakyApi(FakeApi):
 def build(seed):
     rng = random.Random(seed)
     api = FlakyApi(rng)
-    races = [f"Race {i}" for i in range(8)]
+    races = ["U.S. House", "U.S. Senate"] + [f"Race {i}" for i in range(6)]   # incl. the 10,000-share markets
     truth = {r: rng.uniform(0.08, 0.92) for r in races}                  # Republican win probability
     mk = []
     for i, r in enumerate(races):
@@ -272,11 +272,12 @@ def run_seed(seed, steps):
         bank = bot.bankroll()
         fvs = {e: ex.last_fv for e, ex in bot.ex.items()}
         worst = bot.total_worst_case(api.inv, fvs)
-        slack = len(eids) * bot.cfg.max_order_cash_frac * bank * 2
+        max_q = max(list(bot.size_plan.values()) + [bot.cfg.order_size_frac * bank])   # biggest quote size
+        slack = len(eids) * max(bot.cfg.max_order_cash_frac * bank, max_q) * 2
         if worst > bot.cfg.max_worst_case_frac * bank + slack:
             problems.append(f"step {cycles}: worst-case loss {worst:.0f} ran away past the cap")
         delta = sum(PARTY_SIGN.get(eids[e][1], 0) * q for e, q in api.inv.items())
-        if abs(delta) > bot.cfg.max_party_delta_frac * bank + len(eids) * bot.cfg.order_size_frac * bank * 2:
+        if abs(delta) > bot.cfg.max_party_delta_frac * bank + len(eids) * max_q * 2:
             problems.append(f"step {cycles}: national-swing exposure {delta:+.0f} ran away past the cap")
 
     # 1. A normal session with faults.

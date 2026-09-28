@@ -20,10 +20,12 @@ os.environ.setdefault("TOURNAMENT_SLUG", "test")
 
 import mm_bot as M                                        # noqa: E402
 from mm_bot import *                                      # noqa: E402,F401,F403
-from fakes import FakeApi, FakeFeed, FakeRefs, lvl, make_bot, market, run_cycles   # noqa: E402
+from fakes import FakeApi, FakeFeed, FakeRefs, lvl, make_bot, market, pin_test_sizes, run_cycles   # noqa: E402
 
 # Never send real phone notifications from tests, even in a terminal where ALERT_URL is set.
 M.CFG.alert_url = ""
+_live = Config()                                          # the real defaults, checked below
+pin_test_sizes(M.CFG)                                     # exact expected numbers below use the old sizes
 M.notify = lambda *a, **k: False
 
 logging.basicConfig(level=logging.ERROR, format="    log %(levelname)s %(message)s")
@@ -818,6 +820,68 @@ except Exception:
 finally:
     logging.disable(logging.NOTSET); M.build_summary = real_bs
 check("a failing phone summary is skipped, never an error that would pull the quotes", ok)
+
+print("--- live size defaults")
+q = compute_quote(0.14, 0, 0, 0.10, 0.18, _live, bankroll=100_000)
+check("live defaults: 500-share quotes at 100k (sized for big trades)", (q.bid_size, q.ask_size) == (500, 500), q)
+check("live defaults: 3,000-share position limit (no reliable Polymarket price), 15,000-share national-swing cap",
+      (_live.max_position_frac * 100_000, _live.max_party_delta_frac * 100_000) == (3000, 15000))
+
+print("--- quote sizes by market activity")
+act = {"H1": 0.3, "H2": 0.3, "big": 0.2, "mid": 0.05, "small": 0.001, "dead": 0.0}
+plan = plan_sizes(act, {"H1", "H2"}, 100_000, _live)
+check("party-control markets get 10,000-share quotes", plan["H1"] == plan["H2"] == 10_000, plan)
+check("few markets, capital to spare: active ones get the 2,000 maximum, a market with no activity the 100 minimum",
+      plan["big"] == plan["mid"] == plan["small"] == 2000 and plan["dead"] == 100, plan)
+check("sizes are whole multiples of 50 shares", all(v % 50 == 0 for v in plan.values()), plan)
+many = {f"m{i}": 1.0 / (i + 1) for i in range(170)}
+many.update(dict.fromkeys(("H1", "H2", "H3", "H4"), 1.0))
+p2 = plan_sizes(many, {"H1", "H2", "H3", "H4"}, 100_000, _live)
+check("~174 markets: all quotes together stay within 60% of the account", sum(p2.values()) <= 60_000, sum(p2.values()))
+check("...busier markets get bigger quotes; the quiet ones still get the 100-share minimum",
+      p2["m0"] > p2["m5"] > p2["m60"] and p2["m0"] > 100 and min(p2[f"m{i}"] for i in range(170)) == 100,
+      (p2["m0"], p2["m5"], p2["m60"], min(p2.values())))
+p3 = plan_sizes(dict(many, m5=many["m5"] * 1.2), {"H1", "H2", "H3", "H4"}, 100_000, _live, prev=p2)
+check("a small shift in activity changes no sizes (so no orders are replaced)", p3 == p2,
+      {e: (p2[e], p3[e]) for e in p2 if p2[e] != p3[e]})
+tight = plan_sizes(dict.fromkeys([f"q{i}" for i in range(250)], 0.0) | dict.fromkeys(("H1", "H2", "H3", "H4"), 1.0),
+                   {"H1", "H2", "H3", "H4"}, 100_000, _live)
+check("if the 10,000s would starve everything else, they're scaled down to fit the cap",
+      tight["H1"] < 10_000 and sum(tight.values()) <= 60_000 and tight["q0"] == 100, (tight["H1"], sum(tight.values())))
+cheap = plan_sizes({"a": 1.0, "b": 1.0}, set(), 100_000, _live, lock={"a": 0.98, "b": 0.03})
+check("capital is counted at what each quote really locks (a near-certain market's one cheap side costs little)",
+      quote_lock(0.5, _live) == 0.98 and quote_lock(0.02, _live) == 0.02 and abs(quote_lock(0.98, _live) - 0.02) < 1e-9
+      and cheap == {"a": 2000, "b": 2000}, cheap)
+grown = plan_sizes(many, {"H1", "H2", "H3", "H4"}, 150_000, _live)
+shrunk = plan_sizes(many, {"H1", "H2", "H3", "H4"}, 80_000, _live)
+check("everything scales with the account, party-control quotes included (150k -> 15,000, 80k -> 8,000)",
+      grown["H1"] == 15_000 and shrunk["H1"] == 8_000 and grown["m0"] > p2["m0"] > shrunk["m0"],
+      (grown["H1"], shrunk["H1"], grown["m0"], p2["m0"], shrunk["m0"]))
+check("no activity data at all: markets share equally",
+      len(set(plan_sizes({"a": 0, "b": 0, "c": 0}, set(), 100_000, _live).values())) == 1)
+
+class VolRefs:
+    """Polymarket volumes only (no prices), to test sizing on its own."""
+    version, last_moves, mapping = 1, {}, {}
+    def get(self): return {}
+    def spreads(self): return {}
+    def volumes(self): return {"U.S. House|Republican": 9e6, "U.S. House|Democratic": 3e6}
+books6 = {"11": {"bids": [lvl(0.10, 1000)], "asks": [lvl(0.18, 1000)]}, "12": {"bids": [lvl(0.82, 1000)], "asks": [lvl(0.90, 1000)]},
+          "21": {"bids": [lvl(0.48, 1000)], "asks": [lvl(0.56, 1000)]}, "22": {"bids": [lvl(0.44, 1000)], "asks": [lvl(0.52, 1000)]},
+          "91": {"bids": [lvl(0.44, 20000)], "asks": [lvl(0.52, 20000)]}, "92": {"bids": [lvl(0.48, 20000)], "asks": [lvl(0.56, 20000)]}}
+a, b = make_bot(books=books6, extra_markets=[market("9", "91", "Republican", "U.S. House"), market("10", "92", "Democratic", "U.S. House")])
+b.cfg.size_by_activity, b.refs = True, VolRefs()
+b.cycle()
+check("live: the U.S. House markets quote 10,000 shares a side",
+      [n for _, _, n in a.ours("91")] == [10000, 10000] and [n for _, _, n in a.ours("92")] == [10000, 10000], (a.ours("91"), a.ours("92")))
+check("...ordinary markets quote at most 2,000", all(n <= 2000 for e in ("11", "12", "21", "22") for _, _, n in a.ours(e)),
+      [a.ours(e) for e in ("11", "21")])
+b.feed = FakeFeed()
+b.feed.trade_counts = {"21": 5000}                          # the tournament trades Utah Republican far more
+b.size_plan_time = -1e9
+b.update_size_plan(time.monotonic(), {e: 0.5 for e in b.ex})
+check("tournament trades shift the plan: the market people actually trade gets the big quote",
+      b.size_plan["21"] == 2000 and b.size_plan["11"] == 100, b.size_plan)
 
 print("--- parallel requests")
 a, b = make_bot()
