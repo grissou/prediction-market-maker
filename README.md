@@ -73,7 +73,7 @@ source .venv/bin/activate
 ```
 
 Optional: `ALERT_URL=https://ntfy.sh/<long-random-name>` in `.env` sends phone alerts (kill switch,
-crashes) and a **daily summary** at 21:00 UTC (P&L, rank, Smart Score, fills, edge, bot health) via the
+crashes) and a **summary every 2 hours**, on the hour UTC (P&L, rank, Smart Score, fills, edge, bot health) via the
 free ntfy app: install it and subscribe to the same topic name.
 
 ## Commands
@@ -85,7 +85,7 @@ python mm_bot.py run           # dry run: live data, orders only simulated
 python mm_bot.py run --live    # trade
 python mm_bot.py cancel        # cancel every open order
 python mm_bot.py report        # edge and adverse selection from logged fills
-python mm_bot.py summary       # the daily phone summary, now (tests your ALERT_URL)
+python mm_bot.py summary       # the phone summary, now (tests your ALERT_URL)
 
 python ref_prices.py check     # tournament price vs outside price for every contract
 python ref_prices.py suggest   # match unmapped races to Polymarket (review the result)

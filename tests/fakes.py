@@ -191,7 +191,7 @@ def make_bot(live=True, only="", books=None, extra_markets=()):
     d = tempfile.mkdtemp()
     cfg.fills_csv, cfg.status_file, cfg.order_notes_file, cfg.kill_file = (
         os.path.join(d, n) for n in ("fills.csv", "status.json", "notes.json", "kill.tripped"))
-    cfg.record_file, cfg.ref_map_file, cfg.daily_summary_hour_utc = "", "", -1   # opt-in per test
+    cfg.record_file, cfg.ref_map_file, cfg.summary_every_hours = "", "", 0   # opt-in per test
     cfg.slow_poll_seconds = 0             # read P&L and fills every cycle, so each test cycle sees them
     cfg.realtime_enabled = False          # no network in tests; realtime is tested with a FakeFeed
     return api, Bot(api, cfg)

@@ -158,7 +158,7 @@ def build(seed):
     d = tempfile.mkdtemp()
     cfg.fills_csv, cfg.status_file, cfg.order_notes_file, cfg.kill_file = (
         os.path.join(d, n) for n in ("fills.csv", "status.json", "notes.json", "kill.tripped"))
-    cfg.record_file, cfg.ref_map_file, cfg.daily_summary_hour_utc, cfg.realtime_enabled = "", "", -1, False
+    cfg.record_file, cfg.ref_map_file, cfg.summary_every_hours, cfg.realtime_enabled = "", "", -1, False
     cfg.slow_poll_seconds, cfg.reserved_cash_mode = 30.0, "ignore"
     cfg.parallel_requests = 1             # one request thread: the random faults then fire in a repeatable order
     eids = {}
@@ -325,7 +325,7 @@ def run_seed(seed, steps):
     return {"problems": problems, "record_ok": record == actual, "record": (record, actual), "stuck": stuck,
             "changes": changes, "unquoted": unquoted, "priceable": len(priceable), "cycles": cycles,
             "errors_handled": errors_handled, "faults": api.faults, "fills": len(api.fills),
-            "takes": bot.takes_today, "arbs": bot.arbs_today, "moves_off": moves_off}
+            "takes": bot.takes_total, "arbs": bot.arbs_total, "moves_off": moves_off}
 
 
 if __name__ == "__main__":

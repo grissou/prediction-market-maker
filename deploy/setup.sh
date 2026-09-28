@@ -5,6 +5,11 @@
 #   scp -r mm_bot.py ref_prices.py ref_map.json deploy root@SERVER_IP:/root/mmbot-src
 #   ssh -t root@SERVER_IP 'bash /root/mmbot-src/deploy/setup.sh'
 #
+# On servers where you log in as your own user instead of root (Azure: azureuser), use sudo:
+#
+#   scp -r mm_bot.py ref_prices.py ref_map.json deploy azureuser@SERVER_IP:mmbot-src
+#   ssh -t azureuser@SERVER_IP 'sudo bash mmbot-src/deploy/setup.sh'
+#
 # It does NOT start live trading. When you're ready: systemctl enable --now mmbot
 set -euo pipefail
 
@@ -26,17 +31,30 @@ printf 'APT::Periodic::Update-Package-Lists "1";\nAPT::Periodic::Unattended-Upgr
 # fail2ban bans IPs that keep guessing SSH passwords (its sshd protection is on by default).
 systemctl enable --now fail2ban >/dev/null 2>&1 || true
 # Log in with SSH keys only - but ONLY if a key is installed, otherwise you'd lock yourself out.
-if [ -s /root/.ssh/authorized_keys ]; then
+# The key is root's, or (run with sudo, e.g. Azure's azureuser) the logged-in user's.
+USER_KEYS=/root/.ssh/authorized_keys
+if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+  USER_KEYS="$(getent passwd "$SUDO_USER" | cut -d: -f6)/.ssh/authorized_keys"
+fi
+if [ -s /root/.ssh/authorized_keys ] || [ -s "$USER_KEYS" ]; then
   printf 'PasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin prohibit-password\n' \
     > /etc/ssh/sshd_config.d/50-mmbot-hardening.conf
   systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
   echo "    SSH: password logins disabled (key-only)"
 else
-  echo "    WARNING: no SSH key in /root/.ssh/authorized_keys, so password logins are left ON."
-  echo "    Add your key (ssh-copy-id root@SERVER_IP from the Mac), then re-run this script."
+  echo "    WARNING: no SSH key found for root or ${SUDO_USER:-root}, so password logins are left ON."
+  echo "    Add your key (ssh-copy-id USER@SERVER_IP from the Mac), then re-run this script."
 fi
 timedatectl set-timezone UTC 2>/dev/null || true      # server clock in UTC, like the bot's logs
 timedatectl set-ntp true 2>/dev/null || true          # keep the clock exact: order expiry and the open use it
+# A swap file, so a memory spike (e.g. automatic updates running) can't get the bot killed on a small
+# 1 GB server. Skipped if the server already has swap.
+if ! swapon --show | grep -q .; then
+  fallocate -l 2G /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=2048 status=none
+  chmod 600 /swapfile && mkswap /swapfile >/dev/null && swapon /swapfile
+  grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+  echo "    swap: 2 GB swap file added"
+fi
 
 # ---------------------------------------------------------------- the bot
 echo "==> creating a 'mmbot' user (the bot doesn't need to run as root)"
@@ -67,7 +85,7 @@ systemctl daemon-reload
 
 echo "==> checking the connection (read-only)"
 runuser -u mmbot -- "$DEST/.venv/bin/python" "$DEST/mm_bot.py" status | head -12
-echo "==> request latency from this server (lower = faster bot; ~0.28 s from the UK):"
+echo "==> request latency from this server (lower = faster bot; ~0.4 s from the UK):"
 curl -s -o /dev/null -w "    %{time_total} s\n" https://sig.thesuper.market/api/v1/tournaments || true
 
 cat <<'EOF'

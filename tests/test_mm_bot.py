@@ -222,7 +222,7 @@ os.environ["MM_TEST_B"] = "keep"; load_env_file(envf)
 check(".env loader: reads values, doesn't override existing ones", os.environ["MM_TEST_A"] == "hello" and os.environ["MM_TEST_B"] == "keep")
 
 # =============================================================================================
-# NEW FEATURES: arbitrage, tail guard, reference prices, recording, daily summary, parallel
+# NEW FEATURES: arbitrage, tail guard, reference prices, recording, phone summary, parallel
 # =============================================================================================
 print("--- arbitrage")
 arb_books = {"11": {"bids": [lvl(0.60, 300)], "asks": [lvl(0.70, 300)]},    # Rep Ohio bid 0.60
@@ -239,12 +239,12 @@ check("arbitrage position has zero worst-case loss", b.health["worst_case_loss"]
 arb_rows = [r for r in read_fills(b.cfg.fills_csv) if r["exchange_id"] in ("11", "12")]
 check("arbitrage fills logged as our asks at 0.60 / 0.45",
       sorted((r["our_side"], r["quote_price"]) for r in arb_rows) == [("ask", "0.45"), ("ask", "0.6")], arb_rows)
-check("arbitrage counted once", b.arbs_today == 1, b.arbs_today)
+check("arbitrage counted once", b.arbs_total == 1, b.arbs_total)
 
 a, b = make_bot(live=False, books=json.loads(json.dumps(arb_books)))
 b.cycle(); b.cycle()
 check("dry run: arbitrage logged but nothing sent, and not repeated during the cooldown",
-      not a.inv and b.arbs_today == 1 and not a.orders)
+      not a.inv and b.arbs_total == 1 and not a.orders)
 
 print("--- tail guard")
 tail_market = {"id": "5", "title": "Will turnout exceed 70%?", "isComposite": False,
@@ -331,7 +331,7 @@ for e in ("11", "12"):
 b.cycle()
 check("small Polymarket moves (1c) don't pull quotes; after the cooldown quoting resumes", len(a.ours("11")) == 2, a.ours("11"))
 
-print("--- recording and daily summary")
+print("--- recording and phone summary")
 a, b = make_bot()
 b.cfg.record_file = os.path.join(tempfile.mkdtemp(), "data.sqlite")
 b.db = b.open_recorder()
@@ -346,20 +346,48 @@ check("snapshot has book, fair value and our quote", row[2] and row[3] == 0.105 
 sent = []
 real_notify, M.notify = M.notify, lambda message, title="", **k: sent.append((title, message)) or True
 a, b = make_bot()
-b.cfg.daily_summary_hour_utc = utcnow().hour
+b.cfg.summary_every_hours = 1                               # every hour, so the current hour is always due
+b.phase = "trading"                                         # as run() sets it once trading is open
 a.equity = 101_234.0
-b.cycle(); b.maybe_daily_summary(); b.maybe_daily_summary()
-M.notify = real_notify
+b.cycle(); b.maybe_summary(); b.maybe_summary()
 title, message = sent[0] if sent else ("", "")
-check("daily summary sent once a day", len(sent) == 1, sent)
-check("title shows the P&L", title == "mm_bot daily: +1,234 (+1.2%)", title)
-check("message has account, rank, Smart Score, 24h stats and bot health",
+check("summary sent once per slot (not every cycle)", len(sent) == 1, sent)
+check("title shows the P&L", title == "mm_bot: +1,234 (+1.2%)", title)
+check("message has account, rank, Smart Score, stats since the last update and bot health",
       all(x in message for x in ("Account 101,234", "Rank 3 of 50", "Smart Score 61.2 (rank 150 of 900, ELITE)",
-                                 "Last 24h:", "orders resting")), message)
+                                 "Last 1h:", "orders resting")), message)
+sent.clear()
+a2, b2 = make_bot()
+b2.cfg.summary_every_hours = 2
+b2.cycle(); b2.maybe_summary()
+check("every 2 hours: sent on even UTC hours only", len(sent) == (1 if utcnow().hour % 2 == 0 else 0), (utcnow().hour, sent))
+b.last_summary_slot, b.arbs_total, b.takes_total = None, 3, 1
+sent.clear(); b.maybe_summary()
+check("the next summary shows the change since the previous one (account, arbitrages, takes)",
+      sent and "+0 in 1h" in sent[0][1] and "3 arbitrages" in sent[0][1] and "1 takes" in sent[0][1], sent)
+check("status line first: OK, and what the bot is doing", message.split("\n")[0].startswith("Status: OK | trading"), message)
+sent.clear(); calls_prio = []
+M.notify = lambda message, title="", priority="default", **k: sent.append((title, message)) or calls_prio.append(priority) or True
+b.last_summary_slot, b.pulled_after_errors, b.failed_cycles = None, True, 3
+b.maybe_summary()
+check("problems -> 'ISSUES' in the title, listed in the status line, sent at high priority",
+      sent and sent[0][0].startswith("mm_bot ISSUES:") and "quotes PULLED" in sent[0][1] and "last 3 cycle(s) failed" in sent[0][1]
+      and calls_prio == ["high"], (sent, calls_prio))
+b.pulled_after_errors, b.failed_cycles = False, 0
+sent.clear()
+a3, b3 = make_bot()
+b3.cfg.summary_every_hours, b3.cfg.start_check_seconds = 1, 0
+seq = iter(["draft", "active"])
+a3.tournament = lambda: {"id": "T", "initialBalance": 100000, "status": next(seq), "startDate": "2099-01-01T00:00:00Z"}
+b3.sleep_until = lambda t: None
+b3.wait_for_trading()
+check("updates are sent while waiting for the open too (so you know it's alive)",
+      sent and "waiting for the open" in sent[0][1] and "order books ready" in sent[0][1], sent)
+M.notify = real_notify
 empty = FakeApi(); empty.leaderboard = lambda: {"myRank": None, "total": 0}; empty.smart_score = lambda: []
 t2, m2 = build_summary(empty, "/nonexistent/fills.csv", 100_000, value=100_000)
 check("before any trading: 'not ranked yet' / 'not scored yet' instead of an error",
-      "not ranked yet" in m2 and "not scored yet" in m2 and t2 == "mm_bot daily: +0 (+0.0%)", (t2, m2))
+      "not ranked yet" in m2 and "not scored yet" in m2 and t2 == "mm_bot: +0 (+0.0%)", (t2, m2))
 check("every line fits a phone notification", all(len(line) < 160 for line in message.split("\n")), message)
 
 print("--- request budget")
@@ -521,7 +549,7 @@ check("...still nothing 10 s later", not a.inv, a.inv)
 later(b, 21); b.refs.new_reading(b.refs.prices, {}); b.cycle()
 check("gap on every reading for 30 s: buys the stale Rep ask (0.18) and sells to the stale Dem bid (0.82)",
       a.inv.get("11") == 1000 and a.inv.get("12") == -1000, a.inv)
-check("takes counted, and logged as our fills", b.takes_today == 2 and b.cycle() is None)
+check("takes counted, and logged as our fills", b.takes_total == 2 and b.cycle() is None)
 a, b = take_setup()
 b.cycle(); later(b)
 b.refs.new_reading({"Ohio Senate|Republican": 0.14, "Ohio Senate|Democratic": 0.86}, {}); b.cycle()
@@ -780,16 +808,16 @@ print("--- robustness")
 check("timestamps with 7 decimal places parse (Python 3.10 can't read them as they come)",
       parse_ts("2026-09-26T13:56:47.7844565+00:00") == parse_ts("2026-09-26T13:56:47.784456Z"))
 a, b = make_bot()
-b.cfg.daily_summary_hour_utc, b.last_summary_day = utcnow().hour, None
+b.cfg.summary_every_hours, b.last_summary_slot = 1, None
 real_bs, M.build_summary = M.build_summary, lambda *x, **k: 1 / 0
 logging.disable(logging.CRITICAL)
 try:
-    b.maybe_daily_summary(); ok = True
+    b.maybe_summary(); ok = True
 except Exception:
     ok = False
 finally:
     logging.disable(logging.NOTSET); M.build_summary = real_bs
-check("a failing daily summary is skipped, never an error that would pull the quotes", ok)
+check("a failing phone summary is skipped, never an error that would pull the quotes", ok)
 
 print("--- parallel requests")
 a, b = make_bot()

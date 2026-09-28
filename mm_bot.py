@@ -15,13 +15,13 @@ COMMANDS
     python mm_bot.py run --live       trade for real
     python mm_bot.py cancel           cancel every open order in the tournament
     python mm_bot.py report           spread-capture stats from fills.csv
-    python mm_bot.py summary          build the daily phone summary now and send it (test your ALERT_URL)
+    python mm_bot.py summary          build the phone summary now and send it (test your ALERT_URL)
 
 ENVIRONMENT (set by `source .venv/bin/activate` on the Mac, or by a .env file next to this script)
     SUPERMARKET_API_KEY, TOURNAMENT_SLUG
     optional: ONLY_EXCHANGES="id1,id2" to trade a subset
-              ALERT_URL=https://ntfy.sh/<random-topic> for phone alerts (kill switch, crashes) and the
-              daily summary: install the ntfy app and subscribe to that topic
+              ALERT_URL=https://ntfy.sh/<random-topic> for phone alerts (kill switch, crashes) and a
+              summary every 2 hours: install the ntfy app and subscribe to that topic
 
 FILES THE BOT WRITES (next to this script)
     fills.csv            every fill, for `report`
@@ -270,7 +270,8 @@ class Config:
     record_seconds: float = 60.0          # one snapshot of every market this often (~15 MB a day)
 
     # --- CONNECTION / ALERTS (from the environment: see top of file) ------------------------
-    daily_summary_hour_utc: int = 21      # phone summary once a day at this UTC hour (-1 = off). Live only
+    summary_every_hours: int = 2          # phone summary every N hours, on the hour UTC (2 = 00:00, 02:00, 04:00...),
+                                          #   covering what happened since the previous one. 0 = off. Live only
     alert_url: str = os.environ.get("ALERT_URL", "")   # e.g. https://ntfy.sh/some-long-random-name
     api_key: str = os.environ.get("SUPERMARKET_API_KEY", "")
     base_url: str = os.environ.get("SUPERMARKET_BASE_URL", "https://sig.thesuper.market/api/v1")
@@ -392,7 +393,7 @@ def notify(message, title="mm_bot", priority="default", tags=""):
         r = requests.post(CFG.alert_url, data=message.encode(), timeout=5,
                           headers={"Title": title, "Priority": priority, "Tags": tags})
         return r.ok
-    except requests.RequestException:
+    except Exception:                   # network, or anything else: an alert must never crash the bot
         return False
 
 
@@ -1146,10 +1147,12 @@ def fill_stats(rows):
             "edge_c": 100 * edge_tot / max(q_tot, 1), "markout_c": 100 * mk_tot / max(mk_q, 1)}
 
 
-def build_summary(api, fills_path, initial_balance, value=None, value_24h_ago=None, arbs=None, health=None, takes=None):
-    """The daily phone summary as (title, message). Reads account value (unless given), rank and
-    Smart Score from the API, and the last 24 h of fills from fills.csv. Missing pieces show as "?"
-    (e.g. no rank before our first trade) instead of failing."""
+def build_summary(api, fills_path, initial_balance, value=None, value_prev=None, arbs=None, health=None, takes=None,
+                  hours=24, status=None):
+    """The phone summary as (title, message). Reads account value (unless given), rank and Smart Score
+    from the API, and the last `hours` of fills from fills.csv. value_prev = account value at the previous
+    summary. status = the bot's status line, shown first. Missing pieces show as "?" (e.g. no rank before
+    our first trade) instead of failing."""
     def safe(fn, default=None):
         try:
             return fn()
@@ -1161,22 +1164,22 @@ def build_summary(api, fills_path, initial_balance, value=None, value_24h_ago=No
     lb = safe(api.leaderboard, {}) or {}
     scores = safe(api.smart_score, []) or []
     score = next((s for s in scores if s.get("marketType") == "global"), scores[0] if scores else None)
-    since = utcnow() - timedelta(days=1)
+    since = utcnow() - timedelta(hours=hours)
     day = fill_stats([r for r in read_fills(fills_path) if (parse_ts(r.get("filled_at")) or since) >= since])
 
     if value is None:
-        title, account = "mm_bot daily: account ?", "Account: unavailable"
+        title, account = "mm_bot: account ?", "Account: unavailable"
     else:
         total = value - initial_balance
-        title = f"mm_bot daily: {total:+,.0f} ({100 * total / initial_balance:+.1f}%)"
-        day_change = "" if value_24h_ago is None else f", {value - value_24h_ago:+,.0f} in 24h"
+        title = f"mm_bot: {total:+,.0f} ({100 * total / initial_balance:+.1f}%)"
+        day_change = "" if value_prev is None else f", {value - value_prev:+,.0f} in {hours:g}h"
         account = f"Account {value:,.0f} ({total:+,.0f} total{day_change})"
     rank = (f"Rank {lb['myRank']} of {lb.get('total', '?')}" if lb.get("myRank") else "Rank: not ranked yet")
     smart = (f"Smart Score {score.get('smartScoreDecayed', 0):.1f} (rank {score.get('rank', '?')} of "
              f"{score.get('totalTraders', '?')}{', ELITE' if score.get('isElite') else ''})"
              if score else "Smart Score: not scored yet")
-    lines = [account, f"{rank} | {smart}",
-             f"Last 24h: {day['fills']} fills, {day['shares']:,.0f} shares, edge {day['edge_c']:+.2f}c, "
+    lines = ([status] if status else []) + [account, f"{rank} | {smart}",
+             f"Last {hours:g}h: {day['fills']} fills, {day['shares']:,.0f} shares, edge {day['edge_c']:+.2f}c, "
              f"markout {day['markout_c']:+.2f}c" + (f", {arbs} arbitrages" if arbs is not None else "")
              + (f", {takes} takes" if takes is not None else "")]
     if health:
@@ -1277,13 +1280,17 @@ class Bot:
         self.ref_version_seen = 0         # last Polymarket reading the jump guard has looked at
         self.last_tops = {}               # latest bulk best bid/ask per exchange (for recording)
         self.arb_cooldown = {}            # race -> time.monotonic() until which we leave it alone
-        self.arbs_today = 0
-        self.takes_today = 0
+        self.arbs_total = 0               # arbitrages / takes since start (summaries report the change)
+        self.takes_total = 0
         self.take_version_seen = 0        # last Polymarket reading the take logic has counted
         self.db = self.open_recorder()
         self.last_record = -1e9
-        self.last_summary_day = None
+        self.last_summary_slot = None     # (date, hour) of the last phone summary
         self.value_at_last_summary = None
+        self.counts_at_last_summary = {"arbs": 0, "takes": 0, "errors": 0, "rate_limits": 0}
+        self.errors_total = 0             # failed cycles since start (summaries report new ones)
+        self.phase = "starting"           # what the bot is doing, for the status line
+        self.selftest_passed = False
         self.load_markets()
 
     def check_clock(self):
@@ -1490,13 +1497,13 @@ class Bot:
                        "markets_priced": sum(v is not None for v in fvs.values()), "markets_tracked": len(fvs),
                        "orders_resting": sum(len(v) for v in resting.values()),
                        "reference_prices": len(refs), "reference_prices_liquid": len(liquid),
-                       "arbitrages_today": self.arbs_today,
+                       "arbitrages_total": self.arbs_total,
                        "rate_limited_total": getattr(self.api, "rate_limited", 0),     # should stay 0
                        "request_budget_per_min": round(getattr(self.api, "budget", 0)),
                        "requests_last_min": round(getattr(self.api, "budget", 0)) - getattr(self.api, "budget_left", lambda: 0)(),
                        "realtime": "connected" if realtime else ("reconnecting" if self.feed else "off"),
                        "realtime_events": self.feed.events if self.feed else 0,
-                       "takes_today": self.takes_today,
+                       "takes_total": self.takes_total,
                        "positions": {self.ex[e].label: q for e, q in inv.items() if q and e in self.ex}}
 
         # 6b. Take tournament quotes that Polymarket says are clearly stale (confirmed over 2 readings) ---
@@ -1518,6 +1525,8 @@ class Bot:
                 log.error("exchange %s (%s): %s", eid, ex.label, e)
         if self.running:
             self.place(new_orders, now_m)
+        # Orders resting NOW, after this cycle's changes (the health snapshot above was taken before them).
+        self.health["orders_resting"] = len(self.my_orders) if self.api.live else len(self.sim)
 
         # 8. Snapshot for later analysis (every record_seconds) -------------------------------------
         self.record(fvs, now_m)
@@ -2099,7 +2108,7 @@ class Bot:
         legs = ", ".join(f"{self.ex[e].label} @{p:.3f}" for e, (p, _) in bids.items())
         log.warning("%sARBITRAGE %s: bids add up to %.3f (%s) -> selling %d YES on each, locking in >= %.0f",
                     "" if self.api.live else "[dry] ", race, total, legs, qty, (total - 1) * qty)
-        self.arbs_today += 1
+        self.arbs_total += 1
         if not self.api.live:
             return
         # 1. Pull our own quotes in this race, so the arbitrage can't trade against ourselves.
@@ -2222,7 +2231,7 @@ class Bot:
         log.warning("%sTAKE %s: Polymarket %.3f vs stale %s %.3f -> %s %d YES at %.3f",
                     "" if self.api.live else "[dry] ", ex.label, p, "ask" if buy else "bid", price,
                     "buying" if buy else "selling", qty, price)
-        self.takes_today += 1
+        self.takes_total += 1
         if not self.api.live:
             return True
         # Pull our own quotes here first (so we can't trade with ourselves), then take, then cancel leftovers.
@@ -2333,25 +2342,71 @@ class Bot:
         except sqlite3.Error as e:
             log.warning("could not record snapshot: %s", e)
 
-    # ------------------------------------------------------------------------------ daily summary (#12)
-    def maybe_daily_summary(self):
-        """Once a day at daily_summary_hour_utc, push a summary to your phone (live only):
-        P&L in the title; account, rank, Smart Score, last 24 h of fills, and bot health below."""
-        hour, now = self.cfg.daily_summary_hour_utc, utcnow()
-        if hour < 0 or not self.api.live or now.hour != hour or self.last_summary_day == now.date():
+    # ------------------------------------------------------------------------------ phone summary (#12)
+    def maybe_summary(self):
+        """Every summary_every_hours, on the hour UTC (2 = 00:00, 02:00, 04:00...), push a summary to your
+        phone (live only), also while waiting for the open. First line: the bot's status - "OK" or the
+        ISSUES since the previous summary (then the title says ISSUES and it's sent at high priority).
+        Then P&L, rank, Smart Score, fills since the previous summary and bot health. If an update
+        doesn't arrive on time, the bot itself is down. Costs 2-3 requests (P&L, rank, Smart Score)."""
+        every, now = self.cfg.summary_every_hours, utcnow()
+        slot = (now.date(), now.hour)
+        if every <= 0 or not self.api.live or now.hour % every or self.last_summary_slot == slot:
             return
-        self.last_summary_day = now.date()
+        self.last_summary_slot = slot
         value = self.health.get("account_value")
+        marks = self.counts_at_last_summary
+        status, problems = self.status_report()
         try:                                  # a report must never be able to disturb trading
             title, message = build_summary(self.api, bot_path(self.cfg.fills_csv), self.initial_balance, value=value,
-                                           value_24h_ago=self.value_at_last_summary, arbs=self.arbs_today,
-                                           takes=self.takes_today, health=self.health)
+                                           value_prev=self.value_at_last_summary,
+                                           arbs=self.arbs_total - marks["arbs"], takes=self.takes_total - marks["takes"],
+                                           health=self.health, hours=every, status=status)
         except Exception as e:
-            log.warning("daily summary failed (%s) - skipped today", e)
+            log.warning("phone summary failed (%s) - skipped", e)
             return
+        if problems:
+            title = title.replace("mm_bot:", "mm_bot ISSUES:", 1)
         log.info("%s\n%s", title, message)
-        notify(message, title=title, tags="chart_with_upwards_trend")
-        self.value_at_last_summary, self.arbs_today, self.takes_today = value, 0, 0
+        notify(message, title=title, priority="high" if problems else "default",
+               tags="warning" if problems else "chart_with_upwards_trend")
+        self.value_at_last_summary = value
+        self.counts_at_last_summary = {"arbs": self.arbs_total, "takes": self.takes_total,
+                                       "errors": self.errors_total, "rate_limits": getattr(self.api, "rate_limited", 0)}
+
+    def status_report(self):
+        """(status line, problems) for the phone summary: what the bot is doing right now, and anything
+        that has gone wrong since the previous summary. Problems are things you may want to look at."""
+        h, cfg, marks = self.health, self.cfg, self.counts_at_last_summary
+        errors = self.errors_total - marks["errors"]
+        rate_limits = getattr(self.api, "rate_limited", 0) - marks["rate_limits"]
+        problems = []
+        if self.pulled_after_errors:
+            problems.append("all quotes PULLED after repeated errors")
+        if self.failed_cycles:
+            problems.append(f"the last {self.failed_cycles} cycle(s) failed")
+        elif errors:
+            problems.append(f"{errors} failed cycle(s) since the last update, recovered since")
+        if rate_limits:
+            problems.append(f"{rate_limits} rate limit(s) (429) since the last update")
+        if h.get("realtime") == "reconnecting":
+            problems.append("realtime feed down, polling meanwhile")
+        if h.get("reduce_only"):
+            problems.append("reduce-only: worst-case loss above the cap")
+        phase = self.phase
+        if phase == "trading":
+            hrs = min((self.hours_to_close(ex) for ex in self.ex.values()), default=float("inf"))
+            if hrs * 60 <= cfg.stop_minutes_before_close:
+                phase = "stopped for settlement"
+            elif hrs <= cfg.exit_hours_before_close:
+                phase = f"election night: exiting positions ({hrs:.1f} h to close)"
+            elif hrs <= cfg.flatten_hours_before_close:
+                phase = f"election night: reducing positions ({hrs:.1f} h to close)"
+            elif h and not h.get("orders_resting"):
+                problems.append("no orders resting")
+            if self.selftest_passed:
+                phase += ", self-test passed"
+        return ("Status: " + ("OK" if not problems else "ISSUES - " + "; ".join(problems)) + f" | {phase}"), problems
 
     def write_status(self, ok):
         """status.json: a one-glance health check, e.g. `cat status.json` over ssh."""
@@ -2440,6 +2495,7 @@ class Bot:
                           f"ones work - using {ttl / 60:.0f}-min orders from now on")
                     self.cfg.order_ttl, self.cfg.refresh_before_expiry = ttl, ttl / 5
                 log.info("self-test passed: orders, sell->NO conversion, expiry and cancel all behave as expected")
+                self.selftest_passed = True
                 return True
             if rejected and ttl > 600:
                 # The docs allow any future expiry, but if the exchange caps it, fall back rather than stop.
@@ -2511,6 +2567,8 @@ class Bot:
                 except Exception as e:
                     log.warning("pre-open book download failed: %s", e)
                 ready = sum(e.book is not None for e in self.ex.values())
+                self.phase = (f"waiting for the open ({start:%d %b %H:%M} UTC), {ready}/{len(self.ex)} order books ready"
+                              if start else f"waiting for the open, {ready}/{len(self.ex)} order books ready")
                 wait = min(cfg.start_check_seconds, to_start - cfg.open_quiet_seconds)
                 log.info("tournament is '%s' (starts %s) - %d/%d books ready - checking again in %.0f s",
                          t.get("status"), t.get("startDate"), ready, len(self.ex), wait)
@@ -2524,12 +2582,14 @@ class Bot:
                 wait = cfg.start_check_seconds    # well past the start and still not open: back to slow checks
                 log.info("tournament still '%s' %.0f s after its start time - checking every %.0f s",
                          t.get("status"), -to_start, wait)
+            self.maybe_summary()                  # updates while waiting too, so you know it's alive
             self.sleep_until(time.monotonic() + wait)
 
     def on_cycle_error(self, what, pull_now):
         """API errors are usually transient: tolerate a few, then pull every quote until healthy.
         Unexpected (non-API) errors may be a bug in our own logic, so those pull quotes at once."""
         self.failed_cycles += 1
+        self.errors_total += 1
         if (pull_now or self.failed_cycles >= self.cfg.max_failed_cycles) and not self.pulled_after_errors:
             alert(f"{what} - pulling all quotes until cycles succeed again")
             try:
@@ -2559,6 +2619,7 @@ class Bot:
                 if self.running:
                     log.info("clean slate: cancelling any orders left over from before")
                     self.cancel_everything()
+            self.phase = "trading"
             tested = not self.api.live
             while self.running:
                 t0 = time.monotonic()
@@ -2571,7 +2632,7 @@ class Bot:
                         self.self_test()          # stops the bot (exit code 3) if the API surprises us
                     self.failed_cycles, self.pulled_after_errors = 0, False
                     self.write_status(ok=True)
-                    self.maybe_daily_summary()
+                    self.maybe_summary()
                 except ApiError as e:
                     if e.code in FATAL_API_CODES:          # e.g. key revoked: retrying forever won't help
                         fatal(f"API says {e.code}: {e}")
