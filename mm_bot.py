@@ -233,7 +233,12 @@ class Config:
                                           #   orders reads); book downloads already leave budget_reserve for writes
     write_wait_seconds: float = 3.0       # a cycle waits at most this long for its writes; slower ones (day one: 15-30 s)
                                           #   finish in the background and their exchanges are left alone until then
-    pending_seconds: float = 90.0         # placement outcome unknown -> leave that exchange alone this long
+    pending_seconds: float = 90.0         # placement outcome unknown -> leave that exchange alone this long, unless
+                                          #   the orders show up in the open-orders list first (recovered: see
+                                          #   adopt_unconfirmed), which on a slow exchange takes seconds
+    recover_unconfirmed: bool = True      # match orders that landed after their request timed out (day one: 55 of
+                                          #   the first 82 fills) to what we sent, by exchange/side/price/expiry, so
+                                          #   the bot knows them at once and their fills are attributed
     recent_order_grace_seconds: float = 15.0  # the open-orders list can lag the exchange: for this long, trust our
                                               #   own record of an order we just placed (or cancelled) over it,
                                               #   so the bot never places the same quote twice
@@ -1369,6 +1374,7 @@ class Ex:
     cooldown_until: float = 0.0           # jump guard
     pending_until: float = 0.0            # placement outcome unknown: don't place again yet
     pause_until: float = 0.0              # order was rejected: back off
+    unconfirmed_hold: float = -1.0        # the pending_until set for orders whose batch outcome was unknown
     writes: int = 0                       # our writes (cancels / batches) touching it still in flight
     cancelling: bool = False              # ...one of them is a cancel
     inv: float = 0.0                      # for logging / recording
@@ -1447,6 +1453,7 @@ class Bot:
         self.my_orders = {}               # LIVE: orderId -> Resting, our own record of our resting orders (see sync_orders)
         self.recent_orders = {}           # orderId -> (Resting, time placed): placed moments ago, maybe not listed yet
         self.recent_cancels = {}          # orderId -> time cancelled: cancelled moments ago, maybe still listed
+        self.unconfirmed = {}             # eid -> [(order, meta, time sent)]: sent, outcome unknown (see adopt_unconfirmed)
         self.placed_qty = {}              # orderId -> shares we placed, and...
         self.filled_qty = defaultdict(float)   # ...shares filled so far (each fill counted once, from fills)
         self.ref_rejected = set()         # Polymarket keys currently ignored as implausible (alerted once)
@@ -2333,6 +2340,7 @@ class Bot:
         list doesn't show it yet (else we'd place it twice), and one we just cancelled stays gone."""
         grace = self.cfg.recent_order_grace_seconds
         listed = {r.order_id: r for r in map(parse_order, raw_orders) if r}
+        self.adopt_unconfirmed(listed, now_m)
         for oid, t in list(self.recent_cancels.items()):
             if now_m - t > grace:
                 del self.recent_cancels[oid]
@@ -2352,6 +2360,47 @@ class Bot:
         for oid in [k for k in self.placed_qty if k not in listed]:
             self.placed_qty.pop(oid, None)            # no longer resting: stop tracking its size
             self.filled_qty.pop(oid, None)
+
+    def match_unconfirmed(self, eid, is_bid, price, oid, expires=None, lift=True):
+        """An order (or fill) we have no record of: is it one we sent whose response never came back? Matched on
+        exchange, side and price (and expiry when known: every batch has its own). Adopts it: its notes go to
+        order_meta (fills get attributed), and the exchange's 'outcome unknown' hold lifts once every order
+        sent there is accounted for. Returns the order we sent, or None."""
+        cands = self.unconfirmed.get(eid) or []
+        for k, (o, meta, _t) in enumerate(cands):
+            if (o["action"] == "buy") != is_bid or abs(o["price"] - price) > 1e-6:
+                continue
+            if expires is not None and abs((parse_ts(o["expirationDate"]) - expires).total_seconds()) > 1.5:
+                continue
+            del cands[k]
+            self.order_meta[oid] = {**meta, "eid": eid, "recovered": True}
+            self.notes_dirty = True
+            self.placed_qty[oid], self.filled_qty[oid] = float(o["quantity"]), self.filled_qty.get(oid, 0.0)
+            if not cands:
+                self.unconfirmed.pop(eid, None)
+                ex = self.ex.get(eid)
+                # All accounted for: quote here again straight away - but only lift the hold these sends set
+                # (not one from a take, an arbitrage, a 502 or the self-test), and only when the order was seen
+                # in the open-orders list (a fill alone doesn't say whether the rest of it still rests).
+                if (lift and ex and ex.pending_until == ex.unconfirmed_hold and eid != self.selftest_eid
+                        and not any(eid in w.eids for w in self.writes)):
+                    ex.pending_until = 0.0
+            log.info("recovered order %s on %s (its placement response was lost)", oid, eid)
+            return o
+        return None
+
+    def adopt_unconfirmed(self, listed, now_m):
+        """Open-orders list just read: adopt listed orders we have no record of (see match_unconfirmed), and
+        forget sends older than pending_seconds (never landed, or filled at once - fills still match them)."""
+        for eid in list(self.unconfirmed):
+            self.unconfirmed[eid] = [c for c in self.unconfirmed[eid] if now_m - c[2] <= 2 * self.cfg.pending_seconds]
+            if not self.unconfirmed[eid]:
+                del self.unconfirmed[eid]
+        if not self.unconfirmed:
+            return
+        for oid, r in listed.items():
+            if oid not in self.order_meta and r.eid in self.unconfirmed:
+                self.match_unconfirmed(r.eid, r.is_bid, r.price, oid, r.expires)
 
     def orders_by_eid(self, now):
         """Our resting orders (live) grouped by exchange, dropping any that have expired."""
@@ -2445,11 +2494,13 @@ class Bot:
             # exist, so leave these exchanges alone until they show up. Clear rejection: back off.
             ambiguous = e.status in (0, 409, 502, 503, 504)
             self.orders_stale = self.orders_stale or ambiguous   # some may exist: re-read the list
-            for o, _ in chunk:
+            for o, meta in chunk:
                 ex = self.ex.get(o["exchangeId"])
                 if ex:
                     if ambiguous:
-                        ex.pending_until = now_m + cfg.pending_seconds
+                        ex.pending_until = ex.unconfirmed_hold = now_m + cfg.pending_seconds
+                        if cfg.recover_unconfirmed:
+                            self.unconfirmed.setdefault(ex.eid, []).append((o, meta, now_m))
                     else:
                         ex.pause_until = now_m + cfg.fail_pause_seconds
             log.error("batch of %d orders failed (%s)", len(chunk), e)
@@ -2717,12 +2768,27 @@ class Bot:
             if len(fresh) < len(batch) or not page.get("pagination", {}).get("hasMore"):
                 break
             cursor = page["pagination"]["nextCursor"]
+        for f in new:
+            oid = f.get("orderId")
+            if oid is not None and oid not in self.order_meta and str(f.get("exchangeId")) in self.unconfirmed:
+                # A fill's price is in the terms of its side: a NO-side fill (our converted ask) is 1 - the YES price.
+                # quantity > 0 = a YES-side fill (our bid, or a sell of YES we held); < 0 = a NO-side fill (our
+                # ask, converted to buy NO): day one reported those at the NO price (1 - our ask), but accept the
+                # YES price too.
+                qty, p = float(f.get("quantity") or 0), float(f.get("price") or 0)
+                eid = str(f.get("exchangeId"))
+                tries = ((True, p), (False, p)) if qty > 0 else ((False, rnd(1 - p)), (False, p))
+                for is_bid, price in tries:
+                    if self.match_unconfirmed(eid, is_bid, price, oid, lift=False):
+                        break
         if new:
             self.fills.record(new, self.order_meta, fvs)
         for f in reversed(new):                               # oldest first
             oid = f.get("orderId")
             o = self.my_orders.get(oid)
             if o is None:
+                if oid in self.placed_qty:                    # recovered from its fill, not listed yet
+                    self.filled_qty[oid] += abs(float(f.get("quantity") or 0))
                 continue
             if oid not in self.placed_qty:
                 self.orders_stale = True                      # an order we didn't place this run: re-read the list

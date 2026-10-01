@@ -324,7 +324,10 @@ def run_seed(seed, steps):
     # Every exchange with a real two-sided book must be quoted. (Near 0 or 1 the house can't quote past
     # 0.5c / 99.5c, so a one-sided book has no fair value and is correctly left alone.)
     priceable = {e for e, ex in bot.ex.items() if M.fair_value(ex.book, bot.cfg) is not None}
-    unquoted = sorted(bot.ex[e].label for e in priceable - {o["exchangeId"] for o in api.orders.values()})
+    # ...unless the bot DECIDED not to quote it (risk limits blocking both sides, e.g. the national-swing cap on
+    # one side and a Kelly limit on the other): that's a choice, not a stuck exchange.
+    wanted = {e for e in priceable if bot.ex[e].quote.bid is not None or bot.ex[e].quote.ask is not None}
+    unquoted = sorted(bot.ex[e].label for e in wanted - {o["exchangeId"] for o in api.orders.values()})
     M.time, M.utcnow = real_time, real_utcnow
     return {"problems": problems, "record_ok": record == actual, "record": (record, actual), "stuck": stuck,
             "changes": changes, "unquoted": unquoted, "priceable": len(priceable), "cycles": cycles,

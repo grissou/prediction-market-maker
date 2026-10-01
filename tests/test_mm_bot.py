@@ -4,6 +4,7 @@ Offline tests for mm_bot.py. No network: a FakeApi plays the exchange, following
 
 Run:  python tests/test_mm_bot.py      (exit code 0 = all passed; GitHub Actions runs this on every push)
 """
+import csv
 import json
 import logging
 import os
@@ -1232,6 +1233,79 @@ logging.disable(logging.CRITICAL); b.feed.push(dirty=set()); b.cycle(); logging.
 check("if the exchange can't be read at all, a book past book_stale still isn't quoted", not any(a.ours(e) for e in a.books),
       {e: a.ours(e) for e in a.books})
 a.bulk_prices = real_bulk
+
+print("--- orders whose placement response was lost (day one: 55 of the first 82 fills unattributed)")
+a, b = make_bot()
+real_pb = a.place_batch
+def lands_but_times_out(orders):
+    real_pb(orders)                                       # the exchange places them...
+    raise ApiError(409, "REQUEST_IN_FLIGHT", "still in flight")   # ...but we never hear back
+a.place_batch = lands_but_times_out
+logging.disable(logging.CRITICAL); b.cycle(); logging.disable(logging.NOTSET)
+check("(setup) every exchange on hold, the bot doesn't know its orders", all(b.ex[e].pending_until > time.monotonic() for e in a.books)
+      and not b.my_orders and len(a.orders) == 8)
+a.place_batch = real_pb
+n = len(a.sent("batch")); b.cycle()
+oids = list(a.orders)
+check("next cycle: the landed orders are recognised from the open-orders list, with their notes",
+      all(o in b.my_orders and b.order_meta.get(o, {}).get("recovered") for o in oids), (oids, list(b.order_meta)))
+check("...the hold lifts at once (not after pending_seconds) and nothing is placed twice",
+      all(b.ex[e].pending_until == 0 for e in a.books) and len(a.orders) == 8 and not b.unconfirmed, (len(a.orders), b.unconfirmed))
+a.fill("11", True, 40)
+b.cycle()
+rows = list(csv.DictReader(open(b.cfg.fills_csv)))
+check("...and a fill on one is attributed to our bid with its quote price and fair value",
+      rows and rows[-1]["our_side"] == "bid" and rows[-1]["fv_at_quote"] != "", rows[-1:])
+
+a, b = make_bot()
+a.books["11"]["asks"] = [lvl(0.12, 50), lvl(0.18, 1000)]   # our 0.105 bid would not trade; make the ask cross:
+def fill_at_once(orders):
+    res = real_pb2(orders)
+    for o in list(a.orders.values()):                     # someone takes every order the moment it lands
+        is_bid, _ = a.yes_view(o)
+        a.fill(o["exchangeId"], is_bid, o["quantity"])
+    raise ApiError(0, "NETWORK", "read timed out")
+real_pb2 = a.place_batch
+a.place_batch = fill_at_once
+logging.disable(logging.CRITICAL); b.cycle(); logging.disable(logging.NOTSET)
+a.place_batch = real_pb2
+b.cycle()
+rows = list(csv.DictReader(open(b.cfg.fills_csv)))
+check("orders that filled before they were ever listed: their fills are still attributed (matched on side + price)",
+      rows and all(r["our_side"] in ("bid", "ask") for r in rows), [r["our_side"] for r in rows])
+b.cfg.recover_unconfirmed = False
+
+# Review fixes: a fill alone never lifts the hold; other holds (takes, self-test) are never lifted by a recovery.
+a, b = make_bot()
+real_pb3 = a.place_batch
+a.place_batch = lambda orders: (real_pb3(orders), (_ for _ in ()).throw(ApiError(0, "NETWORK", "timeout")))[1]
+logging.disable(logging.CRITICAL); b.cycle(); logging.disable(logging.NOTSET)
+a.place_batch = real_pb3
+oid11 = next(o["id"] for o in a.orders.values() if o["exchangeId"] == "11" and a.yes_view(o)[0])
+a.fill("11", True, 30)                                   # partly filled; the rest still rests
+hide = {o for o in a.orders if a.orders[o]["exchangeId"] == "11"}
+real_oo = a.open_orders
+a.open_orders = lambda tid, eid=None: [o for o in real_oo(tid, eid) if o["id"] not in hide]   # list lags
+b.log_fills({})
+check("a fill matched to a lost order attributes it but does NOT lift the hold (the rest may still rest)",
+      b.order_meta.get(oid11, {}).get("recovered") and b.ex["11"].pending_until > time.monotonic()
+      and b.filled_qty.get(oid11) == 30, (b.order_meta.get(oid11), b.ex["11"].pending_until - time.monotonic()))
+a.open_orders = real_oo
+b.ex["12"].pending_until = time.monotonic() + 500        # e.g. a take's unclear outcome, set later
+b.cycle()
+check("a recovery doesn't lift a hold something else set", b.ex["12"].pending_until > time.monotonic() + 400)
+check("...and the recovered part-filled order's shares left = placed - filled", b.my_orders.get(oid11) and
+      b.my_orders[oid11].qty == b.placed_qty[oid11] - 30, b.my_orders.get(oid11))
+
+a, b = make_bot()
+b.cfg.recover_unconfirmed = False
+a.place_batch = lambda orders: (real_pb_c(orders), (_ for _ in ()).throw(ApiError(409, "REQUEST_IN_FLIGHT", "x")))[1]
+real_pb_c = FakeApi.place_batch.__get__(a)
+logging.disable(logging.CRITICAL); b.cycle(); logging.disable(logging.NOTSET)
+a.place_batch = real_pb_c
+b.cycle()
+check("recover_unconfirmed = False: the old behaviour (hold for pending_seconds, no notes)",
+      all(b.ex[e].pending_until > time.monotonic() for e in a.books) and not b.unconfirmed)
 
 print("--- parallel requests")
 a, b = make_bot()

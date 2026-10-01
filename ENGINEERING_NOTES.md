@@ -9,9 +9,9 @@ Numbers are simulated seconds from `tests/scenario.py` (see "Scenarios"). Update
 |---|---|---|
 | 0 | Scenarios: slow writes + crowded book (`tests/scenario.py`) | done |
 | 1 | Self-test: busy (409/timeout/429/5xx) = retry later, on its own thread | done |
-| 2 | Parallel, time-boxed, prioritised order sending | todo |
-| 3 | Book freshness (bulk re-verify, book_stale 900, max_books 30) | todo |
-| 4 | Recover unconfirmed orders + metadata (fill attribution) | todo |
+| 2 | Parallel, time-boxed, prioritised order sending | done |
+| 3 | Book freshness (bulk re-verify, book_stale 900, max_books 30) | done |
+| 4 | Recover unconfirmed orders + metadata (fill attribution) | done |
 | 5 | Realtime reconnect backoff resets after a healthy session | todo |
 | 6 | Faster Polymarket | todo |
 | 7 | Burst protection | todo |
@@ -53,6 +53,40 @@ orders = retry once (list lag), fatal the 2nd time; earlier pending hold kept; o
 in the test is fatal on the 3rd in a row. Slow scenario, 3 seeds: self-test exits 0/3 (main: 1-2/3).
 Known leftover: a test write that lands after shutdown's cancel-all leaves two 1-share orders at 0.005/0.995 until
 they expire (30 min, cost <= 1c); interpreter exit may wait for the test thread's retries (systemd kills after 90 s).
+
+## Item 2 - parallel order writes (done)
+
+`send_changes`: plan every change, then up to `parallel_writes` (4) writes at once; cancels first (pulls first), empty
+sides at once, a reprice's new orders only after its cancel is confirmed; order = pulls, House/Senate (own batch),
+empty sides, reprices, biggest first; cut to the request budget minus `write_read_reserve` (pulls always go); the
+cycle waits `write_wait_seconds` (3 s), slower writes finish in the background (`Ex.writes` blocks the exchange).
+`parallel_writes = 1` = old serial path. Scenario (seeds 1-3; the harness now runs at 10x - main re-measured):
+
+| | main slow | item 2 slow | main crowded | item 2 crowded | items 2+3 crowded |
+|---|---|---|---|---|---|
+| 80% quoted (s) | 339-361 | 123-132 | 42-53 | 30-32 | 42-47 |
+| quoted at 2 min | 17-21% | 68-78% | 93-97% | 97-98% | 97-100% |
+| quoted at 10 min | 44-75% | 31-39% | 36-59% | 0-6% | 86-95% |
+| longest cycle (s) | 314-338 | 28-39 | 256-508 | 39-74 | 38-58 |
+| duplicate quotes (max) | 0-1 | 0 (self-test orders excluded) | 1-2 | 0 | 0 |
+
+Leftovers: in `slow`, coverage still decays after ~5 min (each timed-out batch holds 20 exchanges for 90 s:
+item 4), and headline quotes can stay wrong for minutes (items 7-8). A re-added exchange (load_markets drops and
+re-adds) starts with `writes = 0` while an old write may still run (rare; noted).
+
+## Item 3 - book freshness (done)
+
+`reverify_books`: books unconfirmed for `book_reverify_seconds` (120) get a bulk best-price check on event cycles too;
+`book_stale` 300 -> 900, `max_books_per_cycle` 10 -> 30. Crowded coverage at 10 min 0-6% -> 86-95% (above).
+
+## Item 4 - lost placement responses (done)
+
+`apply_batch` keeps every order of an ambiguous batch in `self.unconfirmed`; the next list read adopts unknown listed
+orders matching exchange/side/price/expiry (`adopt_unconfirmed`), fills of never-listed ones are matched by side and
+price (NO-side fills at 1 - price, as day one reported them). Reviewer fixes: a fill match never lifts the hold;
+only the hold these sends set is lifted (not a take's, arbitrage's, 502's or the self-test's); recovered orders'
+fills counted. Slow scenario: unattributed fills 276-341 -> 0. Stress-test settle check now accepts exchanges the
+bot decided not to quote (both sides blocked by risk limits), which a new trajectory hit (party delta over cap).
 
 ## Code review findings (main a49587c)
 
