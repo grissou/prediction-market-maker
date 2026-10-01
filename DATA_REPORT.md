@@ -157,3 +157,45 @@ Volume per half hour fell five-fold as spreads closed.
 - They stay two-sided through the session; the share of tight books keeps rising, so they do not step back by 20h.
 - They often sit through our fair value, so their fair values differ.
 - Sizes and repricing latency are **not recorded** (snapshots have no sizes). This is the main data gap for Run C; recommended: record top-3 levels with sizes from realtime book pushes.
+
+## 4. Coverage: which markets went unpriced, and why
+
+Script: `coverage.py`. Average count of markets per snapshot in each half hour (237 markets):
+
+| Half hour | Quoted 2-sided | Quoted 1-sided | Unpriced: 2-sided top book | Unpriced: one-sided/empty | Unpriced: spread >30c |
+|---|---|---|---|---|---|
+| 16:00 | 33 | 8 | 189 | 3 | 3 |
+| 17:00 | 37 | 22 | 177 | 0 | 0 |
+| 18:00 | 42 | 19 | 175 | 0 | 0 |
+| 19:00 | 37 | 28 | 172 | 0 | 0 |
+| 19:30 | 47 | 30 | 161 | 0 | 0 |
+| 20:00 | 53 | 28 | 157 | 0 | 0 |
+
+- **About 160-190 markets were unpriced while their books were two-sided and tight.** The median top-of-book spread of unpriced markets after 19:30 was **1.0c** (p25 0.5c, p75 1.5c).
+- 97% of them had a Polymarket reference.
+- So unpriced markets were **not** one-sided books or missing references.
+- `fair_value()` returns None unless the *tournament* book has ≥200 shares at both best prices (`fv_min_depth`) and was verified in the last 300 s (`book_stale`). **Polymarket alone can never price a market.**
+- The remaining causes are thin top levels (<200 sh) or stale verification under the read budget. The snapshots cannot separate them.
+- Recommendation for Run A: log the reason per market.
+- Telling example: **Rep and Dem U.S. Senate had no fair value in any snapshot after 19:30**, although the book was 0.36/0.375 and we held **+7,585 Rep U.S. Senate**. Dem U.S. House was priced 50% of the time and Rep U.S. House 36%.
+- **72 of the positions held at 20:18 were in unpriced markets** and could not be quoted or reduced. Examples: Dem NH Senate +1,862, Dem AK Gov +200, Dem NH-01 +200.
+
+**Error timeline (journal):**
+
+| Half hour | 409 REQUEST_IN_FLIGHT | 429 | Realtime missed messages (full resync) | Other |
+|---|---|---|---|---|
+| 16:00 | 19 | 2 (16:07:33, 16:10:35 → budget 46/min) | 12 | |
+| 16:30 | 18 | 1 (16:43:43 → 42/min) | 18 | 4 cancel confirms failed, 1 failed cycle (valuation CONFLICT) |
+| 17:00 | 16 | 0 | 9 | |
+| 17:30 | 20 | 0 | 36 | |
+| 18:00 | 14 | 0 | 28 | websocket down ×1 |
+| 18:30 | 16 | 0 | 12 | |
+| 19:00 | 23 | 1 (19:02:54 → 59/min) | 21 | websocket down ×1 |
+| 19:30 | 18 | 0 | 20 | |
+| 20:00 | 12 | 0 | 11 | websocket down ×1 |
+
+- **409s did not fade after the open.** There were 12-23 every half hour all afternoon (156 total), with 20-order batches.
+- A third-party copy of the platform docs says the limit is **"100 reads and 30 writes per minute per key"** (see §7). A 20-order batch may count as 20 writes, which would explain persistent slow and duplicate writes. This needs confirming.
+- The bot's budget of about 76 requests/min is not split into reads and writes.
+- Cycle durations are not logged apart from the first one (4.5 min, from the brief). The bot changed a market's quote every 282 s at the median.
+- 32 orders "traded immediately", meaning they crossed on arrival because the book had moved during the slow write.
