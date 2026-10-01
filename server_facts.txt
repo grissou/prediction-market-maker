@@ -1,0 +1,27 @@
+== .env keys (values redacted)
+SUPERMARKET_API_KEY=<redacted>
+TOURNAMENT_SLUG=<redacted>
+ALERT_URL=<redacted>
+== host
+5.15.0-191-generic
+Ubuntu 22.04.5 LTS
+Python 3.10.12
+                Time zone: UTC (UTC, +0000)
+System clock synchronized: yes
+/dev/vda1        25G  4.5G   20G  19% /
+               total        used        free      shared  buff/cache   available
+Mem:             957         210         131           3         615         575
+1
+== venv packages
+annotated-types==0.8.0
+certifi==2026.7.22
+charset-normalizer==3.5.1
+idna==3.20
+pydantic==2.13.5
+pydantic_core==2.46.5
+realtime==2.31.0
+requests==2.34.2
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+urllib3==2.8.0
+websockets==15.0.1
