@@ -3,6 +3,20 @@
 Data: branch `ops-snapshot-2026-10-01` (never merged). The scripts are in `analysis/`. Run them with `SNAP=<extracted snapshot dir>`. Each script's docstring says what it computes. Order: `attribute.py`, then `pnl.py`, `pnl_curve.py`, `worstcase.py`, and the rest.
 Caveat: `market_data.sqlite` has only 90 live snapshots, about one every 2-3 minutes. Microstructure numbers that need finer timing use the journal's per-market quote lines (3,184 lines, logged only when the quote changes) and fills.csv (exact ms timestamps).
 
+## Top findings (read this first)
+1. **The +26.5% is not real.** True P&L is about **+475 (+0.47%)**: `account_value` double-counts cash locked in orders. The kill switch, worst-case cap, sizes and summaries all use the inflated figure (§1).
+2. **Inventory skew pays the edge away.** 42% of shares traded at or through our own fair value. Fills at ≤ −1c edge lost −804. The skew is set per share, so headline fills of 4-8k shares move it 12-24c (§3).
+3. **Profit comes from sweeps, not the touch.** Fills with >3c edge were 8% of volume and +1,513 of the +1,613 earned at the 60-min mid (§3, §5).
+4. **Every quoted market is contested.** Other quoters sit a median 0.5-1.0c from our fair value, inside our 1c floor. We were behind the best price about 70% of the time. 71% of books were ≤1c wide by 20h (§3).
+5. **Rep U.S. Senate was a third of all volume (122k sh) at +0.02c edge,** pure churn (§3).
+6. **157-189 of 237 markets were unpriced although their books were tight.** Fair value requires ≥200 shares at the tournament top of book. 72 held positions were stuck unquotable, including Rep U.S. Senate +7,585 (§4).
+7. **42% of filled shares came from orders the bot did not know about** (409 batches). The orders landed unmanaged (§6).
+8. **409s ran at about 35 per hour all afternoon.** The platform reportedly allows only **30 writes/min** besides 100 reads (§4, §7).
+9. **The worst-case loss is a sum of per-race maxima.** It grows about 1.5k/h with breadth and hits 30% of real equity around 01:00 UTC on 2 Oct, although the settlement sd is about 4.4k and a 10c national swing costs ±249 (§2).
+10. **Tournament prices revert to Polymarket.** In 213 of 218 closed divergence episodes the tournament moved, with a transient half-life of about 5 min, plus a persistent per-market bias (sd 1.2c, favourite-longshot shaped) (§5).
+
+Ideas: see `IDEAS.md`. Section 9 of this report is that file.
+
 ## 1. Where the "+26.5%" came from: it is almost all double-counted cash
 
 **Headline: the real gain is about +475 SUSQies (+0.47%), not +26,529.**
