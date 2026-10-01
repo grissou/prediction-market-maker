@@ -13,7 +13,7 @@ Numbers are simulated seconds from `tests/scenario.py` (see "Scenarios"). Update
 | 3 | Book freshness (bulk re-verify, book_stale 900, max_books 30) | done |
 | 4 | Recover unconfirmed orders + metadata (fill attribution) | done |
 | 5 | Realtime reconnect backoff resets after a healthy session | done |
-| 6 | Faster Polymarket | todo |
+| 6 | Faster Polymarket | done (no WebSocket, refresh stays 5 s) |
 | 7 | Burst protection | todo |
 | 8 | Churn control for a crowded book | todo |
 
@@ -87,6 +87,17 @@ price (NO-side fills at 1 - price, as day one reported them). Reviewer fixes: a 
 only the hold these sends set is lifted (not a take's, arbitrage's, 502's or the self-test's); recovered orders'
 fills counted. Slow scenario: unattributed fills 276-341 -> 0. Stress-test settle check now accepts exchanges the
 bot decided not to quote (both sides blocked by risk limits), which a new trajectory hit (party delta over cap).
+
+## Item 6 - Polymarket (done)
+
+One shared `requests.Session` (connections kept open), the 5 batches sent side by side (`REF.parallel_fetches`), one
+failed batch no longer discards the others, `polymarket_fetch_seconds` in status.json. Expected: a refresh takes one
+round trip (~0.1-0.3 s from SF) instead of five new TLS connections (day one ~1-2 s), so prices are ~1-1.5 s fresher
+on average. `ref_refresh_seconds` stays 5 s: docs.polymarket.com is blocked from this sandbox, so I could not confirm
+the Gamma rate limit (I recall ~300 requests / 10 s for /markets; 2 s refresh = 25 / 10 s would fit). **Owner: confirm,
+then try 2 s.** WebSocket (CLOB market channel, sub-second): not built - needs clobTokenIds per mapped market (a
+ref_map change) and a second socket to keep alive; worth it only if markouts show we're picked off within 5 s of
+Polymarket moves (Run B/C data). Estimate: ~150 lines + tests.
 
 ## Code review findings (main a49587c)
 

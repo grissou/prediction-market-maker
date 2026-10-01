@@ -175,9 +175,11 @@ class Config:
     # Polymarket is treated as the better estimate of the true price: the tournament book is seeded
     # from it and lags it.
     ref_map_file: str = "ref_map.json"    # "" = off
-    ref_refresh_seconds: float = 5.0      # download Polymarket prices this often. Its public API is live (checked
-                                          #   against its order book) and separate from SIG's request budget, so
-                                          #   the only delay is this interval: faster bots pick off stale quotes
+    ref_refresh_seconds: float = 5.0      # download Polymarket prices this often (one round trip: 5 requests side by
+                                          #   side on kept-open connections = 1 request/s). Going below 5 s: first
+                                          #   confirm Polymarket's published Gamma /markets rate limit allows it.
+                                          #   Its public API is live and separate from SIG's request budget, so the
+                                          #   only delay is this interval: faster bots pick off stale quotes
     ref_weight: float = 0.7               # fair value = 70% Polymarket + 30% tournament book (0 = guard only)
     ref_guard_gap: float = 0.05           # Polymarket and the TOURNAMENT BOOK disagree by more than this -> don't
                                           #   quote the side Polymarket says is mispriced. Keep >= 0.05: Polymarket
@@ -1712,6 +1714,7 @@ class Bot:
                        "markets_priced": sum(v is not None for v in fvs.values()), "markets_tracked": len(fvs),
                        "orders_resting": sum(len(v) for v in resting.values()),
                        "reference_prices": len(refs), "reference_prices_liquid": len(liquid),
+                       "polymarket_fetch_seconds": getattr(self.refs, "fetch_seconds", None),
                        "arbitrages_total": self.arbs_total,
                        "rate_limited_total": getattr(self.api, "rate_limited", 0),     # should stay 0
                        "request_budget_per_min": round(getattr(self.api, "budget", 0)),
