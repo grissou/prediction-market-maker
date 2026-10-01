@@ -238,3 +238,18 @@ Script: `divergence.py`. Tournament mid vs Polymarket reference, using two-sided
   - Rank is marked on tournament prices, so mark-to-market noise from a gap is ≤2-3c and short-lived.
   - The real holding risk is Polymarket itself moving (news), which did not happen on day one.
   - Run C's simulator should model the tournament mid as Polymarket + mean-reverting noise (half-life ≈2-3 min, sd ≈1.2c) plus rare sweep spikes (see §8).
+
+## 6. Fill attribution
+
+- **381 of 828 fills (46%), 156,049 of 372,977 shares (42%), from 260 orders, were not matched to a bot quote** (`our_side ?`). It was not only the open: 111 / 115 / 65 / 71 / 19 such fills in the 16h-20h hours.
+- 253 of the 260 order ids are interleaved with noted ids, so these are the bot's own live orders whose confirmation never came back. The most likely reason is 20-order batches that hit **409 REQUEST_IN_FLIGHT** (156 batch failures ≈ up to 3,100 orders). The orders landed but the bot does not know about them.
+- Consequences:
+  - fill stats exclude 42% of volume;
+  - "unknown" orders rest until the 30-min expiry, unmanaged, while their market moves. That is a stale-quote risk;
+  - the inventory the bot thinks it has is right only because positions are read from the API.
+- **Recovered by price matching** (`attribute.py`): 372 of 381 fills match a logged quote of the same market within 35 min (price = our bid, or ask / 1 − ask).
+  - The recovered fills had **+585 total edge (+0.39c/share), +350 at the 15-min mid and +376 at the 60-min mid.** They carried positive edge, but less than matched fills (+0.71c), as expected for older and staler orders.
+  - By size: headline 57.6k sh, busy races 58.6k, small 35.7k.
+- **9 fills (4,947 sh) cannot be attributed.** They are mostly Rep Maine Senate 2,000 sh @0.415 (16:55) and Rep U.S. Senate 1,547 sh @0.39 (16:24). They explain most of the 12 position mismatches against status.json.
+- Fix (Run A): on a 409 or timeout, re-read open orders and adopt unknown orders into `order_notes` with the quote they came from. Also log `eid` and price on every fill so attribution never needs inference. fills.csv also loses the NO/YES side: the API's signed quantity is stored as an absolute value.
+- Note: for NO-side fills, `fill_price` is the NO price. Verified: 158 of 202 matched ask fills have fill_price = 1 − quote_price; 34 equal the quote, which are sells of YES already held.
