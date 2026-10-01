@@ -1337,6 +1337,45 @@ b.cycle()
 check("recover_unconfirmed = False: the old behaviour (hold for pending_seconds, no notes)",
       all(b.ex[e].pending_until > time.monotonic() for e in a.books) and not b.unconfirmed)
 
+print("--- burst protection (slow exchange: fewer, smaller, wider quotes)")
+a, b = make_bot(); b.cycle()
+check("normal speed: no burst mode", not b.burst and b.health.get("burst_mode") is False)
+now_m = time.monotonic()
+b.write_log.extend([(now_m, 18.0, True), (now_m, 16.0, True), (now_m, 20.0, False)])
+b.cfg.burst_markets, b.size_plan = 2, {"11": 300, "12": 300, "21": 100, "22": 100}
+b.update_burst(now_m)
+check("2 write timeouts in a minute -> burst mode, top markets = the 2 biggest", b.burst and b.burst_set == {"11", "12"}, b.burst_set)
+before = {e: a.ours(e) for e in a.books}
+for e in a.books:                                          # every book moves 1.5c: all quotes want repricing
+    a.books[e] = {"bids": [lvl(round(l["price"] + 0.015, 3), 1000) for l in a.books[e]["bids"]],
+                  "asks": [lvl(round(l["price"] + 0.015, 3), 1000) for l in a.books[e]["asks"]]}
+b.feed = FakeFeed(); b.feed.push(dirty=set(a.books)); b.last_cycle_seconds = 0
+real_ub = b.update_burst
+b.update_burst = lambda now_m: None                       # hold burst mode on for this cycle
+a.calls.clear(); b.cycle()
+new21 = [x for x in a.ours("21") if x not in before["21"]]
+check("...e.g. Utah: no new orders there", not new21, (before["21"], a.ours("21")))
+moved = [x for x in a.ours("11") if x not in before["11"]]
+check("burst: top markets repriced at half size", moved and all(n == 50 for _, _, n in moved), (before["11"], a.ours("11")))
+b.update_burst = real_ub
+b.write_log.clear(); b.burst_calm_since = time.monotonic() - 121
+b.update_burst(time.monotonic())
+check("after burst_calm_seconds of normal speed: burst mode off", not b.burst)
+a, b = make_bot(); b.cfg.burst_protection = False
+b.write_log.extend([(time.monotonic(), 30.0, True)] * 5); b.update_burst(time.monotonic())
+check("burst_protection = False: never enters burst mode", not b.burst)
+
+a, b = make_bot()
+a.cancel_all = lambda tid, eid=None: (_ for _ in ()).throw(ApiError(0, "NETWORK", "read timed out"))
+b.cfg.selftest_enabled = False
+try:
+    logging.disable(logging.CRITICAL); run_cycles(b, 2); crashed = False
+except ApiError:
+    crashed = True
+finally:
+    logging.disable(logging.NOTSET)
+check("startup: a clean-slate cancel that times out doesn't crash the bot; it goes on quoting", not crashed and a.orders)
+
 print("--- parallel requests")
 a, b = make_bot()
 res = b.in_parallel(lambda x: 1 / x, [1, 0, 2])
