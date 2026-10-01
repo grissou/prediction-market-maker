@@ -124,6 +124,23 @@ Edge over time (30-min buckets):
 
 Volume per half hour fell five-fold as spreads closed.
 
+**Inventory skew pays away the edge in big markets (an important finding).** Fills bucketed by edge at quote:
+
+| Edge bucket (c) | Fills | Shares | P&L at mid +15m | P&L at mid +60m |
+|---|---|---|---|---|
+| ≤ −1 (through our own fair value) | 127 | 70,079 | **−913** | **−804** |
+| −1 to 0 | 141 | 86,939 | −398 | −211 |
+| 0 to 1 | 214 | 96,059 | +312 | +546 |
+| 1 to 2 | 205 | 58,179 | +323 | +161 |
+| 2 to 3 | 86 | 27,735 | +415 | +408 |
+| > 3 (sweeps through our resting quotes) | 46 | 29,939 | **+1,425** | **+1,513** |
+
+- **42% of shares were traded at or through our own fair value.** 89 of the 127 worst fills are matched to logged quotes, so they are not attribution errors.
+- Cause: `skew_per_share = 0.00003` (0.3c per 100 shares) is the same for every market. After a single 4,000-8,000-share headline fill, the reservation price moves 12-24c, so the next quote crosses fair value by up to the 4c cap to dump inventory.
+- Rep U.S. Senate contributed 30k of the 70k worst shares. Examples: bid 0.40 vs fair value 0.3795 for 4,438 + 8,333 sh at 16:24-16:25; ask 0.91 vs fair value 0.922 for 8,000 Dem House sh.
+- **Fix for Run C:** scale the skew to the market's quote size (for example per 1% of the position limit), not per share.
+- **All the profit comes from fills with >2c edge,** which are mostly other traders sweeping through our resting quotes. That supports quoting depth behind the touch (IDEAS.md).
+
 **Competition at the top of book.** These are 2-3 min snapshots; best bid and ask include our own orders. Where we were quoting (8,668 quote-snapshots):
 
 | Our quote vs the best price | Bid | Ask |
@@ -199,3 +216,25 @@ Script: `coverage.py`. Average count of markets per snapshot in each half hour (
 - The bot's budget of about 76 requests/min is not split into reads and writes.
 - Cycle durations are not logged apart from the first one (4.5 min, from the brief). The bot changed a market's quote every 282 s at the median.
 - 32 orders "traded immediately", meaning they crossed on arrival because the book had moved during the slow write.
+
+## 5. Divergence between tournament prices and Polymarket
+
+Script: `divergence.py`. Tournament mid vs Polymarket reference, using two-sided books with spread ≤5c (20,220 observations from 16:05 to 20:18).
+
+- **|gap| distribution:** median 0.8c, p90 2.2c, p99 3.6c. ≥3c: 3.1% of observations. ≥5c: 0.1%. ≥10c: none.
+- **≥3c episodes:** 228 in 69 markets (≈54/h).
+  - 96% closed within the data. Median duration ≤2.7 min (one snapshot interval), p75 7.8 min.
+  - **213 of 218 closed because the tournament price moved back** and only 5 because Polymarket moved. Tournament prices converge to Polymarket, not the other way round.
+- **≥5c episodes:** 10 in 8 markets (Rep TX Senate 8c, Dem U.S. House 6c, Dem TX Gov 6c, Rep RI Senate 5.6c …). All closed within ≤10 min.
+- **The big day-one dislocations were sweeps between snapshots.** These include Maine Senate summing to 1.43, Dem House at 0.816 and WI Gov at 0.50. At every snapshot from 16:05 to 16:28 the books were back near Polymarket: Dem House 0.905/0.925 vs reference 0.925, Rep Maine 0.41/0.425 vs 0.405. So the big gaps are *traded prints* from market orders walking thin books, refilled within 1-3 minutes. The P&L of >3c-edge fills above is the money from these.
+- **Persistent bias: favourite-longshot.** Mean (tournament − Polymarket):
+  - +1.1c for contracts under 10c and +0.9c for 10-30c;
+  - +0.25c for 30-70c;
+  - −0.6c for 70-90c and −0.6c above 90c.
+  - By party: Rep +0.33c, Dem +0.14c, so no meaningful partisan bias.
+- **Race party sums.** Bid sums above 1.00 occurred in 2.9% of race-snapshots and never above 1.03 at snapshot times. Ask sums below 0.97 occurred in 0.3%. The bot's 3c arbitrage trigger would therefore rarely fire on resting books; dislocations exist only during sweeps.
+- **What it implies for holding positions:**
+  - Holding against a dislocation is right: it reverts in minutes, and toward Polymarket.
+  - Rank is marked on tournament prices, so mark-to-market noise from a gap is ≤2-3c and short-lived.
+  - The real holding risk is Polymarket itself moving (news), which did not happen on day one.
+  - Run C's simulator should model the tournament mid as Polymarket + mean-reverting noise (half-life ≈2-3 min, sd ≈1.2c) plus rare sweep spikes (see §8).
