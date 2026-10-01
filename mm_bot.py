@@ -102,9 +102,12 @@ class Config:
     # --- RISK LIMITS -------------------------------------------------------------------------
     max_drawdown_pct: float = 0.30        # kill switch: stop if account value falls this far below the initial balance (0.30 = 30%)
     kill_confirmations: int = 2           # ...on this many readings in a row (so one glitchy number can't trigger it)
-    reserved_cash_mode: str = "auto"      # does the API's account value leave out cash locked in our open orders?
+    reserved_cash_mode: str = "ignore"    # does the API's account value leave out cash locked in our open orders?
                                           #   "auto" = work it out from the first orders we post, "add" = yes, add
-                                          #   it back, "ignore" = no, use the API's number as is
+                                          #   it back, "ignore" = no, use the API's number as is. Day one settled it:
+                                          #   "ignore" (API value - locked stayed 99.2-101.3k while locked moved
+                                          #   0-48k, corr 0.9993; "auto" never decided and added it back, inflating
+                                          #   the kill switch, the worst-case cap and the summaries by up to 48k)
     reserved_calib_min: float = 1000.0    # "auto" only judges when locked cash changed by at least this much...
     reserved_calib_votes: int = 2         # ...and needs this many agreeing observations before deciding
     max_worst_case_frac: float = 0.30     # worst-case settlement loss > 30% of account value -> reduce-only everywhere

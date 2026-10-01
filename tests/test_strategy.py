@@ -25,6 +25,17 @@ def check(name, cond, extra=""):
 
 
 # =============================================================================================
+# R1 EQUITY BASE
+
+check("R1: reserved_cash_mode defaults to 'ignore' (the API value already includes locked cash)",
+      Config().reserved_cash_mode == "ignore")
+a, b = make_bot()
+a.pnl = lambda: {"totalAccountValue": 100000}
+b.cycle(); b.cycle()
+check("R1: account value = the API's number, locked cash not added on top",
+      b.last_equity == 100000 and b.health["locked_in_orders"] > 0, (b.last_equity, b.health.get("locked_in_orders")))
+
+# =============================================================================================
 # SIMULATOR SANITY
 
 agg, rows = S.run_many(1, 0.5, "quiet")
