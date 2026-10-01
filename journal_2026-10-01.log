@@ -5377,3 +5377,646 @@
 2026-10-01T17:00:24+0000 mm-bot python[28561]: 2026-10-01 17:00:24 INFO    FILL ex 1040  our ask x100 @ 0.75  (fv when quoted 0.737167072685945)
 2026-10-01T17:00:24+0000 mm-bot python[28561]: 2026-10-01 17:00:24 INFO    realtime | account 110932 (locked in orders 9808, detecting) | worst-case loss 6888 | party delta +2450 | priced 60/237 | resting 59
 2026-10-01T17:00:25+0000 mm-bot python[28561]: 2026-10-01 17:00:25 INFO    Rep Alaska Governor        fv 0.247 inv  -300 race  -400 | bid 0.215 x100  ask 0.280 x100
+2026-10-01T17:00:38+0000 mm-bot python[28561]: 2026-10-01 17:00:38 INFO    Dem WI-03 House race       fv 0.736 (ref 0.725) inv    +0 race  +200 | bid 0.720 x100  ask 0.745 x100
+2026-10-01T17:00:38+0000 mm-bot python[28561]: 2026-10-01 17:00:38 INFO    Dem FL-22 House race       fv 0.513 (ref 0.505) inv    +0 race  +100 | bid 0.500 x100  ask 0.525 x100
+2026-10-01T17:00:38+0000 mm-bot python[28561]: 2026-10-01 17:00:38 INFO    Rep FL-20 House race       fv 0.028 (ref 0.027) inv    +0 race    +0 | bid 0.015 x100  ask    -
+2026-10-01T17:00:38+0000 mm-bot python[28561]: 2026-10-01 17:00:38 INFO    Rep SC-01 House race       fv 0.735 (ref 0.735) inv  -153 race  +481 | bid 0.705 x2000 ask    -
+2026-10-01T17:00:38+0000 mm-bot python[28561]: 2026-10-01 17:00:38 INFO    Rep NJ-07 House race       fv 0.107 (ref 0.105) inv    +0 race    +0 | bid 0.090 x100  ask 0.115 x100
+2026-10-01T17:00:38+0000 mm-bot python[28561]: 2026-10-01 17:00:38 INFO    Rep AZ-06 House race       fv 0.173 (ref 0.175) inv   -41 race  -141 | bid 0.165 x1855 ask 0.190 x2000
+2026-10-01T17:00:38+0000 mm-bot python[28561]: 2026-10-01 17:00:38 INFO    Rep Alabama Governor       fv 0.924 (ref 0.927) inv    +0 race    +0 | bid 0.910 x100  ask 0.935 x100
+2026-10-01T17:00:38+0000 mm-bot python[28561]: 2026-10-01 17:00:38 INFO    Rep U.S. Senate            fv 0.376 (ref 0.375) inv +3848 race +3848 | bid 0.245 x6152 ask 0.375 x10000
+2026-10-01T17:00:38+0000 mm-bot python[28561]: 2026-10-01 17:00:38 INFO    Dem U.S. House             fv 0.923 (ref 0.925) inv -2238 race -2238 | bid 0.920 x10000 ask 0.995 x7762
+2026-10-01T17:00:53+0000 mm-bot python[28561]: 2026-10-01 17:00:53 ERROR   batch of 16 orders failed (409 REQUEST_IN_FLIGHT: An identical request with this idempotency key is still in flight. Retry with the same key after 90 seconds.)
+2026-10-01T17:01:27+0000 mm-bot python[28561]: 2026-10-01 17:01:27 INFO    FILL ex 1070  our ? x100 @ 0.865  (fv when quoted ?)
+2026-10-01T17:01:27+0000 mm-bot python[28561]: 2026-10-01 17:01:27 INFO    FILL ex 1041  our ask x100 @ 0.28  (fv when quoted 0.26449722549609744)
+2026-10-01T17:01:27+0000 mm-bot python[28561]: 2026-10-01 17:01:27 INFO    realtime | account 110935 (locked in orders 9819, detecting) | worst-case loss 6987 | party delta +2350 | priced 59/237 | resting 61
+2026-10-01T17:01:27+0000 mm-bot python[28561]: 2026-10-01 17:01:27 INFO    Dem New Hampshire Senate   fv 0.873 (ref 0.875) inv  +100 race  +100 | bid 0.860 x100  ask 0.885 x100
+2026-10-01T17:01:27+0000 mm-bot python[28561]: 2026-10-01 17:01:27 INFO    Dem Alaska Senate          fv 0.691 inv    +0 race  +100 | bid 0.675 x100  ask 0.700 x100
+2026-10-01T17:01:33+0000 mm-bot python[28561]: 2026-10-01 17:01:33 INFO    Rep Wyoming Senate         fv   -   (ref 0.974) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:01:34+0000 mm-bot python[28561]: 2026-10-01 17:01:34 INFO    Dem Wyoming Senate         fv   -   (ref 0.025) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:01:34+0000 mm-bot python[28561]: 2026-10-01 17:01:34 INFO    Rep WI-03 House race       fv   -   (ref 0.255) inv  -200 race  -100 | bid    -        ask    -
+2026-10-01T17:01:35+0000 mm-bot python[28561]: 2026-10-01 17:01:35 INFO    Dem MI-10 House race       fv   -   (ref 0.655) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:01:35+0000 mm-bot python[28561]: 2026-10-01 17:01:35 INFO    Dem FL-07 House race       fv 0.331 (ref 0.335) inv  +206 race  +206 | bid 0.315 x2000 ask 0.340 x763
+2026-10-01T17:01:35+0000 mm-bot python[28561]: 2026-10-01 17:01:35 INFO    Rep AL-02 House race       fv 0.740 (ref 0.745) inv    +0 race    +0 | bid 0.725 x100  ask 0.750 x100
+2026-10-01T17:01:35+0000 mm-bot python[28561]: 2026-10-01 17:01:35 INFO    Dem AL-02 House race       fv 0.260 (ref 0.265) inv    +0 race    +0 | bid 0.250 x100  ask 0.275 x100
+2026-10-01T17:01:35+0000 mm-bot python[28561]: 2026-10-01 17:01:35 INFO    Rep Wyoming Governor       fv 0.966 (ref 0.970) inv    +0 race    +0 | bid    -        ask 0.975 x100
+2026-10-01T17:01:41+0000 mm-bot python[28561]: 2026-10-01 17:01:41 INFO    Rep Tennessee Governor     fv   -   (ref 0.965) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:01:42+0000 mm-bot python[28561]: 2026-10-01 17:01:42 INFO    Dem Montana Senate         fv 0.004 (ref 0.002) inv    +0 race    +0 | bid 0.005 x100  ask    -
+2026-10-01T17:01:42+0000 mm-bot python[28561]: 2026-10-01 17:01:42 INFO    Dem NE-02 House race       fv 0.916 (ref 0.915) inv    +0 race    +0 | bid 0.905 x100  ask 0.930 x100
+2026-10-01T17:02:14+0000 mm-bot python[28561]: 2026-10-01 17:02:14 INFO    FILL ex 1067  our ? x100 @ 0.6799999999999999  (fv when quoted ?)
+2026-10-01T17:02:14+0000 mm-bot python[28561]: 2026-10-01 17:02:14 INFO    realtime | account 112425 (locked in orders 11339, detecting) | worst-case loss 7128 | party delta +2150 | priced 58/237 | resting 69
+2026-10-01T17:02:20+0000 mm-bot python[28561]: 2026-10-01 17:02:20 INFO    Rep Alaska Senate          fv 0.320 inv  -200 race  -200 | bid 0.310 x100  ask 0.335 x100
+2026-10-01T17:02:29+0000 mm-bot python[28561]: 2026-10-01 17:02:29 INFO    Dem Alaska Senate          fv 0.680 inv    +0 race  +200 | bid 0.665 x100  ask 0.700 x100
+2026-10-01T17:02:29+0000 mm-bot python[28561]: 2026-10-01 17:02:29 INFO    Rep Alaska Governor        fv 0.237 inv  -300 race  -400 | bid 0.225 x100  ask 0.260 x100
+2026-10-01T17:02:29+0000 mm-bot python[28561]: 2026-10-01 17:02:29 INFO    Rep WI-03 House race       fv 0.262 (ref 0.255) inv  -300 race  -200 | bid 0.255 x100  ask 0.280 x100
+2026-10-01T17:02:31+0000 mm-bot python[28561]: 2026-10-01 17:02:31 INFO    Dem WI-03 House race       fv 0.738 (ref 0.725) inv  -100 race  +200 | bid 0.720 x100  ask 0.775 x100
+2026-10-01T17:02:31+0000 mm-bot python[28561]: 2026-10-01 17:02:31 INFO    Rep VA-05 House race       fv   -   (ref 0.785) inv  -300 race  -300 | bid    -        ask    -
+2026-10-01T17:02:32+0000 mm-bot python[28561]: 2026-10-01 17:02:32 INFO    Dem VA-02 House race       fv   -   (ref 0.815) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:02:32+0000 mm-bot python[28561]: 2026-10-01 17:02:32 INFO    Dem TN-05 House race       fv 0.069 (ref 0.061) inv    +0 race  +100 | bid 0.055 x100  ask 0.090 x100
+2026-10-01T17:02:33+0000 mm-bot python[28561]: 2026-10-01 17:02:33 INFO    Rep FL-22 House race       fv 0.487 (ref 0.485) inv  -100 race  -100 | bid 0.475 x100  ask 0.500 x100
+2026-10-01T17:02:36+0000 mm-bot python[28561]: 2026-10-01 17:02:36 INFO    Rep FL-20 House race       fv   -   (ref 0.022) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:02:36+0000 mm-bot python[28561]: 2026-10-01 17:02:36 INFO    Dem Wisconsin Governor     fv 0.801 (ref 0.805) inv    +0 race  -300 | bid 0.790 x100  ask 0.825 x100
+2026-10-01T17:02:36+0000 mm-bot python[28561]: 2026-10-01 17:02:36 INFO    Rep Vermont Governor       fv 0.829 (ref 0.835) inv    +0 race    +0 | bid 0.815 x100  ask 0.840 x100
+2026-10-01T17:02:36+0000 mm-bot python[28561]: 2026-10-01 17:02:36 INFO    Dem Vermont Governor       fv 0.171 (ref 0.170) inv    +0 race    +0 | bid 0.160 x100  ask 0.185 x100
+2026-10-01T17:02:36+0000 mm-bot python[28561]: 2026-10-01 17:02:36 INFO    Rep South Dakota Senate    fv 0.918 (ref 0.917) inv    +0 race    +0 | bid 0.905 x100  ask 0.930 x100
+2026-10-01T17:02:36+0000 mm-bot python[28561]: 2026-10-01 17:02:36 INFO    Dem Mississippi Senate     fv 0.094 (ref 0.095) inv    +0 race    +0 | bid 0.085 x100  ask 0.110 x100
+2026-10-01T17:02:43+0000 mm-bot python[28561]: 2026-10-01 17:02:43 INFO    Rep Maine Senate           fv 0.410 (ref 0.405) inv -1539 race  -939 | bid 0.420 x1639 ask 0.450 x2000
+2026-10-01T17:02:43+0000 mm-bot python[28561]: 2026-10-01 17:02:43 INFO    Rep Louisiana Senate       fv 0.937 (ref 0.935) inv    +0 race    +0 | bid 0.925 x100  ask 0.950 x100
+2026-10-01T17:02:43+0000 mm-bot python[28561]: 2026-10-01 17:02:43 INFO    Dem Alabama Senate         fv 0.029 (ref 0.026) inv    +0 race    +0 | bid 0.020 x2000 ask    -
+2026-10-01T17:02:43+0000 mm-bot python[28561]: 2026-10-01 17:02:43 INFO    Dem VA-07 House race       fv 0.953 (ref 0.962) inv    +0 race    +0 | bid    -        ask 0.970 x100
+2026-10-01T17:02:43+0000 mm-bot python[28561]: 2026-10-01 17:02:43 INFO    Rep SC-01 House race       fv 0.735 (ref 0.735) inv  -153 race  +481 | bid 0.705 x2000 ask    -
+2026-10-01T17:02:43+0000 mm-bot python[28561]: 2026-10-01 17:02:43 INFO    Rep PA-07 House race       fv 0.145 (ref 0.140) inv  -200 race  -400 | bid 0.145 x100  ask 0.170 x100
+2026-10-01T17:02:43+0000 mm-bot python[28561]: 2026-10-01 17:02:43 INFO    Rep NJ-07 House race       fv 0.107 (ref 0.105) inv    +0 race    +0 | bid 0.090 x100  ask 0.115 x100
+2026-10-01T17:02:43+0000 mm-bot python[28561]: 2026-10-01 17:02:43 INFO    Rep AZ-06 House race       fv 0.173 (ref 0.175) inv   -41 race  -141 | bid 0.165 x1855 ask 0.190 x2000
+2026-10-01T17:02:43+0000 mm-bot python[28561]: 2026-10-01 17:02:43 INFO    Rep Alabama Governor       fv 0.924 (ref 0.927) inv    +0 race    +0 | bid 0.910 x100  ask 0.935 x100
+2026-10-01T17:02:43+0000 mm-bot python[28561]: 2026-10-01 17:02:43 INFO    Rep U.S. Senate            fv 0.376 (ref 0.375) inv +3848 race +3848 | bid 0.245 x6152 ask 0.375 x10000
+2026-10-01T17:02:43+0000 mm-bot python[28561]: 2026-10-01 17:02:43 INFO    Dem U.S. House             fv 0.923 (ref 0.925) inv -2238 race -2238 | bid 0.920 x10000 ask 0.995 x7762
+2026-10-01T17:03:17+0000 mm-bot python[28561]: 2026-10-01 17:03:17 ERROR   batch of 17 orders failed (409 REQUEST_IN_FLIGHT: An identical request with this idempotency key is still in flight. Retry with the same key after 90 seconds.)
+2026-10-01T17:03:59+0000 mm-bot python[28561]: 2026-10-01 17:03:59 INFO    size plan: 57 markets quoted, locking up to 59,293 (cap 60000), 53 changed, tournament trades weigh 0% | biggest: Rep U.S. Senate 10,000, Rep U.S. House 10,000, Dem New Hampshire Senate 2,000, Rep Massachusetts Governor 2,000, Dem Wisconsin Governor 2,000, Dem Florida Governor 2,000
+2026-10-01T17:04:08+0000 mm-bot python[28561]: 2026-10-01 17:04:08 INFO    FILL ex 843  our ask x5407 @ 0.375  (fv when quoted 0.37575)
+2026-10-01T17:04:08+0000 mm-bot python[28561]: 2026-10-01 17:04:08 INFO    FILL ex 1067  our bid x100 @ 0.31  (fv when quoted 0.3195121951219513)
+2026-10-01T17:04:08+0000 mm-bot python[28561]: 2026-10-01 17:04:08 INFO    FILL ex 1008  our ask x100 @ 0.75  (fv when quoted 0.7398359994887275)
+2026-10-01T17:04:08+0000 mm-bot python[28561]: 2026-10-01 17:04:08 INFO    FILL ex 1007  our bid x100 @ 0.25  (fv when quoted 0.26016400051127264)
+2026-10-01T17:04:08+0000 mm-bot python[28561]: 2026-10-01 17:04:08 INFO    FILL ex 1070  our ? x100 @ 0.10999999999999999  (fv when quoted ?)
+2026-10-01T17:04:08+0000 mm-bot python[28561]: 2026-10-01 17:04:08 INFO    FILL ex 1067  our ask x100 @ 0.335  (fv when quoted 0.3195121951219513)
+2026-10-01T17:04:08+0000 mm-bot python[28561]: 2026-10-01 17:04:08 INFO    FILL ex 840  our ? x350 @ 0.92  (fv when quoted ?)
+2026-10-01T17:04:08+0000 mm-bot python[28561]: 2026-10-01 17:04:08 INFO    FILL ex 840  our ? x2720 @ 0.92  (fv when quoted ?)
+2026-10-01T17:04:08+0000 mm-bot python[28561]: 2026-10-01 17:04:08 INFO    FILL ex 889  our ? x50 @ 0.165  (fv when quoted ?)
+2026-10-01T17:04:08+0000 mm-bot python[28561]: 2026-10-01 17:04:08 INFO    realtime | account 110442 (locked in orders 9355, detecting) | worst-case loss 6549 | party delta -3257 | priced 57/237 | resting 75
+2026-10-01T17:04:08+0000 mm-bot python[28561]: 2026-10-01 17:04:08 INFO    Rep Rhode Island Senate    fv 0.013 (ref 0.009) inv    +0 race    +0 | bid 0.005 x1150 ask    -
+2026-10-01T17:04:09+0000 mm-bot python[28561]: 2026-10-01 17:04:09 INFO    Dem Rhode Island Senate    fv 0.987 (ref 0.992) inv    +0 race    +0 | bid    -        ask 0.995 x700
+2026-10-01T17:04:09+0000 mm-bot python[28561]: 2026-10-01 17:04:09 INFO    Rep Rhode Island Governor  fv 0.024 (ref 0.017) inv    +0 race    +0 | bid 0.015 x850  ask    -
+2026-10-01T17:04:10+0000 mm-bot python[28561]: 2026-10-01 17:04:10 INFO    Dem Oklahoma Senate        fv   -   (ref 0.022) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:04:15+0000 mm-bot python[28561]: 2026-10-01 17:04:15 INFO    Dem New Hampshire Senate   fv 0.878 (ref 0.875) inv    +0 race    +0 | bid 0.860 x2000 ask 0.905 x2000
+2026-10-01T17:04:16+0000 mm-bot python[28561]: 2026-10-01 17:04:16 INFO    Rep Massachusetts Senate   fv 0.019 (ref 0.018) inv    +0 race    +0 | bid 0.010 x950  ask    -
+2026-10-01T17:04:17+0000 mm-bot python[28561]: 2026-10-01 17:04:17 INFO    Dem Massachusetts Senate   fv   -   (ref 0.979) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:04:17+0000 mm-bot python[28561]: 2026-10-01 17:04:17 INFO    Rep Alaska Senate          fv 0.348 inv  -100 race  -100 | bid 0.310 x100  ask 0.365 x100
+2026-10-01T17:04:21+0000 mm-bot python[28561]: 2026-10-01 17:04:21 INFO    Dem Alaska Senate          fv   -   inv    +0 race  +100 | bid    -        ask    -
+2026-10-01T17:04:22+0000 mm-bot python[28561]: 2026-10-01 17:04:22 INFO    Rep Oklahoma Governor      fv   -   (ref 0.935) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:04:28+0000 mm-bot python[28561]: 2026-10-01 17:04:28 INFO    Rep Massachusetts Governor fv 0.030 (ref 0.029) inv    +0 race    +0 | bid 0.020 x2000 ask    -
+2026-10-01T17:04:37+0000 mm-bot python[28561]: 2026-10-01 17:04:37 INFO    Dem Massachusetts Governor fv 0.970 (ref 0.962) inv    +0 race    +0 | bid    -        ask 0.980 x1550
+2026-10-01T17:04:39+0000 mm-bot python[28561]: 2026-10-01 17:04:39 INFO    Rep Alaska Governor        fv 0.237 inv  -300 race  -400 | bid 0.225 x100  ask 0.265 x100
+2026-10-01T17:04:43+0000 mm-bot python[28561]: 2026-10-01 17:04:43 INFO    Rep Virginia Senate        fv 0.021 (ref 0.019) inv    +0 race    +0 | bid 0.010 x700  ask    -
+2026-10-01T17:04:43+0000 mm-bot python[28561]: 2026-10-01 17:04:43 INFO    Rep Tennessee Senate       fv 0.972 (ref 0.972) inv    +0 race    +0 | bid    -        ask 0.990 x1150
+2026-10-01T17:04:44+0000 mm-bot python[28561]: 2026-10-01 17:04:44 INFO    Rep WI-03 House race       fv 0.262 (ref 0.255) inv  -300 race  -200 | bid 0.260 x400  ask 0.285 x400
+2026-10-01T17:04:45+0000 mm-bot python[28561]: 2026-10-01 17:04:45 INFO    Dem WI-03 House race       fv 0.738 (ref 0.725) inv  -100 race  +200 | bid 0.715 x550  ask 0.770 x550
+2026-10-01T17:04:46+0000 mm-bot python[28561]: 2026-10-01 17:04:46 INFO    Dem TN-05 House race       fv 0.069 (ref 0.061) inv    +0 race  +100 | bid 0.050 x1550 ask 0.090 x1550
+2026-10-01T17:04:49+0000 mm-bot python[28561]: 2026-10-01 17:04:49 INFO    Rep MI-10 House race       fv 0.346 (ref 0.345) inv    +0 race    +0 | bid 0.335 x450  ask 0.360 x450
+2026-10-01T17:04:52+0000 mm-bot python[28561]: 2026-10-01 17:04:52 INFO    Rep MI-07 House race       fv   -   (ref 0.435) inv  +100 race  +200 | bid    -        ask    -
+2026-10-01T17:04:55+0000 mm-bot python[28561]: 2026-10-01 17:04:55 INFO    Rep FL-22 House race       fv 0.487 (ref 0.485) inv  -100 race  -100 | bid 0.480 x600  ask 0.505 x1350
+2026-10-01T17:04:57+0000 mm-bot python[28561]: 2026-10-01 17:04:57 INFO    Dem FL-22 House race       fv 0.513 (ref 0.505) inv    +0 race  +100 | bid 0.495 x1000 ask 0.520 x1250
+2026-10-01T17:04:57+0000 mm-bot python[28561]: 2026-10-01 17:04:57 INFO    Dem FL-13 House race       fv 0.245 (ref 0.235) inv    +0 race    +0 | bid 0.230 x700  ask 0.270 x700
+2026-10-01T17:04:57+0000 mm-bot python[28561]: 2026-10-01 17:04:57 INFO    Rep FL-09 House race       fv 0.700 (ref 0.685) inv    +0 race    +0 | bid 0.690 x100  ask 0.715 x950
+2026-10-01T17:04:59+0000 mm-bot python[28561]: 2026-10-01 17:04:59 INFO    Dem FL-07 House race       fv 0.331 (ref 0.335) inv  +206 race  +206 | bid 0.310 x850  ask 0.335 x306
+2026-10-01T17:05:04+0000 mm-bot python[28561]: 2026-10-01 17:05:04 INFO    Rep AL-02 House race       fv 0.740 (ref 0.745) inv  -100 race  -200 | bid 0.735 x1383 ask 0.760 x1400
+2026-10-01T17:05:06+0000 mm-bot python[28561]: 2026-10-01 17:05:06 INFO    Dem AL-02 House race       fv 0.260 (ref 0.265) inv  +100 race  +200 | bid 0.240 x1650 ask 0.265 x200
+2026-10-01T17:05:07+0000 mm-bot python[28561]: 2026-10-01 17:05:07 INFO    Rep Wyoming Governor       fv 0.966 (ref 0.970) inv    +0 race    +0 | bid    -        ask 0.980 x800
+2026-10-01T17:05:09+0000 mm-bot python[28561]: 2026-10-01 17:05:09 INFO    Dem Wyoming Governor       fv 0.034 (ref 0.029) inv    +0 race    +0 | bid 0.020 x400  ask    -
+2026-10-01T17:05:11+0000 mm-bot python[28561]: 2026-10-01 17:05:11 INFO    Dem Wisconsin Governor     fv 0.801 (ref 0.805) inv    +0 race  -300 | bid 0.790 x2000 ask 0.820 x2000
+2026-10-01T17:05:20+0000 mm-bot python[28561]: 2026-10-01 17:05:20 INFO    Rep Vermont Governor       fv 0.829 (ref 0.835) inv    +0 race    +0 | bid 0.820 x1950 ask 0.845 x1908
+2026-10-01T17:05:21+0000 mm-bot python[28561]: 2026-10-01 17:05:21 INFO    Dem Vermont Governor       fv 0.171 (ref 0.170) inv    +0 race    +0 | bid 0.155 x1950 ask 0.180 x1778
+2026-10-01T17:05:24+0000 mm-bot python[28561]: 2026-10-01 17:05:24 INFO    Dem Hawaii Governor        fv 0.976 (ref 0.978) inv    +0 race    +0 | bid    -        ask 0.985 x700
+2026-10-01T17:05:27+0000 mm-bot python[28561]: 2026-10-01 17:05:27 INFO    Dem Florida Governor       fv 0.220 (ref 0.215) inv  -164 race  -164 | bid 0.210 x917  ask 0.235 x2000
+2026-10-01T17:05:27+0000 mm-bot python[28561]: 2026-10-01 17:05:27 INFO    Rep South Dakota Senate    fv 0.918 (ref 0.917) inv    +0 race    +0 | bid 0.910 x1400 ask 0.935 x1400
+2026-10-01T17:05:27+0000 mm-bot python[28561]: 2026-10-01 17:05:27 INFO    Dem South Carolina Senate  fv 0.135 (ref 0.135) inv    +0 race    +0 | bid 0.120 x2000 ask 0.145 x2000
+2026-10-01T17:05:28+0000 mm-bot python[28561]: 2026-10-01 17:05:28 INFO    Dem Oregon Senate          fv 0.975 (ref 0.977) inv    +0 race    +0 | bid    -        ask 0.985 x500
+2026-10-01T17:05:28+0000 mm-bot python[28561]: 2026-10-01 17:05:28 INFO    Rep New Mexico Senate      fv 0.017 (ref 0.016) inv    +0 race    +0 | bid 0.010 x800  ask    -
+2026-10-01T17:05:29+0000 mm-bot python[28561]: 2026-10-01 17:05:29 INFO    Dem New Mexico Senate      fv 0.983 (ref 0.970) inv    +0 race    +0 | bid    -        ask 0.990 x1050
+2026-10-01T17:05:33+0000 mm-bot python[28561]: 2026-10-01 17:05:33 INFO    Dem North Carolina Senate  fv 0.952 (ref 0.955) inv    +0 race    +0 | bid    -        ask 0.960 x2000
+2026-10-01T17:05:33+0000 mm-bot python[28561]: 2026-10-01 17:05:33 INFO    Dem Mississippi Senate     fv 0.094 (ref 0.095) inv    +0 race    +0 | bid 0.080 x1750 ask 0.105 x1750
+2026-10-01T17:05:34+0000 mm-bot python[28561]: 2026-10-01 17:05:34 INFO    Rep Illinois Senate        fv 0.025 (ref 0.024) inv    +0 race    +0 | bid 0.010 x1050 ask    -
+2026-10-01T17:05:34+0000 mm-bot python[28561]: 2026-10-01 17:05:34 INFO    Dem Iowa Senate            fv   -   (ref 0.415) inv  -769 race  -769 | bid    -        ask    -
+2026-10-01T17:05:40+0000 mm-bot python[28561]: 2026-10-01 17:05:40 INFO    Rep Georgia Senate         fv   -   (ref 0.028) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:05:49+0000 mm-bot python[28561]: 2026-10-01 17:05:49 INFO    Rep Arkansas Senate        fv 0.938 (ref 0.937) inv    +0 race    +0 | bid 0.930 x1100 ask 0.955 x1100
+2026-10-01T17:05:49+0000 mm-bot python[28561]: 2026-10-01 17:05:49 INFO    Dem TX-15 House race       fv 0.795 (ref 0.800) inv    +0 race    +0 | bid 0.780 x1000 ask 0.805 x796
+2026-10-01T17:05:53+0000 mm-bot python[28561]: 2026-10-01 17:05:53 INFO    Dem NE-02 House race       fv 0.916 (ref 0.915) inv    +0 race    +0 | bid 0.900 x1600 ask 0.925 x1600
+2026-10-01T17:05:53+0000 mm-bot python[28561]: 2026-10-01 17:05:53 INFO    Dem ME-02 House race       fv 0.351 (ref 0.355) inv    +0 race    +0 | bid 0.335 x1000 ask 0.360 x542
+2026-10-01T17:05:53+0000 mm-bot python[28561]: 2026-10-01 17:05:53 INFO    Rep FL-13 House race       fv 0.755 (ref 0.755) inv    +0 race    +0 | bid 0.745 x550  ask 0.770 x550
+2026-10-01T17:05:54+0000 mm-bot python[28561]: 2026-10-01 17:05:54 INFO    Dem FL-09 House race       fv 0.300 (ref 0.295) inv    +0 race    +0 | bid 0.285 x800  ask 0.310 x800
+2026-10-01T17:05:57+0000 mm-bot python[28561]: 2026-10-01 17:05:57 INFO    Dem CA-22 House race       fv 0.907 inv  +100 race  +142 | bid 0.885 x100  ask 0.920 x100
+2026-10-01T17:05:57+0000 mm-bot python[28561]: 2026-10-01 17:05:57 INFO    Dem Alabama Governor       fv 0.073 (ref 0.068) inv    +0 race    +0 | bid 0.055 x900  ask 0.085 x900
+2026-10-01T17:05:57+0000 mm-bot python[28561]: 2026-10-01 17:05:57 INFO    Rep U.S. House             fv 0.085 (ref 0.085) inv    +0 race +2238 | bid 0.010 x10000 ask 0.085 x10000
+2026-10-01T17:06:29+0000 mm-bot python[28561]: 2026-10-01 17:06:29 ERROR   batch of 20 orders failed (409 REQUEST_IN_FLIGHT: An identical request with this idempotency key is still in flight. Retry with the same key after 90 seconds.)
+2026-10-01T17:07:26+0000 mm-bot python[28561]: 2026-10-01 17:07:26 INFO    FILL ex 981  our ask x100 @ 0.93  (fv when quoted 0.9175500000000001)
+2026-10-01T17:07:26+0000 mm-bot python[28561]: 2026-10-01 17:07:26 INFO    FILL ex 889  our ? x25 @ 0.165  (fv when quoted ?)
+2026-10-01T17:07:26+0000 mm-bot python[28561]: 2026-10-01 17:07:26 INFO    FILL ex 1058  our bid x100 @ 0.225  (fv when quoted 0.2375)
+2026-10-01T17:07:26+0000 mm-bot python[28561]: 2026-10-01 17:07:26 INFO    FILL ex 843  our ask x1567 @ 0.375  (fv when quoted 0.37575)
+2026-10-01T17:07:26+0000 mm-bot python[28561]: 2026-10-01 17:07:26 INFO    FILL ex 988  our ask x2000 @ 0.235  (fv when quoted 0.22025)
+2026-10-01T17:07:26+0000 mm-bot python[28561]: 2026-10-01 17:07:26 INFO    FILL ex 889  our ? x3 @ 0.165  (fv when quoted ?)
+2026-10-01T17:07:26+0000 mm-bot python[28561]: 2026-10-01 17:07:26 INFO    FILL ex 1002  our ask x1908 @ 0.845  (fv when quoted 0.82890387815694)
+2026-10-01T17:07:26+0000 mm-bot python[28561]: 2026-10-01 17:07:26 INFO    FILL ex 1002  our bid x1950 @ 0.82  (fv when quoted 0.82890387815694)
+2026-10-01T17:07:26+0000 mm-bot python[28561]: 2026-10-01 17:07:26 INFO    realtime | account 148174 (locked in orders 48003, detecting) | worst-case loss 9514 | party delta -5916 | priced 58/237 | resting 83
+2026-10-01T17:07:27+0000 mm-bot python[28561]: 2026-10-01 17:07:27 INFO    Rep Rhode Island Senate    fv   -   (ref 0.010) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:07:28+0000 mm-bot python[28561]: 2026-10-01 17:07:28 INFO    Dem Rhode Island Senate    fv   -   (ref 0.992) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:07:30+0000 mm-bot python[28561]: 2026-10-01 17:07:30 INFO    Rep Alaska Senate          fv 0.312 inv  -200 race  -200 | bid 0.310 x100  ask 0.335 x100
+2026-10-01T17:07:30+0000 mm-bot python[28561]: 2026-10-01 17:07:30 INFO    Dem Massachusetts Governor fv 0.970 (ref 0.962) inv    +0 race    +0 | bid    -        ask 0.975 x1550
+2026-10-01T17:07:30+0000 mm-bot python[28561]: 2026-10-01 17:07:30 INFO    Rep Alaska Governor        fv 0.255 inv  -200 race  -300 | bid 0.250 x100  ask 0.280 x100
+2026-10-01T17:07:30+0000 mm-bot python[28561]: 2026-10-01 17:07:30 INFO    Dem Wyoming Senate         fv 0.029 (ref 0.025) inv    +0 race    +0 | bid 0.010 x100  ask    -
+2026-10-01T17:07:30+0000 mm-bot python[28561]: 2026-10-01 17:07:30 INFO    Dem Tennessee Senate       fv 0.024 (ref 0.021) inv    +0 race    +0 | bid 0.005 x100  ask    -
+2026-10-01T17:07:30+0000 mm-bot python[28561]: 2026-10-01 17:07:30 INFO    Dem Kansas Senate          fv 0.290 (ref 0.285) inv    +0 race  +300 | bid 0.265 x100  ask 0.320 x100
+2026-10-01T17:07:30+0000 mm-bot python[28561]: 2026-10-01 17:07:30 INFO    Rep WI-03 House race       fv 0.261 (ref 0.255) inv  -300 race  -200 | bid 0.260 x400  ask 0.285 x400
+2026-10-01T17:07:30+0000 mm-bot python[28561]: 2026-10-01 17:07:30 INFO    Rep WI-01 House race       fv 0.665 (ref 0.665) inv    +0 race    +0 | bid 0.660 x100  ask 0.685 x100
+2026-10-01T17:07:30+0000 mm-bot python[28561]: 2026-10-01 17:07:30 INFO    Dem MN-01 House race       fv 0.233 (ref 0.235) inv    +0 race    +0 | bid 0.215 x100  ask 0.240 x100
+2026-10-01T17:07:33+0000 mm-bot python[28561]: 2026-10-01 17:07:33 INFO    Rep MI-10 House race       fv 0.346 (ref 0.345) inv    +0 race    +0 | bid 0.340 x450  ask 0.365 x450
+2026-10-01T17:07:33+0000 mm-bot python[28561]: 2026-10-01 17:07:33 INFO    Dem MI-10 House race       fv 0.653 (ref 0.655) inv    +0 race    +0 | bid 0.635 x100  ask 0.660 x100
+2026-10-01T17:07:37+0000 mm-bot python[28561]: 2026-10-01 17:07:37 INFO    Rep FL-22 House race       fv 0.487 (ref 0.485) inv  -100 race  -100 | bid 0.480 x600  ask 0.510 x1350
+2026-10-01T17:07:37+0000 mm-bot python[28561]: 2026-10-01 17:07:37 INFO    Dem FL-22 House race       fv 0.513 (ref 0.505) inv    +0 race  +100 | bid 0.490 x1250 ask 0.520 x1250
+2026-10-01T17:07:43+0000 mm-bot python[28561]: 2026-10-01 17:07:43 INFO    Dem FL-13 House race       fv 0.245 (ref 0.235) inv    +0 race    +0 | bid 0.225 x700  ask 0.270 x700
+2026-10-01T17:07:45+0000 mm-bot python[28561]: 2026-10-01 17:07:45 INFO    Rep FL-09 House race       fv 0.700 (ref 0.685) inv    +0 race    +0 | bid 0.695 x100  ask 0.720 x950
+2026-10-01T17:07:47+0000 mm-bot python[28561]: 2026-10-01 17:07:47 INFO    Dem FL-07 House race       fv 0.331 (ref 0.335) inv  +206 race  +206 | bid 0.305 x850  ask 0.330 x306
+2026-10-01T17:07:48+0000 mm-bot python[28561]: 2026-10-01 17:07:48 INFO    Rep AL-02 House race       fv 0.740 (ref 0.745) inv  -100 race  -200 | bid 0.740 x749  ask 0.765 x1400
+2026-10-01T17:07:49+0000 mm-bot python[28561]: 2026-10-01 17:07:49 INFO    Dem AL-02 House race       fv 0.260 (ref 0.265) inv  +100 race  +200 | bid 0.235 x1650 ask 0.260 x200
+2026-10-01T17:07:50+0000 mm-bot python[28561]: 2026-10-01 17:07:50 INFO    Rep Wyoming Governor       fv 0.966 (ref 0.970) inv    +0 race    +0 | bid    -        ask 0.985 x800
+2026-10-01T17:07:51+0000 mm-bot python[28561]: 2026-10-01 17:07:51 INFO    Dem Wyoming Governor       fv 0.034 (ref 0.029) inv    +0 race    +0 | bid 0.015 x400  ask    -
+2026-10-01T17:07:52+0000 mm-bot python[28561]: 2026-10-01 17:07:52 INFO    Dem Wisconsin Governor     fv   -   (ref 0.805) inv    +0 race  -300 | bid    -        ask    -
+2026-10-01T17:07:52+0000 mm-bot python[28561]: 2026-10-01 17:07:52 INFO    Rep Vermont Governor       fv   -   (ref 0.835) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:08:06+0000 mm-bot python[28561]: 2026-10-01 17:08:06 INFO    Dem Florida Governor       fv 0.265 (ref 0.215) inv -2164 race -2164 | bid    -        ask 0.365 x985
+2026-10-01T17:08:06+0000 mm-bot python[28561]: 2026-10-01 17:08:06 INFO    Dem Connecticut Governor   fv 0.965 (ref 0.966) inv    +0 race    +0 | bid    -        ask 0.970 x100
+2026-10-01T17:08:06+0000 mm-bot python[28561]: 2026-10-01 17:08:06 INFO    Rep South Dakota Senate    fv 0.923 (ref 0.917) inv  -100 race  -100 | bid 0.915 x582  ask 0.960 x1400
+2026-10-01T17:08:07+0000 mm-bot python[28561]: 2026-10-01 17:08:07 INFO    Dem South Carolina Senate  fv 0.135 (ref 0.135) inv    +0 race    +0 | bid 0.115 x2000 ask 0.140 x1038
+2026-10-01T17:08:07+0000 mm-bot python[28561]: 2026-10-01 17:08:07 INFO    Rep New Mexico Senate      fv   -   (ref 0.016) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:08:08+0000 mm-bot python[28561]: 2026-10-01 17:08:08 INFO    Dem New Mexico Senate      fv   -   (ref 0.970) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:08:08+0000 mm-bot python[28561]: 2026-10-01 17:08:08 INFO    Dem New Jersey Senate      fv 0.974 (ref 0.972) inv    +0 race    +0 | bid    -        ask 0.980 x100
+2026-10-01T17:08:11+0000 mm-bot python[28561]: 2026-10-01 17:08:11 INFO    realtime: missed message(s) on user:6c996168-fbca-415e-bb62-04b8bcaa95f3 - full resync next cycle
+2026-10-01T17:08:11+0000 mm-bot python[28561]: 2026-10-01 17:08:11 INFO    realtime: missed message(s) on user:6c996168-fbca-415e-bb62-04b8bcaa95f3 - full resync next cycle
+2026-10-01T17:08:12+0000 mm-bot python[28561]: 2026-10-01 17:08:12 INFO    Dem North Carolina Senate  fv   -   (ref 0.955) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:08:12+0000 mm-bot python[28561]: 2026-10-01 17:08:12 INFO    Ind Montana Senate         fv 0.081 (ref 0.086) inv    +0 race    +0 | bid 0.070 x100  ask 0.095 x100
+2026-10-01T17:08:12+0000 mm-bot python[28561]: 2026-10-01 17:08:12 INFO    realtime: missed message(s) on user:6c996168-fbca-415e-bb62-04b8bcaa95f3 - full resync next cycle
+2026-10-01T17:08:13+0000 mm-bot python[28561]: 2026-10-01 17:08:13 INFO    Dem Mississippi Senate     fv 0.094 (ref 0.095) inv    +0 race    +0 | bid 0.075 x1750 ask 0.100 x1388
+2026-10-01T17:08:13+0000 mm-bot python[28561]: 2026-10-01 17:08:13 INFO    Rep Maine Senate           fv 0.410 (ref 0.405) inv -1539 race  -939 | bid 0.420 x1639 ask 0.455 x2000
+2026-10-01T17:08:14+0000 mm-bot python[28561]: 2026-10-01 17:08:14 INFO    Rep Louisiana Senate       fv   -   (ref 0.935) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:08:18+0000 mm-bot python[28561]: 2026-10-01 17:08:18 INFO    Rep Colorado Senate        fv 0.021 (ref 0.018) inv    +0 race    +0 | bid 0.015 x2000 ask    -
+2026-10-01T17:08:19+0000 mm-bot python[28561]: 2026-10-01 17:08:19 INFO    Rep Arkansas Senate        fv   -   (ref 0.937) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:08:22+0000 mm-bot python[28561]: 2026-10-01 17:08:22 INFO    Dem Alabama Senate         fv   -   (ref 0.026) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:08:24+0000 mm-bot python[28561]: 2026-10-01 17:08:24 INFO    Dem VA-07 House race       fv 0.953 (ref 0.962) inv    +0 race    +0 | bid    -        ask 0.960 x100
+2026-10-01T17:08:27+0000 mm-bot python[28561]: 2026-10-01 17:08:27 INFO    Dem TX-15 House race       fv 0.795 (ref 0.800) inv    +0 race    +0 | bid 0.775 x1000 ask 0.800 x100
+2026-10-01T17:08:27+0000 mm-bot python[28561]: 2026-10-01 17:08:27 INFO    Rep SC-01 House race       fv 0.735 (ref 0.735) inv  -153 race  +481 | bid 0.715 x950  ask 0.740 x496
+2026-10-01T17:08:30+0000 mm-bot python[28561]: 2026-10-01 17:08:30 INFO    Rep PA-07 House race       fv 0.147 (ref 0.140) inv  -200 race  -400 | bid 0.150 x300  ask 0.175 x750
+2026-10-01T17:08:30+0000 mm-bot python[28561]: 2026-10-01 17:08:30 INFO    Dem PA-07 House race       fv 0.853 (ref 0.845) inv  +200 race  +400 | bid 0.825 x100  ask 0.855 x100
+2026-10-01T17:08:34+0000 mm-bot python[28561]: 2026-10-01 17:08:34 INFO    Rep NJ-07 House race       fv   -   (ref 0.105) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:08:34+0000 mm-bot python[28561]: 2026-10-01 17:08:34 INFO    Rep MT-01 House race       fv 0.675 (ref 0.675) inv    +0 race    +0 | bid 0.670 x100  ask 0.695 x100
+2026-10-01T17:08:34+0000 mm-bot python[28561]: 2026-10-01 17:08:34 INFO    Rep FL-13 House race       fv 0.755 (ref 0.755) inv    +0 race    +0 | bid 0.745 x550  ask 0.775 x550
+2026-10-01T17:08:43+0000 mm-bot python[28561]: 2026-10-01 17:08:43 INFO    Dem FL-09 House race       fv 0.300 (ref 0.295) inv    +0 race    +0 | bid 0.280 x800  ask 0.305 x800
+2026-10-01T17:08:47+0000 mm-bot python[28561]: 2026-10-01 17:08:47 INFO    Rep AZ-06 House race       fv 0.173 (ref 0.175) inv   +37 race   -63 | bid 0.165 x750  ask 0.195 x750
+2026-10-01T17:08:47+0000 mm-bot python[28561]: 2026-10-01 17:08:47 INFO    Dem California Governor    fv 0.968 inv    +0 race    +0 | bid    -        ask 0.975 x100
+2026-10-01T17:08:47+0000 mm-bot python[28561]: 2026-10-01 17:08:47 INFO    Dem Arizona Governor       fv 0.883 (ref 0.885) inv    +0 race    +0 | bid 0.865 x100  ask 0.890 x100
+2026-10-01T17:08:52+0000 mm-bot python[28561]: 2026-10-01 17:08:52 INFO    Rep Alabama Governor       fv 0.927 (ref 0.927) inv    +0 race    +0 | bid 0.915 x900  ask 0.945 x900
+2026-10-01T17:08:56+0000 mm-bot python[28561]: 2026-10-01 17:08:56 INFO    Rep U.S. Senate            fv 0.376 (ref 0.375) inv -3126 race -3126 | bid 0.380 x10000 ask 0.490 x6874
+2026-10-01T17:08:56+0000 mm-bot python[28561]: 2026-10-01 17:08:56 INFO    Dem U.S. Senate            fv 0.624 (ref 0.625) inv    +0 race +3126 | bid 0.510 x100  ask 0.625 x100
+2026-10-01T17:09:01+0000 mm-bot python[28561]: 2026-10-01 17:09:01 INFO    Rep U.S. House             fv 0.084 (ref 0.085) inv    +0 race  -832 | bid 0.085 x10000 ask 0.130 x10000
+2026-10-01T17:09:04+0000 mm-bot python[28561]: 2026-10-01 17:09:04 INFO    Dem U.S. House             fv 0.916 (ref 0.925) inv  +832 race  +832 | bid 0.870 x100  ask 0.925 x100
+2026-10-01T17:09:20+0000 mm-bot python[28561]: 2026-10-01 17:09:20 ERROR   batch of 20 orders failed (409 REQUEST_IN_FLIGHT: An identical request with this idempotency key is still in flight. Retry with the same key after 90 seconds.)
+2026-10-01T17:09:30+0000 mm-bot python[28561]: 2026-10-01 17:09:30 INFO    realtime: renewing the session (fresh login, full resync)
+2026-10-01T17:09:31+0000 mm-bot python[28561]: 2026-10-01 17:09:31 INFO    realtime feed connected - reacting to pushed updates
+2026-10-01T17:09:31+0000 mm-bot python[28561]: 2026-10-01 17:09:31 INFO    realtime: subscribed to tournament - full resync next cycle
+2026-10-01T17:09:31+0000 mm-bot python[28561]: 2026-10-01 17:09:31 INFO    realtime: subscribed to user - full resync next cycle
+2026-10-01T17:09:51+0000 mm-bot python[28561]: 2026-10-01 17:09:51 ERROR   batch of 20 orders failed (409 REQUEST_IN_FLIGHT: An identical request with this idempotency key is still in flight. Retry with the same key after 90 seconds.)
+2026-10-01T17:10:20+0000 mm-bot python[28561]: 2026-10-01 17:10:20 INFO    Tracking 237 exchanges in 117 races
+2026-10-01T17:10:48+0000 mm-bot python[28561]: 2026-10-01 17:10:48 INFO    FILL ex 981  our ask x81 @ 0.935  (fv when quoted 0.9175500000000001)
+2026-10-01T17:10:48+0000 mm-bot python[28561]: 2026-10-01 17:10:48 INFO    FILL ex 889  our ? x12 @ 0.165  (fv when quoted ?)
+2026-10-01T17:10:48+0000 mm-bot python[28561]: 2026-10-01 17:10:48 INFO    FILL ex 960  our bid x528 @ 0.42  (fv when quoted 0.41025)
+2026-10-01T17:10:48+0000 mm-bot python[28561]: 2026-10-01 17:10:48 INFO    FILL ex 981  our ask x81 @ 0.935  (fv when quoted 0.9175500000000001)
+2026-10-01T17:10:48+0000 mm-bot python[28561]: 2026-10-01 17:10:48 INFO    FILL ex 1067  our ? x100 @ 0.31  (fv when quoted ?)
+2026-10-01T17:10:48+0000 mm-bot python[28561]: 2026-10-01 17:10:48 INFO    FILL ex 981  our ask x81 @ 0.935  (fv when quoted 0.9175500000000001)
+2026-10-01T17:10:48+0000 mm-bot python[28561]: 2026-10-01 17:10:48 INFO    FILL ex 981  our ask x235 @ 0.935  (fv when quoted 0.9175500000000001)
+2026-10-01T17:10:48+0000 mm-bot python[28561]: 2026-10-01 17:10:48 INFO    FILL ex 960  our bid x1111 @ 0.42  (fv when quoted 0.41025)
+2026-10-01T17:10:48+0000 mm-bot python[28561]: 2026-10-01 17:10:48 INFO    FILL ex 981  our ask x1400 @ 0.96  (fv when quoted 0.9228000000000001)
+2026-10-01T17:10:48+0000 mm-bot python[28561]: 2026-10-01 17:10:48 INFO    FILL ex 1070  our ? x2000 @ 0.86  (fv when quoted ?)
+2026-10-01T17:10:48+0000 mm-bot python[28561]: 2026-10-01 17:10:48 INFO    FILL ex 848  our ? x2 @ 0.10999999999999999  (fv when quoted ?)
+2026-10-01T17:10:48+0000 mm-bot python[28561]: 2026-10-01 17:10:48 INFO    realtime | account 139894 (locked in orders 39547, detecting) | worst-case loss 11111 | party delta -7999 | priced 58/237 | resting 93
+2026-10-01T17:10:48+0000 mm-bot python[28561]: 2026-10-01 17:10:48 INFO    Rep Rhode Island Governor  fv   -   (ref 0.017) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:10:48+0000 mm-bot python[28561]: 2026-10-01 17:10:48 INFO    Dem Oklahoma Senate        fv 0.030 (ref 0.022) inv    +0 race    +0 | bid 0.010 x100  ask    -
+2026-10-01T17:10:52+0000 mm-bot python[28561]: 2026-10-01 17:10:52 INFO    Dem New Hampshire Senate   fv   -   (ref 0.875) inv +2000 race +2000 | bid    -        ask    -
+2026-10-01T17:10:52+0000 mm-bot python[28561]: 2026-10-01 17:10:52 INFO    Rep Alaska Senate          fv 0.312 inv  -100 race  -100 | bid 0.305 x100  ask 0.335 x100
+2026-10-01T17:10:53+0000 mm-bot python[28561]: 2026-10-01 17:10:53 INFO    Dem Massachusetts Governor fv 0.970 (ref 0.962) inv    +0 race    +0 | bid    -        ask 0.975 x1550
+2026-10-01T17:10:54+0000 mm-bot python[28561]: 2026-10-01 17:10:54 INFO    Rep Alaska Governor        fv 0.255 inv  -200 race  -300 | bid 0.250 x100  ask 0.285 x100
+2026-10-01T17:10:54+0000 mm-bot python[28561]: 2026-10-01 17:10:54 INFO    Rep Virginia Senate        fv 0.021 (ref 0.019) inv    +0 race    +0 | bid 0.010 x700  ask    -
+2026-10-01T17:10:54+0000 mm-bot python[28561]: 2026-10-01 17:10:54 INFO    Dem Minnesota Senate       fv 0.897 (ref 0.905) inv    +0 race    +0 | bid 0.875 x100  ask 0.900 x100
+2026-10-01T17:11:00+0000 mm-bot python[28561]: 2026-10-01 17:11:00 INFO    Dem Kansas Senate          fv 0.290 (ref 0.285) inv    +0 race  +300 | bid 0.260 x100  ask 0.315 x100
+2026-10-01T17:11:12+0000 mm-bot python[28561]: 2026-10-01 17:11:12 INFO    Rep WI-03 House race       fv   -   (ref 0.255) inv  -300 race  -200 | bid    -        ask    -
+2026-10-01T17:11:12+0000 mm-bot python[28561]: 2026-10-01 17:11:12 INFO    Dem MI-10 House race       fv 0.653 (ref 0.655) inv    +0 race    +0 | bid 0.635 x100  ask 0.660 x100
+2026-10-01T17:11:12+0000 mm-bot python[28561]: 2026-10-01 17:11:12 INFO    Rep FL-22 House race       fv 0.487 (ref 0.485) inv  -100 race  -100 | bid 0.480 x600  ask 0.510 x1350
+2026-10-01T17:11:12+0000 mm-bot python[28561]: 2026-10-01 17:11:12 INFO    Dem FL-22 House race       fv 0.513 (ref 0.505) inv    +0 race  +100 | bid 0.490 x1250 ask 0.520 x1250
+2026-10-01T17:11:16+0000 mm-bot python[28561]: 2026-10-01 17:11:16 INFO    Dem FL-07 House race       fv   -   (ref 0.335) inv  +206 race  +206 | bid    -        ask    -
+2026-10-01T17:11:18+0000 mm-bot python[28561]: 2026-10-01 17:11:18 INFO    Rep AL-02 House race       fv   -   (ref 0.745) inv  -100 race  -200 | bid    -        ask    -
+2026-10-01T17:11:18+0000 mm-bot python[28561]: 2026-10-01 17:11:18 INFO    Rep Vermont Governor       fv 0.829 (ref 0.835) inv   +42 race   +42 | bid 0.825 x1689 ask 0.850 x1950
+2026-10-01T17:11:18+0000 mm-bot python[28561]: 2026-10-01 17:11:18 INFO    Dem Vermont Governor       fv 0.171 (ref 0.170) inv    +0 race   -42 | bid 0.150 x1950 ask 0.180 x1778
+2026-10-01T17:11:18+0000 mm-bot python[28561]: 2026-10-01 17:11:18 INFO    Dem Hawaii Governor        fv   -   (ref 0.978) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:11:22+0000 mm-bot python[28561]: 2026-10-01 17:11:22 INFO    Dem Connecticut Governor   fv 0.971 (ref 0.966) inv    +0 race    +0 | bid    -        ask 0.975 x100
+2026-10-01T17:11:26+0000 mm-bot python[28561]: 2026-10-01 17:11:26 INFO    Rep South Dakota Senate    fv 0.920 (ref 0.917) inv -1978 race -1978 | bid 0.940 x1400 ask 0.995 x1400
+2026-10-01T17:11:36+0000 mm-bot python[28561]: 2026-10-01 17:11:36 INFO    Dem South Carolina Senate  fv   -   (ref 0.135) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:11:39+0000 mm-bot python[28561]: 2026-10-01 17:11:39 INFO    Dem Mississippi Senate     fv   -   (ref 0.095) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:11:40+0000 mm-bot python[28561]: 2026-10-01 17:11:40 INFO    Rep Maine Senate           fv 0.409 (ref 0.405) inv  +100 race  +700 | bid 0.385 x2000 ask 0.415 x1129
+2026-10-01T17:11:41+0000 mm-bot python[28561]: 2026-10-01 17:11:41 INFO    Dem VA-07 House race       fv   -   (ref 0.962) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:11:44+0000 mm-bot python[28561]: 2026-10-01 17:11:44 INFO    Rep PA-07 House race       fv 0.147 (ref 0.140) inv  -200 race  -400 | bid 0.150 x300  ask 0.180 x750
+2026-10-01T17:11:44+0000 mm-bot python[28561]: 2026-10-01 17:11:44 INFO    Dem PA-07 House race       fv 0.853 (ref 0.845) inv  +200 race  +400 | bid 0.820 x100  ask 0.855 x100
+2026-10-01T17:11:44+0000 mm-bot python[28561]: 2026-10-01 17:11:44 INFO    Rep NE-02 House race       fv 0.083 (ref 0.086) inv    +0 race    +0 | bid 0.080 x100  ask 0.105 x100
+2026-10-01T17:11:45+0000 mm-bot python[28561]: 2026-10-01 17:11:45 INFO    Dem NE-02 House race       fv 0.917 (ref 0.915) inv    +0 race    +0 | bid 0.895 x1600 ask 0.920 x1600
+2026-10-01T17:11:46+0000 mm-bot python[28561]: 2026-10-01 17:11:46 INFO    Dem ME-02 House race       fv   -   (ref 0.355) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:11:46+0000 mm-bot python[28561]: 2026-10-01 17:11:46 INFO    Rep Iowa Governor          fv 0.150 (ref 0.145) inv    +0 race    +0 | bid 0.145 x100  ask 0.170 x100
+2026-10-01T17:11:46+0000 mm-bot python[28561]: 2026-10-01 17:11:46 INFO    Rep Connecticut Governor   fv 0.029 (ref 0.025) inv    +0 race    +0 | bid 0.025 x100  ask    -
+2026-10-01T17:11:46+0000 mm-bot python[28561]: 2026-10-01 17:11:46 INFO    Rep Colorado Governor      fv 0.031 (ref 0.028) inv    +0 race    +0 | bid 0.025 x100  ask    -
+2026-10-01T17:11:46+0000 mm-bot python[28561]: 2026-10-01 17:11:46 INFO    Dem Colorado Governor      fv 0.969 (ref 0.966) inv    +0 race    +0 | bid    -        ask 0.975 x100
+2026-10-01T17:11:46+0000 mm-bot python[28561]: 2026-10-01 17:11:46 INFO    Rep California Governor    fv 0.035 inv    +0 race    +0 | bid 0.030 x100  ask    -
+2026-10-01T17:11:46+0000 mm-bot python[28561]: 2026-10-01 17:11:46 INFO    Dem Arizona Governor       fv 0.883 (ref 0.885) inv    -2 race    -2 | bid 0.860 x100  ask 0.885 x98
+2026-10-01T17:11:47+0000 mm-bot python[28561]: 2026-10-01 17:11:47 INFO    Rep Alabama Governor       fv 0.927 (ref 0.927) inv    +0 race    +0 | bid 0.915 x900  ask 0.950 x900
+2026-10-01T17:11:49+0000 mm-bot python[28561]: 2026-10-01 17:11:49 INFO    Dem Alabama Governor       fv 0.073 (ref 0.068) inv    +0 race    +0 | bid 0.050 x900  ask 0.085 x900
+2026-10-01T17:12:32+0000 mm-bot python[28561]: 2026-10-01 17:12:32 INFO    FILL ex 1017  our ask x296 @ 0.52  (fv when quoted 0.5127281951101319)
+2026-10-01T17:12:32+0000 mm-bot python[28561]: 2026-10-01 17:12:32 INFO    FILL ex 1041  our ? x293 @ 0.26  (fv when quoted ?)
+2026-10-01T17:12:32+0000 mm-bot python[28561]: 2026-10-01 17:12:32 INFO    FILL ex 1045  our ? x100 @ 0.6799999999999999  (fv when quoted ?)
+2026-10-01T17:12:32+0000 mm-bot python[28561]: 2026-10-01 17:12:32 INFO    FILL ex 841  our bid x25 @ 0.085  (fv when quoted 0.08428315226252056)
+2026-10-01T17:12:32+0000 mm-bot python[28561]: 2026-10-01 17:12:32 INFO    FILL ex 981  our bid x1400 @ 0.94  (fv when quoted 0.9198000000000002)
+2026-10-01T17:12:32+0000 mm-bot python[28561]: 2026-10-01 17:12:32 INFO    FILL ex 1007  our ask x200 @ 0.265  (fv when quoted 0.26016400051127264)
+2026-10-01T17:12:32+0000 mm-bot python[28561]: 2026-10-01 17:12:32 INFO    FILL ex 889  our ? x227 @ 0.165  (fv when quoted ?)
+2026-10-01T17:12:32+0000 mm-bot python[28561]: 2026-10-01 17:12:32 INFO    FILL ex 960  our ask x34 @ 0.415  (fv when quoted 0.4095)
+2026-10-01T17:12:32+0000 mm-bot python[28561]: 2026-10-01 17:12:32 INFO    FILL ex 843  our ask x3353 @ 0.49  (fv when quoted 0.3763957816377171)
+2026-10-01T17:12:32+0000 mm-bot python[28561]: 2026-10-01 17:12:32 INFO    realtime | account 135935 (locked in orders 35564, detecting) | worst-case loss 10858 | party delta -5885 | priced 53/237 | resting 93
+2026-10-01T17:12:32+0000 mm-bot python[28561]: 2026-10-01 17:12:32 INFO    Dem New Hampshire Senate   fv 0.873 (ref 0.875) inv +2000 race +2000 | bid 0.795 x515  ask 0.860 x2000
+2026-10-01T17:12:36+0000 mm-bot python[28561]: 2026-10-01 17:12:36 INFO    Dem Wyoming Senate         fv   -   (ref 0.025) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:12:37+0000 mm-bot python[28561]: 2026-10-01 17:12:37 INFO    Dem Tennessee Senate       fv   -   (ref 0.019) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:12:38+0000 mm-bot python[28561]: 2026-10-01 17:12:38 INFO    Dem Minnesota Senate       fv 0.897 (ref 0.905) inv    +0 race    +0 | bid 0.880 x100  ask 0.905 x100
+2026-10-01T17:12:38+0000 mm-bot python[28561]: 2026-10-01 17:12:38 INFO    Dem Kansas Senate          fv 0.291 (ref 0.285) inv  -100 race  +200 | bid 0.265 x100  ask 0.305 x100
+2026-10-01T17:12:38+0000 mm-bot python[28561]: 2026-10-01 17:12:38 INFO    Rep WI-03 House race       fv 0.259 (ref 0.255) inv    -7 race   +93 | bid 0.250 x400  ask 0.275 x400
+2026-10-01T17:12:40+0000 mm-bot python[28561]: 2026-10-01 17:12:40 INFO    Dem MN-01 House race       fv   -   (ref 0.230) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:12:40+0000 mm-bot python[28561]: 2026-10-01 17:12:40 INFO    Rep FL-22 House race       fv 0.488 (ref 0.485) inv  -100 race  +196 | bid 0.475 x1102 ask 0.500 x1350
+2026-10-01T17:12:41+0000 mm-bot python[28561]: 2026-10-01 17:12:41 INFO    Dem FL-22 House race       fv 0.512 (ref 0.505) inv  -296 race  -196 | bid 0.500 x796  ask 0.525 x1250
+2026-10-01T17:12:45+0000 mm-bot python[28561]: 2026-10-01 17:12:45 INFO    Rep FL-09 House race       fv   -   (ref 0.685) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:12:46+0000 mm-bot python[28561]: 2026-10-01 17:12:46 INFO    Dem AL-02 House race       fv   -   (ref 0.265) inv  +100 race  +200 | bid    -        ask    -
+2026-10-01T17:12:47+0000 mm-bot python[28561]: 2026-10-01 17:12:47 INFO    Rep Vermont Governor       fv 0.829 (ref 0.835) inv   +42 race   +42 | bid 0.820 x1950 ask 0.845 x1950
+2026-10-01T17:12:47+0000 mm-bot python[28561]: 2026-10-01 17:12:47 INFO    Dem Connecticut Governor   fv   -   (ref 0.966) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:12:48+0000 mm-bot python[28561]: 2026-10-01 17:12:48 INFO    Rep South Dakota Senate    fv 0.920 (ref 0.917) inv  -578 race  -578 | bid 0.920 x678  ask 0.955 x1400
+2026-10-01T17:12:48+0000 mm-bot python[28561]: 2026-10-01 17:12:48 INFO    Dem Oregon Senate          fv   -   (ref 0.981) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:12:49+0000 mm-bot python[28561]: 2026-10-01 17:12:49 INFO    Dem New Jersey Senate      fv   -   (ref 0.972) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:12:51+0000 mm-bot python[28561]: 2026-10-01 17:12:51 INFO    Rep Maine Senate           fv 0.409 (ref 0.405) inv  +100 race  +700 | bid 0.380 x2000 ask 0.415 x1129
+2026-10-01T17:12:52+0000 mm-bot python[28561]: 2026-10-01 17:12:52 INFO    Rep Illinois Senate        fv   -   (ref 0.024) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:13:12+0000 mm-bot python[28561]: 2026-10-01 17:13:12 INFO    Dem PA-07 House race       fv   -   (ref 0.845) inv  +200 race  +400 | bid    -        ask    -
+2026-10-01T17:13:23+0000 mm-bot python[28561]: 2026-10-01 17:13:23 INFO    Rep NE-02 House race       fv 0.083 (ref 0.086) inv    +0 race    +0 | bid 0.075 x100  ask 0.100 x100
+2026-10-01T17:13:23+0000 mm-bot python[28561]: 2026-10-01 17:13:23 INFO    Dem KY-04 House race       fv 0.027 (ref 0.023) inv    +0 race    +0 | bid 0.010 x100  ask    -
+2026-10-01T17:13:33+0000 mm-bot python[28561]: 2026-10-01 17:13:33 INFO    Dem FL-09 House race       fv   -   (ref 0.295) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:13:33+0000 mm-bot python[28561]: 2026-10-01 17:13:33 INFO    Rep Illinois Governor      fv 0.025 (ref 0.024) inv    +0 race    +0 | bid 0.020 x100  ask    -
+2026-10-01T17:13:33+0000 mm-bot python[28561]: 2026-10-01 17:13:33 INFO    Dem Idaho Governor         fv 0.027 (ref 0.022) inv    +0 race    +0 | bid 0.010 x100  ask    -
+2026-10-01T17:13:49+0000 mm-bot python[28561]: 2026-10-01 17:13:49 INFO    Rep Connecticut Governor   fv 0.028 (ref 0.025) inv    +0 race    +0 | bid 0.020 x100  ask    -
+2026-10-01T17:13:49+0000 mm-bot python[28561]: 2026-10-01 17:13:49 INFO    Rep Arizona Governor       fv 0.112 (ref 0.105) inv    +0 race    +2 | bid 0.105 x100  ask 0.130 x100
+2026-10-01T17:14:06+0000 mm-bot python[28561]: 2026-10-01 17:14:06 INFO    Dem Arizona Governor       fv 0.888 (ref 0.885) inv    -2 race    -2 | bid 0.865 x100  ask 0.895 x100
+2026-10-01T17:14:31+0000 mm-bot python[28561]: 2026-10-01 17:14:31 ERROR   batch of 20 orders failed (409 REQUEST_IN_FLIGHT: An identical request with this idempotency key is still in flight. Retry with the same key after 90 seconds.)
+2026-10-01T17:14:47+0000 mm-bot python[28561]: 2026-10-01 17:14:47 INFO    FILL ex 858  our ask x100 @ 0.17  (fv when quoted 0.14950000000000002)
+2026-10-01T17:14:47+0000 mm-bot python[28561]: 2026-10-01 17:14:47 INFO    FILL ex 889  our ? x6 @ 0.165  (fv when quoted ?)
+2026-10-01T17:14:47+0000 mm-bot python[28561]: 2026-10-01 17:14:47 INFO    FILL ex 1070  our ? x19 @ 0.86  (fv when quoted ?)
+2026-10-01T17:14:47+0000 mm-bot python[28561]: 2026-10-01 17:14:47 INFO    FILL ex 1060  our ? x921 @ 0.02  (fv when quoted ?)
+2026-10-01T17:14:47+0000 mm-bot python[28561]: 2026-10-01 17:14:47 INFO    FILL ex 1045  our ? x100 @ 0.6950000000000001  (fv when quoted ?)
+2026-10-01T17:14:47+0000 mm-bot python[28561]: 2026-10-01 17:14:47 INFO    realtime | account 128838 (locked in orders 28139, detecting) | worst-case loss 12938 | party delta -8920 | priced 61/237 | resting 70
+2026-10-01T17:14:48+0000 mm-bot python[28561]: 2026-10-01 17:14:48 INFO    Rep Alaska Governor        fv   -   inv  -200 race  -300 | bid    -        ask    -
+2026-10-01T17:14:48+0000 mm-bot python[28561]: 2026-10-01 17:14:48 INFO    Rep Tennessee Senate       fv 0.972 (ref 0.972) inv    +0 race    +0 | bid    -        ask 0.995 x1150
+2026-10-01T17:14:48+0000 mm-bot python[28561]: 2026-10-01 17:14:48 INFO    Dem Kansas Senate          fv 0.291 (ref 0.285) inv  -100 race  +200 | bid 0.265 x100  ask 0.305 x100
+2026-10-01T17:14:48+0000 mm-bot python[28561]: 2026-10-01 17:14:48 INFO    Rep WI-03 House race       fv 0.259 (ref 0.255) inv    -7 race   +93 | bid 0.250 x400  ask 0.275 x400
+2026-10-01T17:14:48+0000 mm-bot python[28561]: 2026-10-01 17:14:48 INFO    Rep MI-10 House race       fv 0.346 (ref 0.345) inv    +0 race    +0 | bid 0.345 x100  ask 0.370 x450
+2026-10-01T17:14:49+0000 mm-bot python[28561]: 2026-10-01 17:14:49 INFO    Dem MI-10 House race       fv 0.653 (ref 0.655) inv    +0 race    +0 | bid 0.630 x100  ask 0.655 x100
+2026-10-01T17:14:49+0000 mm-bot python[28561]: 2026-10-01 17:14:49 INFO    Rep FL-22 House race       fv 0.488 (ref 0.485) inv  -100 race  +196 | bid 0.480 x600  ask 0.505 x1350
+2026-10-01T17:14:49+0000 mm-bot python[28561]: 2026-10-01 17:14:49 INFO    Dem FL-22 House race       fv 0.512 (ref 0.505) inv  -296 race  -196 | bid 0.495 x1250 ask 0.520 x1206
+2026-10-01T17:14:49+0000 mm-bot python[28561]: 2026-10-01 17:14:49 INFO    Rep FL-09 House race       fv 0.690 (ref 0.685) inv    +0 race    +0 | bid 0.685 x100  ask 0.710 x950
+2026-10-01T17:14:49+0000 mm-bot python[28561]: 2026-10-01 17:14:49 INFO    Dem AL-02 House race       fv 0.261 (ref 0.265) inv  -100 race    +0 | bid 0.240 x1650 ask    -
+2026-10-01T17:14:49+0000 mm-bot python[28561]: 2026-10-01 17:14:49 INFO    Rep Vermont Governor       fv 0.829 (ref 0.835) inv   +42 race   +42 | bid 0.825 x1689 ask 0.850 x1950
+2026-10-01T17:14:49+0000 mm-bot python[28561]: 2026-10-01 17:14:49 INFO    Rep Hawaii Governor        fv 0.022 (ref 0.018) inv    +0 race    +0 | bid 0.020 x100  ask    -
+2026-10-01T17:14:49+0000 mm-bot python[28561]: 2026-10-01 17:14:49 INFO    Dem Florida Governor       fv   -   (ref 0.215) inv -2164 race -2164 | bid    -        ask    -
+2026-10-01T17:14:49+0000 mm-bot python[28561]: 2026-10-01 17:14:49 INFO    Rep South Dakota Senate    fv 0.920 (ref 0.917) inv  -578 race  -578 | bid 0.920 x678  ask 0.960 x1400
+2026-10-01T17:14:49+0000 mm-bot python[28561]: 2026-10-01 17:14:49 INFO    Rep Maine Senate           fv 0.409 (ref 0.405) inv   +66 race  +666 | bid 0.385 x2000 ask 0.415 x1095
+2026-10-01T17:14:49+0000 mm-bot python[28561]: 2026-10-01 17:14:49 INFO    Rep Illinois Senate        fv 0.025 (ref 0.024) inv    +0 race    +0 | bid 0.010 x1050 ask    -
+2026-10-01T17:14:49+0000 mm-bot python[28561]: 2026-10-01 17:14:49 INFO    Rep NE-02 House race       fv 0.083 (ref 0.086) inv    +0 race    +0 | bid 0.080 x100  ask 0.105 x100
+2026-10-01T17:14:49+0000 mm-bot python[28561]: 2026-10-01 17:14:49 INFO    Dem KY-04 House race       fv 0.027 (ref 0.023) inv    +0 race    +0 | bid 0.005 x100  ask    -
+2026-10-01T17:14:52+0000 mm-bot python[28561]: 2026-10-01 17:14:52 INFO    Dem CA-22 House race       fv 0.907 inv  +100 race  +142 | bid 0.880 x100  ask 0.920 x100
+2026-10-01T17:14:52+0000 mm-bot python[28561]: 2026-10-01 17:14:52 INFO    Dem Oregon Governor        fv 0.800 (ref 0.805) inv    +0 race    +0 | bid 0.775 x100  ask 0.805 x100
+2026-10-01T17:14:52+0000 mm-bot python[28561]: 2026-10-01 17:14:52 INFO    Rep New York Governor      fv 0.048 (ref 0.045) inv    +0 race    +0 | bid 0.045 x100  ask    -
+2026-10-01T17:14:52+0000 mm-bot python[28561]: 2026-10-01 17:14:52 INFO    Dem New York Governor      fv 0.952 (ref 0.955) inv    +0 race    +0 | bid    -        ask 0.955 x100
+2026-10-01T17:14:52+0000 mm-bot python[28561]: 2026-10-01 17:14:52 INFO    Rep Nebraska Governor      fv 0.914 (ref 0.905) inv    +0 race    +0 | bid 0.910 x100  ask 0.935 x100
+2026-10-01T17:14:52+0000 mm-bot python[28561]: 2026-10-01 17:14:52 INFO    Dem Nebraska Governor      fv 0.086 (ref 0.085) inv    +0 race    +0 | bid 0.065 x100  ask 0.090 x100
+2026-10-01T17:14:52+0000 mm-bot python[28561]: 2026-10-01 17:14:52 INFO    Rep Maine Governor         fv 0.039 (ref 0.036) inv    +0 race    +0 | bid 0.035 x100  ask    -
+2026-10-01T17:14:52+0000 mm-bot python[28561]: 2026-10-01 17:14:52 INFO    Dem Maine Governor         fv 0.961 (ref 0.960) inv    +0 race    +0 | bid    -        ask 0.965 x100
+2026-10-01T17:14:52+0000 mm-bot python[28561]: 2026-10-01 17:14:52 INFO    Rep Illinois Governor      fv 0.025 (ref 0.024) inv    +0 race    +0 | bid 0.020 x100  ask    -
+2026-10-01T17:14:52+0000 mm-bot python[28561]: 2026-10-01 17:14:52 INFO    Dem Idaho Governor         fv 0.027 (ref 0.022) inv    +0 race    +0 | bid 0.005 x100  ask    -
+2026-10-01T17:14:52+0000 mm-bot python[28561]: 2026-10-01 17:14:52 INFO    Rep Iowa Governor          fv 0.150 (ref 0.145) inv  -100 race  -100 | bid 0.150 x100  ask 0.175 x100
+2026-10-01T17:14:52+0000 mm-bot python[28561]: 2026-10-01 17:14:52 INFO    Rep Connecticut Governor   fv 0.028 (ref 0.025) inv    +0 race    +0 | bid 0.025 x100  ask    -
+2026-10-01T17:14:55+0000 mm-bot python[28561]: 2026-10-01 17:14:55 INFO    Dem California Governor    fv   -   inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:14:58+0000 mm-bot python[28561]: 2026-10-01 17:14:58 INFO    Rep Arizona Governor       fv 0.112 (ref 0.105) inv    +0 race    +2 | bid 0.110 x100  ask 0.135 x100
+2026-10-01T17:15:04+0000 mm-bot python[28561]: 2026-10-01 17:15:04 INFO    Rep U.S. Senate            fv 0.377 (ref 0.375) inv -6479 race -6479 | bid 0.395 x10000 ask 0.595 x3521
+2026-10-01T17:15:05+0000 mm-bot python[28561]: 2026-10-01 17:15:05 INFO    Dem U.S. Senate            fv 0.623 (ref 0.625) inv    +0 race +6479 | bid 0.405 x100  ask 0.625 x100
+2026-10-01T17:15:05+0000 mm-bot python[28561]: 2026-10-01 17:15:05 INFO    Dem U.S. House             fv   -   (ref 0.925) inv  +832 race  +807 | bid    -        ask    -
+2026-10-01T17:15:22+0000 mm-bot python[28561]: 2026-10-01 17:15:22 ERROR   batch of 20 orders failed (409 REQUEST_IN_FLIGHT: An identical request with this idempotency key is still in flight. Retry with the same key after 90 seconds.)
+2026-10-01T17:15:45+0000 mm-bot python[28561]: 2026-10-01 17:15:45 ERROR   batch of 20 orders failed (409 REQUEST_IN_FLIGHT: An identical request with this idempotency key is still in flight. Retry with the same key after 90 seconds.)
+2026-10-01T17:16:05+0000 mm-bot python[28561]: 2026-10-01 17:16:05 INFO    FILL ex 1070  our ? x721 @ 0.86  (fv when quoted ?)
+2026-10-01T17:16:05+0000 mm-bot python[28561]: 2026-10-01 17:16:05 INFO    FILL ex 960  our ask x144 @ 0.415  (fv when quoted 0.4095)
+2026-10-01T17:16:05+0000 mm-bot python[28561]: 2026-10-01 17:16:05 INFO    FILL ex 1067  our bid x100 @ 0.305  (fv when quoted 0.3125)
+2026-10-01T17:16:05+0000 mm-bot python[28561]: 2026-10-01 17:16:05 INFO    realtime | account 125605 (locked in orders 24849, detecting) | worst-case loss 12175 | party delta -7222 | priced 59/237 | resting 69
+2026-10-01T17:16:06+0000 mm-bot python[28561]: 2026-10-01 17:16:06 INFO    Dem Oklahoma Senate        fv   -   (ref 0.022) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:16:08+0000 mm-bot python[28561]: 2026-10-01 17:16:08 INFO    Dem New Hampshire Senate   fv 0.871 (ref 0.875) inv +1260 race +1260 | bid 0.815 x1193 ask 0.865 x1360
+2026-10-01T17:16:08+0000 mm-bot python[28561]: 2026-10-01 17:16:08 INFO    Rep Alaska Senate          fv 0.315 inv    +0 race    +0 | bid 0.305 x100  ask 0.335 x100
+2026-10-01T17:16:08+0000 mm-bot python[28561]: 2026-10-01 17:16:08 INFO    Dem NH-01 House race       fv 0.938 (ref 0.946) inv    +0 race    +0 | bid 0.920 x100  ask 0.950 x100
+2026-10-01T17:16:09+0000 mm-bot python[28561]: 2026-10-01 17:16:09 INFO    Rep Massachusetts Governor fv 0.036 (ref 0.029) inv  +921 race  +921 | bid 0.005 x2000 ask 0.060 x921
+2026-10-01T17:16:09+0000 mm-bot python[28561]: 2026-10-01 17:16:09 INFO    Dem Massachusetts Governor fv 0.964 (ref 0.962) inv    +0 race  -921 | bid    -        ask 0.995 x1550
+2026-10-01T17:16:11+0000 mm-bot python[28561]: 2026-10-01 17:16:11 INFO    Rep Virginia Senate        fv   -   (ref 0.019) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:16:12+0000 mm-bot python[28561]: 2026-10-01 17:16:12 INFO    Dem Minnesota Senate       fv   -   (ref 0.905) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:16:13+0000 mm-bot python[28561]: 2026-10-01 17:16:13 INFO    Rep WI-01 House race       fv   -   (ref 0.665) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:16:13+0000 mm-bot python[28561]: 2026-10-01 17:16:13 INFO    Rep MN-05 House race       fv 0.014 (ref 0.012) inv    +0 race    +0 | bid 0.010 x100  ask    -
+2026-10-01T17:16:13+0000 mm-bot python[28561]: 2026-10-01 17:16:13 INFO    Rep PA-07 House race       fv   -   (ref 0.140) inv  -200 race  -400 | bid    -        ask    -
+2026-10-01T17:16:13+0000 mm-bot python[28561]: 2026-10-01 17:16:13 INFO    Dem NY-17 House race       fv 0.635 (ref 0.635) inv  -100 race  -300 | bid 0.625 x100  ask 0.650 x100
+2026-10-01T17:16:20+0000 mm-bot python[28561]: 2026-10-01 17:16:20 INFO    Rep MT-01 House race       fv   -   (ref 0.675) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:16:21+0000 mm-bot python[28561]: 2026-10-01 17:16:21 INFO    Rep FL-13 House race       fv   -   (ref 0.755) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:16:21+0000 mm-bot python[28561]: 2026-10-01 17:16:21 INFO    Dem South Carolina Governo fv 0.054 (ref 0.048) inv    +0 race    +0 | bid 0.035 x100  ask 0.060 x100
+2026-10-01T17:16:21+0000 mm-bot python[28561]: 2026-10-01 17:16:21 INFO    Rep Pennsylvania Governor  fv 0.029 (ref 0.028) inv    +0 race    +0 | bid 0.025 x100  ask    -
+2026-10-01T17:16:21+0000 mm-bot python[28561]: 2026-10-01 17:16:21 INFO    Dem Pennsylvania Governor  fv 0.971 (ref 0.970) inv    +0 race    +0 | bid    -        ask 0.975 x100
+2026-10-01T17:16:21+0000 mm-bot python[28561]: 2026-10-01 17:16:21 INFO    Rep Oregon Governor        fv 0.203 (ref 0.195) inv    +0 race    +0 | bid 0.195 x100  ask 0.235 x100
+2026-10-01T17:16:21+0000 mm-bot python[28561]: 2026-10-01 17:16:21 INFO    Dem U.S. Senate            fv   -   (ref 0.625) inv    +0 race +6479 | bid    -        ask    -
+2026-10-01T17:16:37+0000 mm-bot python[28561]: 2026-10-01 17:16:37 ERROR   batch of 16 orders failed (409 REQUEST_IN_FLIGHT: An identical request with this idempotency key is still in flight. Retry with the same key after 90 seconds.)
+2026-10-01T17:16:49+0000 mm-bot python[28561]: 2026-10-01 17:16:49 INFO    FILL ex 1018  our ? x1350 @ 0.5  (fv when quoted ?)
+2026-10-01T17:16:49+0000 mm-bot python[28561]: 2026-10-01 17:16:49 INFO    FILL ex 1070  our ? x17 @ 0.86  (fv when quoted ?)
+2026-10-01T17:16:49+0000 mm-bot python[28561]: 2026-10-01 17:16:49 INFO    FILL ex 1041  our ? x400 @ 0.725  (fv when quoted ?)
+2026-10-01T17:16:49+0000 mm-bot python[28561]: 2026-10-01 17:16:49 INFO    FILL ex 1041  our ? x400 @ 0.725  (fv when quoted ?)
+2026-10-01T17:16:49+0000 mm-bot python[28561]: 2026-10-01 17:16:49 INFO    FILL ex 1022  our ? x100 @ 0.345  (fv when quoted ?)
+2026-10-01T17:16:49+0000 mm-bot python[28561]: 2026-10-01 17:16:49 INFO    FILL ex 1067  our ? x100 @ 0.665  (fv when quoted ?)
+2026-10-01T17:16:49+0000 mm-bot python[28561]: 2026-10-01 17:16:49 INFO    FILL ex 960  our ask x951 @ 0.415  (fv when quoted 0.4095)
+2026-10-01T17:16:49+0000 mm-bot python[28561]: 2026-10-01 17:16:49 INFO    realtime | account 123001 (locked in orders 22605, detecting) | worst-case loss 13190 | party delta -9255 | priced 59/237 | resting 57
+2026-10-01T17:16:49+0000 mm-bot python[28561]: 2026-10-01 17:16:49 INFO    Rep Alaska Governor        fv 0.255 inv  -200 race  -300 | bid 0.250 x100  ask 0.285 x100
+2026-10-01T17:16:52+0000 mm-bot python[28561]: 2026-10-01 17:16:52 INFO    Rep WI-03 House race       fv 0.259 (ref 0.255) inv  -807 race  -707 | bid 0.265 x400  ask 0.300 x400
+2026-10-01T17:16:52+0000 mm-bot python[28561]: 2026-10-01 17:16:52 INFO    Rep MI-10 House race       fv 0.346 (ref 0.345) inv  +100 race  +100 | bid 0.340 x450  ask 0.365 x450
+2026-10-01T17:16:53+0000 mm-bot python[28561]: 2026-10-01 17:16:53 INFO    Dem FL-22 House race       fv 0.508 (ref 0.505) inv  -296 race +1154 | bid 0.450 x1250 ask 0.510 x204
+2026-10-01T17:16:54+0000 mm-bot python[28561]: 2026-10-01 17:16:54 INFO    Dem FL-13 House race       fv 0.244 (ref 0.235) inv    +0 race    +0 | bid 0.220 x700  ask 0.270 x700
+2026-10-01T17:16:54+0000 mm-bot python[28561]: 2026-10-01 17:16:54 INFO    Rep FL-09 House race       fv 0.690 (ref 0.685) inv    +0 race    +0 | bid 0.685 x100  ask 0.710 x950
+2026-10-01T17:16:54+0000 mm-bot python[28561]: 2026-10-01 17:16:54 INFO    Dem AL-02 House race       fv 0.261 (ref 0.265) inv  -100 race    +0 | bid 0.240 x1650 ask    -
+2026-10-01T17:16:57+0000 mm-bot python[28561]: 2026-10-01 17:16:57 INFO    Rep Wyoming Governor       fv 0.966 (ref 0.970) inv    +0 race    +0 | bid    -        ask 0.990 x800
+2026-10-01T17:16:57+0000 mm-bot python[28561]: 2026-10-01 17:16:57 INFO    Dem Wyoming Governor       fv 0.034 (ref 0.029) inv    +0 race    +0 | bid 0.010 x400  ask    -
+2026-10-01T17:16:57+0000 mm-bot python[28561]: 2026-10-01 17:16:57 INFO    Rep Vermont Governor       fv 0.829 (ref 0.835) inv   +42 race   +42 | bid 0.825 x1689 ask 0.850 x1950
+2026-10-01T17:16:57+0000 mm-bot python[28561]: 2026-10-01 17:16:57 INFO    Rep Hawaii Governor        fv 0.022 (ref 0.018) inv    +0 race    +0 | bid 0.020 x100  ask    -
+2026-10-01T17:16:57+0000 mm-bot python[28561]: 2026-10-01 17:16:57 INFO    Rep South Dakota Senate    fv 0.920 (ref 0.917) inv  -578 race  -578 | bid 0.920 x678  ask 0.960 x1400
+2026-10-01T17:16:58+0000 mm-bot python[28561]: 2026-10-01 17:16:58 INFO    Rep Maine Senate           fv 0.423 (ref 0.425) inv   -78 race  +522 | bid 0.405 x2000 ask 0.430 x431
+2026-10-01T17:16:58+0000 mm-bot python[28561]: 2026-10-01 17:16:58 INFO    Rep Illinois Senate        fv 0.025 (ref 0.024) inv    +0 race    +0 | bid 0.010 x1050 ask    -
+2026-10-01T17:16:58+0000 mm-bot python[28561]: 2026-10-01 17:16:58 INFO    Dem Nebraska Governor      fv 0.086 (ref 0.085) inv    +0 race    +0 | bid 0.065 x100  ask 0.090 x100
+2026-10-01T17:16:58+0000 mm-bot python[28561]: 2026-10-01 17:16:58 INFO    Rep Maine Governor         fv 0.039 (ref 0.036) inv    +0 race    +0 | bid 0.035 x100  ask    -
+2026-10-01T17:16:58+0000 mm-bot python[28561]: 2026-10-01 17:16:58 INFO    Dem Maine Governor         fv 0.961 (ref 0.960) inv    +0 race    +0 | bid    -        ask 0.965 x100
+2026-10-01T17:16:58+0000 mm-bot python[28561]: 2026-10-01 17:16:58 INFO    Rep Illinois Governor      fv 0.024 (ref 0.022) inv    +0 race    +0 | bid 0.020 x100  ask    -
+2026-10-01T17:16:58+0000 mm-bot python[28561]: 2026-10-01 17:16:58 INFO    Dem Idaho Governor         fv 0.029 (ref 0.024) inv    +0 race    +0 | bid 0.005 x100  ask    -
+2026-10-01T17:16:58+0000 mm-bot python[28561]: 2026-10-01 17:16:58 INFO    Rep Iowa Governor          fv 0.150 (ref 0.145) inv  -100 race  -100 | bid 0.150 x100  ask 0.175 x100
+2026-10-01T17:16:58+0000 mm-bot python[28561]: 2026-10-01 17:16:58 INFO    Rep Arizona Governor       fv 0.112 (ref 0.105) inv    +0 race    +2 | bid 0.110 x100  ask 0.135 x100
+2026-10-01T17:16:58+0000 mm-bot python[28561]: 2026-10-01 17:16:58 INFO    Rep U.S. Senate            fv 0.378 (ref 0.375) inv -6479 race -6479 | bid 0.395 x10000 ask 0.595 x3521
+2026-10-01T17:17:27+0000 mm-bot python[28561]: 2026-10-01 17:17:27 ERROR   batch of 20 orders failed (409 REQUEST_IN_FLIGHT: An identical request with this idempotency key is still in flight. Retry with the same key after 90 seconds.)
+2026-10-01T17:17:32+0000 mm-bot python[28561]: 2026-10-01 17:17:32 INFO    order on 843 traded 3792 immediately
+2026-10-01T17:17:59+0000 mm-bot python[28561]: 2026-10-01 17:17:59 INFO    FILL ex 843  our bid x3692 @ 0.395  (fv when quoted 0.378)
+2026-10-01T17:17:59+0000 mm-bot python[28561]: 2026-10-01 17:17:59 INFO    FILL ex 843  our bid x100 @ 0.395  (fv when quoted 0.378)
+2026-10-01T17:17:59+0000 mm-bot python[28561]: 2026-10-01 17:17:59 INFO    FILL ex 843  our bid x250 @ 0.395  (fv when quoted 0.378)
+2026-10-01T17:17:59+0000 mm-bot python[28561]: 2026-10-01 17:17:59 INFO    FILL ex 843  our bid x20 @ 0.395  (fv when quoted 0.378)
+2026-10-01T17:17:59+0000 mm-bot python[28561]: 2026-10-01 17:17:59 INFO    FILL ex 843  our bid x3988 @ 0.395  (fv when quoted 0.378)
+2026-10-01T17:17:59+0000 mm-bot python[28561]: 2026-10-01 17:17:59 INFO    FILL ex 843  our bid x500 @ 0.395  (fv when quoted 0.378)
+2026-10-01T17:17:59+0000 mm-bot python[28561]: 2026-10-01 17:17:59 INFO    FILL ex 1017  our ? x204 @ 0.49  (fv when quoted ?)
+2026-10-01T17:17:59+0000 mm-bot python[28561]: 2026-10-01 17:17:59 INFO    FILL ex 843  our bid x500 @ 0.395  (fv when quoted 0.378)
+2026-10-01T17:17:59+0000 mm-bot python[28561]: 2026-10-01 17:17:59 INFO    FILL ex 843  our bid x5 @ 0.395  (fv when quoted 0.378)
+2026-10-01T17:17:59+0000 mm-bot python[28561]: 2026-10-01 17:17:59 INFO    realtime | account 125008 (locked in orders 24640, detecting) | worst-case loss 10752 | party delta -6244 | priced 61/237 | resting 71
+2026-10-01T17:18:00+0000 mm-bot python[28561]: 2026-10-01 17:18:00 INFO    Dem New Hampshire Senate   fv 0.868 (ref 0.875) inv +1243 race +1243 | bid 0.810 x1226 ask 0.855 x1343
+2026-10-01T17:18:00+0000 mm-bot python[28561]: 2026-10-01 17:18:00 INFO    Rep Alaska Senate          fv 0.328 inv  -100 race  -100 | bid 0.315 x100  ask 0.350 x100
+2026-10-01T17:18:01+0000 mm-bot python[28561]: 2026-10-01 17:18:01 INFO    Dem Kansas Senate          fv 0.291 (ref 0.285) inv  -200 race  +100 | bid 0.270 x100  ask 0.305 x100
+2026-10-01T17:18:05+0000 mm-bot python[28561]: 2026-10-01 17:18:05 INFO    Dem MI-10 House race       fv   -   (ref 0.655) inv    +0 race  -100 | bid    -        ask    -
+2026-10-01T17:18:05+0000 mm-bot python[28561]: 2026-10-01 17:18:05 INFO    Rep FL-22 House race       fv 0.488 (ref 0.485) inv -1450 race -1154 | bid 0.485 x1350 ask 0.540 x1350
+2026-10-01T17:18:06+0000 mm-bot python[28561]: 2026-10-01 17:18:06 INFO    Dem NY-17 House race       fv 0.635 (ref 0.635) inv  -100 race  -300 | bid 0.625 x100  ask 0.650 x100
+2026-10-01T17:18:06+0000 mm-bot python[28561]: 2026-10-01 17:18:06 INFO    Rep NE-02 House race       fv 0.083 (ref 0.086) inv    +0 race    +0 | bid 0.075 x100  ask 0.100 x100
+2026-10-01T17:18:06+0000 mm-bot python[28561]: 2026-10-01 17:18:06 INFO    Rep MT-01 House race       fv 0.675 (ref 0.675) inv    +0 race    +0 | bid 0.670 x100  ask 0.695 x100
+2026-10-01T17:18:11+0000 mm-bot python[28561]: 2026-10-01 17:18:11 INFO    Dem CA-22 House race       fv   -   inv  +100 race  +142 | bid    -        ask    -
+2026-10-01T17:18:12+0000 mm-bot python[28561]: 2026-10-01 17:18:12 INFO    Rep AZ-06 House race       fv 0.173 (ref 0.175) inv  +282 race  +182 | bid 0.160 x750  ask 0.185 x750
+2026-10-01T17:18:12+0000 mm-bot python[28561]: 2026-10-01 17:18:12 INFO    Dem AZ-01 House race       fv 0.790 (ref 0.795) inv    +0 race    +0 | bid 0.770 x100  ask 0.795 x100
+2026-10-01T17:18:12+0000 mm-bot python[28561]: 2026-10-01 17:18:12 INFO    Dem South Dakota Governor  fv 0.033 (ref 0.027) inv    +0 race    +0 | bid 0.015 x100  ask    -
+2026-10-01T17:18:12+0000 mm-bot python[28561]: 2026-10-01 17:18:12 INFO    Rep South Carolina Governo fv 0.946 (ref 0.945) inv    +0 race    +0 | bid 0.940 x100  ask 0.965 x100
+2026-10-01T17:18:12+0000 mm-bot python[28561]: 2026-10-01 17:18:12 INFO    Dem South Carolina Governo fv 0.054 (ref 0.048) inv    +0 race    +0 | bid 0.035 x100  ask 0.060 x100
+2026-10-01T17:18:12+0000 mm-bot python[28561]: 2026-10-01 17:18:12 INFO    Rep Pennsylvania Governor  fv 0.029 (ref 0.028) inv    +0 race    +0 | bid 0.025 x100  ask    -
+2026-10-01T17:18:12+0000 mm-bot python[28561]: 2026-10-01 17:18:12 INFO    Dem Pennsylvania Governor  fv 0.971 (ref 0.970) inv    +0 race    +0 | bid    -        ask 0.975 x100
+2026-10-01T17:18:12+0000 mm-bot python[28561]: 2026-10-01 17:18:12 INFO    Rep Oregon Governor        fv 0.203 (ref 0.195) inv    +0 race    +0 | bid 0.195 x100  ask 0.235 x100
+2026-10-01T17:18:12+0000 mm-bot python[28561]: 2026-10-01 17:18:12 INFO    Dem Oklahoma Governor      fv 0.074 (ref 0.075) inv    +0 race    +0 | bid 0.055 x100  ask 0.080 x100
+2026-10-01T17:18:21+0000 mm-bot python[28561]: 2026-10-01 17:18:21 INFO    Rep New York Governor      fv 0.048 (ref 0.045) inv    +0 race    +0 | bid 0.040 x100  ask    -
+2026-10-01T17:18:22+0000 mm-bot python[28561]: 2026-10-01 17:18:22 INFO    Dem New York Governor      fv 0.952 (ref 0.955) inv    +0 race    +0 | bid    -        ask 0.960 x100
+2026-10-01T17:18:22+0000 mm-bot python[28561]: 2026-10-01 17:18:22 INFO    Dem Nevada Governor        fv 0.477 (ref 0.485) inv    +0 race  +150 | bid 0.455 x100  ask 0.480 x100
+2026-10-01T17:18:22+0000 mm-bot python[28561]: 2026-10-01 17:18:22 INFO    Rep Colorado Governor      fv   -   (ref 0.028) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:18:22+0000 mm-bot python[28561]: 2026-10-01 17:18:22 INFO    Dem Colorado Governor      fv   -   (ref 0.966) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:18:28+0000 mm-bot python[28561]: 2026-10-01 17:18:28 INFO    Rep Arizona Governor       fv 0.112 (ref 0.105) inv    +0 race    +2 | bid 0.105 x100  ask 0.130 x100
+2026-10-01T17:18:28+0000 mm-bot python[28561]: 2026-10-01 17:18:28 INFO    Dem Arkansas Governor      fv 0.034 (ref 0.028) inv    +0 race    +0 | bid 0.015 x100  ask    -
+2026-10-01T17:18:28+0000 mm-bot python[28561]: 2026-10-01 17:18:28 INFO    Dem Alabama Governor       fv   -   (ref 0.068) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:18:34+0000 mm-bot python[28561]: 2026-10-01 17:18:34 INFO    Rep U.S. Senate            fv 0.378 (ref 0.375) inv -2417 race -2417 | bid 0.395 x10000 ask 0.470 x7583
+2026-10-01T17:18:41+0000 mm-bot python[28561]: 2026-10-01 17:18:41 INFO    realtime: missed message(s) on user:6c996168-fbca-415e-bb62-04b8bcaa95f3 - full resync next cycle
+2026-10-01T17:18:41+0000 mm-bot python[28561]: 2026-10-01 17:18:41 INFO    realtime: missed message(s) on user:6c996168-fbca-415e-bb62-04b8bcaa95f3 - full resync next cycle
+2026-10-01T17:18:43+0000 mm-bot python[28561]: 2026-10-01 17:18:43 INFO    realtime: missed message(s) on user:6c996168-fbca-415e-bb62-04b8bcaa95f3 - full resync next cycle
+2026-10-01T17:18:57+0000 mm-bot python[28561]: 2026-10-01 17:18:57 INFO    order on 843 traded 6063 immediately
+2026-10-01T17:19:35+0000 mm-bot python[28561]: 2026-10-01 17:19:35 INFO    FILL ex 843  our bid x5 @ 0.395  (fv when quoted 0.378)
+2026-10-01T17:19:35+0000 mm-bot python[28561]: 2026-10-01 17:19:35 INFO    FILL ex 843  our bid x250 @ 0.395  (fv when quoted 0.378)
+2026-10-01T17:19:35+0000 mm-bot python[28561]: 2026-10-01 17:19:35 INFO    FILL ex 843  our bid x5 @ 0.395  (fv when quoted 0.378)
+2026-10-01T17:19:35+0000 mm-bot python[28561]: 2026-10-01 17:19:35 INFO    FILL ex 843  our bid x452 @ 0.395  (fv when quoted 0.378)
+2026-10-01T17:19:35+0000 mm-bot python[28561]: 2026-10-01 17:19:35 INFO    FILL ex 843  our bid x233 @ 0.395  (fv when quoted 0.378)
+2026-10-01T17:19:35+0000 mm-bot python[28561]: 2026-10-01 17:19:35 INFO    FILL ex 868  our ? x82 @ 0.91  (fv when quoted ?)
+2026-10-01T17:19:35+0000 mm-bot python[28561]: 2026-10-01 17:19:35 INFO    FILL ex 843  our bid x3692 @ 0.395  (fv when quoted 0.378)
+2026-10-01T17:19:35+0000 mm-bot python[28561]: 2026-10-01 17:19:35 INFO    FILL ex 843  our bid x4 @ 0.395  (fv when quoted 0.378)
+2026-10-01T17:19:35+0000 mm-bot python[28561]: 2026-10-01 17:19:35 INFO    FILL ex 843  our bid x1000 @ 0.395  (fv when quoted 0.378)
+2026-10-01T17:19:35+0000 mm-bot python[28561]: 2026-10-01 17:19:35 INFO    FILL ex 843  our bid x1000 @ 0.395  (fv when quoted 0.378)
+2026-10-01T17:19:35+0000 mm-bot python[28561]: 2026-10-01 17:19:35 INFO    FILL ex 843  our bid x100 @ 0.395  (fv when quoted 0.378)
+2026-10-01T17:19:35+0000 mm-bot python[28561]: 2026-10-01 17:19:35 INFO    FILL ex 843  our bid x267 @ 0.395  (fv when quoted 0.378)
+2026-10-01T17:19:35+0000 mm-bot python[28561]: 2026-10-01 17:19:35 INFO    FILL ex 843  our bid x250 @ 0.395  (fv when quoted 0.378)
+2026-10-01T17:19:35+0000 mm-bot python[28561]: 2026-10-01 17:19:35 INFO    FILL ex 843  our bid x1616 @ 0.395  (fv when quoted 0.378)
+2026-10-01T17:19:35+0000 mm-bot python[28561]: 2026-10-01 17:19:35 INFO    FILL ex 843  our bid x500 @ 0.395  (fv when quoted 0.378)
+2026-10-01T17:19:35+0000 mm-bot python[28561]: 2026-10-01 17:19:35 INFO    FILL ex 843  our bid x5 @ 0.395  (fv when quoted 0.378)
+2026-10-01T17:19:35+0000 mm-bot python[28561]: 2026-10-01 17:19:35 INFO    FILL ex 843  our bid x1566 @ 0.395  (fv when quoted 0.378)
+2026-10-01T17:19:35+0000 mm-bot python[28561]: 2026-10-01 17:19:35 INFO    realtime | account 123978 (locked in orders 23584, detecting) | worst-case loss 12841 | party delta +6043 | priced 68/237 | resting 87
+2026-10-01T17:19:36+0000 mm-bot python[28561]: 2026-10-01 17:19:36 INFO    Dem New Hampshire Senate   fv 0.868 (ref 0.875) inv +1243 race +1243 | bid 0.825 x1181 ask 0.855 x1343
+2026-10-01T17:19:36+0000 mm-bot python[28561]: 2026-10-01 17:19:36 INFO    Rep Massachusetts Senate   fv 0.019 (ref 0.017) inv    +0 race    +0 | bid 0.005 x950  ask    -
+2026-10-01T17:19:38+0000 mm-bot python[28561]: 2026-10-01 17:19:38 INFO    Rep Alaska Senate          fv 0.328 inv  -100 race  -100 | bid 0.310 x100  ask 0.335 x100
+2026-10-01T17:19:38+0000 mm-bot python[28561]: 2026-10-01 17:19:38 INFO    Dem NH-01 House race       fv 0.938 (ref 0.947) inv    +0 race    +0 | bid 0.930 x100  ask 0.955 x100
+2026-10-01T17:19:39+0000 mm-bot python[28561]: 2026-10-01 17:19:39 INFO    Rep Massachusetts Governor fv 0.036 (ref 0.029) inv  +921 race  +921 | bid 0.005 x2000 ask 0.045 x921
+2026-10-01T17:19:40+0000 mm-bot python[28561]: 2026-10-01 17:19:40 INFO    Rep Alaska Governor        fv 0.255 inv  -200 race  -300 | bid 0.245 x100  ask 0.270 x100
+2026-10-01T17:19:44+0000 mm-bot python[28561]: 2026-10-01 17:19:44 INFO    Rep Tennessee Senate       fv 0.972 (ref 0.972) inv    +0 race    +0 | bid    -        ask 0.980 x1150
+2026-10-01T17:19:45+0000 mm-bot python[28561]: 2026-10-01 17:19:45 INFO    Dem Kansas Senate          fv 0.291 (ref 0.285) inv  -200 race  +100 | bid 0.280 x100  ask 0.305 x100
+2026-10-01T17:19:45+0000 mm-bot python[28561]: 2026-10-01 17:19:45 INFO    Rep WI-03 House race       fv 0.260 (ref 0.255) inv  -807 race  -707 | bid 0.260 x400  ask 0.285 x400
+2026-10-01T17:19:47+0000 mm-bot python[28561]: 2026-10-01 17:19:47 INFO    Rep MN-05 House race       fv 0.015 (ref 0.012) inv    +0 race    +0 | bid 0.005 x100  ask    -
+2026-10-01T17:19:47+0000 mm-bot python[28561]: 2026-10-01 17:19:47 INFO    Dem MN-05 House race       fv 0.985 (ref 0.988) inv    +0 race    +0 | bid    -        ask 0.995 x100
+2026-10-01T17:19:47+0000 mm-bot python[28561]: 2026-10-01 17:19:47 INFO    Rep MN-02 House race       fv 0.052 (ref 0.047) inv    +0 race    +0 | bid 0.035 x100  ask 0.060 x100
+2026-10-01T17:19:47+0000 mm-bot python[28561]: 2026-10-01 17:19:47 INFO    Dem MN-02 House race       fv 0.948 (ref 0.940) inv    +0 race    +0 | bid 0.935 x100  ask 0.965 x100
+2026-10-01T17:19:47+0000 mm-bot python[28561]: 2026-10-01 17:19:47 INFO    Rep MN-01 House race       fv 0.757 (ref 0.755) inv    +0 race    +0 | bid 0.740 x100  ask 0.765 x100
+2026-10-01T17:19:51+0000 mm-bot python[28561]: 2026-10-01 17:19:51 INFO    Rep MI-10 House race       fv 0.346 (ref 0.345) inv  +100 race  +100 | bid 0.325 x450  ask 0.350 x450
+2026-10-01T17:20:04+0000 mm-bot python[28561]: 2026-10-01 17:20:04 INFO    Rep FL-22 House race       fv 0.489 (ref 0.485) inv -1450 race  -950 | bid 0.485 x1350 ask 0.525 x1350
+2026-10-01T17:20:10+0000 mm-bot python[28561]: 2026-10-01 17:20:10 INFO    Dem FL-22 House race       fv 0.511 (ref 0.505) inv  -500 race  +950 | bid 0.475 x1250 ask 0.515 x500
+2026-10-01T17:20:14+0000 mm-bot python[28561]: 2026-10-01 17:20:14 INFO    Rep FL-09 House race       fv 0.690 (ref 0.685) inv    +0 race    +0 | bid 0.670 x950  ask 0.700 x950
+2026-10-01T17:20:14+0000 mm-bot python[28561]: 2026-10-01 17:20:14 INFO    Rep FL-07 House race       fv 0.667 (ref 0.665) inv    +0 race  -206 | bid 0.655 x100  ask 0.680 x100
+2026-10-01T17:20:14+0000 mm-bot python[28561]: 2026-10-01 17:20:14 INFO    Dem AL-02 House race       fv 0.261 (ref 0.265) inv  -100 race    +0 | bid 0.255 x1415 ask 0.280 x1650
+2026-10-01T17:20:14+0000 mm-bot python[28561]: 2026-10-01 17:20:14 INFO    Rep Wyoming Governor       fv 0.966 (ref 0.970) inv    +0 race    +0 | bid    -        ask 0.975 x800
+2026-10-01T17:20:14+0000 mm-bot python[28561]: 2026-10-01 17:20:14 INFO    Dem Wyoming Governor       fv 0.034 (ref 0.029) inv    +0 race    +0 | bid 0.030 x100  ask    -
+2026-10-01T17:20:19+0000 mm-bot python[28561]: 2026-10-01 17:20:19 INFO    Rep Vermont Governor       fv 0.829 (ref 0.835) inv   +42 race   +42 | bid 0.810 x1950 ask 0.840 x972
+2026-10-01T17:20:20+0000 mm-bot python[28561]: 2026-10-01 17:20:20 INFO    Dem Vermont Governor       fv 0.171 (ref 0.170) inv    +0 race   -42 | bid 0.165 x816  ask 0.190 x1950
+2026-10-01T17:20:20+0000 mm-bot python[28561]: 2026-10-01 17:20:20 INFO    Dem Tennessee Governor     fv 0.038 (ref 0.034) inv    +0 race    +0 | bid 0.030 x100  ask    -
+2026-10-01T17:20:20+0000 mm-bot python[28561]: 2026-10-01 17:20:20 INFO    Rep Hawaii Governor        fv 0.022 (ref 0.018) inv    +0 race    +0 | bid 0.005 x100  ask    -
+2026-10-01T17:20:20+0000 mm-bot python[28561]: 2026-10-01 17:20:20 INFO    Rep Maine Senate           fv 0.422 (ref 0.425) inv -1029 race  -429 | bid 0.415 x2000 ask 0.440 x492
+2026-10-01T17:20:20+0000 mm-bot python[28561]: 2026-10-01 17:20:20 INFO    Rep Illinois Senate        fv 0.025 (ref 0.024) inv    +0 race    +0 | bid 0.005 x1050 ask    -
+2026-10-01T17:20:20+0000 mm-bot python[28561]: 2026-10-01 17:20:20 INFO    Rep Colorado Senate        fv 0.020 (ref 0.017) inv    +0 race    +0 | bid 0.005 x2000 ask    -
+2026-10-01T17:20:20+0000 mm-bot python[28561]: 2026-10-01 17:20:20 INFO    Rep VA-01 House race       fv 0.462 (ref 0.455) inv    +0 race  +100 | bid 0.440 x100  ask 0.480 x100
+2026-10-01T17:20:26+0000 mm-bot python[28561]: 2026-10-01 17:20:26 INFO    Dem TX-15 House race       fv 0.795 (ref 0.800) inv    +0 race    +0 | bid 0.780 x1000 ask 0.815 x1000
+2026-10-01T17:20:32+0000 mm-bot python[28561]: 2026-10-01 17:20:32 INFO    Rep SC-01 House race       fv 0.735 (ref 0.735) inv  -153 race  +481 | bid 0.700 x950  ask    -
+2026-10-01T17:20:32+0000 mm-bot python[28561]: 2026-10-01 17:20:32 INFO    Dem NY-17 House race       fv 0.635 (ref 0.635) inv  -100 race  -300 | bid 0.630 x100  ask 0.665 x100
+2026-10-01T17:20:33+0000 mm-bot python[28561]: 2026-10-01 17:20:33 INFO    Rep NE-02 House race       fv 0.083 (ref 0.086) inv    +0 race    +0 | bid 0.065 x100  ask 0.090 x100
+2026-10-01T17:20:34+0000 mm-bot python[28561]: 2026-10-01 17:20:34 INFO    Dem NE-02 House race       fv 0.917 (ref 0.915) inv    +0 race    +0 | bid 0.910 x1526 ask 0.935 x1600
+2026-10-01T17:20:34+0000 mm-bot python[28561]: 2026-10-01 17:20:34 INFO    Rep MT-01 House race       fv 0.675 (ref 0.675) inv    +0 race    +0 | bid 0.655 x100  ask 0.680 x100
+2026-10-01T17:20:35+0000 mm-bot python[28561]: 2026-10-01 17:20:35 INFO    Dem KY-04 House race       fv 0.027 (ref 0.022) inv    +0 race    +0 | bid 0.020 x100  ask    -
+2026-10-01T17:20:35+0000 mm-bot python[28561]: 2026-10-01 17:20:35 INFO    Rep CA-48 House race       fv 0.089 (ref 0.085) inv    +0 race    +0 | bid 0.070 x100  ask 0.100 x100
+2026-10-01T17:20:39+0000 mm-bot python[28561]: 2026-10-01 17:20:39 INFO    Rep AZ-06 House race       fv 0.173 (ref 0.175) inv  +282 race  +182 | bid 0.150 x750  ask 0.175 x382
+2026-10-01T17:20:39+0000 mm-bot python[28561]: 2026-10-01 17:20:39 INFO    Rep AZ-01 House race       fv 0.216 (ref 0.215) inv    +0 race    +0 | bid 0.195 x100  ask 0.220 x100
+2026-10-01T17:20:41+0000 mm-bot python[28561]: 2026-10-01 17:20:41 INFO    Dem AZ-01 House race       fv 0.784 (ref 0.795) inv    +0 race    +0 | bid 0.775 x100  ask 0.805 x100
+2026-10-01T17:20:41+0000 mm-bot python[28561]: 2026-10-01 17:20:41 INFO    Dem South Dakota Governor  fv 0.033 (ref 0.027) inv    +0 race    +0 | bid 0.025 x100  ask    -
+2026-10-01T17:20:44+0000 mm-bot python[28561]: 2026-10-01 17:20:44 INFO    Rep South Carolina Governo fv 0.946 (ref 0.945) inv    +0 race    +0 | bid 0.925 x100  ask 0.950 x100
+2026-10-01T17:20:45+0000 mm-bot python[28561]: 2026-10-01 17:20:45 INFO    Dem South Carolina Governo fv 0.054 (ref 0.048) inv    +0 race    +0 | bid 0.050 x100  ask 0.075 x100
+2026-10-01T17:20:47+0000 mm-bot python[28561]: 2026-10-01 17:20:47 INFO    Rep Pennsylvania Governor  fv 0.029 (ref 0.028) inv    +0 race    +0 | bid 0.010 x100  ask    -
+2026-10-01T17:20:49+0000 mm-bot python[28561]: 2026-10-01 17:20:49 INFO    Dem Pennsylvania Governor  fv 0.971 (ref 0.970) inv    +0 race    +0 | bid    -        ask 0.990 x100
+2026-10-01T17:20:49+0000 mm-bot python[28561]: 2026-10-01 17:20:49 INFO    Rep Oregon Governor        fv 0.203 (ref 0.195) inv    +0 race    +0 | bid 0.185 x100  ask 0.235 x100
+2026-10-01T17:20:51+0000 mm-bot python[28561]: 2026-10-01 17:20:51 INFO    Dem Oregon Governor        fv 0.797 (ref 0.805) inv    +0 race    +0 | bid 0.775 x100  ask 0.815 x100
+2026-10-01T17:20:53+0000 mm-bot python[28561]: 2026-10-01 17:20:53 INFO    Dem Oklahoma Governor      fv 0.074 (ref 0.075) inv    +0 race    +0 | bid 0.065 x100  ask 0.095 x100
+2026-10-01T17:20:54+0000 mm-bot python[28561]: 2026-10-01 17:20:54 INFO    Rep New York Governor      fv 0.048 (ref 0.045) inv    +0 race    +0 | bid 0.030 x100  ask    -
+2026-10-01T17:21:05+0000 mm-bot python[28561]: 2026-10-01 17:21:05 INFO    Dem New York Governor      fv 0.952 (ref 0.955) inv    +0 race    +0 | bid    -        ask 0.970 x100
+2026-10-01T17:21:06+0000 mm-bot python[28561]: 2026-10-01 17:21:06 INFO    Dem Nevada Governor        fv 0.477 (ref 0.485) inv    +0 race  +150 | bid 0.455 x100  ask 0.490 x100
+2026-10-01T17:21:06+0000 mm-bot python[28561]: 2026-10-01 17:21:06 INFO    Rep Nebraska Governor      fv 0.914 (ref 0.905) inv   +82 race   +82 | bid 0.895 x100  ask 0.920 x100
+2026-10-01T17:21:11+0000 mm-bot python[28561]: 2026-10-01 17:21:11 INFO    Dem Nebraska Governor      fv 0.086 (ref 0.085) inv    +0 race   -82 | bid 0.080 x100  ask 0.105 x100
+2026-10-01T17:21:15+0000 mm-bot python[28561]: 2026-10-01 17:21:15 INFO    Rep Maine Governor         fv 0.039 (ref 0.036) inv    +0 race    +0 | bid 0.020 x100  ask    -
+2026-10-01T17:21:16+0000 mm-bot python[28561]: 2026-10-01 17:21:16 INFO    Dem Maine Governor         fv 0.961 (ref 0.960) inv    +0 race    +0 | bid    -        ask 0.980 x100
+2026-10-01T17:21:18+0000 mm-bot python[28561]: 2026-10-01 17:21:18 INFO    Rep Illinois Governor      fv 0.024 (ref 0.022) inv    +0 race    +0 | bid 0.005 x100  ask    -
+2026-10-01T17:21:21+0000 mm-bot python[28561]: 2026-10-01 17:21:21 INFO    Dem Idaho Governor         fv 0.029 (ref 0.024) inv    +0 race    +0 | bid 0.020 x100  ask    -
+2026-10-01T17:21:21+0000 mm-bot python[28561]: 2026-10-01 17:21:21 INFO    Rep Iowa Governor          fv 0.150 (ref 0.145) inv  -100 race  -100 | bid 0.135 x100  ask 0.165 x100
+2026-10-01T17:21:24+0000 mm-bot python[28561]: 2026-10-01 17:21:24 INFO    Rep California Governor    fv 0.035 inv    +0 race    +0 | bid 0.015 x100  ask    -
+2026-10-01T17:21:24+0000 mm-bot python[28561]: 2026-10-01 17:21:24 INFO    Rep Arizona Governor       fv 0.112 (ref 0.105) inv    +0 race    +2 | bid 0.095 x100  ask 0.125 x100
+2026-10-01T17:21:29+0000 mm-bot python[28561]: 2026-10-01 17:21:29 INFO    Dem Arizona Governor       fv   -   (ref 0.885) inv    -2 race    -2 | bid    -        ask    -
+2026-10-01T17:21:34+0000 mm-bot python[28561]: 2026-10-01 17:21:34 INFO    Dem Arkansas Governor      fv 0.034 (ref 0.028) inv    +0 race    +0 | bid 0.025 x100  ask    -
+2026-10-01T17:21:46+0000 mm-bot python[28561]: 2026-10-01 17:21:46 INFO    Rep Alabama Governor       fv 0.925 (ref 0.927) inv    +0 race    +0 | bid 0.905 x900  ask 0.930 x900
+2026-10-01T17:21:47+0000 mm-bot python[28561]: 2026-10-01 17:21:47 INFO    Rep U.S. Senate            fv 0.378 (ref 0.375) inv +9584 race +9584 | bid 0.070 x416  ask 0.375 x10000
+2026-10-01T17:21:51+0000 mm-bot python[28561]: 2026-10-01 17:21:51 INFO    Rep U.S. House             fv 0.085 (ref 0.085) inv   +25 race  -807 | bid 0.085 x9975 ask 0.115 x10000
+2026-10-01T17:22:20+0000 mm-bot python[28561]: 2026-10-01 17:22:20 ERROR   batch of 20 orders failed (409 REQUEST_IN_FLIGHT: An identical request with this idempotency key is still in flight. Retry with the same key after 90 seconds.)
+2026-10-01T17:22:26+0000 mm-bot python[28561]: 2026-10-01 17:22:26 INFO    realtime: missed message(s) on user:6c996168-fbca-415e-bb62-04b8bcaa95f3 - full resync next cycle
+2026-10-01T17:22:26+0000 mm-bot python[28561]: 2026-10-01 17:22:26 INFO    realtime: missed message(s) on user:6c996168-fbca-415e-bb62-04b8bcaa95f3 - full resync next cycle
+2026-10-01T17:22:29+0000 mm-bot python[28561]: 2026-10-01 17:22:29 INFO    realtime: missed message(s) on user:6c996168-fbca-415e-bb62-04b8bcaa95f3 - full resync next cycle
+2026-10-01T17:22:35+0000 mm-bot python[28561]: 2026-10-01 17:22:35 ERROR   batch of 20 orders failed (409 REQUEST_IN_FLIGHT: An identical request with this idempotency key is still in flight. Retry with the same key after 90 seconds.)
+2026-10-01T17:22:52+0000 mm-bot python[28561]: 2026-10-01 17:22:52 ERROR   batch of 20 orders failed (409 REQUEST_IN_FLIGHT: An identical request with this idempotency key is still in flight. Retry with the same key after 90 seconds.)
+2026-10-01T17:23:16+0000 mm-bot python[28561]: 2026-10-01 17:23:16 ERROR   batch of 16 orders failed (409 REQUEST_IN_FLIGHT: An identical request with this idempotency key is still in flight. Retry with the same key after 90 seconds.)
+2026-10-01T17:23:32+0000 mm-bot python[28561]: 2026-10-01 17:23:32 INFO    Tracking 237 exchanges in 117 races
+2026-10-01T17:24:05+0000 mm-bot python[28561]: 2026-10-01 17:24:05 INFO    FILL ex 841  our bid x250 @ 0.085  (fv when quoted 0.08428315226252056)
+2026-10-01T17:24:05+0000 mm-bot python[28561]: 2026-10-01 17:24:05 INFO    FILL ex 877  our ask x100 @ 0.235  (fv when quoted 0.20258910891089107)
+2026-10-01T17:24:05+0000 mm-bot python[28561]: 2026-10-01 17:24:05 INFO    FILL ex 876  our ? x100 @ 0.775  (fv when quoted ?)
+2026-10-01T17:24:05+0000 mm-bot python[28561]: 2026-10-01 17:24:05 INFO    FILL ex 871  our bid x100 @ 0.455  (fv when quoted 0.4775)
+2026-10-01T17:24:05+0000 mm-bot python[28561]: 2026-10-01 17:24:05 INFO    FILL ex 1070  our ? x1243 @ 0.86  (fv when quoted ?)
+2026-10-01T17:24:05+0000 mm-bot python[28561]: 2026-10-01 17:24:05 INFO    FILL ex 848  our ask x100 @ 0.895  (fv when quoted 0.8875582945958367)
+2026-10-01T17:24:05+0000 mm-bot python[28561]: 2026-10-01 17:24:05 INFO    FILL ex 1067  our ask x100 @ 0.335  (fv when quoted 0.3275)
+2026-10-01T17:24:05+0000 mm-bot python[28561]: 2026-10-01 17:24:05 INFO    FILL ex 960  our ? x290 @ 0.415  (fv when quoted ?)
+2026-10-01T17:24:05+0000 mm-bot python[28561]: 2026-10-01 17:24:05 INFO    FILL ex 1045  our ? x41 @ 0.6950000000000001  (fv when quoted ?)
+2026-10-01T17:24:05+0000 mm-bot python[28561]: 2026-10-01 17:24:05 INFO    FILL ex 1025  our bid x49 @ 0.935  (fv when quoted 0.9478940731399748)
+2026-10-01T17:24:05+0000 mm-bot python[28561]: 2026-10-01 17:24:05 INFO    FILL ex 1007  our ? x1650 @ 0.72  (fv when quoted ?)
+2026-10-01T17:24:05+0000 mm-bot python[28561]: 2026-10-01 17:24:05 INFO    FILL ex 843  our ? x1576 @ 0.375  (fv when quoted ?)
+2026-10-01T17:24:05+0000 mm-bot python[28561]: 2026-10-01 17:24:05 INFO    realtime | account 127555 (locked in orders 27194, detecting) | worst-case loss 14393 | party delta +13105 | priced 60/237 | resting 106
+2026-10-01T17:24:05+0000 mm-bot python[28561]: 2026-10-01 17:24:05 INFO    Dem Rhode Island Senate    fv 0.986 (ref 0.992) inv    +0 race    +0 | bid    -        ask 0.995 x700
+2026-10-01T17:24:10+0000 mm-bot python[28561]: 2026-10-01 17:24:10 INFO    Dem New Hampshire Senate   fv 0.870 (ref 0.875) inv    +0 race    +0 | bid 0.865 x2000 ask 0.895 x2000
+2026-10-01T17:24:10+0000 mm-bot python[28561]: 2026-10-01 17:24:10 INFO    Rep Alaska Senate          fv 0.323 inv  -200 race  -200 | bid 0.305 x100  ask 0.330 x100
+2026-10-01T17:24:12+0000 mm-bot python[28561]: 2026-10-01 17:24:12 INFO    Dem NH-01 House race       fv 0.938 (ref 0.946) inv    +0 race    +0 | bid 0.935 x100  ask 0.965 x100
+2026-10-01T17:24:14+0000 mm-bot python[28561]: 2026-10-01 17:24:14 INFO    Rep Massachusetts Governor fv   -   (ref 0.030) inv  +921 race  +921 | bid    -        ask    -
+2026-10-01T17:24:27+0000 mm-bot python[28561]: 2026-10-01 17:24:27 INFO    Dem Massachusetts Governor fv   -   (ref 0.962) inv    +0 race  -921 | bid    -        ask    -
+2026-10-01T17:24:30+0000 mm-bot python[28561]: 2026-10-01 17:24:30 INFO    Rep Alaska Governor        fv   -   inv  -200 race  -300 | bid    -        ask    -
+2026-10-01T17:24:37+0000 mm-bot python[28561]: 2026-10-01 17:24:37 INFO    Rep Tennessee Senate       fv   -   (ref 0.973) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:24:37+0000 mm-bot python[28561]: 2026-10-01 17:24:37 INFO    Rep Michigan Senate        fv 0.276 (ref 0.275) inv  -620 race  -170 | bid 0.255 x100  ask 0.285 x100
+2026-10-01T17:24:37+0000 mm-bot python[28561]: 2026-10-01 17:24:37 INFO    Dem Kansas Senate          fv 0.291 (ref 0.285) inv  -241 race   +59 | bid 0.290 x100  ask 0.315 x100
+2026-10-01T17:24:38+0000 mm-bot python[28561]: 2026-10-01 17:24:38 INFO    Rep WI-03 House race       fv 0.260 (ref 0.255) inv  -807 race  -707 | bid 0.255 x400  ask 0.280 x400
+2026-10-01T17:24:38+0000 mm-bot python[28561]: 2026-10-01 17:24:38 INFO    Rep VA-07 House race       fv 0.045 (ref 0.035) inv    +0 race    +0 | bid 0.020 x100  ask    -
+2026-10-01T17:24:40+0000 mm-bot python[28561]: 2026-10-01 17:24:40 INFO    Rep MN-02 House race       fv 0.052 (ref 0.047) inv    +0 race   -49 | bid 0.030 x100  ask 0.060 x100
+2026-10-01T17:24:43+0000 mm-bot python[28561]: 2026-10-01 17:24:43 INFO    Dem MN-02 House race       fv 0.948 (ref 0.940) inv   +49 race   +49 | bid 0.935 x100  ask 0.970 x100
+2026-10-01T17:24:49+0000 mm-bot python[28561]: 2026-10-01 17:24:49 INFO    Rep MN-01 House race       fv 0.757 (ref 0.755) inv    +0 race    +0 | bid 0.730 x100  ask 0.765 x100
+2026-10-01T17:24:50+0000 mm-bot python[28561]: 2026-10-01 17:24:50 INFO    Rep MI-10 House race       fv 0.346 (ref 0.345) inv  +100 race  +100 | bid 0.320 x450  ask 0.350 x450
+2026-10-01T17:24:56+0000 mm-bot python[28561]: 2026-10-01 17:24:56 INFO    Rep FL-22 House race       fv 0.489 (ref 0.485) inv -1450 race  -950 | bid 0.485 x1350 ask 0.515 x1350
+2026-10-01T17:24:57+0000 mm-bot python[28561]: 2026-10-01 17:24:57 INFO    Dem FL-22 House race       fv 0.511 (ref 0.505) inv  -500 race  +950 | bid 0.485 x1250 ask 0.515 x500
+2026-10-01T17:25:11+0000 mm-bot python[28561]: 2026-10-01 17:25:11 INFO    Rep FL-09 House race       fv 0.690 (ref 0.685) inv    +0 race    +0 | bid 0.665 x950  ask 0.700 x950
+2026-10-01T17:25:34+0000 mm-bot python[28561]: 2026-10-01 17:25:34 INFO    Rep FL-07 House race       fv 0.667 (ref 0.665) inv    +0 race  -206 | bid 0.650 x100  ask 0.675 x100
+2026-10-01T17:25:34+0000 mm-bot python[28561]: 2026-10-01 17:25:34 INFO    Dem AL-02 House race       fv   -   (ref 0.265) inv -1750 race -1650 | bid    -        ask    -
+2026-10-01T17:25:38+0000 mm-bot python[28561]: 2026-10-01 17:25:38 INFO    Rep Vermont Governor       fv 0.829 (ref 0.835) inv   +42 race   +42 | bid 0.800 x1950 ask 0.840 x972
+2026-10-01T17:25:42+0000 mm-bot python[28561]: 2026-10-01 17:25:42 INFO    Dem Vermont Governor       fv 0.171 (ref 0.170) inv    +0 race   -42 | bid 0.175 x100  ask 0.200 x1950
+2026-10-01T17:25:46+0000 mm-bot python[28561]: 2026-10-01 17:25:46 INFO    Dem Tennessee Governor     fv 0.038 (ref 0.034) inv    +0 race    +0 | bid 0.040 x100  ask    -
+2026-10-01T17:25:47+0000 mm-bot python[28561]: 2026-10-01 17:25:47 INFO    Rep Hawaii Governor        fv   -   (ref 0.017) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:25:50+0000 mm-bot python[28561]: 2026-10-01 17:25:50 INFO    Ind Montana Senate         fv   -   (ref 0.086) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:25:51+0000 mm-bot python[28561]: 2026-10-01 17:25:51 INFO    Dem Montana Senate         fv   -   (ref 0.002) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:25:53+0000 mm-bot python[28561]: 2026-10-01 17:25:53 INFO    Rep Maine Senate           fv 0.424 (ref 0.425) inv  -739 race  -139 | bid 0.405 x2000 ask    -
+2026-10-01T17:26:01+0000 mm-bot python[28561]: 2026-10-01 17:26:01 INFO    Rep Illinois Senate        fv   -   (ref 0.024) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:26:14+0000 mm-bot python[28561]: 2026-10-01 17:26:14 INFO    Rep VA-01 House race       fv 0.462 (ref 0.455) inv    +0 race  +100 | bid 0.435 x100  ask 0.480 x100
+2026-10-01T17:26:14+0000 mm-bot python[28561]: 2026-10-01 17:26:14 INFO    Rep TX-15 House race       fv 0.196 (ref 0.185) inv    +0 race    +0 | bid 0.170 x100  ask 0.210 x100
+2026-10-01T17:26:18+0000 mm-bot python[28561]: 2026-10-01 17:26:18 INFO    Dem TX-15 House race       fv 0.804 (ref 0.800) inv    +0 race    +0 | bid 0.780 x1000 ask 0.830 x1000
+2026-10-01T17:26:18+0000 mm-bot python[28561]: 2026-10-01 17:26:18 INFO    Rep SC-01 House race       fv 0.735 (ref 0.735) inv  -153 race  +481 | bid 0.695 x950  ask    -
+2026-10-01T17:26:19+0000 mm-bot python[28561]: 2026-10-01 17:26:19 INFO    Dem NY-17 House race       fv 0.635 (ref 0.635) inv  -100 race  -300 | bid 0.630 x100  ask 0.670 x100
+2026-10-01T17:26:19+0000 mm-bot python[28561]: 2026-10-01 17:26:19 INFO    Rep NY-13 House race       fv 0.025 (ref 0.024) inv    +0 race    +0 | bid 0.005 x100  ask    -
+2026-10-01T17:26:20+0000 mm-bot python[28561]: 2026-10-01 17:26:20 INFO    Rep NE-02 House race       fv 0.083 (ref 0.086) inv    +0 race    +0 | bid 0.055 x100  ask 0.080 x100
+2026-10-01T17:26:25+0000 mm-bot python[28561]: 2026-10-01 17:26:25 INFO    Dem NE-02 House race       fv 0.917 (ref 0.915) inv    +0 race    +0 | bid 0.920 x100  ask 0.945 x1600
+2026-10-01T17:26:26+0000 mm-bot python[28561]: 2026-10-01 17:26:26 INFO    Rep MT-01 House race       fv   -   (ref 0.675) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:26:30+0000 mm-bot python[28561]: 2026-10-01 17:26:30 INFO    Dem KY-04 House race       fv   -   (ref 0.018) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:26:32+0000 mm-bot python[28561]: 2026-10-01 17:26:32 INFO    Rep CA-48 House race       fv 0.089 (ref 0.085) inv    +0 race    +0 | bid 0.065 x100  ask 0.100 x100
+2026-10-01T17:26:32+0000 mm-bot python[28561]: 2026-10-01 17:26:32 INFO    Dem CA-48 House race       fv 0.911 (ref 0.905) inv    +0 race    +0 | bid 0.900 x100  ask 0.935 x100
+2026-10-01T17:26:37+0000 mm-bot python[28561]: 2026-10-01 17:26:37 INFO    Rep AZ-06 House race       fv   -   (ref 0.175) inv  +282 race  +182 | bid    -        ask    -
+2026-10-01T17:26:38+0000 mm-bot python[28561]: 2026-10-01 17:26:38 INFO    Rep AZ-01 House race       fv 0.216 (ref 0.215) inv    +0 race    +0 | bid 0.190 x100  ask 0.220 x100
+2026-10-01T17:26:43+0000 mm-bot python[28561]: 2026-10-01 17:26:43 INFO    Dem AZ-01 House race       fv 0.784 (ref 0.795) inv    +0 race    +0 | bid 0.775 x100  ask 0.810 x100
+2026-10-01T17:26:44+0000 mm-bot python[28561]: 2026-10-01 17:26:44 INFO    Rep South Carolina Governo fv 0.946 (ref 0.945) inv    +0 race    +0 | bid 0.920 x100  ask 0.950 x100
+2026-10-01T17:26:56+0000 mm-bot python[28561]: 2026-10-01 17:26:56 INFO    Dem South Carolina Governo fv 0.054 (ref 0.048) inv    +0 race    +0 | bid 0.055 x100  ask 0.080 x100
+2026-10-01T17:26:56+0000 mm-bot python[28561]: 2026-10-01 17:26:56 INFO    Rep Pennsylvania Governor  fv 0.029 (ref 0.028) inv    +0 race    +0 | bid 0.005 x100  ask    -
+2026-10-01T17:27:02+0000 mm-bot python[28561]: 2026-10-01 17:27:02 INFO    Dem Pennsylvania Governor  fv 0.971 (ref 0.970) inv    +0 race    +0 | bid    -        ask 0.995 x100
+2026-10-01T17:27:02+0000 mm-bot python[28561]: 2026-10-01 17:27:02 INFO    Rep Oregon Governor        fv 0.202 (ref 0.195) inv  -100 race  -200 | bid 0.185 x100  ask 0.230 x100
+2026-10-01T17:27:02+0000 mm-bot python[28561]: 2026-10-01 17:27:02 INFO    Dem Oregon Governor        fv 0.798 (ref 0.805) inv  +100 race  +200 | bid 0.780 x100  ask 0.815 x100
+2026-10-01T17:27:02+0000 mm-bot python[28561]: 2026-10-01 17:27:02 INFO    Dem Oklahoma Governor      fv 0.074 (ref 0.075) inv    +0 race    +0 | bid 0.065 x100  ask 0.100 x100
+2026-10-01T17:27:10+0000 mm-bot python[28561]: 2026-10-01 17:27:10 INFO    Rep New York Governor      fv 0.048 (ref 0.045) inv    +0 race    +0 | bid 0.020 x100  ask    -
+2026-10-01T17:27:10+0000 mm-bot python[28561]: 2026-10-01 17:27:10 INFO    Dem New York Governor      fv   -   (ref 0.955) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:27:14+0000 mm-bot python[28561]: 2026-10-01 17:27:14 INFO    Dem Nevada Governor        fv 0.477 (ref 0.485) inv  +100 race  +250 | bid 0.455 x100  ask 0.495 x100
+2026-10-01T17:27:15+0000 mm-bot python[28561]: 2026-10-01 17:27:15 INFO    Rep Nebraska Governor      fv 0.914 (ref 0.905) inv   +82 race   +82 | bid 0.885 x100  ask 0.915 x100
+2026-10-01T17:27:19+0000 mm-bot python[28561]: 2026-10-01 17:27:19 INFO    Dem Nebraska Governor      fv 0.086 (ref 0.085) inv    +0 race   -82 | bid 0.085 x100  ask 0.115 x100
+2026-10-01T17:27:20+0000 mm-bot python[28561]: 2026-10-01 17:27:20 INFO    Rep Maine Governor         fv 0.037 (ref 0.033) inv    +0 race    +0 | bid 0.010 x100  ask    -
+2026-10-01T17:27:21+0000 mm-bot python[28561]: 2026-10-01 17:27:21 INFO    Dem Maine Governor         fv   -   (ref 0.960) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:27:21+0000 mm-bot python[28561]: 2026-10-01 17:27:21 INFO    Rep Iowa Governor          fv 0.150 (ref 0.145) inv  -100 race  -100 | bid 0.130 x100  ask 0.165 x100
+2026-10-01T17:27:22+0000 mm-bot python[28561]: 2026-10-01 17:27:22 INFO    Rep California Governor    fv 0.035 inv    +0 race    +0 | bid 0.010 x100  ask    -
+2026-10-01T17:27:32+0000 mm-bot python[28561]: 2026-10-01 17:27:32 INFO    Rep Arizona Governor       fv   -   (ref 0.105) inv    +0 race  +102 | bid    -        ask    -
+2026-10-01T17:27:32+0000 mm-bot python[28561]: 2026-10-01 17:27:32 INFO    Dem Arizona Governor       fv 0.884 (ref 0.885) inv  -102 race  -102 | bid 0.875 x100  ask 0.915 x100
+2026-10-01T17:27:38+0000 mm-bot python[28561]: 2026-10-01 17:27:38 INFO    Dem Arkansas Governor      fv 0.034 (ref 0.028) inv    +0 race    +0 | bid 0.035 x100  ask    -
+2026-10-01T17:27:43+0000 mm-bot python[28561]: 2026-10-01 17:27:43 INFO    Rep Alabama Governor       fv 0.925 (ref 0.927) inv    +0 race    +0 | bid 0.900 x900  ask 0.925 x100
+2026-10-01T17:27:44+0000 mm-bot python[28561]: 2026-10-01 17:27:44 INFO    Rep U.S. Senate            fv 0.378 (ref 0.375) inv +13521 race +13521 | bid    -        ask 0.375 x10000
+2026-10-01T17:27:52+0000 mm-bot python[28561]: 2026-10-01 17:27:52 INFO    Rep U.S. House             fv 0.085 (ref 0.085) inv  +275 race  -557 | bid 0.075 x9725 ask 0.100 x10000
+2026-10-01T17:28:12+0000 mm-bot python[28561]: 2026-10-01 17:28:12 INFO    order on 1048 traded 100 immediately
+2026-10-01T17:28:49+0000 mm-bot python[28561]: 2026-10-01 17:28:49 ERROR   batch of 20 orders failed (409 REQUEST_IN_FLIGHT: An identical request with this idempotency key is still in flight. Retry with the same key after 90 seconds.)
+2026-10-01T17:29:22+0000 mm-bot python[28561]: 2026-10-01 17:29:22 INFO    FILL ex 960  our ? x500 @ 0.415  (fv when quoted ?)
+2026-10-01T17:29:22+0000 mm-bot python[28561]: 2026-10-01 17:29:22 INFO    FILL ex 1058  our ask x100 @ 0.27  (fv when quoted 0.255)
+2026-10-01T17:29:22+0000 mm-bot python[28561]: 2026-10-01 17:29:22 INFO    FILL ex 858  our ? x100 @ 0.835  (fv when quoted ?)
+2026-10-01T17:29:22+0000 mm-bot python[28561]: 2026-10-01 17:29:22 INFO    FILL ex 843  our ? x109 @ 0.375  (fv when quoted ?)
+2026-10-01T17:29:22+0000 mm-bot python[28561]: 2026-10-01 17:29:22 INFO    FILL ex 889  our ? x382 @ 0.825  (fv when quoted ?)
+2026-10-01T17:29:22+0000 mm-bot python[28561]: 2026-10-01 17:29:22 INFO    FILL ex 843  our ? x750 @ 0.375  (fv when quoted ?)
+2026-10-01T17:29:22+0000 mm-bot python[28561]: 2026-10-01 17:29:22 INFO    FILL ex 960  our ? x1210 @ 0.415  (fv when quoted ?)
+2026-10-01T17:29:22+0000 mm-bot python[28561]: 2026-10-01 17:29:22 INFO    FILL ex 1017  our ? x5 @ 0.485  (fv when quoted ?)
+2026-10-01T17:29:22+0000 mm-bot python[28561]: 2026-10-01 17:29:22 INFO    FILL ex 1048  our ask x10 @ 0.285  (fv when quoted 0.27575)
+2026-10-01T17:29:22+0000 mm-bot python[28561]: 2026-10-01 17:29:22 INFO    FILL ex 1048  our ask x90 @ 0.285  (fv when quoted 0.27575)
+2026-10-01T17:29:22+0000 mm-bot python[28561]: 2026-10-01 17:29:22 INFO    FILL ex 1067  our bid x4 @ 0.305  (fv when quoted 0.3225)
+2026-10-01T17:29:22+0000 mm-bot python[28561]: 2026-10-01 17:29:22 INFO    realtime | account 124986 (locked in orders 24575, detecting) | worst-case loss 14406 | party delta +11703 | priced 50/237 | resting 96
+2026-10-01T17:29:22+0000 mm-bot python[28561]: 2026-10-01 17:29:22 INFO    Dem Rhode Island Senate    fv   -   (ref 0.992) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:29:25+0000 mm-bot python[28561]: 2026-10-01 17:29:25 INFO    Dem NH-01 House race       fv   -   (ref 0.946) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:29:25+0000 mm-bot python[28561]: 2026-10-01 17:29:25 INFO    Rep Alaska Governor        fv 0.242 inv  -300 race  -400 | bid 0.225 x100  ask 0.255 x100
+2026-10-01T17:29:25+0000 mm-bot python[28561]: 2026-10-01 17:29:25 INFO    Dem Minnesota Senate       fv 0.897 (ref 0.905) inv    +0 race    +0 | bid 0.880 x100  ask 0.920 x100
+2026-10-01T17:29:26+0000 mm-bot python[28561]: 2026-10-01 17:29:26 INFO    Rep Michigan Senate        fv 0.279 (ref 0.275) inv  -720 race  -270 | bid 0.265 x100  ask 0.290 x100
+2026-10-01T17:29:26+0000 mm-bot python[28561]: 2026-10-01 17:29:26 INFO    Dem Kansas Senate          fv 0.287 (ref 0.285) inv  -241 race   +59 | bid 0.280 x100  ask 0.310 x100
+2026-10-01T17:29:26+0000 mm-bot python[28561]: 2026-10-01 17:29:26 INFO    Dem VA-02 House race       fv 0.809 (ref 0.815) inv    +0 race    +0 | bid 0.800 x100  ask 0.835 x100
+2026-10-01T17:29:33+0000 mm-bot python[28561]: 2026-10-01 17:29:33 INFO    Rep MN-05 House race       fv   -   (ref 0.011) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:29:36+0000 mm-bot python[28561]: 2026-10-01 17:29:36 INFO    Dem MN-05 House race       fv   -   (ref 0.988) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:29:39+0000 mm-bot python[28561]: 2026-10-01 17:29:39 INFO    Rep MI-10 House race       fv   -   (ref 0.345) inv  +100 race  +100 | bid    -        ask    -
+2026-10-01T17:29:39+0000 mm-bot python[28561]: 2026-10-01 17:29:39 INFO    Rep FL-22 House race       fv   -   (ref 0.485) inv -1450 race  -945 | bid    -        ask    -
+2026-10-01T17:29:41+0000 mm-bot python[28561]: 2026-10-01 17:29:41 INFO    Dem FL-22 House race       fv 0.507 (ref 0.505) inv  -505 race  +945 | bid 0.480 x1250 ask 0.515 x495
+2026-10-01T17:29:45+0000 mm-bot python[28561]: 2026-10-01 17:29:45 INFO    Rep FL-09 House race       fv   -   (ref 0.685) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:29:45+0000 mm-bot python[28561]: 2026-10-01 17:29:45 INFO    Dem AL-02 House race       fv 0.276 (ref 0.265) inv -1750 race -1650 | bid 0.255 x1650 ask 0.350 x1326
+2026-10-01T17:29:50+0000 mm-bot python[28561]: 2026-10-01 17:29:50 INFO    Dem Vermont Governor       fv 0.171 (ref 0.170) inv    +0 race   -42 | bid 0.170 x100  ask 0.195 x1950
+2026-10-01T17:29:50+0000 mm-bot python[28561]: 2026-10-01 17:29:50 INFO    Rep South Dakota Governor  fv 0.966 (ref 0.967) inv    +0 race    +0 | bid    -        ask 0.970 x100
+2026-10-01T17:29:50+0000 mm-bot python[28561]: 2026-10-01 17:29:50 INFO    Rep Oklahoma Senate        fv 0.974 (ref 0.977) inv    +0 race    +0 | bid    -        ask 0.985 x100
+2026-10-01T17:30:06+0000 mm-bot python[28561]: 2026-10-01 17:30:06 INFO    Rep Maine Senate           fv 0.430 (ref 0.435) inv  +971 race +1571 | bid 0.360 x2000 ask 0.420 x1071
+2026-10-01T17:30:07+0000 mm-bot python[28561]: 2026-10-01 17:30:07 INFO    Rep SC-01 House race       fv   -   (ref 0.735) inv  -153 race  +481 | bid    -        ask    -
+2026-10-01T17:30:13+0000 mm-bot python[28561]: 2026-10-01 17:30:13 INFO    Dem NY-17 House race       fv   -   (ref 0.635) inv  -100 race  -300 | bid    -        ask    -
+2026-10-01T17:30:29+0000 mm-bot python[28561]: 2026-10-01 17:30:29 INFO    Rep NE-02 House race       fv 0.083 (ref 0.086) inv    +0 race    +0 | bid 0.060 x100  ask 0.085 x100
+2026-10-01T17:30:31+0000 mm-bot python[28561]: 2026-10-01 17:30:31 INFO    Dem NE-02 House race       fv 0.917 (ref 0.915) inv    +0 race    +0 | bid 0.915 x100  ask 0.940 x1600
+2026-10-01T17:30:31+0000 mm-bot python[28561]: 2026-10-01 17:30:31 INFO    Dem CO-03 House race       fv 0.268 (ref 0.260) inv    +0 race  -100 | bid 0.270 x100  ask 0.295 x100
+2026-10-01T17:30:36+0000 mm-bot python[28561]: 2026-10-01 17:30:36 INFO    Rep CA-48 House race       fv   -   (ref 0.085) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:30:36+0000 mm-bot python[28561]: 2026-10-01 17:30:36 INFO    Rep AZ-06 House race       fv 0.177 (ref 0.175) inv  -100 race  -200 | bid 0.160 x750  ask 0.185 x750
+2026-10-01T17:30:36+0000 mm-bot python[28561]: 2026-10-01 17:30:36 INFO    Dem South Dakota Governor  fv   -   (ref 0.027) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:30:41+0000 mm-bot python[28561]: 2026-10-01 17:30:41 INFO    Dem South Carolina Governo fv   -   (ref 0.048) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:30:44+0000 mm-bot python[28561]: 2026-10-01 17:30:44 INFO    Dem Oklahoma Governor      fv   -   (ref 0.075) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:30:57+0000 mm-bot python[28561]: 2026-10-01 17:30:57 INFO    Dem Nevada Governor        fv   -   (ref 0.485) inv  +100 race  +250 | bid    -        ask    -
+2026-10-01T17:31:03+0000 mm-bot python[28561]: 2026-10-01 17:31:03 INFO    Rep Nebraska Governor      fv   -   (ref 0.905) inv   +82 race   +82 | bid    -        ask    -
+2026-10-01T17:31:08+0000 mm-bot python[28561]: 2026-10-01 17:31:08 INFO    Dem Nebraska Governor      fv   -   (ref 0.085) inv    +0 race   -82 | bid    -        ask    -
+2026-10-01T17:31:16+0000 mm-bot python[28561]: 2026-10-01 17:31:16 INFO    Rep Maine Governor         fv   -   (ref 0.036) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:31:16+0000 mm-bot python[28561]: 2026-10-01 17:31:16 INFO    Rep Iowa Governor          fv 0.150 (ref 0.145) inv  -200 race  -200 | bid 0.130 x100  ask 0.165 x100
+2026-10-01T17:31:17+0000 mm-bot python[28561]: 2026-10-01 17:31:17 INFO    Rep Alabama Governor       fv   -   (ref 0.928) inv    +0 race    +0 | bid    -        ask    -
+2026-10-01T17:31:17+0000 mm-bot python[28561]: 2026-10-01 17:31:17 INFO    Rep U.S. House             fv 0.085 (ref 0.085) inv  +275 race  -557 | bid 0.080 x9725 ask 0.105 x10000
+2026-10-01T17:31:37+0000 mm-bot python[28561]: 2026-10-01 17:31:37 ERROR   batch of 20 orders failed (409 REQUEST_IN_FLIGHT: An identical request with this idempotency key is still in flight. Retry with the same key after 90 seconds.)
