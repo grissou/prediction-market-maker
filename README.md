@@ -1,6 +1,6 @@
 # Day-one data snapshot (2026-10-01): read-only, do not merge
 
-Copied from the live bot's server at 17:32 UTC on the tournament's first day (trading opened at 16:00 UTC), for analysis only. The first copy was at about 17:00 UTC; this refresh adds the next half hour. This branch holds data, not code. Never merge it, and never copy its files into a code branch.
+Copied from the live bot's server at 20:22 UTC on the tournament's first day (trading opened at 16:00 UTC), for analysis only. Earlier copies were taken at about 17:00 and 17:32 UTC; this one covers the first 4 hours 22 minutes of trading. This branch holds data, not code. Never merge it, and never copy its files into a code branch.
 
 | File | What it is |
 |---|---|
