@@ -168,6 +168,7 @@ def locked(a): return reserved_cash(a.open_orders("T"))
 for leaves_out in (True, False):
     a, b = make_bot()
     b.cfg.reserved_calib_min = 100
+    b.reserved_mode = None                # "auto" (the live default is "ignore" since day one)
     a.pnl = (lambda a=a: {"totalAccountValue": 100000 - locked(a)}) if leaves_out else (lambda: {"totalAccountValue": 100000})
     b.cycle(); b.cycle()                  # orders go up -> first observation
     a.cancel_all("T"); b.cycle()          # orders vanish without fills -> second observation
@@ -175,6 +176,7 @@ for leaves_out in (True, False):
     check(f"auto-detects the API {'leaving out' if leaves_out else 'including'} locked cash -> '{want}'", b.reserved_mode == want, b.reserved_mode)
 
 a, b = make_bot(); b.cfg.max_drawdown_pct = 0.002             # floor 99,800; our quotes lock ~370
+b.reserved_mode = None                                         # "auto"
 a.pnl = lambda: {"totalAccountValue": 100000 - locked(a)}
 for _ in range(4):
     b.cycle()
@@ -849,7 +851,7 @@ check("account +6%: sizing steps up to 106,000, but resting 100-share orders are
       b.bankroll() == 106_000 and {o["quantity"] for o in a.orders.values()} == {100}, (b.bankroll(), a.orders))
 b.cancel_everything(); b.cycle()
 check("...new orders are 106 shares", {o["quantity"] for o in a.orders.values()} == {106}, {o["quantity"] for o in a.orders.values()})
-a, b = make_bot()
+a, b = make_bot(); b.reserved_mode = None                    # "auto"
 a.equity = 120_000; b.cycle()
 check("locked-cash question not settled yet: sizes stay on the starting balance", b.bankroll() == 100_000, b.bankroll())
 
