@@ -67,7 +67,7 @@ import threading
 import time
 import uuid
 from collections import defaultdict, deque
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 
@@ -226,6 +226,13 @@ class Config:
                                           #   replacements (each costs requests and our place in line)
     refresh_before_expiry: float = 180.0  # replace an order once it has less than 3 min to live
     batch_size: int = 20                  # orders per POST /orders/batch
+    parallel_writes: int = 4              # order writes (cancels, batches) in flight at once. Cancels go first, then
+                                          #   new orders: party-control (headline) markets first, then the biggest
+                                          #   quotes. 1 = the old way: one write at a time, the cycle waiting for each
+    write_read_reserve: int = 3           # order writes leave this many requests/min of the budget free (positions,
+                                          #   orders reads); book downloads already leave budget_reserve for writes
+    write_wait_seconds: float = 3.0       # a cycle waits at most this long for its writes; slower ones (day one: 15-30 s)
+                                          #   finish in the background and their exchanges are left alone until then
     pending_seconds: float = 90.0         # placement outcome unknown -> leave that exchange alone this long
     recent_order_grace_seconds: float = 15.0  # the open-orders list can lag the exchange: for this long, trust our
                                               #   own record of an order we just placed (or cancelled) over it,
@@ -1358,6 +1365,8 @@ class Ex:
     cooldown_until: float = 0.0           # jump guard
     pending_until: float = 0.0            # placement outcome unknown: don't place again yet
     pause_until: float = 0.0              # order was rejected: back off
+    writes: int = 0                       # our writes (cancels / batches) touching it still in flight
+    cancelling: bool = False              # ...one of them is a cancel
     inv: float = 0.0                      # for logging / recording
     eff: float = 0.0                      # for logging
     ref: float | None = None              # outside reference price, if any (for logging / recording)
@@ -1365,6 +1374,29 @@ class Ex:
     take_dir: int = 0                     # +1 = Polymarket above the best ask, -1 = below the best bid, 0 = neither
     take_since: float = 0.0               # since when every Polymarket reading has shown that same gap
     take_until: float = 0.0               # after taking here, leave it alone until this time
+
+
+def busy(ex, now_m):
+    """Don't place on this exchange: an earlier placement's outcome is unknown, or a write is still running."""
+    return now_m < ex.pending_until or ex.writes > 0
+
+
+class Change:
+    """What one exchange needs this cycle: orders to cancel first (all of them with whole=True), then new ones.
+    key orders the work: pulls first, then party-control markets, then the biggest quotes."""
+    __slots__ = ("ex", "doomed", "whole", "new", "key")
+
+    def __init__(self, ex, doomed, whole, new, key):
+        self.ex, self.doomed, self.whole, self.new, self.key = ex, doomed, whole, new, key
+
+
+class Write:
+    """One order write running on a writer thread: kind "cancel" (eid, orders, whole) or "batch" (chunk)."""
+    __slots__ = ("kind", "eids", "payload", "future", "sent", "change", "payload_ok")
+
+    def __init__(self, kind, eids, payload, sent, change=None):
+        self.kind, self.eids, self.payload, self.sent, self.change = kind, eids, payload, sent, change
+        self.future, self.payload_ok = None, False     # payload_ok: a cancel confirmed
 
 
 def fmt(price, size):
@@ -1416,6 +1448,10 @@ class Bot:
         self.ref_rejected = set()         # Polymarket keys currently ignored as implausible (alerted once)
         # Threads for sending several HTTP requests at once (downloads mostly wait on the network).
         self.pool = ThreadPoolExecutor(max_workers=max(1, cfg.parallel_requests), thread_name_prefix="http")
+        # ...and for order writes, so a slow one never holds up the others or the cycle (see send_changes).
+        self.writer = ThreadPoolExecutor(max_workers=max(1, cfg.parallel_writes), thread_name_prefix="write")
+        self.writes = []                  # Write jobs in flight; only the main thread reads or changes this list
+        self.write_done = threading.Event()   # set when one finishes (wakes the main loop to apply it)
         self.refs = self.load_reference_prices()
         self.ref_version_seen = 0         # last Polymarket reading the jump guard has looked at
         self.last_tops = {}               # latest bulk best bid/ask per exchange (for recording)
@@ -1563,6 +1599,9 @@ class Bot:
         read_positions = read_orders or fill_event or self.cached_pos is None
         read_fills = fill_event or slow_poll
 
+        # 0b. Results of order writes that finished since the last cycle (slow ones run in the background).
+        self.harvest_writes()
+
         # 1. Account state: independent reads, sent at the same time ------------------------------
         f_pos = self.pool.submit(self.api.positions) if read_positions else None
         f_orders = self.pool.submit(self.api.open_orders, self.tid) if read_orders else None
@@ -1668,8 +1707,9 @@ class Bot:
         taken = (self.take_stale_quotes(refs, liquid, fvs, inv, mine_real, global_reduce, party_delta, now_m)
                  if self.running else set())
 
-        # 7. Decide + reconcile each exchange; cancels happen now, new orders are batched ------------
-        new_orders = []
+        # 7. Decide + reconcile each exchange. One write at a time (parallel_writes = 1): cancels happen now,
+        #    new orders are batched after. Otherwise every change is planned first, then sent in parallel.
+        new_orders, changes = [], []
         for eid, ex in list(self.ex.items()):
             if not self.running:          # Ctrl+C: stop touching the book immediately
                 return
@@ -1678,11 +1718,19 @@ class Bot:
             try:
                 ex.quote = self.decide(ex, fvs.get(eid), inv, eff, global_reduce, party_delta, now_m,
                                        refs.get(eid), book_fvs.get(eid), eid in liquid)
-                new_orders += self.reconcile(ex, ex.quote, resting.get(eid, []), fvs.get(eid), now, now_m)
+                if cfg.parallel_writes > 1:
+                    ch = self.plan_change(ex, ex.quote, resting.get(eid, []), fvs.get(eid), now, now_m)
+                    if ch:
+                        changes.append(ch)
+                else:
+                    new_orders += self.reconcile(ex, ex.quote, resting.get(eid, []), fvs.get(eid), now, now_m)
             except ApiError as e:         # one exchange failing must not stop the others
                 log.error("exchange %s (%s): %s", eid, ex.label, e)
         if self.running:
-            self.place(new_orders, now_m)
+            if cfg.parallel_writes > 1:
+                self.send_changes(changes)
+            else:
+                self.place(new_orders, now_m)
         # Orders resting NOW, after this cycle's changes (the health snapshot above was taken before them).
         self.health["orders_resting"] = len(self.my_orders) if self.api.live else len(self.sim)
 
@@ -2046,41 +2094,197 @@ class Bot:
         return self.size_bank
 
     # ------------------------------------------------------------------------------ reconcile
-    def reconcile(self, ex, q, resting, fv, now, now_m):
-        """Make the orders resting on this exchange match quote q.
-        Cancels happen right away. New orders are returned so they can be sent in batches."""
-        if now_m < ex.pending_until:
-            # An earlier placement may still land, so don't place again (it could double up).
-            # Pulling orders is always safe, though.
-            if q.bid is None and q.ask is None and resting:
-                self.cancel(ex.eid, resting, whole_exchange=True)
-            return []
+    def plan_change(self, ex, q, resting, fv, now, now_m):
+        """What has to change on this exchange so its resting orders match quote q: a Change, or None.
+        Nothing new is ever planned while an earlier write there is unresolved (it could double up);
+        pulling orders is always allowed, unless a cancel is already on its way."""
+        if busy(ex, now_m):
+            if q.bid is None and q.ask is None and resting and not ex.cancelling:
+                return Change(ex, resting, True, [], self.change_key(ex, pull=True, reprice=True))
+            return None
 
         bids = [o for o in resting if o.is_bid]
         asks = [o for o in resting if not o.is_bid]
         fix_bid = side_needs_change(bids, q.bid, q.bid_size, self.cfg, now, q.bid_limit, is_bid=True)
         fix_ask = side_needs_change(asks, q.ask, q.ask_size, self.cfg, now, q.ask_limit, is_bid=False)
         if not (fix_bid or fix_ask):
-            return []                     # book already matches: keep our queue position
+            return None                   # book already matches: keep our queue position
 
         # Cancel the wrong side(s). Both wrong -> one cancel-all for the exchange; else per order.
         doomed = (bids if fix_bid else []) + (asks if fix_ask else [])
-        if doomed and not self.cancel(ex.eid, doomed, whole_exchange=fix_bid and fix_ask):
-            log.warning("%s: could not confirm cancels - retrying next cycle", ex.label)
-            return []                     # never stack new quotes on top of old ones
-        if now_m < ex.pause_until:
-            return []
-
         new = []
-        if fix_bid and q.bid is not None:
-            new.append(self.new_order(ex, True, q.bid, q.bid_size, fv, now))
-        if fix_ask and q.ask is not None:
-            new.append(self.new_order(ex, False, q.ask, q.ask_size, fv, now))
+        if now_m >= ex.pause_until:
+            if fix_bid and q.bid is not None:
+                new.append(self.new_order(ex, True, q.bid, q.bid_size, fv, now))
+            if fix_ask and q.ask is not None:
+                new.append(self.new_order(ex, False, q.ask, q.ask_size, fv, now))
         log.info("%s%-26.26s fv %s%s inv %+5.0f race %+5.0f | bid %s ask %s", "" if self.api.live else "[dry] ",
                  ex.label, f"{fv:.3f}" if fv is not None else "  -  ",
                  f" (ref {ex.ref:.3f})" if ex.ref is not None else "", ex.inv, ex.eff,
                  fmt(q.bid, q.bid_size), fmt(q.ask, q.ask_size))
-        return new
+        if not doomed and not new:
+            return None
+        return Change(ex, doomed, fix_bid and fix_ask, new, self.change_key(ex, pull=not new, reprice=bool(doomed)))
+
+    def change_key(self, ex, pull, reprice=False):
+        """Sending order: pulls first, then the party-control markets, then quotes for empty sides (cheap: a
+        share of one batch), then reprices (a cancel each), biggest quotes first within each."""
+        return (0 if pull else 1, 0 if ex.group in self.cfg.headline_races else 1, 1 if reprice else 0,
+                -self.size_plan.get(ex.eid, 0))
+
+    def reconcile(self, ex, q, resting, fv, now, now_m):
+        """One write at a time (parallel_writes = 1): make the orders resting on this exchange match quote q.
+        Cancels happen right away. New orders are returned so they can be sent in batches."""
+        ch = self.plan_change(ex, q, resting, fv, now, now_m)
+        if ch is None:
+            return []
+        if ch.doomed and not self.cancel(ex.eid, ch.doomed, whole_exchange=ch.whole):
+            log.warning("%s: could not confirm cancels - retrying next cycle", ex.label)
+            return []                     # never stack new quotes on top of old ones
+        return ch.new
+
+    # ------------------------------------------------------------------------------ parallel order writes
+    def send_changes(self, changes):
+        """Send this cycle's order changes with up to parallel_writes requests in flight, most urgent first:
+          1. every cancel at once (pulls first), plus the new orders on exchanges that need no cancel;
+          2. as each cancel is confirmed, the new orders that were waiting for it.
+        New orders on an exchange are only ever sent after its cancel is CONFIRMED (never two quotes on one
+        side). The cycle waits at most write_wait_seconds; writes still running then carry on in the
+        background, their exchanges are left alone (Ex.writes) and the results are applied next cycle."""
+        cfg = self.cfg
+        deadline = time.monotonic() + cfg.write_wait_seconds
+        changes = sorted(changes, key=lambda c: c.key)
+        # Within the request budget, keeping write_read_reserve back so reads (positions, orders, books) never
+        # starve; the least urgent changes wait for the next cycle.
+        spare = getattr(self.api, "budget_left", lambda: 10 ** 6)() - cfg.write_read_reserve
+        kept, cost, orders = [], 0.0, 0
+        for ch in changes:
+            n = orders + len(ch.new)
+            c = (0 if not ch.doomed else 1 if ch.whole else len(ch.doomed)) + (
+                math.ceil(n / cfg.batch_size) - math.ceil(orders / cfg.batch_size))
+            if cost + c > spare and ch.key[0] != 0:
+                break                         # pulls always go; everything after the first misfit waits
+            kept.append(ch)
+            cost, orders = cost + c, n
+        if len(kept) < len(changes):
+            log.info("request budget: %d of %d order changes deferred to the next cycle",
+                     len(changes) - len(kept), len(changes))
+        changes = kept
+        waiting = set()
+        for ch in changes:
+            if ch.doomed:
+                waiting.add(self.submit_write("cancel", [ch.ex.eid], (ch.doomed, ch.whole), change=ch))
+        self.send_orders([c for c in changes if not c.doomed and c.new])
+        while self.running:
+            # Only cancels sent by THIS call release their new orders: a late one from an earlier cycle carries
+            # that cycle's prices (the next cycle re-plans that exchange instead).
+            ready = [w.change for w in self.harvest_writes() if w in waiting and w.change.new and w.payload_ok]
+            if ready:
+                self.send_orders(sorted(ready, key=lambda c: c.key))
+            left = deadline - time.monotonic()
+            if left <= 0 or not self.writes:
+                break
+            wait([w.future for w in self.writes], timeout=left, return_when=FIRST_COMPLETED)
+        self.harvest_writes()
+
+    def send_orders(self, changes):
+        """New orders of these changes in batches of batch_size, in the order given; party-control markets get
+        a batch of their own, so it's never queued behind (or slowed by) a big one."""
+        orders = [(c.key, o) for c in changes for o in c.new if c.ex.writes == 0]
+        head = [o for k, o in orders if k[1] == 0]
+        rest = [o for k, o in orders if k[1] != 0]
+        for group in (head, rest):
+            for i in range(0, len(group), self.cfg.batch_size):
+                chunk = group[i:i + self.cfg.batch_size]
+                self.submit_write("batch", [o["exchangeId"] for o, _ in chunk], chunk)
+
+    def submit_write(self, kind, eids, payload, change=None):
+        w = Write(kind, eids, payload, time.monotonic(), change)
+        for eid in eids:
+            ex = self.ex.get(eid)
+            if ex:
+                ex.writes += 1
+                ex.cancelling = ex.cancelling or kind == "cancel"
+        if kind == "cancel":
+            eid, (orders, whole) = eids[0], payload
+            if whole and eid == self.selftest_eid:
+                self.cancel_gen += 1      # also removes any self-test orders there (see selftest_finish)
+            w.future = self.writer.submit(self.cancel_request, eid, orders, whole)
+        else:
+            w.future = self.writer.submit(self.api.place_batch, [o for o, _ in payload])
+        w.future.add_done_callback(lambda _f: self.write_done.set())   # main loop: apply it soon
+        self.writes.append(w)
+        return w
+
+    def cancel_request(self, eid, orders, whole):
+        """Writer thread: the cancel request(s) only. True = confirmed gone."""
+        if not self.api.live:
+            return True
+        if whole:
+            return self.api.cancel_all(self.tid, eid)
+        return all([self.api.cancel_order(o.order_id) for o in orders])
+
+    def harvest_writes(self):
+        """Main thread: apply the results of writes that have finished; returns those Write jobs."""
+        self.write_done.clear()
+        done = [w for w in self.writes if w.future.done()]
+        if not done:
+            return []
+        self.writes = [w for w in self.writes if w not in done]
+        now_m = time.monotonic()
+        for w in done:                    # counters first, so a failure below can't leave an exchange stuck
+            for eid in w.eids:
+                ex = self.ex.get(eid)
+                if ex:
+                    ex.writes = max(0, ex.writes - 1)
+                    if w.kind == "cancel":
+                        ex.cancelling = False
+        for w in done:
+            if w.future.cancelled():
+                continue                  # never sent (dropped from the queue by stop_queued_writes)
+            try:
+                self.apply_write(w, now_m)
+            except Exception:
+                log.exception("applying a write result failed")
+                self.orders_stale = True
+        return done
+
+    def apply_write(self, w, now_m):
+        """Main thread: apply one finished write's result."""
+        try:
+            result = w.future.result()
+        except Exception as e:
+            result = e
+        if w.kind == "cancel":
+            eid, (orders, whole) = w.eids[0], w.payload
+            if result is True:
+                w.payload_ok = True
+                if not self.api.live:
+                    for o in orders:
+                        self.sim.pop(o.order_id, None)
+                self.forget_orders([oid for oid, o in self.my_orders.items() if o.eid == eid] if whole
+                                   else [o.order_id for o in orders])
+            else:
+                if isinstance(result, Exception):
+                    log.error("cancel on %s failed: %s", eid, result)
+                label = self.ex[eid].label if eid in self.ex else eid
+                log.warning("%s: could not confirm cancels - retrying next cycle", label)
+                self.orders_stale = True
+        else:
+            self.apply_batch(w.payload, result, now_m)
+
+    def stop_queued_writes(self):
+        """Drop writes still waiting for a writer thread (not yet sent): before cancelling everything, so
+        nothing queued earlier is placed after the cancel."""
+        for w in self.writes:
+            w.future.cancel()             # only succeeds for ones not started
+
+    def drain_writes(self, timeout):
+        """Wait (up to timeout) for writes still in flight and apply them: before cancelling everything at
+        shutdown, so an order that lands late isn't left resting."""
+        if self.writes:
+            wait([w.future for w in self.writes], timeout=timeout)
+        self.harvest_writes()
 
     def new_order(self, ex, is_bid, price, size, fv, now):
         """One order for POST /orders/batch, plus notes about why we placed it."""
@@ -2160,6 +2364,8 @@ class Bot:
         exchanges, so orders you placed by hand elsewhere survive. Otherwise it's the whole tournament."""
         self.sim.clear()
         self.cancel_gen += 1
+        if hasattr(self, "writes"):
+            self.stop_queued_writes()
         self.forget_orders(list(self.my_orders))
         self.orders_stale = True                  # confirm with a fresh read next cycle
         if not self.cfg.only_exchanges:
@@ -2191,59 +2397,68 @@ class Bot:
         return ok
 
     def place(self, new_orders, now_m):
-        """Send new orders in batches and record what each one was for (for fill attribution)."""
+        """One write at a time: send new orders in batches and record what each one was for."""
         cfg = self.cfg
         for i in range(0, len(new_orders), cfg.batch_size):
             chunk = new_orders[i:i + cfg.batch_size]
             try:
                 results = self.api.place_batch([o for o, _ in chunk])
             except ApiError as e:
-                # Unknown outcome (network, 409 in flight, 502/503 after retries): some orders may
-                # exist, so leave these exchanges alone until they show up. Clear rejection: back off.
-                ambiguous = e.status in (0, 409, 502, 503, 504)
-                self.orders_stale = self.orders_stale or ambiguous   # some may exist: re-read the list
-                for o, _ in chunk:
-                    ex = self.ex.get(o["exchangeId"])
-                    if ex:
-                        if ambiguous:
-                            ex.pending_until = now_m + cfg.pending_seconds
-                        else:
-                            ex.pause_until = now_m + cfg.fail_pause_seconds
-                log.error("batch of %d orders failed (%s)", len(chunk), e)
-                if e.code in FATAL_API_CODES:
-                    fatal(f"orders rejected with {e.code} - fix it (accept the terms in the web UI / check the API key) and restart")
-                continue
+                results = e
+            self.apply_batch(chunk, results, now_m)
 
-            by_index = {r.get("index", k): r for k, r in enumerate(results)}
-            for k, (order, meta) in enumerate(chunk):
-                r, ex = by_index.get(k, {}), self.ex.get(order["exchangeId"])
-                data = r.get("data") or {}
-                if r.get("ok"):
-                    oid = data.get("orderId")
-                    if not self.api.live:                     # dry run: remember it as if it were resting
-                        oid, self.next_sim_id = self.next_sim_id, self.next_sim_id - 1
-                        self.sim[oid] = Resting(oid, order["exchangeId"], order["action"] == "buy",
-                                                order["price"], order["quantity"], parse_ts(order["expirationDate"]))
-                    if oid is not None:
-                        self.order_meta[oid] = {**meta, "eid": order["exchangeId"]}
-                        self.notes_dirty = True
-                    self.remember_order(order, data, now_m)       # our record of resting orders
-                    if data.get("quantityTraded"):
-                        log.info("order on %s traded %s immediately", order["exchangeId"], data["quantityTraded"])
-                        self.orders_stale = True          # positions changed: re-read them next cycle
-                    continue
-                err = data.get("error") or {}
-                code = err.get("code") or data.get("code") or r.get("status")
-                log.warning("order rejected on %s (%s): %s", ex.label if ex else order["exchangeId"],
-                            code, err.get("message") or data.get("error"))
+    def apply_batch(self, chunk, results, now_m):
+        """Main thread: record the outcome of one batch (its results, or the exception it raised): what each
+        order was for (fill attribution), our record of resting orders, and back-offs."""
+        cfg = self.cfg
+        if isinstance(results, Exception):
+            e = results if isinstance(results, ApiError) else ApiError(0, "NETWORK", str(results))
+            # Unknown outcome (network, 409 in flight, 502/503 after retries): some orders may
+            # exist, so leave these exchanges alone until they show up. Clear rejection: back off.
+            ambiguous = e.status in (0, 409, 502, 503, 504)
+            self.orders_stale = self.orders_stale or ambiguous   # some may exist: re-read the list
+            for o, _ in chunk:
+                ex = self.ex.get(o["exchangeId"])
                 if ex:
-                    if r.get("status") == 502:                # ORDER_STATUS_UNKNOWN: it may exist
+                    if ambiguous:
                         ex.pending_until = now_m + cfg.pending_seconds
-                        self.orders_stale = True
-                    elif r.get("status") not in (429, 503):   # transient ones just retry next cycle
+                    else:
                         ex.pause_until = now_m + cfg.fail_pause_seconds
-                if code in FATAL_API_CODES:
-                    fatal(f"orders rejected with {code} - fix it (accept the terms in the web UI / check the API key) and restart")
+            log.error("batch of %d orders failed (%s)", len(chunk), e)
+            if e.code in FATAL_API_CODES:
+                fatal(f"orders rejected with {e.code} - fix it (accept the terms in the web UI / check the API key) and restart")
+            return
+
+        by_index = {r.get("index", k): r for k, r in enumerate(results)}
+        for k, (order, meta) in enumerate(chunk):
+            r, ex = by_index.get(k, {}), self.ex.get(order["exchangeId"])
+            data = r.get("data") or {}
+            if r.get("ok"):
+                oid = data.get("orderId")
+                if not self.api.live:                     # dry run: remember it as if it were resting
+                    oid, self.next_sim_id = self.next_sim_id, self.next_sim_id - 1
+                    self.sim[oid] = Resting(oid, order["exchangeId"], order["action"] == "buy",
+                                            order["price"], order["quantity"], parse_ts(order["expirationDate"]))
+                if oid is not None:
+                    self.order_meta[oid] = {**meta, "eid": order["exchangeId"]}
+                    self.notes_dirty = True
+                self.remember_order(order, data, now_m)       # our record of resting orders
+                if data.get("quantityTraded"):
+                    log.info("order on %s traded %s immediately", order["exchangeId"], data["quantityTraded"])
+                    self.orders_stale = True          # positions changed: re-read them next cycle
+                continue
+            err = data.get("error") or {}
+            code = err.get("code") or data.get("code") or r.get("status")
+            log.warning("order rejected on %s (%s): %s", ex.label if ex else order["exchangeId"],
+                        code, err.get("message") or data.get("error"))
+            if ex:
+                if r.get("status") == 502:                # ORDER_STATUS_UNKNOWN: it may exist
+                    ex.pending_until = now_m + cfg.pending_seconds
+                    self.orders_stale = True
+                elif r.get("status") not in (429, 503):   # transient ones just retry next cycle
+                    ex.pause_until = now_m + cfg.fail_pause_seconds
+            if code in FATAL_API_CODES:
+                fatal(f"orders rejected with {code} - fix it (accept the terms in the web UI / check the API key) and restart")
 
     # ------------------------------------------------------------------------------ arbitrage
     def take_arbitrage(self, inv, fvs, mine_real, now_m):
@@ -2263,7 +2478,7 @@ class Bot:
             return done
         for race, members in self.groups.items():
             if (len(members) < 2 or not self.running or now_m < self.arb_cooldown.get(race, 0)
-                    or any(now_m < self.ex[e].pending_until for e in members)
+                    or any(busy(self.ex[e], now_m) for e in members)
                     # not in the pre-close window: the positions are hedged across the race, but the
                     # per-market flatten would then pay the spread to unwind each leg
                     or any(self.hours_to_close(self.ex[e]) <= cfg.flatten_hours_before_close for e in members)):
@@ -2380,7 +2595,7 @@ class Bot:
         for eid, ex in self.ex.items():
             if (not self.running or not ex.take_dir or now_m - ex.take_since < cfg.take_confirm_seconds
                     or now_m < ex.take_until
-                    or now_m < ex.pending_until or global_reduce
+                    or busy(ex, now_m) or global_reduce
                     or self.hours_to_close(ex) <= cfg.flatten_hours_before_close):
                 continue
             no_bid, no_ask = self.party_blocks(ex, party_delta)
@@ -2839,7 +3054,8 @@ class Bot:
         self.sleep_until(t0 + self.cfg.min_cycle_seconds)
         deadline = t0 + self.cfg.loop_seconds
         while self.running and time.monotonic() < deadline:
-            if self.wake.is_set() or (self.feed and self.feed.healthy() and self.feed.wake.is_set()):
+            if (self.wake.is_set() or (self.feed and self.feed.healthy() and self.feed.wake.is_set())
+                    or (self.writes and self.write_done.is_set())):
                 break
             self.wake.wait(timeout=0.05)
         self.wake.clear()
@@ -2963,6 +3179,7 @@ class Bot:
         if self.refs and hasattr(self.refs, "stop"):
             self.refs.stop()
         self.pool.shutdown(wait=True, cancel_futures=True)
+        self.writer.shutdown(wait=False, cancel_futures=True)
         self.selftest_pool.shutdown(wait=False, cancel_futures=True)
         if self.db:
             self.db.close()
@@ -2973,11 +3190,18 @@ class Bot:
         if not self.api.live:
             log.info("dry run finished (no real orders to cancel)")
             return
+        # An order write still in flight could land after the cancel-all and be left resting: drop the queued
+        # ones, wait for those already sent, and cancel again below if any are still running after that.
+        self.writer.shutdown(wait=False, cancel_futures=True)
+        self.drain_writes(timeout=2 * self.cfg.request_timeout)
         self.notes_dirty = True
         self.save_order_notes()
         for attempt in range(self.cfg.shutdown_cancel_attempts):
             try:
                 if self.cancel_everything():
+                    if self.writes:               # a write was still running: once it ends, cancel once more
+                        self.drain_writes(timeout=2 * self.cfg.request_timeout)
+                        self.cancel_everything()
                     log.info("all orders cancelled")
                     alert("bot stopped, all orders cancelled")
                     return

@@ -32,12 +32,12 @@ from fakes import FakeApi, lvl, market   # noqa: F401  (sets up the path + env)
 import mm_bot as M
 from mm_bot import Api, Bot, Config, TICK, ceil_tick, floor_tick, rnd
 
-SCALE = float(os.environ.get("SCENARIO_SCALE", "0.05"))   # real seconds per simulated second
+SCALE = float(os.environ.get("SCENARIO_SCALE", "0.1"))   # real seconds per simulated second
 
 
 class Clock:
     """Replaces the `time` module inside mm_bot (and mm_bot.utcnow): simulated time runs 1/SCALE times
-    faster than real time, so a 10-minute session takes 30 s while threads and timeouts stay real."""
+    faster than real time, so a 10-minute session takes 60 s while threads and timeouts stay real."""
     def __init__(self):
         self.r0 = real_time.monotonic()
         self.base = M.datetime.now(M.timezone.utc)
@@ -335,9 +335,15 @@ class World:
             rv.next = now + rv.delay
             changed = []
             with self.ex.lock:
+                ours = {}
+                for o in self.eng.orders.values():
+                    is_bid, p = self.eng.yes_view(o)
+                    ours.setdefault(o["exchangeId"], []).append((is_bid, p))
                 for eid in self.bot.ex:
                     fv = self.true[self.key_of[eid]]
-                    others = self.eng.full_book(eid)
+                    bk = self.eng.books[eid]
+                    others = {"bids": bk["bids"] + [{"price": p} for b, p in ours.get(eid, []) if b],
+                              "asks": bk["asks"] + [{"price": p} for b, p in ours.get(eid, []) if not b]}
                     mine = rv.quotes.get(eid)
                     bids = [l["price"] for l in others["bids"] if not (mine and abs(l["price"] - mine[0]) < 1e-9)]
                     asks = [l["price"] for l in others["asks"] if not (mine and abs(l["price"] - mine[1]) < 1e-9)]

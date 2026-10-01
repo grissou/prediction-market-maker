@@ -1042,6 +1042,170 @@ line, probs = b.status_report()
 check("status flags missing Polymarket prices (a stalled price thread can't go unnoticed)",
       any("Polymarket prices missing" in p for p in probs), line)
 
+print("--- parallel, time-boxed order writes (day one: writes 15-30 s, sent one at a time)")
+def lock_api(a):
+    """FakeApi isn't thread-safe; the real exchange is. Serialise its writes."""
+    lk = threading.Lock()
+    for name in ("place_batch", "cancel_all", "cancel_order"):
+        f = getattr(a, name)
+        setattr(a, name, (lambda f: lambda *x, **k: (lk.acquire(), f(*x, **k), lk.release())[1])(f))
+    return a
+house = [market("9", "91", "Republican", "U.S. House"), market("10", "92", "Democratic", "U.S. House")]
+hbooks = {"11": {"bids": [lvl(0.10, 1000)], "asks": [lvl(0.18, 1000)]}, "12": {"bids": [lvl(0.82, 1000)], "asks": [lvl(0.90, 1000)]},
+          "21": {"bids": [lvl(0.48, 1000)], "asks": [lvl(0.56, 1000)]}, "22": {"bids": [lvl(0.44, 1000)], "asks": [lvl(0.52, 1000)]},
+          "91": {"bids": [lvl(0.06, 1000)], "asks": [lvl(0.12, 1000)]}, "92": {"bids": [lvl(0.88, 1000)], "asks": [lvl(0.94, 1000)]}}
+a, b = make_bot(books={k: {"bids": [dict(l) for l in v["bids"]], "asks": [dict(l) for l in v["asks"]]} for k, v in hbooks.items()},
+                extra_markets=house)
+lock_api(a)
+sent = []
+real_pb = a.place_batch
+a.place_batch = lambda orders: (sent.append([o["exchangeId"] for o in orders]), real_pb(orders))[1]
+b.cfg.batch_size = 4
+b.cycle()
+check("party-control (headline) orders go out first, in a batch of their own", sent and set(sent[0]) == {"91", "92"}, sent)
+check("every market quoted after one cycle, no duplicates",
+      all(len(a.ours(e)) == 2 for e in ("11", "12", "21", "22", "91", "92")), {e: a.ours(e) for e in a.books})
+
+# A cancel that hangs: the cycle doesn't wait past write_wait_seconds, and nothing is stacked on that exchange.
+gate = threading.Event()
+real_co, real_ca = a.cancel_order, a.cancel_all
+slow_eids = {"21"}
+def slow_cancel_order(oid):
+    if a.orders.get(oid, {}).get("exchangeId") in slow_eids:
+        gate.wait(10)
+    return real_co(oid)
+def slow_cancel_all(tid, eid=None):
+    if eid in slow_eids:
+        gate.wait(10)
+    return real_ca(tid, eid)
+a.cancel_order, a.cancel_all = slow_cancel_order, slow_cancel_all
+b.cfg.write_wait_seconds = 0.3
+for e in ("21", "22"):                                    # Utah moves 4c: both sides there need repricing
+    a.books[e] = {"bids": [lvl(l["price"] + 0.04, 1000) for l in a.books[e]["bids"]],
+                  "asks": [lvl(l["price"] + 0.04, 1000) for l in a.books[e]["asks"]]}
+b.feed = FakeFeed(); b.feed.push(dirty={"21", "22"})
+sent.clear(); t0 = time.monotonic(); b.cycle(); took = time.monotonic() - t0
+check("a cancel that hangs doesn't hold up the cycle (time-boxed at write_wait_seconds)", took < 1.5, f"{took:.2f}s")
+check("...the other exchange's reprice still went out", any("22" in x for x in sent), sent)
+check("...nothing new is placed on the exchange whose cancel is unconfirmed (never two quotes on a side)",
+      not any("21" in x for x in sent) and b.ex["21"].writes == 1, (sent, b.ex["21"].writes))
+b.feed.push(dirty={"21"}); sent.clear(); b.cycle()
+check("...and the next cycle leaves it alone too while the cancel is still running", not any("21" in x for x in sent), sent)
+gate.set()
+for w in list(b.writes):
+    w.future.result(timeout=5)
+b.feed.push(dirty={"21"}); sent.clear(); b.cycle()
+check("once the cancel is confirmed, the new quote goes out", any("21" in x for x in sent) and len(a.ours("21")) == 2, (sent, a.ours("21")))
+a.cancel_order, a.cancel_all = real_co, real_ca
+
+# A placement that hangs: the cycle moves on; its result is applied later (fills attributable); no re-placement meanwhile.
+gate2, entered = threading.Event(), threading.Event()
+def slow_pb(orders):
+    if any(o["exchangeId"] == "11" for o in orders):
+        entered.set(); gate2.wait(10)
+    return real_pb(orders)
+a.place_batch = lambda orders: (sent.append([o["exchangeId"] for o in orders]), slow_pb(orders))[1]
+b.cancel("11", [o for o in b.my_orders.values() if o.eid == "11"], whole_exchange=True)
+sent.clear(); t0 = time.monotonic(); b.cycle(); took = time.monotonic() - t0
+check("a placement that hangs doesn't hold up the cycle", took < 1.5 and entered.is_set(), f"{took:.2f}s")
+b.feed.push(dirty={"11"}); n = len(sent); b.cycle()
+check("...and isn't sent again while it's in flight", not any("11" in x for x in sent[n:]), sent)
+gate2.set()
+for w in list(b.writes):
+    w.future.result(timeout=5)
+b.cycle()
+oids = [o["id"] for o in a.orders.values() if o["exchangeId"] == "11"]
+check("...when it lands, the bot records the orders and what they were for", len(oids) == 2 and
+      all(o in b.my_orders and o in b.order_meta for o in oids), (oids, list(b.my_orders)))
+
+# Writes really run side by side.
+a, b = make_bot(); lock_api(a)
+live, peak, lk = [0], [0], threading.Lock()
+real_pb = a.place_batch
+def counting_pb(orders):
+    with lk:
+        live[0] += 1; peak[0] = max(peak[0], live[0])
+    time.sleep(0.1)
+    with lk:
+        live[0] -= 1
+    return real_pb(orders)
+a.place_batch, b.cfg.batch_size = counting_pb, 2
+b.cycle()
+check("several order batches are in flight at once (parallel_writes)", peak[0] >= 2, peak)
+
+a, b = make_bot()
+b.cfg.parallel_writes = 1
+b.cycle()
+check("parallel_writes = 1: the old one-at-a-time path still quotes every market",
+      all(len(a.ours(e)) == 2 for e in ("11", "12", "21", "22")) and not b.writes)
+
+a, b = make_bot(); lock_api(a)
+gate3 = threading.Event()
+real_pb = a.place_batch
+a.place_batch = lambda orders: (gate3.wait(0.5), real_pb(orders))[1]
+b.cfg.write_wait_seconds = 0.05
+b.cycle()
+b.running = False
+b.shutdown()
+check("shutdown waits for writes in flight before cancelling everything (nothing left resting)", not a.orders, a.orders)
+
+# Review fixes: late cancels don't release old orders; pulls always go; counters never leak; queued writes dropped.
+a, b = make_bot(); lock_api(a)
+b.cycle()
+gate = threading.Event()
+real_ca = a.cancel_all
+a.cancel_all = lambda tid, eid=None: (gate.wait(5) if eid == "11" else None, real_ca(tid, eid))[1]
+b.cfg.write_wait_seconds = 0.1
+a.books["11"] = {"bids": [lvl(0.14, 1000)], "asks": [lvl(0.22, 1000)]}     # both sides need repricing
+b.feed = FakeFeed(); b.feed.push(dirty={"11"}); b.cycle()
+check("(setup) the cancel on 11 is still running after the cycle", b.ex["11"].cancelling)
+sent = []
+real_pb = a.place_batch
+a.place_batch = lambda orders: (sent.append([o["exchangeId"] for o in orders]), real_pb(orders))[1]
+threading.Timer(0.05, gate.set).start()
+b.cfg.write_wait_seconds = 0.5
+b.feed.push(dirty={"21"}); b.cycle()                      # the old cancel confirms DURING this cycle's wait
+check("a cancel from an earlier cycle that confirms later doesn't send that cycle's (old-price) orders",
+      not any("11" in x for x in sent), sent)
+b.feed.push(dirty={"11"}); b.cycle()
+check("...the next cycle re-plans that exchange and quotes it", len(a.ours("11")) == 2, a.ours("11"))
+
+a, b = make_bot(); b.cycle()
+from mm_bot import Change
+pulls = [Change(b.ex[e], [o for o in b.my_orders.values() if o.eid == e], True, [], (0, 1, 1, 0)) for e in ("11", "12", "21")]
+a.budget_left = lambda: 1
+b.send_changes(pulls)
+check("with the request budget nearly gone, every pull still goes out", all(not a.ours(e) for e in ("11", "12", "21")),
+      {e: a.ours(e) for e in ("11", "12", "21")})
+del a.budget_left
+
+a, b = make_bot(); b.cycle()
+real_apply = b.apply_batch
+b.apply_batch = lambda *x: (_ for _ in ()).throw(RuntimeError("boom"))
+for e in a.books:
+    a.books[e] = {"bids": [lvl(l["price"] + 0.03, 1000) for l in a.books[e]["bids"]], "asks": [lvl(l["price"] + 0.03, 1000) for l in a.books[e]["asks"]]}
+b.feed = FakeFeed(); b.feed.push(dirty=set(a.books))
+logging.disable(logging.CRITICAL); b.cycle(); logging.disable(logging.NOTSET)
+check("an error applying a write result never leaves an exchange stuck as 'write in flight'",
+      all(x.writes == 0 and not x.cancelling for x in b.ex.values()) and b.orders_stale)
+b.apply_batch = real_apply
+
+a, b = make_bot(); lock_api(a)
+gate = threading.Event()
+real_pb = a.place_batch
+a.place_batch = lambda orders: (gate.wait(5), real_pb(orders))[1]
+b.cfg.parallel_writes, b.cfg.batch_size, b.cfg.write_wait_seconds = 2, 1, 0.05
+b.writer = M.ThreadPoolExecutor(max_workers=2)
+b.cycle()
+queued = [w for w in b.writes if not w.future.running() and not w.future.done()]
+b.cancel_everything(); gate.set()
+for w in b.writes:
+    try: w.future.result(timeout=5)
+    except Exception: pass
+b.harvest_writes()
+check("cancel-everything drops order writes still queued (never sent after the cancel)",
+      queued and all(w.future.cancelled() for w in queued) and len(a.orders) <= 2, (len(queued), len(a.orders)))
+
 print("--- parallel requests")
 a, b = make_bot()
 res = b.in_parallel(lambda x: 1 / x, [1, 0, 2])
