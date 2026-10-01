@@ -234,6 +234,9 @@ class Config:
     shutdown_cancel_attempts: int = 3     # tries at cancelling everything when the bot exits
     selftest_enabled: bool = True         # live mode: before quoting, place + check + cancel two 1-share orders at
                                           #   extreme prices to confirm the API behaves as assumed; stop if not
+    selftest_retry_seconds: float = 60.0  # exchange busy during the test (timeout, 409 in flight, 429, 5xx): not a
+                                          #   failure - try again this much later, quoting meanwhile
+    selftest_alert_after: float = 900.0   # ...and send one alert if it still hasn't managed after this long
 
     # --- ORDER BOOKS -------------------------------------------------------------------------
     book_depth: int = 10                  # price levels per side to download
@@ -1428,6 +1431,17 @@ class Bot:
         self.errors_total = 0             # failed cycles since start (summaries report new ones)
         self.phase = "starting"           # what the bot is doing, for the status line
         self.selftest_passed = False
+        self.selftest_future = None       # the self-test running in the background (see selftest_tick)
+        self.selftest_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="selftest")
+        self.selftest_eid = None
+        self.selftest_next = 0.0          # when to try again after the exchange answered busy
+        self.selftest_started = None
+        self.selftest_alerted = False
+        self.selftest_hold = 0.0          # the test exchange's pending_until before the test
+        self.selftest_gen = 0             # cancel_gen when the test started
+        self.selftest_unlisted = 0        # tests in a row whose orders were accepted but never listed
+        self.selftest_errors = 0          # tests in a row that crashed (a bug in the test)
+        self.cancel_gen = 0               # +1 on every cancel-everything (the self-test checks it)
         self.load_markets()
 
     def check_clock(self):
@@ -2145,6 +2159,7 @@ class Bot:
         """Cancel every order the bot is responsible for. With ONLY_EXCHANGES set, that's just those
         exchanges, so orders you placed by hand elsewhere survive. Otherwise it's the whole tournament."""
         self.sim.clear()
+        self.cancel_gen += 1
         self.forget_orders(list(self.my_orders))
         self.orders_stale = True                  # confirm with a fresh read next cycle
         if not self.cfg.only_exchanges:
@@ -2157,6 +2172,8 @@ class Bot:
             for o in orders:
                 self.sim.pop(o.order_id, None)
             return True
+        if whole_exchange and eid == self.selftest_eid:
+            self.cancel_gen += 1          # this also removes any self-test orders there (see selftest_finish)
         try:
             if whole_exchange:
                 ok = self.api.cancel_all(self.tid, eid)
@@ -2631,72 +2648,176 @@ class Bot:
         while self.running and time.monotonic() < t:
             time.sleep(min(0.25, max(0.0, t - time.monotonic())))
 
+    # Exchange answers that mean "busy, try again later" rather than "this API doesn't work the way we think":
+    # a network error or timeout (0), the same request still in flight (409), rate limited, server trouble.
+    SELFTEST_BUSY = (0, 409, 429, 500, 502, 503, 504)
+
     def self_test(self):
-        """Live mode, straight after the first quotes go out (so they aren't delayed at the open) and before
-        the bot touches them again: check the exchange behaves the way this bot assumes, using two
-        1-share orders at the most extreme prices allowed (a bid at 0.005 and an ask at 0.995), so they
-        almost certainly won't trade, and if they do it costs about half a cent. Checks:
+        """Live mode, straight after the first quotes go out (so they aren't delayed at the open): check the
+        exchange behaves the way this bot assumes, using two 1-share orders at the most extreme prices
+        allowed (a bid at 0.005 and an ask at 0.995), so they almost certainly won't trade, and if they do
+        it costs about half a cent. Checks:
           1. the batch order is accepted and returns order ids,
           2. both show up in our open orders with side / action / priceLimit / quantity / expirationDate,
           3. "sell YES @ 0.995" reads back as an ask at 0.995 (the engine may store it as buy NO @ 0.005),
           4. the expiry time is kept, and cancel-all removes them.
         Anything unexpected -> alert + stop with exit code 3, so a human looks before real quoting.
-        A network blip gets one retry."""
-        if not self.cfg.selftest_enabled or not self.api.live or not self.ex:
+        A BUSY exchange (timeout, 409 in flight, 429, 5xx: day one's open) is not a failure: the test is
+        simply tried again selftest_retry_seconds later. Returns True = passed (or not needed), False = busy.
+        This runs the test here and now (used by tests and tools); the main loop uses selftest_tick(),
+        which runs the same test on a background thread so slow writes never hold up quoting."""
+        if not self.selftest_needed():
             return True
+        eid = self.selftest_start()
+        return self.selftest_finish(eid, self.selftest_run(eid, self.cfg.order_ttl))
+
+    def selftest_needed(self):
+        return self.cfg.selftest_enabled and self.api.live and bool(self.ex) and not self.selftest_passed
+
+    def selftest_start(self):
+        """Pick the test exchange and keep the bot's own quoting off it until the test is over (the test's
+        clean-up cancels everything there)."""
         # On the quietest ordinary market: the test's clean-up cancels our quotes there too, and that must not
         # cost a big market its place in line at the open.
         quiet = [e for e in sorted(self.ex) if self.ex[e].group not in self.cfg.headline_races] or sorted(self.ex)
         eid = min(quiet, key=lambda e: self.size_plan.get(e, 0))
-        ttl, retried = self.cfg.order_ttl, False
-        for _ in range(3):
-            problems, transient, rejected = [], False, False
-            exp = iso(utcnow() + timedelta(seconds=ttl))          # the same expiry real quotes use
-            orders = [{"exchangeId": eid, "side": "yes", "action": act, "quantity": 1, "price": px,
-                       "tournamentId": self.tid, "expirationDate": exp} for act, px in (("buy", PMIN), ("sell", PMAX))]
-            try:
-                results = self.api.place_batch(orders)
-                if len(results) != 2 or not all(r.get("ok") and (r.get("data") or {}).get("orderId") is not None
-                                                for r in results):
-                    problems.append(f"batch response not as expected: {str(results)[:300]}")
-                    rejected = len(results) == 2 and not any(r.get("ok") for r in results)
-                raw = self.api.open_orders(self.tid, eid)
-                missing = sorted({f for o in raw for f in ("id", "side", "action", "priceLimit", "quantity",
-                                                           "expirationDate") if f not in o})
-                if missing:
-                    problems.append(f"open orders are missing fields {missing}")
-                mine = [o for o in map(parse_order, raw) if o]
-                if not any(o.is_bid and abs(o.price - PMIN) < 1e-9 and o.qty == 1 for o in mine):
-                    problems.append("the test bid at 0.005 isn't in our open orders")
-                if not any(not o.is_bid and abs(o.price - PMAX) < 1e-9 and o.qty == 1 for o in mine):
-                    problems.append("the test 'sell YES @ 0.995' didn't read back as an ask at 0.995")
-                if mine and not all(o.expires for o in mine):
-                    problems.append("the orders' expiry time wasn't kept")
-            except ApiError as e:
-                problems.append(f"API error: {e}")
-                transient = e.status in (0, 429, 502, 503, 504)
-            finally:
-                if not self.cancel(eid, [], whole_exchange=True):   # also removes our quotes there (re-placed next cycle)
+        # Remember any earlier "outcome unknown" hold on it, so finishing the test doesn't lift it early.
+        self.selftest_hold = self.ex[eid].pending_until
+        self.ex[eid].pending_until = float("inf")
+        self.selftest_started = self.selftest_started or time.monotonic()
+        self.selftest_gen = self.cancel_gen
+        return eid
+
+    def selftest_run(self, eid, ttl):
+        """One test (API calls only, no bot state touched, so it can run on any thread).
+        Returns (verdict, problems, ttl): verdict "passed", "failed" or "busy"."""
+        verdict, problems = self.selftest_attempt(eid, ttl)
+        if verdict == "rejected" and ttl > 600:
+            # The docs allow any future expiry, but if the exchange caps it, fall back rather than stop.
+            log.warning("self-test: %.0f-min orders were rejected (%s) - trying 10-min ones", ttl / 60, problems[0])
+            ttl = 600.0
+            verdict, problems = self.selftest_attempt(eid, ttl)
+        return ("failed" if verdict == "rejected" else verdict), problems, ttl
+
+    def selftest_attempt(self, eid, ttl):
+        problems, busy, rejected = [], False, False
+        exp = iso(utcnow() + timedelta(seconds=ttl))              # the same expiry real quotes use
+        orders = [{"exchangeId": eid, "side": "yes", "action": act, "quantity": 1, "price": px,
+                   "tournamentId": self.tid, "expirationDate": exp} for act, px in (("buy", PMIN), ("sell", PMAX))]
+        try:
+            # Our own quotes there can't be repriced while the test runs: take them off first.
+            self.api.cancel_all(self.tid, eid)
+            results = self.api.place_batch(orders)
+            if len(results) != 2 or not all(r.get("ok") and (r.get("data") or {}).get("orderId") is not None
+                                            for r in results):
+                problems.append(f"batch response not as expected: {str(results)[:300]}")
+                rejected = len(results) == 2 and not any(r.get("ok") for r in results)
+                busy = any(r.get("status") in self.SELFTEST_BUSY for r in results)
+            else:
+                # The open-orders list can lag the exchange (up to recent_order_grace_seconds): keep looking.
+                # Test orders that never show up at all are reported as "not listed" (busy the first time).
+                give_up = time.monotonic() + self.cfg.recent_order_grace_seconds
+                while True:
+                    found = self.selftest_check(self.api.open_orders(self.tid, eid))
+                    if not found or time.monotonic() >= give_up:
+                        break
+                    time.sleep(min(2.0, max(0.0, give_up - time.monotonic())))
+                problems += found
+        except ApiError as e:
+            problems.append(f"API error: {e}")
+            busy = e.status in self.SELFTEST_BUSY
+        finally:
+            try:                                                  # also removes our quotes there (re-placed later)
+                if not self.api.cancel_all(self.tid, eid):
                     problems.append("cancel-all didn't confirm the test orders were gone")
-            if not problems:
-                if ttl != self.cfg.order_ttl:
-                    alert(f"orders expiring in {self.cfg.order_ttl / 60:.0f} min were rejected but {ttl / 60:.0f}-min "
-                          f"ones work - using {ttl / 60:.0f}-min orders from now on")
-                    self.cfg.order_ttl, self.cfg.refresh_before_expiry = ttl, ttl / 5
-                log.info("self-test passed: orders, sell->NO conversion, expiry and cancel all behave as expected")
-                self.selftest_passed = True
-                return True
-            if rejected and ttl > 600:
-                # The docs allow any future expiry, but if the exchange caps it, fall back rather than stop.
-                log.warning("self-test: %.0f-min orders were rejected (%s) - trying 10-min ones", ttl / 60, problems[0])
-                ttl = 600.0
-                continue
-            if not transient or retried:
-                break
-            retried = True
-            log.warning("self-test hit a network problem (%s) - retrying once", problems[0])
-            time.sleep(5)
+            except ApiError as e:
+                problems.append(f"cancel-all failed: {e}")
+                busy = busy or e.status in self.SELFTEST_BUSY
+        if not problems:
+            return "passed", []
+        if not busy and not rejected and problems[0] == self.SELFTEST_NOT_LISTED:
+            return "not listed", problems
+        return ("busy" if busy else "rejected" if rejected else "failed"), problems
+
+    SELFTEST_NOT_LISTED = "neither test order is in our open orders"
+
+    @classmethod
+    def selftest_check(cls, raw):
+        problems = []
+        missing = sorted({f for o in raw for f in ("id", "side", "action", "priceLimit", "quantity",
+                                                   "expirationDate") if f not in o})
+        if missing:
+            problems.append(f"open orders are missing fields {missing}")
+        mine = [o for o in map(parse_order, raw) if o]
+        if not any(o.qty == 1 and (abs(o.price - PMIN) < 1e-9 or abs(o.price - PMAX) < 1e-9) for o in mine) \
+                and not missing:
+            return [cls.SELFTEST_NOT_LISTED]
+        if not any(o.is_bid and abs(o.price - PMIN) < 1e-9 and o.qty == 1 for o in mine):
+            problems.append("the test bid at 0.005 isn't in our open orders")
+        if not any(not o.is_bid and abs(o.price - PMAX) < 1e-9 and o.qty == 1 for o in mine):
+            problems.append("the test 'sell YES @ 0.995' didn't read back as an ask at 0.995")
+        if mine and not all(o.expires for o in mine):
+            problems.append("the orders' expiry time wasn't kept")
+        return problems
+
+    def selftest_finish(self, eid, outcome):
+        """Main thread: act on a test's outcome. True = passed."""
+        verdict, problems, ttl = outcome
+        ex = self.ex.get(eid)
+        if ex:
+            ex.pending_until = self.selftest_hold if self.selftest_hold != float("inf") else 0.0
+        if verdict == "failed" and self.cancel_gen != self.selftest_gen:
+            # The bot itself cancelled everything while the test ran (error recovery, kill switch...):
+            # its orders may have vanished for that reason, so this proves nothing. Try again.
+            verdict, problems = "busy", ["our own cancel-all ran during the test"] + problems
+        if verdict == "not listed":
+            # Accepted, but never listed: the list may just be lagging a busy exchange. Twice in a row = real.
+            self.selftest_unlisted += 1
+            verdict = "busy" if self.selftest_unlisted < 2 else "failed"
+        elif verdict == "error":
+            self.selftest_errors += 1
+            verdict = "busy" if self.selftest_errors < 3 else "failed"
+        # The clean-up cancelled whatever we had resting there: drop it from our record and re-read the list.
+        self.forget_orders([oid for oid, o in self.my_orders.items() if o.eid == eid])
+        self.orders_stale = True
+        if verdict == "passed":
+            if ttl != self.cfg.order_ttl:
+                alert(f"orders expiring in {self.cfg.order_ttl / 60:.0f} min were rejected but {ttl / 60:.0f}-min "
+                      f"ones work - using {ttl / 60:.0f}-min orders from now on")
+                self.cfg.order_ttl, self.cfg.refresh_before_expiry = ttl, ttl / 5
+            log.info("self-test passed: orders, sell->NO conversion, expiry and cancel all behave as expected")
+            self.selftest_passed = True
+            return True
+        if verdict == "busy":
+            waited = time.monotonic() - (self.selftest_started or time.monotonic())
+            self.selftest_next = time.monotonic() + self.cfg.selftest_retry_seconds
+            log.warning("self-test: exchange busy (%s) - trying again in %.0f s, quoting meanwhile",
+                        problems[0] if problems else "?", self.cfg.selftest_retry_seconds)
+            if waited >= self.cfg.selftest_alert_after and not self.selftest_alerted:
+                self.selftest_alerted = True
+                alert(f"self-test still not done after {waited / 60:.0f} min: the exchange keeps answering busy "
+                      f"({problems[0] if problems else '?'}). Quoting continues; it keeps retrying")
+            return False
         fatal("self-test failed before trading - " + "; ".join(problems))
+
+    def selftest_tick(self):
+        """Main loop, after every cycle: run the self-test on a background thread, without ever waiting for
+        it (on day one, order writes took 15-30 s at the open), and act on its result once it's in."""
+        if not self.selftest_needed():
+            return
+        f = self.selftest_future
+        if f is not None:
+            if f.done():
+                self.selftest_future = None
+                try:
+                    outcome = f.result()
+                except Exception as e:            # a bug in the test itself: retried, fatal the 3rd time running
+                    outcome = ("error", [f"self-test error: {e}"], self.cfg.order_ttl)
+                self.selftest_finish(self.selftest_eid, outcome)
+            return
+        if time.monotonic() >= self.selftest_next:
+            self.selftest_eid = self.selftest_start()
+            self.selftest_future = self.selftest_pool.submit(self.selftest_run, self.selftest_eid, self.cfg.order_ttl)
 
     def start_feed(self):
         """Start the realtime feed if it's enabled and the `realtime` package is installed."""
@@ -2809,16 +2930,14 @@ class Bot:
                     log.info("clean slate: cancelling any orders left over from before")
                     self.cancel_everything()
             self.phase = "trading"
-            tested = not self.api.live
             while self.running:
                 t0 = time.monotonic()
                 try:
                     if t0 - self.last_reload > self.cfg.market_reload_seconds:
                         self.load_markets()
                     self.cycle()
-                    if not tested and self.running:
-                        tested = True
-                        self.self_test()          # stops the bot (exit code 3) if the API surprises us
+                    if self.running:
+                        self.selftest_tick()      # stops the bot (exit code 3) if the API surprises us
                     self.failed_cycles, self.pulled_after_errors = 0, False
                     self.write_status(ok=True)
                     self.maybe_summary()
@@ -2844,6 +2963,7 @@ class Bot:
         if self.refs and hasattr(self.refs, "stop"):
             self.refs.stop()
         self.pool.shutdown(wait=True, cancel_futures=True)
+        self.selftest_pool.shutdown(wait=False, cancel_futures=True)
         if self.db:
             self.db.close()
             self.db = None

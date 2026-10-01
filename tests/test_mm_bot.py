@@ -523,15 +523,120 @@ check("self-test passes against an exchange that behaves as the spec says, and l
       ok and not a.orders and a.sent("batch") == [("batch", 2)], (a.orders, a.calls))
 a, b = make_bot()
 a.open_orders = lambda tid, eid=None: []                   # the orders "vanish": not what we expect
+b.cfg.recent_order_grace_seconds = 0.05
+logging.disable(logging.CRITICAL)
+first = b.self_test()
+check("self-test: accepted orders not listed once = maybe list lag on a busy exchange -> retry, no exit", first is False)
 try:
     logging.disable(logging.CRITICAL); b.self_test(); code = None
 except SystemExit as e:
     code = e.code
 finally:
     logging.disable(logging.NOTSET)
-check("self-test stops the bot (exit code 3) when the exchange doesn't behave as assumed", code == EXIT_FATAL, code)
+check("self-test stops the bot (exit code 3) when the exchange doesn't behave as assumed (twice in a row)", code == EXIT_FATAL, code)
 a, b = make_bot(live=False)
 check("self-test is skipped in dry runs (no real orders)", b.self_test() and not a.sent("batch"))
+
+print("--- self-test: a busy exchange is not a failure (day one: writes > 15 s, 409 REQUEST_IN_FLIGHT)")
+for err, name in ((ApiError(409, "REQUEST_IN_FLIGHT", "in flight"), "409 in flight"),
+                  (ApiError(0, "NETWORK", "read timed out"), "network timeout")):
+    a, b = make_bot()
+    a.batch_error = err
+    try:
+        logging.disable(logging.CRITICAL); ok = b.self_test(); code = None
+    except SystemExit as e:
+        ok, code = None, e.code
+    finally:
+        logging.disable(logging.NOTSET)
+    tex = b.ex[b.selftest_eid or min(b.ex)]
+    check(f"self-test {name}: no exit, returns 'not yet' and retries ~60 s later",
+          code is None and ok is False and 55 < b.selftest_next - time.monotonic() <= 60, (ok, code))
+    check(f"self-test {name}: the test exchange isn't left blocked, and the order list is re-read",
+          all(x.pending_until < time.monotonic() for x in b.ex.values()) and b.orders_stale)
+    a.batch_error = None
+    check(f"self-test {name}: once the exchange answers, the retry passes", b.self_test() and b.selftest_passed)
+a, b = make_bot()
+real_cancel = a.cancel_all
+def cancel_times_out(tid, eid=None):
+    real_cancel(tid, eid)                                  # it DID cancel; we just never heard back
+    raise ApiError(0, "NETWORK", "read timed out")
+a.cancel_all = cancel_times_out
+try:
+    logging.disable(logging.CRITICAL); ok = b.self_test(); code = None
+except SystemExit as e:
+    ok, code = None, e.code
+finally:
+    logging.disable(logging.NOTSET)
+check("self-test: a clean-up cancel that times out is 'busy', not a failure", code is None and ok is False, (ok, code))
+
+a, b = make_bot()
+gate, entered = threading.Event(), threading.Event()
+real_pb = a.place_batch
+def slow_test_batch(orders):
+    if all(o["quantity"] == 1 for o in orders):           # the self-test's two 1-share orders: hang like day one
+        entered.set(); gate.wait(5)
+    return real_pb(orders)
+a.place_batch = slow_test_batch
+alerts = []
+real_alert, M.alert = M.alert, lambda m: alerts.append(m)
+cycles = {"n": 0}
+real_cycle = b.cycle
+def counting():
+    cycles["n"] += 1
+    real_cycle()
+    if cycles["n"] == 3:
+        check("while the self-test's order write hangs, cycles keep running (it's on its own thread)",
+              entered.is_set() and not b.selftest_passed, cycles)
+        gate.set()
+    if cycles["n"] >= 3 and b.selftest_passed:
+        b.running = False
+    if cycles["n"] > 200:
+        b.running = False
+b.cycle, b.cfg.loop_seconds, b.cfg.min_cycle_seconds = counting, 0.01, 0.01
+b.run()
+M.alert = real_alert
+check("...and its result is picked up once it's in: passed, test orders gone", b.selftest_passed and
+      not [o for o in a.orders.values() if o["quantity"] == 1], cycles)
+
+a, b = make_bot()
+a.batch_error = ApiError(409, "REQUEST_IN_FLIGHT", "in flight")
+b.cfg.selftest_alert_after, b.cfg.selftest_retry_seconds = 0, 0
+alerts = []
+M.alert = lambda m: alerts.append(m)
+logging.disable(logging.CRITICAL)
+b.self_test(); b.self_test()
+logging.disable(logging.NOTSET)
+M.alert = real_alert
+check("self-test still busy after selftest_alert_after: exactly one alert, still no exit",
+      len([m for m in alerts if "self-test" in m]) == 1, alerts)
+a, b = make_bot()
+b.cycle()
+def wrong_side(tid, eid=None):                            # listed, but the ask reads back wrongly
+    return [dict(o, priceLimit=0.5) if o["side"] == "no" else o for o in FakeApi.open_orders(a, tid, eid)]
+real_pb2 = a.place_batch
+def batch_then_bot_cancels(orders):
+    res = real_pb2(orders)
+    if all(o["quantity"] == 1 for o in orders):
+        b.cancel_everything()                              # e.g. error recovery pulling every quote mid-test
+    return res
+a.place_batch, a.open_orders = batch_then_bot_cancels, wrong_side
+try:
+    logging.disable(logging.CRITICAL); ok = b.self_test(); code = None
+except SystemExit as e:
+    ok, code = None, e.code
+finally:
+    logging.disable(logging.NOTSET)
+check("self-test: a failure while the bot itself cancelled everything mid-test proves nothing -> retry",
+      code is None and ok is False, (ok, code))
+a, b = make_bot()
+b.cycle()
+tx = min([e for e in sorted(b.ex)], key=lambda e: b.size_plan.get(e, 0))
+b.ex[tx].pending_until = time.monotonic() + 50                # an unclear placement there earlier
+b.self_test()
+check("self-test keeps an earlier 'outcome unknown' hold on its exchange (no double placement)",
+      b.ex[tx].pending_until > time.monotonic() + 40, b.ex[tx].pending_until - time.monotonic())
+check("self-test takes the bot's own quotes off its exchange before testing (they can't be repriced meanwhile)",
+      ("cancel_all", tx) in a.calls, a.calls[-6:])
 
 print("--- election night")
 q = exit_quote(0.14, 300, 0.12, 0.18, CFG, 100_000)
