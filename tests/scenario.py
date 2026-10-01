@@ -390,6 +390,8 @@ class World:
             per = {}
             for o in self.eng.orders.values():
                 is_bid, p = self.eng.yes_view(o)
+                if o["quantity"] == 1 and (p <= 0.005 or p >= 0.995):
+                    continue              # the self-test's two 1-share orders
                 per.setdefault(o["exchangeId"], []).append((is_bid, p))
         quoted = len(per)
         dups = sum(1 for v in per.values() for side in (True, False) if sum(1 for b, _ in v if b == side) > 1)

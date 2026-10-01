@@ -108,7 +108,7 @@ api.calls.clear(); bot.cycle()
 check("book 21 failing doesn't stop book 22 being refreshed", ("book", "22") in api.calls, api.calls)
 api.fail_book.clear()
 
-for e in bot.ex.values():                                   # downloaded 400 s ago: past book_stale (300 s)
+for e in bot.ex.values():                                   # downloaded 400 s ago: past book_reverify_seconds (120 s)
     e.book_time -= 400; e.verified -= 400                   #   but before book_max_age (600 s)
 api.calls.clear(); bot.cycle()
 check("old download but the bulk check confirms it -> still trusted and quoted, not re-downloaded",
@@ -1205,6 +1205,33 @@ for w in b.writes:
 b.harvest_writes()
 check("cancel-everything drops order writes still queued (never sent after the cancel)",
       queued and all(w.future.cancelled() for w in queued) and len(a.orders) <= 2, (len(queued), len(a.orders)))
+
+print("--- book freshness: re-check before calling a book stale (day one: 4.5-min cycles, then quotes pulled)")
+check("defaults: book_stale 900 s, 30 books per cycle, bulk re-check after 120 s",
+      (CFG.book_stale, CFG.max_books_per_cycle, CFG.book_reverify_seconds) == (900, 30, 120))
+a, b = make_bot(); b.cycle()
+b.feed = FakeFeed(); b.feed.ok = True; b.last_full_check = time.monotonic()      # event cycles only, no full check
+for e in b.ex.values():
+    e.verified -= 200
+a.calls.clear(); b.feed.push(dirty=set()); b.cycle()
+check("between full checks, books unconfirmed for 120 s get one bulk check (not a download each)",
+      len(a.sent("bulk")) == 1 and not a.sent("book") and all(time.monotonic() - e.verified < 5 for e in b.ex.values()),
+      a.calls)
+for e in b.ex.values():
+    e.verified -= 200
+a.books["21"]["bids"][0]["price"] = 0.50                 # this one moved
+a.calls.clear(); b.feed.push(dirty=set()); b.cycle()
+check("...a book whose best price moved is downloaded the next cycle", "21" in b.pending_dirty or ("book", "21") in a.calls)
+b.feed.push(dirty=set()); b.cycle()
+check("...and then it's current again", time.monotonic() - b.ex["21"].verified < 5)
+for e in b.ex.values():
+    e.verified -= 1000
+real_bulk = a.bulk_prices
+a.bulk_prices = lambda *x: (_ for _ in ()).throw(ApiError(503, "SERVICE_UNAVAILABLE", "down"))
+logging.disable(logging.CRITICAL); b.feed.push(dirty=set()); b.cycle(); logging.disable(logging.NOTSET)
+check("if the exchange can't be read at all, a book past book_stale still isn't quoted", not any(a.ours(e) for e in a.books),
+      {e: a.ours(e) for e in a.books})
+a.bulk_prices = real_bulk
 
 print("--- parallel requests")
 a, b = make_bot()

@@ -247,11 +247,15 @@ class Config:
 
     # --- ORDER BOOKS -------------------------------------------------------------------------
     book_depth: int = 10                  # price levels per side to download
-    max_books_per_cycle: int = 10         # full-book downloads per cycle (keeps a cycle inside the request budget)
+    max_books_per_cycle: int = 30         # full-book downloads per cycle (still capped by the spare request budget)
     book_max_age: float = 600.0           # re-download each book at least this often, even if it looks unchanged.
                                           #   Changed books are caught much sooner by the bulk prices anyway
-    book_stale: float = 300.0             # a book not confirmed current (downloaded, or its best prices matched a
-                                          #   bulk check) for this long isn't trusted -> don't quote it
+    book_stale: float = 900.0             # a book not confirmed current (downloaded, or its best prices matched a
+                                          #   bulk check) for this long isn't trusted -> don't quote it. Before that
+                                          #   happens the bot re-checks it (book_reverify_seconds), so this only
+                                          #   bites when the exchange can't be read at all
+    book_reverify_seconds: float = 120.0  # a book unconfirmed for this long gets a bulk best-price check (one request
+                                          #   per 100 books) on the next cycle, even between full checks
 
     # --- TIMING / NETWORK --------------------------------------------------------------------
     loop_seconds: float = 10.0            # target time between cycle starts
@@ -1639,6 +1643,7 @@ class Bot:
             self.refresh_books(mine_real, now_m)  # bulk prices for everything, then only books that moved
         else:
             self.download_books(self.books_to_fetch([]), mine_real)   # just the few the feed reported
+            self.reverify_books(mine_real, now_m)  # books unconfirmed for a while: cheap bulk check first
 
         # 3. Fair values ---------------------------------------------------------------------------
         # book_fvs: the tournament book's own price (parties in a race scaled to sum to 1).
@@ -1826,6 +1831,29 @@ class Bot:
                 extra.append((2, ex.book_time, eid))
         if self.running:
             self.download_books(self.books_to_fetch(extra), mine_real)
+
+    def reverify_books(self, mine_real, now_m):
+        """Books not confirmed current for book_reverify_seconds get one bulk best-price check (one request
+        per 100), so a quiet book never goes stale (and gets its quotes pulled) just because nothing made the
+        bot look at it. Unchanged best prices confirm it; a moved one is downloaded next cycle."""
+        old = [eid for eid, ex in self.ex.items()
+               if ex.book is not None and now_m - ex.verified >= self.cfg.book_reverify_seconds]
+        if not old or not self.running or getattr(self.api, "budget_left", lambda: 10 ** 6)() <= 0:
+            return
+        chunks = [tuple(old[i:i + BULK_MAX_IDS]) for i in range(0, len(old), BULK_MAX_IDS)]
+        for chunk, res in self.in_parallel(lambda c: self.api.bulk_prices(list(c), self.tid), chunks).items():
+            if isinstance(res, Exception):
+                log.warning("bulk re-check failed for %d books (%s)", len(chunk), res)
+                continue
+            self.last_tops.update(res)
+            for eid in chunk:
+                ex = self.ex.get(eid)
+                if ex is None or eid not in res:
+                    continue
+                if res[eid] == predicted_top(ex.book, mine_real.get(eid, [])):
+                    ex.verified = now_m
+                else:
+                    self.pending_dirty.add(eid)      # moved: download it next cycle
 
     def books_to_fetch(self, extra):
         """Which books to download this cycle, most urgent first:
