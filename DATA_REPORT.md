@@ -293,3 +293,23 @@ Not found; these are **rule questions for the owner**:
 - `nullif1ed/sigprediction`: blends SIG mid, other venues and complement markets, polls hot markets every 2 s.
 
 So structural (constraint) arbitrage and Polymarket anchoring are already competed for.
+
+## 8. Simulator parameters for Run C (from day one; `simparams.py`)
+
+| Parameter | Day-one value | Notes |
+|---|---|---|
+| Polymarket reference moves | 95% of 2.8-min intervals unchanged; sd 0.09c per interval | A very quiet day: no news |
+| Polymarket jumps per market-hour | ≥1c: 0.05; ≥2c: 0.004; ≥3c: 0.002 | Over 967 market-hours. Add a news regime: debates, polls, 3 Nov |
+| Tournament − Polymarket gap | Per-market persistent bias sd **1.19c** + transient sd **0.58c**, AR(1) half-life **≈5 min** | Bias pattern is favourite-longshot: +1.1c under 10c, −0.6c above 70c |
+| Sweep spikes (trade prints far from the book) | Not visible in snapshots; fills with >3c edge: 46/819 fills, 30k shares (8% of volume), about 11 per hour | Examples: Dem House 0.816, Maine 1.43, WI Gov 0.23→0.50. Books refill in ≤2-3 min |
+| Tournament mid moves | Median 0 per 2.8 min; 2.1% of intervals move ≥2c | Fat-tailed |
+| Spread (all two-sided books) | p10 0.5c, p25 1.0c, **median 1.5c**, p75 2.0c, p90 3.0c | Races: 2.0c → 1.0c within an hour of the open. Headline 0.5-1.0c |
+| Our fill rate | 191 fills/h, 86k sh/h | small (<500 sh): 132/h over 113 markets; busy: 35/h over 54 markets; headline: 24/h over 3 markets |
+| Fill size | p25 96, median 100, p75 500, p90 1,000, p99 5,200 | |
+| Informed flow | 11% of fills see the 15-min mid ≥1c against the fill price (4% ≥2c); 26% see it ≥1c in favour | Mostly uninformed or noisy flow |
+| Competing quoters | Every quoted market had someone at or inside our price. The best other quote sits median **0.5c** (bid) / **1.0c** (ask) from our fair value; 51-62% within 1c; 19-30% through our fair value | Model 2-4 bots per busy market with floors uniform on [0, 1.5c] from a Polymarket-anchored fair value, with fair-value noise sd ≈0.5c |
+| Competitor repricing | Not measurable at snapshot resolution. Our own requote cadence is a median 282 s per market | Assume 2-10 s for fast bots (polling every 2 s) and 30-120 s for slow ones; ask Run A to log realtime book events |
+| Picking off stale quotes | Not observable on day one (Polymarket barely moved) | Model as: on a Polymarket move ≥1c, the fastest bot takes stale quotes after 2-5 s |
+| Slow writes | 409 REQUEST_IN_FLIGHT about 35 per hour all day (20-order batches); first cycle 4.5 min; 4 × 429 (budget 76 → 42-60/min) | Platform limit reportedly 100 reads + **30 writes**/min. Model write latency of 1-3 s normally and 15+ s in bursts |
+| Lost orders | 42% of filled shares came from orders the bot did not know about | Model as P(confirm lost on 409) ≈ 1 |
+| Divergence episodes ≥3c | About 54 per hour across 69 markets; median ≤2.7 min; 96% close, 98% by the tournament moving | ≥5c: 2.4 per hour, all closed within 10 min |
