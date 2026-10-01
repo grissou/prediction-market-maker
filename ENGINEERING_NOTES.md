@@ -12,7 +12,7 @@ Numbers are simulated seconds from `tests/scenario.py` (see "Scenarios"). Update
 | 2 | Parallel, time-boxed, prioritised order sending | done |
 | 3 | Book freshness (bulk re-verify, book_stale 900, max_books 30) | done |
 | 4 | Recover unconfirmed orders + metadata (fill attribution) | done |
-| 5 | Realtime reconnect backoff resets after a healthy session | todo |
+| 5 | Realtime reconnect backoff resets after a healthy session | done |
 | 6 | Faster Polymarket | todo |
 | 7 | Burst protection | todo |
 | 8 | Churn control for a crowded book | todo |

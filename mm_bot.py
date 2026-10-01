@@ -298,6 +298,8 @@ class Config:
     realtime_heartbeat_seconds: float = 30.0   # with the feed: full safety check (bulk prices, positions, orders)
                                                #   this often, because delivery is best-effort
     realtime_token_refresh_seconds: float = 600.0  # start a new session (fresh 3-hour login) this long before it expires
+    realtime_healthy_seconds: float = 60.0         # a session up this long that then drops reconnects after 1 s again
+                                                   #   (the back-off only grows over drops that come in quick succession)
     realtime_session_max_seconds: float = 3600.0   # ...and at least this often anyway: a long-lived socket can die
                                                    #   without the library noticing (it happened on 29 Sep)
 
@@ -799,10 +801,16 @@ class RealtimeFeed:
         growing back-off, and connect again."""
         backoff = 1.0
         while not self.stopping:
+            self.session_connected_at = None
             try:
                 await self._session()
                 backoff = 1.0
             except Exception as e:
+                # A session that was healthy for a while ended unexpectedly: that's a fresh drop, not a
+                # repeat failure, so start again from the shortest wait (day one: 2, 4, 8, 16 s over 2 hours).
+                up = self.session_connected_at
+                if up is not None and time.monotonic() - up >= self.cfg.realtime_healthy_seconds:
+                    backoff = 1.0
                 if not self.stopping:
                     log.warning("realtime feed down (%s) - polling meanwhile, reconnecting in %.0f s", e, backoff)
             with self.lock:
@@ -842,6 +850,7 @@ class RealtimeFeed:
                 ch.on_broadcast("account_batch", lambda m, t=topic: self._on_account(t, m))
                 await ch.subscribe(lambda state, err, t=topic: self._on_state(t, state, err))
             self.connected = True
+            self.session_connected_at = time.monotonic()
             log.info("realtime feed connected - reacting to pushed updates")
             # The session ends (and a new one starts, with a fresh login and a full resync) before the token
             # runs out, and at least every realtime_session_max_seconds anyway.

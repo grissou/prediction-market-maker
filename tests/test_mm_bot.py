@@ -517,6 +517,36 @@ check("the library logging 'connection closed' flags the feed for reconnection",
 check("...and a flagged feed counts as dead even if everything else looks fine", feed._socket_dead(FakeClient()))
 check("sessions renew at least hourly (fresh login) even when they look healthy", Config().realtime_session_max_seconds == 3600)
 
+print("--- realtime reconnect back-off (day one: 2, 4, 8, 16 s over two hours of unrelated drops)")
+import asyncio
+def backoffs(session_lengths):
+    """Run RealtimeFeed._run with sessions that drop after the given (simulated) lengths; return its waits."""
+    feed = RealtimeFeed(None, "T", Config())
+    waits, clock, runs = [], [1000.0], iter(session_lengths)
+    async def fake_session():
+        n = next(runs, None)
+        if n is None:
+            feed.stopping = True
+            return
+        if n > 0:
+            feed.session_connected_at = clock[0]
+        clock[0] += n
+        raise ConnectionError("socket closed")
+    async def fake_sleep(t):
+        waits.append(t); clock[0] += t
+    feed._session = fake_session
+    real_sleep, real_mono = asyncio.sleep, M.time.monotonic
+    asyncio.sleep, M.time.monotonic = fake_sleep, lambda: clock[0]
+    try:
+        logging.disable(logging.CRITICAL); asyncio.run(feed._run())
+    finally:
+        asyncio.sleep, M.time.monotonic = real_sleep, real_mono; logging.disable(logging.NOTSET)
+    return waits
+w = backoffs([3000, 2400, 1800, 600])
+check("a drop after a healthy session reconnects after 1 s every time (not 2, 4, 8, 16 s)", w[:4] == [1, 1, 1, 1], w)
+w = backoffs([0, 0, 0, 0, 5])
+check("drops in quick succession (never connected) still back off: 1, 2, 4, 8 s", w[:4] == [1, 2, 4, 8], w)
+
 print("--- startup self-test (live)")
 a, b = make_bot()
 ok = b.self_test()
