@@ -92,3 +92,68 @@ Implications for Run C:
 - Net doubled-up race legs (long Rep plus short Dem in the same race).
 - Skew harder to flatten dust positions in quiet races.
 - Fix the equity base.
+
+## 3. Edge, markout and competition
+
+Scripts: `edge.py`, `competition.py`, `pm_moves.py`. All 819 attributed fills are used.
+- **Edge** = side × (fair value at quote − price).
+- **Markouts** are re-measured against the snapshots at +5, +15 and +60 min. The `fv_after` column in fills.csv holds the fair value when the fill was *detected* (usually the same cycle). Its markout is close to 0 by construction, so the logged "markout −0.09c" means little.
+
+**Edge and markout (c/share, share-weighted):**
+
+| Group | Fills | Shares | Edge | Markout vs fv +5m / +15m / +60m | Markout vs tournament mid +15m | P&L at mid +60m |
+|---|---|---|---|---|---|---|
+| All | 819 | 368,930 | **+0.58** | −0.08 / +0.03 / −0.04 | −0.22 | +1,613 |
+| Headline (U.S. House/Senate) | 103 | 160,375 | +0.36 | +0.03 / +0.08 / −0.02 | −0.24 | +689 |
+| Race fills ≥500 sh | 148 | 140,058 | +0.67 | −0.17 / +0.01 / −0.06 | −0.20 | +349 |
+| Race fills <500 sh | 568 | 68,497 | +0.89 | −0.14 / −0.06 / −0.07 | −0.21 | +575 |
+| Matched to a logged quote | 447 | 216,928 | +0.71 | | | +1,236 |
+| Inferred (unmatched in fills.csv) | 372 | 152,002 | +0.39 | | | +376 |
+
+- **Adverse selection is small against our own fair value** (about 0 to −0.1c), and about −0.2c against the tournament mid.
+- **Where we are picked off:** fills at the 1c floor in contested markets, where the edge itself is thin. **Rep U.S. Senate is 33% of all shares traded (121,974) at +0.02c edge**, −74 after 60 min. That is pure churn against other bots.
+- **Where we earn:** Dem U.S. House (+762, edge 1.45c, mostly the 16:07 stale bid), Rep WI Gov (+136), Rep MI Senate (+51), Rep VT Gov, Rep SC-01, Dem TX Gov, Rep SD Senate, Rep TX Senate (+35 to +48 each).
+- **Where we lose:** Rep U.S. Senate −74, Dem FL Gov −66 (negative edge), Rep MN Senate −19.
+
+Edge over time (30-min buckets):
+
+| | 16:00 | 16:30 | 17:00 | 17:30 | 18:00 | 18:30 | 19:00 | 19:30 | 20:00 |
+|---|---|---|---|---|---|---|---|---|---|
+| Edge (c) | 0.94 | 0.02 | 0.64 | 0.48 | 0.61 | 0.80 | 0.19 | 0.22 | 1.22 (37 fills) |
+| Shares (k) | 84 | 63 | 64 | 34 | 37 | 33 | 25 | 16 | 15 |
+
+Volume per half hour fell five-fold as spreads closed.
+
+**Competition at the top of book.** These are 2-3 min snapshots; best bid and ask include our own orders. Where we were quoting (8,668 quote-snapshots):
+
+| Our quote vs the best price | Bid | Ask |
+|---|---|---|
+| We are at the best | 23% | 25% |
+| Someone exactly **1 tick inside** us | **19%** | **18%** |
+| 2 ticks inside | 15% | 19% |
+| 3+ ticks inside | 33% | 31% |
+| Not yet in the book (just posted) | 10% | 9% |
+
+- **We were behind the best price about two-thirds of the time.**
+- Headline markets: at best 28%, but 3+ ticks behind 43% (the 4c cap or skew keeps us away).
+- The share of time we are at the best fell from 27% (16h) to 21% (20h).
+- **Every market we quoted was contested.** Of 220 markets quoted in ≥10 snapshots, 199 had someone ahead of us in >50% of snapshots, and none was never undercut. "Quiet race nobody prices" does not exist on day one at this resolution, though finer data might show gaps.
+- **Spreads tightened fast.** The median two-sided spread in races went 2.0c (16h) → 1.0c (17h, 19h, 20h). Headline: 1.5c → 0.5-1.0c. The share of two-sided books with spread ≤1c went 24% → 51% → 49% → 57% → **71%** (16h→20h).
+- **The other traders' best quotes sit inside our floor.** Where the best price is not ours, the other best bid is a median **0.5c** below our fair value (ask: 1.0c above). 62% of their bids and 51% of their asks are <1c from our fair value, so inside our `min_edge`. 30% of bids and 19% of asks are *through* our fair value, meaning their fair values differ from ours by ≥0.5c.
+- This confirms the owner's picture: several quoters converge at 0.5-1c from a Polymarket-anchored fair value, and our 1c floor leaves us behind them.
+
+**Undercut speed.**
+- The bot changes its quote in a market every **282 s at the median** (p25 170 s, p75 746 s).
+- 26% of quote changes are 1-tick tightenings (chasing) and 29% are 1-tick widenings.
+- Exact undercut latency is not measurable: no tick-level book is stored. Run A/C should log book changes (realtime events) to measure it.
+
+**Polymarket-move fills.**
+- Only 38 of 727 fills with a known reference followed a ≥0.5c Polymarket move in the previous 10 min.
+- Their markout was −0.15c (moved against us) and −0.67c (moved with us) vs −0.21c for the rest.
+- On day one, **adverse markout did not come from Polymarket moves.** Polymarket barely moved, and the reference is logged only on quote changes. The thin edge comes from competition at the floor, not from being picked off.
+
+**How the other bots behave (what can be seen):**
+- They quote within 0.5-1c of a Polymarket-like fair value.
+- They stay two-sided through the session; the share of tight books keeps rising, so they do not step back by 20h.
+- They often sit through our fair value, so their fair values differ.
+- Sizes and repricing latency are **not recorded** (snapshots have no sizes). This is the main data gap for Run C; recommended: record top-3 levels with sizes from realtime book pushes.
