@@ -209,7 +209,10 @@ class ReferencePrices:
     def _loop(self):
         while not self.stopped.is_set():
             t0 = time.monotonic()
-            self.refresh()
+            try:
+                self.refresh()
+            except Exception as e:            # never let one bad reading stop the thread for good: if it died,
+                log.warning("reference price refresh failed: %s", e)   # prices would go stale silently
             # refresh_seconds from START to start (the download itself takes ~1 s)
             self.stopped.wait(max(0.0, self.cfg.refresh_seconds - (time.monotonic() - t0)))
 

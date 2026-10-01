@@ -486,6 +486,36 @@ logging.disable(logging.NOTSET)
 check("a channel error -> unhealthy (bot polls until it reconnects)", not feed.healthy())
 
 
+print("--- dead realtime socket detection (seen live: the library kept saying 'connected')")
+class FakeWS:
+    close_code = None
+class FakeTask:
+    def __init__(self, done): self._done = done
+    def done(self): return self._done
+class FakeClient:
+    def __init__(self, connected=True, close_code=None, listener_done=False):
+        self._ws_connection = FakeWS() if connected else None
+        if connected:
+            self._ws_connection.close_code = close_code
+        self._listen_task = FakeTask(listener_done)
+    @property
+    def is_connected(self): return self._ws_connection is not None
+feed = RealtimeFeed(None, "T", CFG)
+check("healthy socket: not dead", not feed._socket_dead(FakeClient()))
+check("server closed the socket (close code 1006) while is_connected still says True: dead",
+      feed._socket_dead(FakeClient(close_code=1006)))
+check("the library's listener stopped: dead", feed._socket_dead(FakeClient(listener_done=True)))
+handler = M._SocketErrorWatch(feed)
+logging.getLogger("realtime").addHandler(handler)
+logging.disable(logging.NOTSET); logging.getLogger("realtime._async.client").propagate = True
+real_level = logging.getLogger("realtime").level
+logging.getLogger("realtime").setLevel(logging.ERROR)
+logging.getLogger("realtime._async.client").error("WebSocket connection closed with code: 1006, reason: ")
+logging.getLogger("realtime").removeHandler(handler); logging.getLogger("realtime").setLevel(real_level)
+check("the library logging 'connection closed' flags the feed for reconnection", feed.socket_error)
+check("...and a flagged feed counts as dead even if everything else looks fine", feed._socket_dead(FakeClient()))
+check("sessions renew at least hourly (fresh login) even when they look healthy", Config().realtime_session_max_seconds == 3600)
+
 print("--- startup self-test (live)")
 a, b = make_bot()
 ok = b.self_test()
@@ -898,6 +928,14 @@ check("self-test runs on the quietest ordinary market, never a party-control one
       [n for _, _, n in a.ours("91")] == [10000, 10000] and [n for _, _, n in a.ours("92")] == [10000, 10000],
       (a.ours("91"), a.ours("92")))
 check("status.json shows the size plan", b.health.get("biggest_quotes", {}).get("Rep U.S. House") == 10000, b.health.get("biggest_quotes"))
+
+a, b = make_bot()
+b.phase, b.refs = "trading", FakeRefs({"Ohio Senate|Republican": 0.14})
+b.refs.mapping = {f"k{i}": {} for i in range(10)}         # 10 mapped, only 1 priced
+b.cycle()
+line, probs = b.status_report()
+check("status flags missing Polymarket prices (a stalled price thread can't go unnoticed)",
+      any("Polymarket prices missing" in p for p in probs), line)
 
 print("--- parallel requests")
 a, b = make_bot()

@@ -278,7 +278,9 @@ class Config:
                                           #   (3 requests for all 237) instead of downloading each book
     realtime_heartbeat_seconds: float = 30.0   # with the feed: full safety check (bulk prices, positions, orders)
                                                #   this often, because delivery is best-effort
-    realtime_token_refresh_seconds: float = 600.0  # renew the 3-hour realtime login this long before it expires
+    realtime_token_refresh_seconds: float = 600.0  # start a new session (fresh 3-hour login) this long before it expires
+    realtime_session_max_seconds: float = 3600.0   # ...and at least this often anyway: a long-lived socket can die
+                                                   #   without the library noticing (it happened on 29 Sep)
 
     # --- FILES (relative names are kept in the bot's own folder) -----------------------------
     fills_csv: str = "fills.csv"
@@ -636,6 +638,20 @@ class Api:
 # REALTIME FEED - the exchange pushes changes to us (Supabase Realtime), on a background thread
 # =============================================================================================
 
+class _SocketErrorWatch(logging.Handler):
+    """Flags the feed when the `realtime` library logs that its socket closed. Needed because, with its
+    auto-reconnect off (we reconnect ourselves), the library only LOGS the closure: it keeps reporting
+    is_connected=True and keeps heartbeating into the dead socket. Seen live on 29 Sep: dead for 2 days."""
+    def __init__(self, feed):
+        super().__init__(logging.ERROR)
+        self.feed = feed
+
+    def emit(self, record):
+        text = record.getMessage().lower()
+        if "connection closed" in text or "terminating connection" in text:
+            self.feed.socket_error = True
+
+
 class RealtimeFeed:
     """Listens to two private channels and tells the main loop what changed:
 
@@ -662,10 +678,12 @@ class RealtimeFeed:
         self.last_revision = {}           # topic -> last revision number accepted
         self.events = 0                   # messages received (shown in status.json)
         self.trade_counts = defaultdict(int)   # exchange -> tournament trades seen (all traders)
+        self.socket_error = False         # the library logged that the socket closed (see _SocketErrorWatch)
         self.thread = threading.Thread(target=lambda: asyncio.run(self._run()), name="realtime", daemon=True)
 
     # --- used by the main loop -------------------------------------------------------------
     def start(self):
+        logging.getLogger("realtime").addHandler(_SocketErrorWatch(self))   # the library logs under "realtime.*"
         self.thread.start()
 
     def stop(self):
@@ -778,8 +796,20 @@ class RealtimeFeed:
         """A 3-hour realtime login from the REST API (one request, through our rate limiter)."""
         return (await asyncio.to_thread(self.api.call, "POST", "/realtime/token"))[1]
 
+    def _socket_dead(self, client):
+        """Is this session's socket gone? client.is_connected alone can't be trusted (see _SocketErrorWatch),
+        so also check the library's error log, the socket's close code and whether its listener stopped."""
+        if not client.is_connected or self.socket_error:
+            return True
+        ws = getattr(client, "_ws_connection", None)
+        if ws is not None and getattr(ws, "close_code", None) is not None:
+            return True
+        task = getattr(client, "_listen_task", None)
+        return bool(task is not None and task.done())
+
     async def _session(self):
         from realtime import AsyncRealtimeClient          # imported here: the package is optional
+        self.socket_error = False
         tok = await self._mint_token()
         client = AsyncRealtimeClient(f"{tok['supabaseUrl']}/realtime/v1", token=tok["anonKey"],
                                      params={"apikey": tok["anonKey"]}, auto_reconnect=False)
@@ -794,18 +824,22 @@ class RealtimeFeed:
                 await ch.subscribe(lambda state, err, t=topic: self._on_state(t, state, err))
             self.connected = True
             log.info("realtime feed connected - reacting to pushed updates")
-            expires, started = parse_ts(tok.get("expiresAt")), time.monotonic()
+            # The session ends (and a new one starts, with a fresh login and a full resync) before the token
+            # runs out, and at least every realtime_session_max_seconds anyway.
+            started, expires = time.monotonic(), parse_ts(tok.get("expiresAt"))
+            deadline = started + self.cfg.realtime_session_max_seconds
+            if expires:
+                deadline = min(deadline, started + (expires - utcnow()).total_seconds()
+                               - self.cfg.realtime_token_refresh_seconds)
             while not self.stopping:
                 await asyncio.sleep(1)
-                if not client.is_connected:
+                if self._socket_dead(client):
                     raise ConnectionError("socket closed")
                 if len(self.topics_joined) < len(topics) and time.monotonic() - started > 20:
                     raise ConnectionError("a channel subscription failed or dropped")
-                if expires and (expires - utcnow()).total_seconds() < self.cfg.realtime_token_refresh_seconds:
-                    tok = await self._mint_token()
-                    await client.set_auth(tok["token"])
-                    expires = parse_ts(tok.get("expiresAt"))
-                    self._flag_resync("login token refreshed")
+                if time.monotonic() >= deadline:
+                    log.info("realtime: renewing the session (fresh login, full resync)")
+                    return
         finally:
             self.connected = False
             await client.close()
@@ -2542,6 +2576,9 @@ class Bot:
             problems.append("realtime feed down, polling meanwhile")
         if h.get("reduce_only"):
             problems.append("reduce-only: worst-case loss above the cap")
+        mapped = len(getattr(self.refs, "mapping", {}) or {}) if self.refs else 0
+        if mapped and h and h.get("reference_prices", 0) < 0.5 * mapped:
+            problems.append(f"Polymarket prices missing ({h.get('reference_prices', 0)} of {mapped})")
         phase = self.phase
         if phase == "trading":
             hrs = min((self.hours_to_close(ex) for ex in self.ex.values()), default=float("inf"))

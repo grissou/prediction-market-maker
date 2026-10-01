@@ -103,6 +103,18 @@ R.FETCHERS.update(polymarket=lambda ids: {"1": (0.40, 0.01, 5e6)}, kalshi=lambda
 refs.on_refresh = None
 refs.refresh()
 check("volumes() reports each market's volume by key", refs.volumes().get(key) == 5e6, refs.volumes())
+boom = R.ReferencePrices(path, R.RefConfig(refresh_seconds=0.05))
+calls2 = {"n": 0}
+def flaky_refresh():
+    calls2["n"] += 1
+    if calls2["n"] == 1:
+        raise RuntimeError("unexpected data")
+boom.refresh = flaky_refresh
+boom.start(); t_end = time.monotonic() + 2
+while calls2["n"] < 3 and time.monotonic() < t_end:
+    time.sleep(0.02)
+boom.stop()
+check("an error inside a refresh never kills the background thread (it keeps refreshing)", calls2["n"] >= 3, calls2)
 R.FETCHERS.clear(); R.FETCHERS.update(real_fetchers)
 
 print("--- matching tournament races to Polymarket")
