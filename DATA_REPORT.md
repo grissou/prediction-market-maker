@@ -17,6 +17,7 @@ The rank of 92 out of 447 is consistent with about +0.5%, not +26%.
 Knock-on effects on live risk (for Run A and the owner):
 - **Kill switch.** It trips when `API + locked < 70,000`. With 37k locked, the real drawdown needed to trip it is about 67k instead of 30k.
 - **Worst-case cap.** It is `0.30 × (API + locked)`, which was 41.3k at 20:18 instead of 30.1k. It also moves with resting orders: cancelling quotes tightens it, posting quotes loosens it.
+- **Quote sizes.** The README says "every size scales with the account", so sizes and the 60% capital lock scale with the inflated value, up to about 1.4× the intended size.
 - **Phone summaries.** They report noise, for example "+27,447" and "-918 in 2h".
 - **Fix:** set `reserved_cash_mode="ignore"`, or check the detector. The owner was notified.
 
@@ -253,3 +254,42 @@ Script: `divergence.py`. Tournament mid vs Polymarket reference, using two-sided
 - **9 fills (4,947 sh) cannot be attributed.** They are mostly Rep Maine Senate 2,000 sh @0.415 (16:55) and Rep U.S. Senate 1,547 sh @0.39 (16:24). They explain most of the 12 position mismatches against status.json.
 - Fix (Run A): on a 409 or timeout, re-read open orders and adopt unknown orders into `order_notes` with the quote they came from. Also log `eid` and price on every fill so attribution never needs inference. fills.csv also loses the NO/YES side: the API's signed quantity is stored as an absolute value.
 - Note: for NO-side fills, `fill_price` is the NO price. Verified: 158 of 202 matched ask fills have fill_price = 1 − quote_price; 34 equal the quote, which are sells of YES already held.
+
+## 7. Research: rules, Smart Score, rate limits
+
+**Caveat.** The cloud proxy blocks predictionscup.com, sig.thesuper.market, sig.com and docs.polymarket.com. The rule quotes below come from search-engine extracts of the official pages and **must be checked by the owner on the live pages**. Full notes are in `analysis/research_notes.md`.
+
+**Official rules** (https://predictionscup.com/rules/, search extracts):
+- *Dates:* "runs from October 1, 2026 noon ET to November 4, 2026 noon ET."
+- *Bots are allowed:* participants "may connect an unlimited number of automated software programs ('Bots') to their Account, provided that each Participant maintains only one (1) Account." The API may be used to "submit and cancel simulated orders … subject to applicable authentication requirements, **rate limits, position limits, technical controls**, these Official Rules, and the Platform's Terms of Service." The bot's activity is "deemed the activity of the participant."
+- *Ranking:* "You must complete at least one trade to receive a rank. … the ranking at the end of the competition is fully determined by your **final SUSQie balance**." Prizes: $30,000 / $5,000 / $2,500 for the top 3.
+- *Settlement:* "Upon the official resolution of each Market, the Platform will adjust each participant's SUSQies balance by crediting or debiting SUSQies as applicable."
+- *Enforcement:* the Sponsor may "disqualify any participant, void or reverse any trade, adjust any SUSQies balance or leaderboard standing" for rule violations or "unsportsmanlike or disruptive manner". Multiple accounts and identities lead to disqualification.
+
+Not found; these are **rule questions for the owner**:
+1. Whether "final SUSQie balance" counts open positions, and at what price (last trade, mid or valuation price). Election day is 3 Nov and the competition ends 4 Nov at noon ET, so most races will be **unresolved at the end**.
+2. Explicit wash, spoof or collusion wording.
+3. The numeric position limits.
+4. Tie-breaks.
+
+**Smart Score.**
+- There is no public definition. The bot's API wrapper reads `/tournaments/{slug}/me/smart-score`, with fields `smartScoreDecayed`, `rank`, `totalTraders`, `isElite` per `marketType`. The code comment says "SIG's recruiting export ranks candidates by this score". The *decayed* field suggests recent performance weighs more.
+- We were "not scored yet" at 20:00 despite 800 fills, so there is probably a minimum (time, markets or resolved markets).
+- SIG's press release: competitions are "part of how Susquehanna identifies students with an aptitude for probabilistic thinking", which hints at a calibration or accuracy component rather than raw P&L. This is unverified. **Ask SIG or check the docs.**
+
+**Platform API limits** (third-party repo quoting the platform docs, fetched: https://github.com/nullif1ed/sigprediction):
+- "**100 reads and 30 writes per minute per key**; a 429 response carries `Retry-After: 60`."
+- Bulk `/exchanges/prices` covers 237 markets in 3 reads.
+- The realtime websocket "pushes full books without using the read budget".
+- **Implication:** our 20-order batches, about 140 per hour that fail with 409, probably exceed a 30-writes/min budget. Run A should confirm in the docs whether a batch counts as one write or as N.
+
+**Polymarket gamma-api** (third-party summaries; the official page https://docs.polymarket.com/quickstart/introduction/rate-limits is blocked here):
+- General about 4,000 req/10 s, `/markets` 300/10 s, `/events` 500/10 s.
+- Throttled through Cloudflare (requests queued, not rejected).
+- Our 5 s refresh is far below these limits.
+
+**Competitor intel (public).** Other participants publish their bots:
+- `github.com/ZVogel1/SIG-PM-Challenge-F2026`: "edge_hunter", "constraint_arb" and "risk_manager" bots.
+- `nullif1ed/sigprediction`: blends SIG mid, other venues and complement markets, polls hot markets every 2 s.
+
+So structural (constraint) arbitrage and Polymarket anchoring are already competed for.
