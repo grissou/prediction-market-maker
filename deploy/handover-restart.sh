@@ -13,8 +13,12 @@ for i in $(seq 1 480); do
   sleep 0.5
 done
 if systemctl is-active -q mmbot; then
-  echo "WARNING: bot still running 240 s after the handover signal - starting anyway (a no-op while it runs);" >&2
-  echo "         check journalctl -u mmbot, and that it restarts with the new version" >&2
+  # `start` would be a no-op on a unit that is still active, and when the old bot finally exits 0 nothing would
+  # restart it (Restart=on-failure): fall back to a plain restart (SIGTERM = the normal cancel-everything stop).
+  echo "WARNING: bot still running 240 s after the handover signal - falling back to a plain restart" >&2
+  echo "         (this cancels all orders); check journalctl -u mmbot" >&2
+  sudo systemctl restart mmbot || exit 1
+else
+  sudo systemctl start mmbot || exit 1
 fi
-sudo systemctl start mmbot || exit 1
 echo "restarted; watch: journalctl -u mmbot -f | grep -i handover"

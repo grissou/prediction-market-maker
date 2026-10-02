@@ -1803,8 +1803,8 @@ grab = _Grab()
 real_level, real_prop = M.log.level, M.log.propagate
 M.log.addHandler(grab); M.log.setLevel(logging.INFO); M.log.propagate = False
 try:
-    a, b = make_bot(); b.cycle()
-    real_pos = a.positions
+    a, b = make_bot(); b.cfg.positions_stale_max_cycles = 3; b.cycle()   # (default 0: seconds only, since
+    real_pos = a.positions                                                 # feed-woken cycles can be 0.5 s apart)
     a.positions = lambda: (_ for _ in ()).throw(ApiError(409, "CONFLICT", "Tournament holdings cannot be valued"))
     seq = pos_409_run(b, 6)
     check("F2: positions 409 -> the last read is reused 3 cycles in a row, then every cycle fails",
@@ -1893,8 +1893,11 @@ check("write budget: separate from reads (3 writes + 5 reads go at once)", time.
       wapi.writes_left())
 wapi.throttle(write=True)
 check("...a 4th write in the window waits for it", time.monotonic() - t0 >= 0.9, time.monotonic() - t0)
-check("default write budget: starts at 45/min, may grow to 60/min (1-2 Oct: no 429 at >= 40 writes/min)",
-      Config().writes_per_minute == 45 and Config().writes_per_minute_max == 60 and Config().write_budget_cut == 0.75)
+check("default write budget: starts at 45/min, may grow to 50/min (1-2 Oct: no 429 at >= 40 writes/min; 429s "
+      "seen after 33-53 writes in 60 s, and 60 would starve book reads under the 80/min cap)",
+      Config().writes_per_minute == 45 and Config().writes_per_minute_max == 50 and Config().write_budget_cut == 0.75)
+check("the positions-409 fallback is bounded by time only by default (120 s): cycles can be 0.5 s apart",
+      Config().positions_stale_max_cycles == 0 and Config().positions_stale_max_seconds == 120)
 check("default batch: 10 orders (full 20-order batches were 273 of the 417 '409 in flight' failures)",
       Config().batch_size == 10)
 from dataclasses import replace as _replace
@@ -1936,6 +1939,16 @@ t0 = time.monotonic(); status, _ = limited_api.call("GET", "/x"); waited = time.
 check("429 -> waits Retry-After before retrying, then succeeds", status == 200 and waited >= 0.29, f"{waited:.2f}s")
 check("429 -> request gap doubled (0.4 -> 0.8, then drifts down 1%) and counted",
       abs(limited_api.gap - 0.8 * 0.99) < 1e-9 and limited_api.rate_limited == 1, (limited_api.gap, limited_api.rate_limited))
+
+# A 429 on a READ (GETs are the more frequent requests, so a per-key limit hits them first) also cuts a write
+# budget that has grown above its start value; a budget at or below the start value is left alone.
+for start_w, want in ((50.0, 37.5), (45.0, 45.0)):
+    answers = [Resp(429, {"Retry-After": "0.05"}), Resp(200)]
+    read_api = Api(CFG, False); read_api.wbudget = start_w
+    read_api.s.request = lambda *a, **k: answers.pop(0)
+    read_api.call("GET", "/x")
+    check(f"a read 429 with the write budget at {start_w:g}: budget now {want:g} (cut only above its start value)",
+          abs(read_api.wbudget - want) < 1e-9, read_api.wbudget)
 
 # Write budget AIMD: +1 per 60 successful writes up to writes_per_minute_max; a 429 on a write cuts it.
 from dataclasses import replace as _replace
@@ -2067,12 +2080,13 @@ try:
     a, b = pull_storm_bot()
     a.writes_left = lambda: 2
     b.cycle()
-    check("F3: more pulls than the writes left (and than re-placing everything costs): one cancel-all",
-          a.sent("cancel_all") == [("cancel_all", None)] and not a.orders, a.calls)
-    a, b = pull_storm_bot(batch_size=2)                   # re-placing 8 quotes: 4 batches + the cancel-all = 5
-    a.writes_left = lambda: 3
+    check("F3: a drained write budget alone never triggers the cancel-all (re-placement would wait on it too)",
+          len(a.sent("cancel_all")) == 4 and all(c[1] for c in a.sent("cancel_all")), a.calls)
+    a, b = pull_storm_bot(pulls_cancel_all_over=2)
+    b.burst, b.burst_set, b.burst_cfg = True, set(), b.cfg
+    b.update_burst = lambda now_m: None
     b.cycle()
-    check("F3: ...but not when re-placing every quote would cost as much as the pulls",
+    check("F3: never in burst mode (only the top markets would be re-quoted: the rest would stay empty)",
           len(a.sent("cancel_all")) == 4 and all(c[1] for c in a.sent("cancel_all")), a.calls)
     a, b = pull_storm_bot(pulls_cancel_all_over=2)
     b.selftest_future = object()                          # the self-test is running on its own thread

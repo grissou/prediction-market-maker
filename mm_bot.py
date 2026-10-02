@@ -158,7 +158,7 @@ class Config:
     exit_max_slippage: float = 0.03            # ...but never more than 3c worse than fair value
     stop_minutes_before_close: float = 15.0    # nothing at all (orders cancelled)
     max_failed_cycles: int = 3            # this many API-error cycles in a row -> cancel everything until healthy
-    positions_stale_max_cycles: int = 3   # positions answering 409 "holdings cannot be valued": the last read is
+    positions_stale_max_cycles: int = 0   # positions answering 409 "holdings cannot be valued": the last read is
     positions_stale_max_seconds: float = 120.0  # reused for at most this many cycles in a row OR this long, whichever
                                           #   comes first; then the cycle fails (an API error: after max_failed_cycles
                                           #   of those every quote is pulled until positions read again), because
@@ -379,7 +379,7 @@ class Config:
                                           #   at >= 40 writes (peaks ~60) with no 429; the 6 429s came at 33-53 writes
                                           #   and didn't follow the write rate. 30 deferred changes on every cycle for
                                           #   3 minutes after the 2 Oct 08:08 restart
-    writes_per_minute_max: int = 60       # ...it then grows slowly (+1 per 60 successful writes) up to this while no
+    writes_per_minute_max: int = 50       # ...it then grows slowly (+1 per 60 successful writes) up to this while no
                                           #   write is rate limited (= writes_per_minute: never grows)
     startup_writes_per_minute: int = 30   # while the first download of every book is still running after a (re)start,
                                           #   writes stay at most this (the old budget), so the bigger write budget
@@ -813,7 +813,8 @@ class Api:
                     self.gap = min(self.cfg.max_request_gap, self.gap * 2)
                     if not already_paused:        # the budget was too generous: cut it by a quarter
                         self.budget = max(20.0, self.budget * 0.75)
-                        if method != "GET":
+                        if method != "GET" or self.wbudget > self.cfg.writes_per_minute:
+                            # (a per-key limit 429s the more frequent reads first: a grown write budget is cut too)
                             self.wbudget = max(10.0, self.wbudget * self.cfg.write_budget_cut)
                     self.rate_limited += 1
                 if not already_paused:
@@ -2771,9 +2772,9 @@ class Bot:
         # burst-mode skipping), or a position could be left to grow or never be exited.
         critical = self.global_reduce or self.hours_to_close(ex) <= self.cfg.flatten_hours_before_close
         if self.cfg.churn_control and not critical:
-            if fix_bid and self.hold_side(ex, bids, q.bid, q.bid_limit, q.bid_size, True, now, now_m):
-                fix_bid = False
-            if fix_ask and self.hold_side(ex, asks, q.ask, q.ask_limit, q.ask_size, False, now, now_m):
+            if fix_bid and self.hold_side(ex, bids, q.bid, q.bid_limit, full_bid, True, now, now_m):
+                fix_bid = False                   # (full size: a full-size order is still safe in a burst)
+            if fix_ask and self.hold_side(ex, asks, q.ask, q.ask_limit, full_ask, False, now, now_m):
                 fix_ask = False
         if not (fix_bid or fix_ask):
             return None                   # book already matches: keep our queue position
@@ -2980,13 +2981,14 @@ class Bot:
         cfg = self.cfg
         if not (self.api.live and cfg.pulls_cancel_all_over > 0) or cfg.only_exchanges or self.selftest_future:
             return False
-        pulls = sum(1 if c.whole else len(c.doomed) for c in changes if c.key[0] == 0 and c.doomed)
-        if not pulls:
+        if self.burst:                            # burst mode re-quotes only the top markets: a cancel-all would
+            return False                          # leave ~200 safe resting orders empty until the burst ends
+        pulls = sum(1 if c.whole else len(c.doomed) for c in changes if c.key[0] == 0 and c.doomed and not c.new)
+        if not pulls:                             # (urgent reprices carry new orders: they are not pulls)
             return False
         left = getattr(self.api, "writes_left", lambda: 10 ** 6)()
-        replace = 1 + math.ceil(len(self.my_orders) / cfg.batch_size)   # this cancel-all + re-placing everything
-        if not (pulls > cfg.pulls_cancel_all_over or (pulls > left and pulls > replace)):
-            return False
+        if not pulls > cfg.pulls_cancel_all_over:  # (only the count decides: a drained write budget would also
+            return False                          # defer the re-placement, leaving the whole book empty)
         log.warning("%d pulls planned (%d writes left this minute) - one cancel-all instead; what should rest "
                     "is re-placed next cycle", pulls, left)
         try:
