@@ -518,7 +518,9 @@ pnl_liq: start AND end at liquidation (longs at the best other bid, shorts at th
 pnl_mid: start and end at the other traders' mid. Deviation from the plan: the residual-bias decomposition (the real starting gap
 already holds the live tilt, so per-market bias = gap + s0 (p0 - 0.5); the start book matches the real one in every world), and
 informed takers trade toward the anchored price (Polymarket + anchor x (bias + tilt term)), not raw Polymarket.
-"Tilt world" (the judge) = `_rival_anchor` 1, `_world_tilt` 0.05, `_world_tilt_growth` 0.002. BASE = Package 4 defaults + live
+"Tilt world" (the judge) = `_rival_anchor` 1, `_world_tilt` 0.05, `_world_tilt_growth` 0.002. NOTE (found 23:15 UTC): the start book is
+the REAL book either way, so `_world_tilt` only names the part of the real gap that is the tilt (the part that grows); the level of the tilt
+in the 74-market world is the real one (~7% here, ~6.3% cross-section live). `_world_tilt_add` adds tilt on top (the ref_tilt_max test). BASE = Package 4 defaults + live
 overrides (arb_two_sided false, worst_case_backstop_frac 0.8, ceiling factor 0.5, writes 28/28, burst 60), `_start_cap` 0.90.
 8 seeds x 3 h quiet, paired; deltas ± 1 SE. Machine: 1 CPU. Raw output: tests/live_sim_round5_*.txt.
 
@@ -596,3 +598,13 @@ exchange-style mark. The ramp does NOT reduce the Polymarket-marked cost (-112 v
 at a falling rate for 2 h, and re-prices continuously as fair value drifts (+0.8 writes/min, deferred +1,070/h at 3 h). Default set to 0
 (no ramp); the setting stays for the owner. The one-step switch-on re-prices ~157 of 229 live markets by >= 1c once (red team): ~10 min of
 the 28/min budget; do it in a quiet hour. (A 20-min ramp is screened below for the record.)
+
+## News regime and flat tilt (T2.1 step-on, d vs BASE)
+| World | Seeds x h | d pnl_lag | d pnl_liq | d pnl_mid | d pnl (Poly) | d exit_ratio | d cap_end | d wc_end | d writes_pm | d deferred_h | d mk15_mid | d pick_cost |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| tilt world, news (Polymarket jumps 0.6/market-hour, common news) | 6 x 6 | **+670 ± 180** | **+761 ± 160** | +664 ± 140 | +197 ± 120 | +0.063 ± 0.025 | -0.105 ± 0.026 | -10.6k ± 2.3k | -0.94 ± 0.70 | +680 ± 690 (+10%) | -0.015 ± 0.028 | +171 ± 46 |
+| tilt flat (growth 0), quiet | 6 x 3 | -60 ± 59 | +100 ± 84 | +46 ± 81 | -179 ± 65 | +0.046 ± 0.053 | -0.054 ± 0.023 | -8.1k ± 2.2k | -1.10 ± 0.40 | -580 ± 660 | -0.020 ± 0.016 | +55 ± 8 |
+| old world (anchor 0, no tilt), quiet | 8 x 3 | +215 ± 74 | +244 ± 94 | +211 ± 77 | +72 ± 80 | +0.024 ± 0.025 | -0.040 ± 0.015 | -6.2k ± 1.5k | -0.23 ± 0.27 | +530 ± 650 | -0.014 ± 0.028 | +3 ± 6 |
+Reading: in news T2.1 gains most (the base bot's quotes lean toward Polymarket moves the tournament follows only partly, and T2.1's lean
+is 6-7% smaller); with the tilt flat the gain shrinks to +100 ± 84 at liquidation and ~0 at the exchange-style mark (the growth is what
+T2.1 protects against); it never loses.
