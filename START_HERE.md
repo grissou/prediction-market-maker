@@ -7,7 +7,10 @@ Deploy only commits whose message starts "READY"; the branch is cumulative.
 
 ## Package 5 (IN PROGRESS, Finisher 2b executor, 2 Oct evening; branch `claude/finisher-package5` from Package 4 c29f762/fd28b0a)
 Plan: PLAN_POLY_BIAS.md v2 (branch claude/finisher-plan-v2, 6e727dd; merged here, docs and analysis/ only). Run plan: PLAN_FINISHER.md "Package 5".
-Status: step 1 (run plan) done; step 2 yardstick code done (tests/live_sim.py knobs `_rival_anchor`, `_world_tilt`, `_world_tilt_growth`; fields pnl_liq, pnl_mid, mk15_mid, exit_ratio, hold_med, pick_cost, wc_end; tests/test_live_sim_marks.py 104/104; knobs at 0 = identical numbers). Re-score running. Nothing below is deployable until this section says READY.
+Status (19:45 UTC): yardstick done; re-score done (SIM_NOTES Round 5: no earlier verdict flips outright; fast_unload's loss was the
+Polymarket mark, now neutral; ceiling 0.25 still worse). Built and merged, all OFF: T2.1 `ref_tilt_enabled`, B `kelly_edge_cap`,
+A `reduce_from_book`, T2.5 `pair_unwind_passive`, T2.4 `tilt_exposure_max_frac`, C `hold_target_hours`, T2.3 `ref_tilt_carry_days`;
+ops fields in status.json/summary/recorder. All 18 suites green. Design screens running. NOT READY.
 
 ## Package 4 (READY, Finisher, 2 Oct evening; branch `claude/finisher-package4`, draft PR #6): Package 3 final + 28/60 defaults + ladder fixes + write savers (all new features OFF). Code deploy (handover restart).
 **What changed against Package 3 final (439ac54):**

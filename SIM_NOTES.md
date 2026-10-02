@@ -510,3 +510,33 @@ S1, 8 seeds x 3 h quiet, paired seeds (raw: `tests/live_sim_round4_savers_S1_qui
 Recommended defaults: **both OFF** (neither passed S2, which was not run). If the owner wants writes back now, (b) is the
 better candidate (3 se fewer writes, P&L within noise); confirm on 16 x 6 quiet first. At the measured cost a base +
 1 variant run is ~47 CPU-min at 16 x 6, ~23 at 8 x 6 (not the 16 planned).
+
+# Round 5 (Package 5, Finisher 2b): the Polymarket-bias yardstick (PLAN_POLY_BIAS.md v2)
+Simulator: tests/live_sim.py, new world knobs `_rival_anchor`, `_world_tilt`, `_world_tilt_growth` and fields pnl_liq, pnl_mid,
+mk15_mid, exit_ratio, hold_med (+ pick_cost, wc_end in KEYS); pins in tests/test_live_sim_marks.py (knobs 0 = identical numbers).
+pnl_liq: start AND end at liquidation (longs at the best other bid, shorts at the best other ask, no quote = consensus -/+ 2c).
+pnl_mid: start and end at the other traders' mid. Deviation from the plan: the residual-bias decomposition (the real starting gap
+already holds the live tilt, so per-market bias = gap + s0 (p0 - 0.5); the start book matches the real one in every world), and
+informed takers trade toward the anchored price (Polymarket + anchor x (bias + tilt term)), not raw Polymarket.
+"Tilt world" (the judge) = `_rival_anchor` 1, `_world_tilt` 0.05, `_world_tilt_growth` 0.002. BASE = Package 4 defaults + live
+overrides (arb_two_sided false, worst_case_backstop_frac 0.8, ceiling factor 0.5, writes 28/28, burst 60), `_start_cap` 0.90.
+8 seeds x 3 h quiet, paired; deltas ± 1 SE. Machine: 1 CPU. Raw output: tests/live_sim_round5_*.txt.
+
+## Bases (8 x 3 quiet)
+| World | pnl_liq | pnl_mid | pnl (Polymarket) | exit_ratio | hold_med h | cap_end | wc_end | writes_pm | deferred_h |
+|---|---|---|---|---|---|---|---|---|---|
+| tilt (judge) | +1,150 | +1,250 | +1,590 | 1.00 | 2.35 | 0.912 | 48.3k | 21.7 | 6,080 |
+| old (anchor 0, no tilt) | +152 | +382 | +1,590 | 1.09 | 2.65 | 0.860 | 44.2k | 22.2 | 7,380 |
+Reading: in the old world the Polymarket mark overstates P&L by ~1,440 per 3 h (pnl 1,590 vs liquidation 152): the yardstick
+the earlier rounds used counted the gap as profit. The tilt world's own level is not comparable with the old one (rivals priced
+differently); only deltas within a world are.
+
+## Re-score of the earlier decisions (tilt world, d vs BASE)
+| Variant | Old verdict (Polymarket mark) | d pnl_liq | d pnl (Poly) | d exit_ratio | d cap_end | d wc_end | d writes_pm | d deferred_h | d pick_cost | New verdict |
+|---|---|---|---|---|---|---|---|---|---|---|
+| fast_unload_enabled | -165 ± 110: reject | -22 ± 100 | +10 ± 48 | -0.005 ± 0.034 | -0.006 ± 0.015 | -1.3k ± 0.9k | +0.06 ± 0.46 | +206 ± 590 | +0.5 ± 3.9 | neutral: the loss was the mark; still no gain, keep OFF |
+| reduce_join_best | -48 ± 81: reject | -23 ± 120 | -43 ± 46 | +0.043 ± 0.033 | -0.020 ± 0.011 | -1.2k ± 0.9k | -0.82 ± 0.62 | -897 ± 440 | +2.9 ± 4.4 | neutral, fewer writes/deferred; not a pass (cap_end -2 pts, not -5) |
+| turnover_control_enabled | +49 ± 62: weak | +67 ± 120 | +10 ± 43 | +0.025 ± 0.025 | -0.012 ± 0.011 | -1.0k ± 1.0k | -0.31 ± 0.80 | +200 ± 510 | -4.6 ± 5.0 | neutral-positive (pnl_mid +106 ± 110); not a pass |
+| ceiling factor 0.25 (vs 0.5) | 0.5 better by 262 ± 100 | -162 ± 110 | -159 ± 96 | +0.004 ± 0.036 | -0.004 ± 0.012 | -1.7k ± 0.6k | -0.79 ± 0.47 | -914 ± 600 | +5.1 ± 6.4 | still worse (-1.5 SE): keep 0.5 |
+Flipped: none outright. fast_unload goes from a -1.5 SE loser to neutral (its loss was the Polymarket mark); the other three
+keep their sign. No old flag passes the new rule (none moves cap_end by 5 points).
