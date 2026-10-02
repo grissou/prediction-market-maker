@@ -540,3 +540,24 @@ differently); only deltas within a world are.
 | ceiling factor 0.25 (vs 0.5) | 0.5 better by 262 ± 100 | -162 ± 110 | -159 ± 96 | +0.004 ± 0.036 | -0.004 ± 0.012 | -1.7k ± 0.6k | -0.79 ± 0.47 | -914 ± 600 | +5.1 ± 6.4 | still worse (-1.5 SE): keep 0.5 |
 Flipped: none outright. fast_unload goes from a -1.5 SE loser to neutral (its loss was the Polymarket mark); the other three
 keep their sign. No old flag passes the new rule (none moves cap_end by 5 points).
+
+## Design screens, tilt world, 8 x 3 quiet, d vs BASE (± 1 SE). Pass rule (PLAN_POLY_BIAS 5): d pnl_liq >= -1 SE, cap_end -5 pts,
+## wc_end down, writes_pm <= 28 and deferred_h not up > 20%, pick-offs not worse (judge: mk15_mid, the consensus markout;
+## pick_cost is Polymarket-marked and reported alongside), exit_ratio up.
+| Variant | d pnl_liq | d pnl_mid | d pnl (Poly) | d exit_ratio | d hold_med | d cap_end | d wc_end | d writes_pm | d deferred_h | d mk15_mid c | d pick_cost | Verdict |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| T2.1 `ref_tilt_enabled` | **+163 ± 60** | +101 ± 58 | -131 ± 51 | +0.105 ± 0.039 | +0.55 ± 0.48 | **-0.076 ± 0.015** | -8.3k ± 1.0k | -1.17 ± 0.46 | +71 ± 550 | +0.054 ± 0.031 | +38 ± 14 | **PASS** (2.7 SE; the Polymarket mark says -131: the "lost" P&L is the gap it no longer buys) |
+| T2.1 + `ref_weight` 0.5 (T2.2) | +176 ± 50 | +87 ± 62 | -272 ± 66 | +0.141 ± 0.027 | +0.58 ± 0.45 | -0.097 ± 0.011 | -10.8k ± 0.7k | -0.04 ± 0.43 | +1,070 ± 780 (+18%) | -0.056 ± 0.032 | +60 ± 16 | no-go: not >= 1 SE over T2.1 alone; markout worse |
+| T2.1 + `ref_weight` 0.35 (T2.2) | +186 ± 100 | +90 ± 100 | -401 ± 85 | +0.201 ± 0.029 | +0.77 ± 0.62 | -0.131 ± 0.013 | -13.6k ± 1.4k | -0.42 ± 0.38 | +1,330 ± 470 (+22%) | -0.076 ± 0.039 | +70 ± 14 | no-go: deferred over +20%, markout worse, noisier |
+| A `reduce_from_book` | +91 ± 130 | -2 ± 130 | -362 ± 71 | +0.195 ± 0.040 | -1.23 ± 1.2 | -0.120 ± 0.017 | -10.7k ± 1.6k | -0.49 ± 0.62 | -210 ± 890 | **-0.229 ± 0.031** | +51 ± 8 | FAIL on pick-offs (sells to informed flow); P&L neutral |
+| T2.1 + A | +124 ± 90 | +27 ± 93 | -434 ± 69 | +0.237 ± 0.042 | -0.29 ± 0.30 | -0.141 ± 0.014 | -14.1k ± 1.2k | -1.53 ± 0.57 | -220 ± 820 | -0.168 ± 0.030 | +75 ± 9 | FAIL: not better than T2.1 alone, markout worse |
+| B `kelly_edge_cap` 0.01 + `kelly_max_market_frac` 0.01 + `headline_position_frac` 0.05 | **-216 ± 19** (stopped at 4 seeds) | -285 ± 46 | -510 ± 75 | +0.188 ± 0.043 | +0.25 ± 0.37 | -0.069 ± 0.011 | -6.9k ± 0.7k | -4.0 ± 0.6 | -2,990 ± 980 | +0.005 ± 0.038 | +6 ± 12 | FAIL (-11 SE): too little size where the spread pays |
+| T2.1 + B | -89 ± 100 | -226 ± 95 | -634 ± 81 | +0.359 ± 0.046 | +3.7 ± 1.6 | -0.140 ± 0.014 | -12.4k ± 0.7k | -6.2 ± 0.4 | -3,780 ± 540 | -0.026 ± 0.027 | +47 ± 12 | FAIL: 250 below T2.1 alone |
+| T2.1 + T2.4 `tilt_exposure_max_frac` 0.10 | **-331 ± 86** (stopped at 4) | -401 ± 140 | -867 ± 98 | +0.293 ± 0.077 | +7.6 ± 2.4 | -0.120 ± 0.014 | -12.2k ± 0.4k | -12.3 ± 0.9 | -5,220 ± 860 | -0.025 ± 0.021 | +56 ± 10 | FAIL: the live book starts at 15% exposure, the cap binds everywhere (writes -12/min = most adding off) |
+Old world (anchor 0, no tilt), 8 x 3 quiet: T2.1 d pnl_liq **+244 ± 94**, d pnl_mid +211 ± 77, d pnl (Poly) +72 ± 80, d cap_end -0.040 ± 0.015,
+d wc_end -6.2k ± 1.5k, d writes_pm -0.23 ± 0.27, d mk15_mid -0.014 ± 0.028, d pick_cost +3 ± 6: T2.1 does not lose where there is no
+tilt to remove (the plan's no-harm test: must not lose more than 1 SE).
+Reading: removing the tilt from fair value is the one change that pays at liquidation AND at the mid, frees capital and saves writes.
+Everything that only makes the exit more aggressive (A, lower ref_weight) sells into informed flow (mk15_mid) for no extra P&L; everything
+that only shrinks size (B, T2.4 at 0.10) gives up spread income. The 8 x 3 "+163" is 3 h on 74 markets: about +1,300 per day on the sim's
+share of the book, before anything the sim does not model.

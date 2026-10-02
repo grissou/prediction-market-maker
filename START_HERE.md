@@ -7,7 +7,10 @@ Deploy only commits whose message starts "READY"; the branch is cumulative.
 
 ## Package 5 (IN PROGRESS, Finisher 2b executor, 2 Oct evening; branch `claude/finisher-package5` from Package 4 c29f762/fd28b0a)
 Plan: PLAN_POLY_BIAS.md v2 (branch claude/finisher-plan-v2, 6e727dd; merged here, docs and analysis/ only). Run plan: PLAN_FINISHER.md "Package 5".
-Status (19:45 UTC): yardstick done; re-score done (SIM_NOTES Round 5: no earlier verdict flips outright; fast_unload's loss was the
+Status (20:50 UTC): all planned designs built, merged, red-teamed (0 high / 6 medium, all fixed), 18 suites green, all OFF. Screens
+(SIM_NOTES Round 5): T2.1 `ref_tilt_enabled` PASSES (+163 ± 60 at liquidation, capital -7.6 pts, writes -1.2/min, also +244 ± 94 in the
+old world); A, B, T2.2 (ref_weight 0.5/0.35), T2.4 at 0.10 FAIL or do not beat T2.1 alone. Running: news 6 x 6, flat-tilt check,
+C / T2.5 / T2.4 0.25 screens, 16 x 6 confirmation. Owner lifted the 120 CPU-min cap (20:30 UTC). NOT READY.
 Polymarket mark, now neutral; ceiling 0.25 still worse). Built and merged, all OFF: T2.1 `ref_tilt_enabled`, B `kelly_edge_cap`,
 A `reduce_from_book`, T2.5 `pair_unwind_passive`, T2.4 `tilt_exposure_max_frac`, C `hold_target_hours`, T2.3 `ref_tilt_carry_days`;
 ops fields in status.json/summary/recorder. All 18 suites green. Design screens running. NOT READY.
