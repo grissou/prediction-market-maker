@@ -1432,6 +1432,18 @@ time.sleep(0.05); t0 = time.monotonic(); wapi2.throttle(); waited = time.monoton
 th.join()
 check("a write waiting on the write budget doesn't hold up reads", waited < 0.3, f"{waited:.2f}s")
 
+a, b = make_bot(); b.cycle()
+real_pos = a.positions
+a.positions = lambda: (_ for _ in ()).throw(ApiError(409, "CONFLICT", "Tournament holdings cannot be valued"))
+b.orders_stale = True
+logging.disable(logging.CRITICAL)
+try:
+    b.cycle(); ok = True
+except ApiError:
+    ok = False
+logging.disable(logging.NOTSET)
+a.positions = real_pos
+check("positions 409 'holdings cannot be valued' (day one 16:30): the cycle goes on with the last read", ok and b.orders_stale)
 
 print("--- parallel requests")
 a, b = make_bot()

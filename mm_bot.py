@@ -1701,11 +1701,22 @@ class Bot:
         f_pos = self.pool.submit(self.api.positions) if read_positions else None
         f_orders = self.pool.submit(self.api.open_orders, self.tid) if read_orders else None
         f_pnl = self.pool.submit(self.api.pnl) if slow_poll else None
-        if read_positions:                        # if a read fails, the cycle fails
-            self.cached_pos = f_pos.result()
+        pos_failed = False
+        if read_positions:                        # if a read fails, the cycle fails...
+            try:
+                self.cached_pos = f_pos.result()
+            except ApiError as e:
+                # ...except day one's 409 "holdings cannot be valued" (a market without a valuation price):
+                # positions only change through fills, so the last good read is fine for this cycle.
+                if e.status != 409 or self.cached_pos is None:
+                    raise
+                log.warning("positions unavailable (%s) - using the last read for this cycle", e)
+                pos_failed = True
         if read_orders:
             self.cached_orders = f_orders.result()
             self.orders_stale = False
+        if pos_failed:
+            self.orders_stale = True              # read positions (and orders) again next cycle
         pos, raw_orders = self.cached_pos, self.cached_orders
         # position.quantity is already signed by the API: + YES shares, - NO shares.
         inv = {str(p["exchangeId"]): float(p.get("quantity") or 0)
