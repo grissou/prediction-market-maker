@@ -41,8 +41,13 @@ check("defaults: no-chase 2 ticks / 0.25c fv epsilon; TTL busy 60 min, quiet 100
       (c.no_chase_tolerance_ticks, c.no_chase_fv_epsilon, c.order_ttl_busy, c.order_ttl_quiet, c.ttl_jitter_frac,
        c.ttl_expire_grace_seconds) == (2, 0.0025, 3600.0, 6000.0, 0.2, 5.0))
 fields = list(M.Config.__dataclass_fields__)
-check("new settings are the LAST Config fields, in order", fields[-len(SAVER_KEYS):] == SAVER_KEYS, fields[-12:])
-check("...and the last OVERRIDABLE entries, in order", list(M.OVERRIDABLE)[-len(SAVER_KEYS):] == SAVER_KEYS)
+# Package 5 appends its own block after the savers (ref_tilt_*: see test_tilt.py); the savers stay one block, in order
+_p5 = sum(1 for f in fields if f.startswith("ref_tilt_"))
+_end = len(fields) - _p5
+check("new settings are the LAST Config fields before Package 5, in order",
+      fields[_end - len(SAVER_KEYS):_end] == SAVER_KEYS, fields[-12:])
+_ov = [k for k in M.OVERRIDABLE if not k.startswith("ref_tilt_")]
+check("...and the last OVERRIDABLE entries before Package 5, in order", _ov[-len(SAVER_KEYS):] == SAVER_KEYS)
 good, bad = M.validate_overrides({"no_chase_enabled": True, "no_chase_tolerance_ticks": 3, "ttl_tiers_enabled": True,
                                   "order_ttl_quiet": 7200, "ttl_expire_as_cancel": True, "ttl_jitter_frac": 0.3}, c)
 check("valid saver overrides are accepted", not bad and good["order_ttl_quiet"] == 7200.0

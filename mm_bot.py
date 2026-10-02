@@ -698,6 +698,16 @@ class Config:
     ttl_busy_size_frac: float = 0.01      # same split as the ladder's default "busy" (1,000 shares at 100k)
     ttl_expire_as_cancel: bool = False
     ttl_expire_grace_seconds: float = 5.0
+    # --- Package 5: T2.1 tilt-corrected reference ---
+    # The tournament prices every market with one favourite-longshot tilt: mid ~ c + (1 - s)(r - c), c = 1/legs.
+    # On: the blend leans toward that tilted Polymarket price instead of the raw one (the tilt is not mispricing).
+    # s is estimated every cycle from the cross-section (TiltEstimator), even with the flag off (read-only).
+    ref_tilt_enabled: bool = False
+    ref_tilt_headline: bool = False       # False: headline markets keep the raw Polymarket price (staging gate)
+    ref_tilt_min_markets: int = 50        # fewer usable markets than this: hold the last estimate
+    ref_tilt_halflife_min: float = 30.0   # EMA half-life of the estimate, minutes
+    ref_tilt_max: float = 0.12            # estimate clipped to [0, this]
+    ref_tilt_winsor: float = 0.08         # each market's gap (Polymarket - book) clipped to +-this
 
 
 CFG = Config()
@@ -826,6 +836,13 @@ OVERRIDABLE = {
     "ttl_busy_size_frac": (0.0, 0.20),
     "ttl_expire_as_cancel": (False, True),
     "ttl_expire_grace_seconds": (0.0, 60.0),
+    # --- Package 5: T2.1 tilt-corrected reference ---
+    "ref_tilt_enabled": (False, True),
+    "ref_tilt_headline": (False, True),
+    "ref_tilt_min_markets": (5, 1000),
+    "ref_tilt_halflife_min": (0.5, 1440.0),
+    "ref_tilt_max": (0.0, 0.3),
+    "ref_tilt_winsor": (0.005, 0.3),
 }
 MAX_ORDER_TTL = 7200.0    # no order of ours lives longer than this (dead-man's switch), whatever the TTL settings
 LADDER_MAX_LEVELS = 8
@@ -1714,6 +1731,73 @@ def fair_value(book, cfg=CFG):
     if bid is None or ask is None or ask <= bid or ask - bid > cfg.max_spread_for_fv:
         return None
     return (bid + ask) / 2
+
+
+def tilted_ref(r, s, legs):
+    """Polymarket price r as the tournament's favourite-longshot tilt s would price it: c + (1 - s)(r - c), with
+    c = 1 / legs in the race (a lone market counts as two-sided: c = 0.5)."""
+    c = 1.0 / legs if legs and legs > 1 else 0.5
+    return c + (1 - s) * (r - c)
+
+
+def blend_fv(book_fv, r, cfg, s=0.0, legs=2, headline=False):
+    """The main loop's blend: book price leaned toward Polymarket by ref_weight. With ref_tilt_enabled (and, in a
+    headline market, ref_tilt_headline) toward the tilt-corrected Polymarket price instead of the raw one."""
+    if cfg.ref_tilt_enabled and (cfg.ref_tilt_headline or not headline):
+        r = tilted_ref(r, s, legs)
+    return (1 - cfg.ref_weight) * book_fv + cfg.ref_weight * r
+
+
+class TiltEstimator:
+    """Cross-sectional estimate of the tilt s: least squares of the gap (r - book_fv, winsorised at
+    +-ref_tilt_winsor) on (r - c), through the origin. Fewer than ref_tilt_min_markets samples: hold the last value.
+    Smoothed by an EMA with half-life ref_tilt_halflife_min (time-based; the first estimate is taken as is) and
+    clipped to [0, ref_tilt_max]."""
+
+    def __init__(self, cfg=CFG):
+        self.cfg = cfg
+        self.s = 0.0          # current estimate
+        self.n = 0            # samples in the last update
+        self.ready = False    # a valid estimate has been taken (or restored)
+        self.t = None         # time of the last valid estimate (seconds; None after a restore)
+
+    def update(self, samples, now):
+        """samples: [(r, book_fv, legs), ...]; now: seconds (any clock, as long as it is always the same one)."""
+        cfg = self.cfg
+        self.n = len(samples)
+        if self.n < max(1, cfg.ref_tilt_min_markets):
+            return self.s
+        w = cfg.ref_tilt_winsor
+        num = den = 0.0
+        for r, bfv, legs in samples:
+            x = r - (1.0 / legs if legs and legs > 1 else 0.5)
+            num += x * max(-w, min(w, r - bfv))
+            den += x * x
+        if den <= 1e-12:
+            return self.s
+        raw = max(0.0, min(cfg.ref_tilt_max, num / den))
+        if not self.ready:
+            self.s, self.ready = raw, True        # first valid estimate: taken as is
+        else:                                     # after a restore (t None) the first update only sets the clock
+            dt = max(0.0, now - self.t) if self.t is not None else 0.0
+            self.s += (1 - 0.5 ** (dt / (60.0 * max(1e-9, cfg.ref_tilt_halflife_min)))) * (raw - self.s)
+        self.s = max(0.0, min(cfg.ref_tilt_max, self.s))
+        self.t = now
+        return self.s
+
+    def to_dict(self):
+        return {"s": self.s, "ready": self.ready}
+
+    def from_dict(self, d):
+        """Restore a saved estimate (missing or bad = 0, not ready). The EMA continues from it."""
+        try:
+            d = d if isinstance(d, dict) else {}
+            self.s = max(0.0, min(self.cfg.ref_tilt_max, float(d.get("s") or 0.0)))
+            self.ready = bool(d.get("ready", self.s > 0))
+        except (TypeError, ValueError):
+            self.s, self.ready = 0.0, False
+        self.t = None
+        return self
 
 
 def normalise(fvs):
@@ -2859,6 +2943,8 @@ class Bot:
         self.lots_dirty = False
         self.capital_over = False         # capital ceiling active (capital_in_positions_max_frac)
         self.cur_refs, self.cur_liquid = {}, set()   # this cycle's Polymarket prices (for risk_fv)
+        self.tilt = TiltEstimator(cfg).from_dict(self.load_tilt())   # T2.1: tournament tilt s (see update_tilt)
+        self.tilt_s, self.tilt_exposure = self.tilt.s, 0.0
         self.pos_marks = {}               # {eid: the exchange's own valuation price of the position (currentPrice)}
         self.fv_fallback_logged = {}      # {eid: source} - which fallback risk_fv used for a held position (logged once)
         self.mark_sd = {}                 # eid -> sd of the 10-min mid change (mark_frag_*; from the recorder)
@@ -3246,10 +3332,12 @@ class Bot:
         fvs = dict(book_fvs)
         self.ref_only = self.thin_book_prices(fvs, refs, liquid, now_m) if cfg.ref_only_enabled else set()
         self.warn_unpriced_held(fvs, book_fvs, refs, liquid, now_m)
+        self.update_tilt(book_fvs, refs, liquid, inv, now_m)      # T2.1: runs (read-only) with the flag off too
         if cfg.ref_weight > 0 and refs:
             for eid, r in refs.items():
                 if fvs.get(eid) is not None and eid in liquid and eid not in self.ref_only:   # liquid only
-                    fvs[eid] = (1 - cfg.ref_weight) * fvs[eid] + cfg.ref_weight * r
+                    ex = self.ex[eid]
+                    fvs[eid] = blend_fv(fvs[eid], r, cfg, self.tilt_s, self.legs(ex), ex.group in cfg.headline_races)
             for members in self.groups.values():
                 if len(members) > 1:
                     fvs.update(normalise({e: fvs[e] for e in members}))
@@ -3562,6 +3650,38 @@ class Bot:
         self.ref_moved = {e for e, ex in self.ex.items() if f"{ex.group}|{ex.party}" in moved}
         for e in self.ref_moved:
             self.ex[e].ref_moved_at = time.monotonic()
+
+    def legs(self, ex):
+        """Number of markets in this market's race (1 for a lone market)."""
+        return max(1, len(self.groups.get(ex.group) or ()))
+
+    def load_tilt(self):
+        """T2.1: the tilt estimate the previous run left in status.json ({} if none: the estimate starts at 0)."""
+        try:
+            with open(bot_path(self.cfg.status_file)) as f:
+                st = json.load(f)
+            return st.get("tilt_state") or ({"s": st["tilt_s"], "ready": True} if "tilt_s" in st else {})
+        except (OSError, ValueError, TypeError, AttributeError, KeyError):
+            return {}
+
+    def update_tilt(self, book_fvs, refs, liquid, inv, now_m):
+        """T2.1, every cycle and whatever ref_tilt_enabled says: feed the tilt estimator from the markets that are
+        liquid, not R5 (ref_only), not headline, with a book price and Polymarket, and not under a jump guard; and
+        tilt_exposure = sum over held markets of position x (raw Polymarket - c), c = 1/legs."""
+        cfg, samples = self.cfg, []
+        for eid, r in refs.items():
+            ex = self.ex.get(eid)
+            if (ex is None or r is None or book_fvs.get(eid) is None or eid not in liquid or eid in self.ref_only
+                    or ex.group in cfg.headline_races or now_m < ex.cooldown_until):
+                continue
+            samples.append((r, book_fvs[eid], self.legs(ex)))
+        self.tilt_s = self.tilt.update(samples, now_m)
+        exposure = 0.0
+        for eid, q in (inv or {}).items():
+            ex, r = self.ex.get(eid), refs.get(eid)
+            if q and ex is not None and r is not None:
+                exposure += q * (r - tilted_ref(r, 1.0, self.legs(ex)))    # tilted_ref(r, 1, legs) = c
+        self.tilt_exposure = exposure
 
     def reference_jump_guard(self, now_m):
         """After each new Polymarket reading, pull quotes on any market whose Polymarket price moved
@@ -6071,6 +6191,9 @@ class Bot:
                 "last_cycle_ok": ok, "failed_cycles_in_a_row": self.failed_cycles,
                 "quotes_pulled_after_errors": self.pulled_after_errors, **self.health,
                 **(self.api.pause_state() if hasattr(self.api, "pause_state") else {}),
+                # T2.1: the tilt estimate (also restored from here at start) and the position's exposure to it
+                "tilt_s": round(self.tilt_s, 4), "tilt_exposure": round(self.tilt_exposure),
+                "tilt_state": self.tilt.to_dict(),
                 "seconds_since_cycle": round(time.monotonic() - self.last_cycle_done, 1)
                 if self.last_cycle_done is not None else None})
         except OSError as e:
