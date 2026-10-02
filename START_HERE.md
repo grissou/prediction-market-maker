@@ -5,10 +5,32 @@ The Builder's previous START_HERE is kept as `START_HERE_BUILDER.md`; Run A's no
 Plan: `PLAN.md`. Packages appear below as they become READY (commit messages start "READY: Package N").
 Deploy only commits whose message starts "READY"; the branch is cumulative.
 
-## Package 4 (Finisher, in progress; branch `claude/finisher-package4`, plan `PLAN_FINISHER.md`)
-Base: team HEAD 58adcac (Package 3 final 439ac54 + the merged ladder fixes L1-L4). Not READY yet: deploy Package 3 final until a
-commit "READY: Package 4" exists. Progress: item 1 (branch + costed plan) done. Code defaults now `writes_per_minute` 28, `writes_per_minute_max` 28,
-`burst_cycle_seconds` 60 (the owner's live overrides; test_mm_bot 596/596).
+## Package 4 (Finisher, 2 Oct evening; branch `claude/finisher-package4`): Package 3 final + 28/60 defaults + ladder fixes + write savers (all new features OFF). Code deploy (handover restart).
+**What changed against Package 3 final (439ac54):**
+- Defaults `writes_per_minute` 28, `writes_per_minute_max` 28, `burst_cycle_seconds` 60 (were 45 / 50 / 20): the owner's live overrides become the code
+  defaults (2 Oct live: 4 x 429 while the budget climbed to 36-50/min, 0 at 28; normal cycles take 20-30 s, so the 20 s trigger fired with 0.4 s writes).
+- Ladder (`ladder_enabled`, still OFF): the Reviewer fixes L1-L4 (team commit a77c8cb) plus 4 bugs found in them, each with a test that failed before:
+  R4a (high) a new level could exceed its keep limit when the position limit binds -> placed and pulled every cycle; R4b (high) the per-order cash cap
+  was also a keep limit -> a small account-value dip pulled every cash-capped level on every ladder market at once; R4c (medium) min_quote_life could
+  keep a duplicate at a kept level; R4d (medium) a ladder-only cancel of a whole exchange counted toward `pulls_cancel_all_over`.
+- Write savers (new settings, all OFF): `no_chase_enabled` (+ `no_chase_tolerance_ticks` 2, `no_chase_fv_epsilon` 0.0025);
+  `ttl_tiers_enabled` (+ `order_ttl_busy` 3600, `order_ttl_quiet` 6000, `ttl_jitter_frac` 0.2, `ttl_busy_size_frac` 0.01; hard cap 7200 s);
+  `ttl_expire_as_cancel` (+ `ttl_expire_grace_seconds` 5). Mirrored in `tests/strategy_sim.plan_changes`; `tests/test_write_savers.py` pins the two to
+  one rule (1,152-case grid).
+- Simulator: `plan_changes` now models order expiry (base numbers not comparable with rounds <= 3b); `live_sim` prints per-gate ladder counters (`lg_*`).
+**Numbers (SIM_NOTES.md "Round 4"):** savers, 8 seeds x 3 h quiet (base 22.1 writes/min, 6,760 deferred/h): no-chase dP&L -43 ± 62, writes -0.26 ± 0.40
+(noise); TTL saver dP&L -43 ± 39, writes **-1.10 ± 0.35**/min. Neither passed clearly; the 16 x 6 confirmation was not run (the real cost is ~14.6
+CPU-s per seed-hour, 2.9x the estimate). Ladder gates (2 seeds x 0.5 h): blocked by cash in 81-86% of ladder-market cycles at start capital 0.90/0.80/0.70,
+write gate shut 65-76%; 0 ladder shares at 0.90 and 0.80. It needs capital in positions at ~78-80% or less before it places a single level.
+**Switch on:** nothing new. Keep every saver and the ladder OFF. Candidate for the next A/B: `ttl_tiers_enabled` + `ttl_expire_as_cancel` (the only clear
+write saving), after a 16 x 6 quiet confirmation and after checking the exchange accepts expirationDate up to 2 h.
+**Deploy:** `deploy/handover-restart.sh` with this commit (see deploy/RUNBOOK.md). settings_override.json can drop `writes_per_minute`,
+`writes_per_minute_max`, `burst_cycle_seconds` (now defaults) or keep them (same values). **Rollback:** handover restart to 439ac54 (Package 3 final);
+the overrides keep 28/28/60 there.
+**Watch in the first 10 minutes:** as Package 3; status.json write budget 28 and `rate_limited_total` 0; no burst entries on 20-30 s cycles; no
+"refused override" alerts; orders' expirationDate still order_ttl (30 min) since the TTL saver is off.
+**Not done:** item 4 (turnover control and ceiling 0.5 vs 0.25 in 16 x 6 news) was blocked: the session's permission classifier refused the run.
+Ladder P&L runs skipped: the gate diagnosis shows 0 ladder shares at start capital 0.90 and 0.80, so a P&L run would measure an idle ladder.
 
 ## HANDOFF (read this if you are picking the work up)
 **State at 14:35 UTC, 2 Oct.** Live: Package 2 (83f6d45) since 11:21:57 with settings_override `{"arb_two_sided": false, "worst_case_backstop_frac": 0.8}`
