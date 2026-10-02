@@ -50,8 +50,13 @@ def bot(**kw):
     return api, b
 
 
+_T0 = time.time()                                      # frozen wall clock: ages never drift between two decide calls
+_real_time = time.time
+time.time = lambda: _T0                                # (the process ends with the test)
+
+
 def age(b, eid, pos, hours):
-    b.lots[eid] = [[float(pos), time.time() - hours * 3600]]
+    b.lots[eid] = [[float(pos), _T0 - hours * 3600]]
 
 
 def dec(b, pos, fv, book, book_fv, eid="21", now_m=None):
