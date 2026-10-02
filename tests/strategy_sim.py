@@ -409,8 +409,11 @@ def baseline_strategy(sim, m, t, fv, bfv, ref, book):
     size, plimit = sizes_for(sim, m)
     no_ask = ref - bfv > cfg.ref_guard_gap
     no_bid = bfv - ref > cfg.ref_guard_gap
+    side, bias_edge, bias_size = M.fl_side(fv, m.state.get("fl"), cfg)     # favourite-longshot side bias
+    m.state["fl"] = side
     q = M.compute_quote(fv, m.inv, m.inv, bb, ba, cfg, no_bid=no_bid, no_ask=no_ask,
-                        kelly_p=None if m.headline else ref, order_size=size, position_limit=plimit)
+                        kelly_p=None if m.headline else ref, order_size=size, position_limit=plimit,
+                        bias_side="bid" if side == "mid" else side, bias_edge=bias_edge, bias_size=bias_size)
     return quote_to_want(q)
 
 

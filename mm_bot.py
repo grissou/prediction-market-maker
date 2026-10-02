@@ -208,6 +208,21 @@ class Config:
     ref_only_size_frac: float = 0.001     # ...and small: 100 shares at 100k on the side that adds to a position...
     ref_only_reduce_full: bool = True     # ...while the side that shrinks one quotes the market's normal size (day one:
                                           #   Rep U.S. Senate +7,585 would otherwise leave 100 shares at a time)
+    # Favourite-longshot side bias. Day one + night, 891 fills with a known side (edge = quote vs fair value,
+    # markout = fair value 60 min later): asks at fv < 20c +2.26c edge / +2.03c markout on 36k shares, bids there
+    # -0.53c / -0.57c on 20k; bids at fv > 80c +1.49c / +1.41c on 29k, asks there -0.44c / -0.49c on 32k. Students
+    # buy longshots and sell favourites, and the tournament mid reverts toward Polymarket. So the side that buys
+    # the longshot (our bid below fl_low) or sells the favourite (our ask above fl_high) quotes wider and smaller,
+    # unless it shrinks a position on this exchange (then it quotes normally: unloading is good).
+    fl_bias_enabled: bool = True
+    fl_low: float = 0.20                  # fair value below this: the bid is the "bad" side
+    fl_high: float = 0.80                 # fair value above this: the ask is the "bad" side
+    fl_hysteresis: float = 0.01           # once on, the bias stays until fair value is this far back across the line
+    fl_bad_side_extra_edge: float = 0.01  # bad side quotes this much further from the reservation price (capped at
+                                          #   max_half_spread); adds to ref_only_min_edge in thin-book markets
+    fl_bad_side_size_factor: float = 0.5  # ...and at this fraction of its size (multiplies with burst / thin-book sizes)
+    fl_mid_bid_extra_edge: float = 0.0    # optional extra edge on bids with fair value in [fl_low, fl_high] (mid-band
+                                          #   bids lost -0.25c / -0.34c on 92k shares; may be day one's skew bug). 0 = off
 
     # --- REFERENCE PRICES (Polymarket via ref_prices.py; only active if ref_map_file exists) ---
     # Polymarket is treated as the better estimate of the true price: the tournament book is seeded
@@ -434,6 +449,13 @@ OVERRIDABLE = {
     "burst_timeouts": (1, 100), "burst_calm_seconds": (0.0, 3600.0), "burst_markets": (1, 300),
     "burst_size_factor": (0.05, 1.0), "burst_extra_edge": (0.0, 0.05),
     "slow_cycle_alert_seconds": (10.0, 3600.0), "summary_every_hours": (0, 24),
+    "fl_bias_enabled": (False, True),
+    "fl_low": (0.0, 0.50),
+    "fl_high": (0.50, 1.0),
+    "fl_hysteresis": (0.0, 0.05),
+    "fl_bad_side_extra_edge": (0.0, 0.05),
+    "fl_bad_side_size_factor": (0.0, 1.0),
+    "fl_mid_bid_extra_edge": (0.0, 0.03),
 }
 
 
@@ -1310,9 +1332,28 @@ def plan_sizes(activity, headline, bankroll, cfg=CFG, prev=None, lock=None, prev
     return out
 
 
+def fl_side(fv, prev, cfg=CFG):
+    """Favourite-longshot bias: which side of a market priced at fv is the "bad" one -> (side, extra edge,
+    size factor), side None = no bias. Below fl_low our bid buys the longshot students overpay for; above
+    fl_high our ask sells the favourite they undersell. prev = last cycle's side for this market: once on, a
+    bias holds until fv is fl_hysteresis back across the line, so a market sitting at 20c doesn't flip
+    (and get re-quoted) every cycle. Mid-band bids get fl_mid_bid_extra_edge (default 0 = no bias)."""
+    if not cfg.fl_bias_enabled or fv is None:
+        return None, 0.0, 1.0
+    h = cfg.fl_hysteresis
+    if fv < cfg.fl_low or (prev == "bid" and fv < cfg.fl_low + h):
+        return "bid", cfg.fl_bad_side_extra_edge, cfg.fl_bad_side_size_factor
+    if fv > cfg.fl_high or (prev == "ask" and fv > cfg.fl_high - h):
+        return "ask", cfg.fl_bad_side_extra_edge, cfg.fl_bad_side_size_factor
+    if cfg.fl_mid_bid_extra_edge > 0:
+        return "mid", cfg.fl_mid_bid_extra_edge, 1.0
+    return None, 0.0, 1.0
+
+
 def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=False, no_bid=False, no_ask=False,
                   bid_cap=None, ask_cap=None, kelly_p=None, bankroll=None, shift=0.0, order_size=None,
-                  position_limit=None, min_edge=None, reduce_size=None):
+                  position_limit=None, min_edge=None, reduce_size=None, bias_side=None, bias_edge=0.0,
+                  bias_size=1.0):
     """
     fv         fair YES probability
     inv        our net YES shares on THIS exchange (negative = net NO); drives the hard position limit
@@ -1331,6 +1372,10 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
     min_edge           overrides cfg.min_edge (e.g. wider in markets priced from Polymarket alone)
     reduce_size        bigger size allowed on the side that SHRINKS the position (up to the position itself),
                        e.g. a thin-book market quoting 100 shares that holds 7,585 from before
+    bias_side          "bid" / "ask" / None: the side that quotes bias_edge further from r (capped at
+                       max_half_spread) and at bias_size times its size (favourite-longshot bias, see fl_side).
+                       Ignored on a side that shrinks this exchange's position: that side quotes normally
+                       (its size beyond the position itself still gets bias_size)
     """
     bankroll = bankroll or DEFAULT_BANKROLL
     max_order_cash = cfg.max_order_cash_frac * bankroll
@@ -1349,8 +1394,13 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
 
     # 2. Allowed band for each side: at least min_edge, at most max_half_spread away from r.
     edge = cfg.min_edge if min_edge is None else min_edge
-    bid_lo, bid_hi = floor_tick(r - max(cfg.max_half_spread, edge)), floor_tick(r - edge)
-    ask_lo, ask_hi = ceil_tick(r + edge), ceil_tick(r + max(cfg.max_half_spread, edge))
+    widest = max(cfg.max_half_spread, edge)
+    bias_bid = bias_side == "bid" and inv > -1         # (a side that shrinks a position quotes normally)
+    bias_ask = bias_side == "ask" and inv < 1
+    bid_edge = min(widest, edge + bias_edge) if bias_bid else edge
+    ask_edge = min(widest, edge + bias_edge) if bias_ask else edge
+    bid_lo, bid_hi = floor_tick(r - widest), floor_tick(r - bid_edge)
+    ask_lo, ask_hi = ceil_tick(r + ask_edge), ceil_tick(r + widest)
 
     # 3. Penny: one tick better than the best other trader, so we're first in the queue while
     #    keeping the widest spread possible. Then clamp into the band. That clamp is what stops a
@@ -1362,9 +1412,9 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
     ask = ceil_tick(best_ask - imp) if best_ask is not None else ask_hi
     if cfg.undercut_step_back > 0:
         if best_bid is not None and best_bid > bid_hi + 1e-9:
-            bid = floor_tick(r - max(edge, cfg.undercut_step_back))
+            bid = floor_tick(r - max(bid_edge, cfg.undercut_step_back))
         if best_ask is not None and best_ask < ask_lo - 1e-9:
-            ask = ceil_tick(r + max(edge, cfg.undercut_step_back))
+            ask = ceil_tick(r + max(ask_edge, cfg.undercut_step_back))
     bid = min(max(bid, bid_lo), bid_hi)
     ask = max(min(ask, ask_hi), ask_lo)
     if not reduce_only and cfg.max_skew_through < 1.0:
@@ -1390,6 +1440,10 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
         short_limit = kelly_position(kelly_p, ask, bankroll, cfg, yes=False)   # most NO we'd hold
     bid_size = min(order_size, long_limit - inv)
     ask_size = min(order_size, short_limit + inv)
+    if bias_side == "bid" and bias_size != 1.0:        # bad side: smaller, except the part that only unloads
+        bid_size = min(bid_size, max(order_size * bias_size, -inv))
+    if bias_side == "ask" and bias_size != 1.0:
+        ask_size = min(ask_size, max(order_size * bias_size, inv))
     if reduce_size is not None and reduce_size > order_size:
         if inv < 0:
             bid_size = max(bid_size, min(reduce_size, -inv))   # buying back a short
@@ -1724,6 +1778,8 @@ class Ex:
     take_dir: int = 0                     # +1 = Polymarket above the best ask, -1 = below the best bid, 0 = neither
     take_since: float = 0.0               # since when every Polymarket reading has shown that same gap
     take_until: float = 0.0               # after taking here, leave it alone until this time
+    fl_side: str | None = None            # favourite-longshot bias side last cycle (for its hysteresis)
+    fl_tag: str = ""                      # that bias for the quote log line ("" = none active)
 
 
 def busy(ex, now_m):
@@ -2154,6 +2210,8 @@ class Bot:
                 self.place(new_orders, now_m)
         # Orders resting NOW, after this cycle's changes (the health snapshot above was taken before them).
         self.health["orders_resting"] = len(self.my_orders) if self.api.live else len(self.sim)
+        self.health["fl_bias_markets"] = {k: sum(1 for x in self.ex.values() if x.fl_tag.startswith(f" fl:{k}"))
+                                          for k in ("bid", "ask")}
 
         # 8. Snapshot for later analysis (every record_seconds) -------------------------------------
         self.record(fvs, now_m)
@@ -2487,6 +2545,7 @@ class Bot:
         fv is what we quote around; book_fv is the tournament book's own price (for the Polymarket guard);
         ref_liquid says whether the Polymarket price is reliable enough to size positions with Kelly."""
         cfg = self.burst_cfg if self.burst else self.cfg
+        ex.fl_tag = ""
         ex.inv, ex.eff, ex.ref = inv.get(ex.eid, 0.0), eff.get(ex.eid, 0.0), ref
         hrs = self.hours_to_close(ex)
         if hrs * 60 <= cfg.stop_minutes_before_close:
@@ -2552,10 +2611,16 @@ class Bot:
             planned = min(full, max(1.0, cfg.ref_only_size_frac * self.bankroll()))
             if cfg.ref_only_reduce_full:          # ...but a held position leaves at the market's normal size
                 reduce_size = full
+        side, bias_edge, bias_size = fl_side(fv, ex.fl_side, cfg)
+        ex.fl_side, tag = side, side
+        side = "bid" if side == "mid" else side       # mid band: an optional extra edge on bids, full size
+        ex.fl_tag = (f" fl:{tag}+{100 * bias_edge:g}c" if side and (ex.inv > -1 if side == "bid" else ex.inv < 1)
+                     else "")                         # (shown only while it changes the quote: not when unloading)
         return compute_quote(fv, ex.inv, inv_for_quote, best_bid, best_ask, cfg, reduce_only, no_bid, no_ask,
                              bid_cap, ask_cap, kelly_p=kelly_p, bankroll=self.bankroll(),
                              shift=self.party_shift(ex, party_delta), order_size=planned, position_limit=headline_limit,
-                             min_edge=edge, reduce_size=reduce_size)
+                             min_edge=edge, reduce_size=reduce_size, bias_side=side, bias_edge=bias_edge,
+                             bias_size=bias_size)
 
     def update_size_plan(self, now_m, fvs):
         """Every size_plan_seconds: work out how many shares to quote in each market (see plan_sizes).
@@ -2679,7 +2744,7 @@ class Bot:
         log.info("%s%-26.26s fv %s%s inv %+5.0f race %+5.0f | bid %s ask %s", "" if self.api.live else "[dry] ",
                  ex.label, f"{fv:.3f}" if fv is not None else "  -  ",
                  f" (ref {ex.ref:.3f})" if ex.ref is not None else "", ex.inv, ex.eff,
-                 fmt(q.bid, q.bid_size), fmt(q.ask, q.ask_size))
+                 fmt(q.bid, q.bid_size), fmt(q.ask, q.ask_size) + ex.fl_tag)
         if not doomed and not new:
             return None
         return Change(ex, doomed, fix_bid and fix_ask, new, self.change_key(ex, pull=not new, reprice=bool(doomed)))

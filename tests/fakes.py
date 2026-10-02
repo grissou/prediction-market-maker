@@ -205,6 +205,7 @@ def make_bot(live=True, only="", books=None, extra_markets=()):
     cfg.handover_file = os.path.join(d, "handover.json")
     pin_test_sizes(cfg)   # opt-in per test
     cfg.churn_control = False             # tests reprice straight after placing; churn control has its own tests
+    cfg.fl_bias_enabled = False           # exact prices and sizes below predate it; it has its own tests (test_strategy.py)
     cfg.slow_poll_seconds = 0             # read P&L and fills every cycle, so each test cycle sees them
     cfg.realtime_enabled = False          # no network in tests; realtime is tested with a FakeFeed
     return api, Bot(api, cfg)
