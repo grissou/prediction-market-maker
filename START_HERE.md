@@ -1,6 +1,6 @@
 # START HERE (Team run, branch `claude/run-c-tournament-improvements-pycdet`)
 
-Status: **in progress** (started 2026-10-02 08:50 UTC). **Package 1 READY at 10:10 UTC, Package 2 READY at 11:05 UTC** (deploy-ready, cumulative). Base: `claude/live-2026-10-02b` (5c0463a), the code live since 08:34.
+Status: **in progress** (started 2026-10-02 08:50 UTC). **Package 1 READY at 10:10 UTC, Package 2 READY at 11:05 UTC, hot-fix Package 2.1 READY at 12:05 UTC** (deploy-ready, cumulative). Package 2 is LIVE since 11:21:57. Base: `claude/live-2026-10-02b` (5c0463a), the code live since 08:34.
 The Builder's previous START_HERE is kept as `START_HERE_BUILDER.md`; Run A's notes are `ENGINEERING_NOTES.md`.
 Plan: `PLAN.md`. Packages appear below as they become READY (commit messages start "READY: Package N").
 Deploy only commits whose message starts "READY"; the branch is cumulative.
@@ -72,6 +72,35 @@ opposite sign; (5) `position_lots.json` written, `portfolio_age_hours` plausible
 Owner flags: pair unwinder, buy-side arbitrage and the capital ceiling are new behaviour ON by default (data evidence, riskless or strictly
 risk-reducing by construction); ref_weight 0.8 is a parameter step on simulator evidence only.
 
+### Package 2.1 (READY 12:05 UTC): HOT-FIX for the 11:22 reduce-only episode. Code deploy (handover restart). Commit "READY: Package 2.1".
+Behaviour-identical to the live Package 2 except the two fixes below (the not-yet-reviewed fast unload and reduce-join features are
+in the code but OFF: `fast_unload_enabled` False, `reduce_join_best` False; the per-market edge `market_edge_enabled` is OFF too).
+Suites: test_mm_bot 503, test_strategy 114, test_ref_prices 37, test_recorder_refill 37, test_fast_unload 58, test_stress 20; Python 3.11 and 3.10.
+Files that change: `mm_bot.py`, `tests/`, `analysis/` (rival_floor.py, new), `deploy/RUNBOOK.md`.
+
+| Fix | What happened live | Change |
+|---|---|---|
+| Risk fair-value fallback (`Bot.risk_fv`) | Rep U.S. House (short 9,396) unpriced after the restart: `or 0.5` made it a coin flip, risk 20.6k -> 31k, reduce-only 11:22-11:31, Dem House sold at 0.915 vs 0.92 fair | a HELD market with no fair value uses, in order: the liquid Polymarket reference; 1 - the other leg's fair value (two-leg race); the exchange's own mark (currentPrice from the positions read); the last fair value; only then 0.5. Logged once per market and source. Used by settlement_risk, total_worst_case, the capital-in-positions valuation and the unwind safety check |
+| Priming held markets first (Engineer 13) | priming ended at 192 s with 128/237 books; Rep House's adopted bid sat at the best, so the bulk top was blanked and R5 could not price it until its book arrived, behind ~100 others | missing books of HELD markets download first (biggest |position| x price), then markets with resting orders, then tops-priced, then by volume; priming never ends while a held market lacks a book (hard cap `startup_prime_held_max_seconds` 900); a held market unpriced for `unpriced_held_warn_cycles` (5) logs one "UNPRICED held market" WARNING with the reason |
+
+**Stop-gap settings for the 11:31-11:50 slow cycles (2-5 min; 20 silent 429s)**, via settings_override.json, until Package 2.2 ships
+(Engineer 14 is reproducing it; the lead's reading: the capital ceiling x0.25 and burst x0.5 shrank every adding quote, so every resting
+adding order counted as "oversized" = unsafe, `never_defer_unsafe` gave all those reprices pull priority past the request budget, the
+flood hit the exchange's real write limit, each 429 (Retry-After 60 s) paused EVERY request, and the 429 is only logged when no pause
+was already in force):
+`{"arb_two_sided": false, "never_defer_unsafe": false, "capital_ceiling_adding_size_factor": 0.5, "burst_protection": false, "writes_per_minute": 30, "writes_per_minute_max": 30}`
+Watch: summary-line interval back to ~30 s; "request budget: N deferred" shrinking; orders_resting steady (not 70 -> 281 -> 84); status rate_limited_total not rising.
+Re-enable `burst_protection` once cycles are back to ~30 s. `capital_ceiling_adding_size_factor` 0.5 is also the Strategist's recommendation
+(factor 0 was a cliff: -131/h once the ceiling binds; 0.5 recovers ~70%); Package 3 makes 0.5 the default.
+
+**Backstop recommendation** (`worst_case_backstop_frac`, owner set 0.8 at 11:46): keep 0.8 for now. The sum-of-maxima (69k) is dominated by the
+doubled House legs and many small races and ignores the hedged sets; R7's correlated risk (20.6k vs the 30.5k cap) is the operative limit. The
+pair unwinder and the capital ceiling should bring the sum down over the next days; revisit to 0.69 when it is below 60k. This loosens a safety
+limit: the owner's call, flagged.
+
+**ref_weight 0.8: withdrawn.** The Strategist's 3-hour runs reverse the 1-hour gain (ref_weight 0.85: -23 ± 24 / -46 ± 28 per 3 h at the lagged mark).
+Keep 0.7.
+
 ## Parameter changes (cumulative against live)
 | Setting | Live | New | Evidence | Expected effect |
 |---|---|---|---|---|
@@ -84,7 +113,7 @@ risk-reducing by construction); ref_weight 0.8 is a parameter step on simulator 
 | burst_startup_grace_seconds (new) | - | 90 | 08:08 restart tripped burst | normal sizes after a restart |
 | take_ref_max_age_seconds (new) | - | 30 | Engineer 1 task 4 | no takes on a stale Polymarket price |
 | handover_exit_max_seconds (new) | - | 150 | audit #6 | a handover never hangs |
-| ref_weight | 0.7 | 0.8 (override snippet) | Strategist sweep, 128 seeds: 0.85 +17 ± 6 / +20 ± 8 per h; upper bound | slightly more edge, +0.35k peak worst case |
+| ref_weight | 0.7 | 0.7 (0.8 withdrawn) | 1 h: +17 ± 6; 3 h at the lagged mark: -23 ± 24 / -46 ± 28 | none |
 | capital_in_positions_max_frac (new) | - | 0.75 (factor 0.25) | owner: 90% in positions | adding sides at quarter size until positions turn over |
 | skew_age_* (new) | - | 0.25c/h after 1 h, max 2c | median age 7.2 h | faster unloading of old positions |
 | pair_unwind_* / arb_two_sided (new) | - | on | 17.7k paired capital; ask-sum < 0.98 in 2.5% of race-minutes | capital freed; small riskless gains |
