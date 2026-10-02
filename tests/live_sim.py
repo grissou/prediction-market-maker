@@ -408,6 +408,8 @@ class LiveSim(Sim):
                     bot.ex[m.eid].book, by[m.eid] = self.book_dict(m), m
 
         def execute(eid, buy, qty, price):
+            if not self.take_writes_ok(t):
+                return 0.0
             m = by[eid]
             m.orders = [o for o in m.orders if o.owner != "us"]
             got = self.take(m, t, buy, qty, price)
@@ -433,6 +435,8 @@ class LiveSim(Sim):
             bfvs[m.eid] = fair_value(bot.ex[m.eid].book, self.cfg)       # as our_step feeds decide (book_fv)
 
         def execute(eid, buy, qty, price):
+            if not self.take_writes_ok(t):
+                return 0.0
             m = by[eid]
             m.orders = [o for o in m.orders if o.owner != "us"]
             got = self.take(m, t, buy, qty, price)
@@ -441,6 +445,18 @@ class LiveSim(Sim):
             return got
         return bot.take_aged(inv, bfvs, {}, t, execute=execute)
     # ---- end Package 5 C mirror ----
+
+    def take_writes_ok(self, t, n=3):
+        """Package 5 mirrors (T2.5 second leg, C takes): a take costs n writes as live (pull our quotes, the IOC
+        order, the leftover cancel); charge them to the write log, or refuse when the budget has no room (as
+        Bot.take_aged / pair_passive_take wait for writes_ready). The arbitrage path keeps its Round 3 accounting."""
+        spare = self.wcap - sum(c for _, c in self.wlog if t - _ < 60)
+        if spare < n:
+            self.take_refused = getattr(self, "take_refused", 0) + 1
+            return False
+        self.wlog.append((t, n))
+        self.writes += n
+        return True
 
     def take(self, m, t, is_buy, qty, limit):
         """Our immediate-or-cancel order: walks other traders' orders up to `limit`; returns shares done."""
@@ -604,7 +620,8 @@ class LiveSim(Sim):
                    hold_take_sh=round(getattr(self, "hold_take_sh", 0.0)),
                    ro_frac=round(self.ro_cycles / max(1, self.n_cycles), 3),
                    wc_start=round(self.wc_start) if self.wc_start is not None else 0,
-                   tilt_s_end=round(getattr(getattr(self, "tilt", None), "s", 0.0), 4))
+                   tilt_s_end=round(getattr(getattr(self, "tilt", None), "s", 0.0), 4),
+                   take_refused=getattr(self, "take_refused", 0))
         return out
 
 

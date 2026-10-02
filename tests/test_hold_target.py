@@ -385,6 +385,7 @@ if L is not None:
         b.cfg.hold_target_hours = 2.0
         b.cycle()
         st = Stub()
+        st.wcap, st.wlog, st.writes = 1e9, [], 0        # (the mirror charges a take's writes: unlimited here)
         st.bot, st.cfg, st.takes = b, b.cfg, []
         st.mkts = []
         for k, e in enumerate(("11", "12", "21", "22")):

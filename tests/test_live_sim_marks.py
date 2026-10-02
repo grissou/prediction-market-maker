@@ -37,6 +37,15 @@ check("backstop pinned: reduce-only every cycle", r["ro_frac"] == 1.0 and r["wc_
 rq = L._one((1, 0.02, "quiet", {}))
 check("backstop off: ro_frac 0, wc_start 0", rq["ro_frac"] == 0.0 and rq["wc_start"] == 0)
 
+# 1c. Package 5 mirrors charge a take's writes (3) and refuse without room
+st0 = L.LiveSim(1, 0.01, "quiet", S.make_cfg({}))
+st0.wlog, st0.writes = [], 0
+check("take charged 3 writes", st0.take_writes_ok(10) and st0.writes == 3 and st0.wlog == [(10, 3)])
+st0.wlog = [(5, st0.wcap - 2)]
+check("no room: refused", not st0.take_writes_ok(10) and st0.take_refused == 1)
+rp = L._one((1, 0.05, "quiet", {}))
+check("base unchanged by the charge (flags off)", rp["pnl"] == 23 and rp["writes_pm"] == 37.97)
+
 # 2. The tilt world: start consensus unchanged (residual bias), tilt grows, rivals anchored
 cfg = S.make_cfg({})
 a = L.LiveSim(3, 0.02, "quiet", cfg)
