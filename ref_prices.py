@@ -41,6 +41,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import requests
+import requests.adapters
+from concurrent.futures import ThreadPoolExecutor
 
 # =============================================================================================
 # SETTINGS
@@ -57,6 +59,8 @@ class RefConfig:
     use_last_trade: bool = True        # ...so fall back to its last trade price instead (False = no price)
     request_timeout: float = 10.0      # seconds per HTTP request
     batch_size: int = 50               # market ids per request
+    parallel_fetches: int = 5          # requests in flight at once (one per batch: 229 ids = 5 requests, so a
+                                       #   refresh takes one round trip, not five). 1 = one after another
     search_pause: float = 0.3          # pause between searches in `suggest` (be polite to the API)
     polymarket_url: str = "https://gamma-api.polymarket.com"
     kalshi_url: str = "https://api.elections.kalshi.com/trade-api/v2"
@@ -84,11 +88,52 @@ def ref_key(race, party):
 # FETCHING PRICES
 # =============================================================================================
 
+_session = None
+_session_lock = threading.Lock()
+_pool = None
+
+
+def session():
+    """One shared HTTP session: connections stay open between refreshes (day one: every request opened a new
+    TLS connection, ~0.2-0.5 s each, five times per refresh)."""
+    global _session
+    with _session_lock:
+        if _session is None:
+            _session = requests.Session()
+            _session.headers.update({"User-Agent": "mm_bot-reference-prices"})
+            n = max(2, REF.parallel_fetches)
+            _session.mount("https://", requests.adapters.HTTPAdapter(pool_connections=4, pool_maxsize=n))
+        return _session
+
+
 def http_get(url, params=None):
-    r = requests.get(url, params=params, timeout=REF.request_timeout,
-                     headers={"User-Agent": "mm_bot-reference-prices"})
+    r = session().get(url, params=params, timeout=REF.request_timeout)
     r.raise_for_status()
     return r.json()
+
+
+def in_parallel(fn, items):
+    """[fn(item) or the exception it raised] for every item, up to parallel_fetches at once."""
+    global _pool
+    if REF.parallel_fetches <= 1 or len(items) <= 1:
+        out = []
+        for it in items:
+            try:
+                out.append(fn(it))
+            except Exception as e:
+                out.append(e)
+        return out
+    with _session_lock:
+        if _pool is None:
+            _pool = ThreadPoolExecutor(max_workers=REF.parallel_fetches, thread_name_prefix="ref-http")
+    futures = [_pool.submit(fn, it) for it in items]
+    out = []
+    for f in futures:
+        try:
+            out.append(f.result())
+        except Exception as e:
+            out.append(e)
+    return out
 
 
 def to_float(x):
@@ -123,9 +168,18 @@ def fetch_polymarket(ids):
     """{market id: (probability, spread, all-time volume in $)} for Polymarket markets (Gamma API; public,
     no account needed). The volume tells mm_bot which markets people actually trade."""
     out = {}
-    for chunk in chunks(ids, REF.batch_size):
-        params = [("id", i) for i in chunk] + [("limit", len(chunk))]
-        for m in http_get(f"{REF.polymarket_url}/markets", params):
+    parts = chunks(ids, REF.batch_size)
+    pages = in_parallel(lambda c: http_get(f"{REF.polymarket_url}/markets", [("id", i) for i in c] + [("limit", len(c))]),
+                        parts)
+    failed = [p for p in pages if isinstance(p, Exception)]
+    if failed and len(failed) == len(pages):
+        raise failed[0]                       # nothing at all: the caller keeps the old prices
+    if failed:                                # some batches failed: their markets keep their old prices
+        log.warning("reference prices: %d of %d Polymarket requests failed (%s)", len(failed), len(pages), failed[0])
+    for page in pages:
+        if isinstance(page, Exception):
+            continue
+        for m in page:
             if m.get("closed"):
                 continue                      # already resolved: not a live opinion any more
             p, spread = market_quote(m.get("bestBid"), m.get("bestAsk"), m.get("lastTradePrice"))
@@ -195,6 +249,7 @@ class ReferencePrices:
         self.last_moves = {}                  # key -> |price change| at the latest refresh
         self.background = False
         self.stopped = threading.Event()
+        self.fetch_seconds = None            # duration of the latest download
         self.on_refresh = None                # optional callback(moves) after every refresh (mm_bot wakes its loop)
 
     def start(self):
@@ -239,13 +294,14 @@ class ReferencePrices:
         wanted = {}                           # source -> [ids]
         for entry in self.mapping.values():
             wanted.setdefault(entry.get("source", "polymarket"), []).append(str(entry["id"]))
-        fetched = {}
+        fetched, t0 = {}, time.monotonic()
         for source, ids in wanted.items():
             try:
                 fetched[source] = FETCHERS[source](ids)
             except Exception as e:            # network, bad JSON, unknown source...: keep old prices
                 log.warning("reference prices from %s failed: %s", source, e)
         now, moves = time.monotonic(), {}
+        self.fetch_seconds = round(now - t0, 2)   # how long the download took (status.json shows it)
         with self.lock:
             for key, entry in self.mapping.items():
                 quote = fetched.get(entry.get("source", "polymarket"), {}).get(str(entry["id"]))

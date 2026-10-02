@@ -4,6 +4,8 @@ Offline tests for mm_bot.py. No network: a FakeApi plays the exchange, following
 
 Run:  python tests/test_mm_bot.py      (exit code 0 = all passed; GitHub Actions runs this on every push)
 """
+import csv
+from collections import deque
 import json
 import logging
 import os
@@ -108,7 +110,7 @@ api.calls.clear(); bot.cycle()
 check("book 21 failing doesn't stop book 22 being refreshed", ("book", "22") in api.calls, api.calls)
 api.fail_book.clear()
 
-for e in bot.ex.values():                                   # downloaded 400 s ago: past book_stale (300 s)
+for e in bot.ex.values():                                   # downloaded 400 s ago: past book_reverify_seconds (120 s)
     e.book_time -= 400; e.verified -= 400                   #   but before book_max_age (600 s)
 api.calls.clear(); bot.cycle()
 check("old download but the bulk check confirms it -> still trusted and quoted, not re-downloaded",
@@ -516,6 +518,36 @@ check("the library logging 'connection closed' flags the feed for reconnection",
 check("...and a flagged feed counts as dead even if everything else looks fine", feed._socket_dead(FakeClient()))
 check("sessions renew at least hourly (fresh login) even when they look healthy", Config().realtime_session_max_seconds == 3600)
 
+print("--- realtime reconnect back-off (day one: 2, 4, 8, 16 s over two hours of unrelated drops)")
+import asyncio
+def backoffs(session_lengths):
+    """Run RealtimeFeed._run with sessions that drop after the given (simulated) lengths; return its waits."""
+    feed = RealtimeFeed(None, "T", Config())
+    waits, clock, runs = [], [1000.0], iter(session_lengths)
+    async def fake_session():
+        n = next(runs, None)
+        if n is None:
+            feed.stopping = True
+            return
+        if n > 0:
+            feed.session_connected_at = clock[0]
+        clock[0] += n
+        raise ConnectionError("socket closed")
+    async def fake_sleep(t):
+        waits.append(t); clock[0] += t
+    feed._session = fake_session
+    real_sleep, real_mono = asyncio.sleep, M.time.monotonic
+    asyncio.sleep, M.time.monotonic = fake_sleep, lambda: clock[0]
+    try:
+        logging.disable(logging.CRITICAL); asyncio.run(feed._run())
+    finally:
+        asyncio.sleep, M.time.monotonic = real_sleep, real_mono; logging.disable(logging.NOTSET)
+    return waits
+w = backoffs([3000, 2400, 1800, 600])
+check("a drop after a healthy session reconnects after 1 s every time (not 2, 4, 8, 16 s)", w[:4] == [1, 1, 1, 1], w)
+w = backoffs([0, 0, 0, 0, 5])
+check("drops in quick succession (never connected) still back off: 1, 2, 4, 8 s", w[:4] == [1, 2, 4, 8], w)
+
 print("--- startup self-test (live)")
 a, b = make_bot()
 ok = b.self_test()
@@ -523,15 +555,120 @@ check("self-test passes against an exchange that behaves as the spec says, and l
       ok and not a.orders and a.sent("batch") == [("batch", 2)], (a.orders, a.calls))
 a, b = make_bot()
 a.open_orders = lambda tid, eid=None: []                   # the orders "vanish": not what we expect
+b.cfg.recent_order_grace_seconds = 0.05
+logging.disable(logging.CRITICAL)
+first = b.self_test()
+check("self-test: accepted orders not listed once = maybe list lag on a busy exchange -> retry, no exit", first is False)
 try:
     logging.disable(logging.CRITICAL); b.self_test(); code = None
 except SystemExit as e:
     code = e.code
 finally:
     logging.disable(logging.NOTSET)
-check("self-test stops the bot (exit code 3) when the exchange doesn't behave as assumed", code == EXIT_FATAL, code)
+check("self-test stops the bot (exit code 3) when the exchange doesn't behave as assumed (twice in a row)", code == EXIT_FATAL, code)
 a, b = make_bot(live=False)
 check("self-test is skipped in dry runs (no real orders)", b.self_test() and not a.sent("batch"))
+
+print("--- self-test: a busy exchange is not a failure (day one: writes > 15 s, 409 REQUEST_IN_FLIGHT)")
+for err, name in ((ApiError(409, "REQUEST_IN_FLIGHT", "in flight"), "409 in flight"),
+                  (ApiError(0, "NETWORK", "read timed out"), "network timeout")):
+    a, b = make_bot()
+    a.batch_error = err
+    try:
+        logging.disable(logging.CRITICAL); ok = b.self_test(); code = None
+    except SystemExit as e:
+        ok, code = None, e.code
+    finally:
+        logging.disable(logging.NOTSET)
+    tex = b.ex[b.selftest_eid or min(b.ex)]
+    check(f"self-test {name}: no exit, returns 'not yet' and retries ~60 s later",
+          code is None and ok is False and 55 < b.selftest_next - time.monotonic() <= 60, (ok, code))
+    check(f"self-test {name}: the test exchange isn't left blocked, and the order list is re-read",
+          all(x.pending_until < time.monotonic() for x in b.ex.values()) and b.orders_stale)
+    a.batch_error = None
+    check(f"self-test {name}: once the exchange answers, the retry passes", b.self_test() and b.selftest_passed)
+a, b = make_bot()
+real_cancel = a.cancel_all
+def cancel_times_out(tid, eid=None):
+    real_cancel(tid, eid)                                  # it DID cancel; we just never heard back
+    raise ApiError(0, "NETWORK", "read timed out")
+a.cancel_all = cancel_times_out
+try:
+    logging.disable(logging.CRITICAL); ok = b.self_test(); code = None
+except SystemExit as e:
+    ok, code = None, e.code
+finally:
+    logging.disable(logging.NOTSET)
+check("self-test: a clean-up cancel that times out is 'busy', not a failure", code is None and ok is False, (ok, code))
+
+a, b = make_bot()
+gate, entered = threading.Event(), threading.Event()
+real_pb = a.place_batch
+def slow_test_batch(orders):
+    if all(o["quantity"] == 1 for o in orders):           # the self-test's two 1-share orders: hang like day one
+        entered.set(); gate.wait(5)
+    return real_pb(orders)
+a.place_batch = slow_test_batch
+alerts = []
+real_alert, M.alert = M.alert, lambda m: alerts.append(m)
+cycles = {"n": 0}
+real_cycle = b.cycle
+def counting():
+    cycles["n"] += 1
+    real_cycle()
+    if cycles["n"] == 3:
+        check("while the self-test's order write hangs, cycles keep running (it's on its own thread)",
+              entered.is_set() and not b.selftest_passed, cycles)
+        gate.set()
+    if cycles["n"] >= 3 and b.selftest_passed:
+        b.running = False
+    if cycles["n"] > 200:
+        b.running = False
+b.cycle, b.cfg.loop_seconds, b.cfg.min_cycle_seconds = counting, 0.01, 0.01
+b.run()
+M.alert = real_alert
+check("...and its result is picked up once it's in: passed, test orders gone", b.selftest_passed and
+      not [o for o in a.orders.values() if o["quantity"] == 1], cycles)
+
+a, b = make_bot()
+a.batch_error = ApiError(409, "REQUEST_IN_FLIGHT", "in flight")
+b.cfg.selftest_alert_after, b.cfg.selftest_retry_seconds = 0, 0
+alerts = []
+M.alert = lambda m: alerts.append(m)
+logging.disable(logging.CRITICAL)
+b.self_test(); b.self_test()
+logging.disable(logging.NOTSET)
+M.alert = real_alert
+check("self-test still busy after selftest_alert_after: exactly one alert, still no exit",
+      len([m for m in alerts if "self-test" in m]) == 1, alerts)
+a, b = make_bot()
+b.cycle()
+def wrong_side(tid, eid=None):                            # listed, but the ask reads back wrongly
+    return [dict(o, priceLimit=0.5) if o["side"] == "no" else o for o in FakeApi.open_orders(a, tid, eid)]
+real_pb2 = a.place_batch
+def batch_then_bot_cancels(orders):
+    res = real_pb2(orders)
+    if all(o["quantity"] == 1 for o in orders):
+        b.cancel_everything()                              # e.g. error recovery pulling every quote mid-test
+    return res
+a.place_batch, a.open_orders = batch_then_bot_cancels, wrong_side
+try:
+    logging.disable(logging.CRITICAL); ok = b.self_test(); code = None
+except SystemExit as e:
+    ok, code = None, e.code
+finally:
+    logging.disable(logging.NOTSET)
+check("self-test: a failure while the bot itself cancelled everything mid-test proves nothing -> retry",
+      code is None and ok is False, (ok, code))
+a, b = make_bot()
+b.cycle()
+tx = min([e for e in sorted(b.ex)], key=lambda e: b.size_plan.get(e, 0))
+b.ex[tx].pending_until = time.monotonic() + 50                # an unclear placement there earlier
+b.self_test()
+check("self-test keeps an earlier 'outcome unknown' hold on its exchange (no double placement)",
+      b.ex[tx].pending_until > time.monotonic() + 40, b.ex[tx].pending_until - time.monotonic())
+check("self-test takes the bot's own quotes off its exchange before testing (they can't be repriced meanwhile)",
+      ("cancel_all", tx) in a.calls, a.calls[-6:])
 
 print("--- election night")
 q = exit_quote(0.14, 300, 0.12, 0.18, CFG, 100_000)
@@ -937,6 +1074,377 @@ line, probs = b.status_report()
 check("status flags missing Polymarket prices (a stalled price thread can't go unnoticed)",
       any("Polymarket prices missing" in p for p in probs), line)
 
+print("--- parallel, time-boxed order writes (day one: writes 15-30 s, sent one at a time)")
+def lock_api(a):
+    """FakeApi isn't thread-safe; the real exchange is. Serialise its writes."""
+    lk = threading.Lock()
+    for name in ("place_batch", "cancel_all", "cancel_order"):
+        f = getattr(a, name)
+        setattr(a, name, (lambda f: lambda *x, **k: (lk.acquire(), f(*x, **k), lk.release())[1])(f))
+    return a
+house = [market("9", "91", "Republican", "U.S. House"), market("10", "92", "Democratic", "U.S. House")]
+hbooks = {"11": {"bids": [lvl(0.10, 1000)], "asks": [lvl(0.18, 1000)]}, "12": {"bids": [lvl(0.82, 1000)], "asks": [lvl(0.90, 1000)]},
+          "21": {"bids": [lvl(0.48, 1000)], "asks": [lvl(0.56, 1000)]}, "22": {"bids": [lvl(0.44, 1000)], "asks": [lvl(0.52, 1000)]},
+          "91": {"bids": [lvl(0.06, 1000)], "asks": [lvl(0.12, 1000)]}, "92": {"bids": [lvl(0.88, 1000)], "asks": [lvl(0.94, 1000)]}}
+a, b = make_bot(books={k: {"bids": [dict(l) for l in v["bids"]], "asks": [dict(l) for l in v["asks"]]} for k, v in hbooks.items()},
+                extra_markets=house)
+lock_api(a)
+sent = []
+real_pb = a.place_batch
+a.place_batch = lambda orders: (sent.append([o["exchangeId"] for o in orders]), real_pb(orders))[1]
+b.cfg.batch_size = 4
+b.cycle()
+check("party-control (headline) orders go out first, in a batch of their own", sent and set(sent[0]) == {"91", "92"}, sent)
+check("every market quoted after one cycle, no duplicates",
+      all(len(a.ours(e)) == 2 for e in ("11", "12", "21", "22", "91", "92")), {e: a.ours(e) for e in a.books})
+
+# A cancel that hangs: the cycle doesn't wait past write_wait_seconds, and nothing is stacked on that exchange.
+gate = threading.Event()
+real_co, real_ca = a.cancel_order, a.cancel_all
+slow_eids = {"21"}
+def slow_cancel_order(oid):
+    if a.orders.get(oid, {}).get("exchangeId") in slow_eids:
+        gate.wait(10)
+    return real_co(oid)
+def slow_cancel_all(tid, eid=None):
+    if eid in slow_eids:
+        gate.wait(10)
+    return real_ca(tid, eid)
+a.cancel_order, a.cancel_all = slow_cancel_order, slow_cancel_all
+b.cfg.write_wait_seconds = 0.3
+for e in ("21", "22"):                                    # Utah moves 4c: both sides there need repricing
+    a.books[e] = {"bids": [lvl(l["price"] + 0.04, 1000) for l in a.books[e]["bids"]],
+                  "asks": [lvl(l["price"] + 0.04, 1000) for l in a.books[e]["asks"]]}
+b.feed = FakeFeed(); b.feed.push(dirty={"21", "22"})
+sent.clear(); t0 = time.monotonic(); b.cycle(); took = time.monotonic() - t0
+check("a cancel that hangs doesn't hold up the cycle (time-boxed at write_wait_seconds)", took < 1.5, f"{took:.2f}s")
+check("...the other exchange's reprice still went out", any("22" in x for x in sent), sent)
+check("...nothing new is placed on the exchange whose cancel is unconfirmed (never two quotes on a side)",
+      not any("21" in x for x in sent) and b.ex["21"].writes == 1, (sent, b.ex["21"].writes))
+b.feed.push(dirty={"21"}); sent.clear(); b.cycle()
+check("...and the next cycle leaves it alone too while the cancel is still running", not any("21" in x for x in sent), sent)
+gate.set()
+for w in list(b.writes):
+    w.future.result(timeout=5)
+b.feed.push(dirty={"21"}); sent.clear(); b.cycle()
+check("once the cancel is confirmed, the new quote goes out", any("21" in x for x in sent) and len(a.ours("21")) == 2, (sent, a.ours("21")))
+a.cancel_order, a.cancel_all = real_co, real_ca
+
+# A placement that hangs: the cycle moves on; its result is applied later (fills attributable); no re-placement meanwhile.
+gate2, entered = threading.Event(), threading.Event()
+def slow_pb(orders):
+    if any(o["exchangeId"] == "11" for o in orders):
+        entered.set(); gate2.wait(10)
+    return real_pb(orders)
+a.place_batch = lambda orders: (sent.append([o["exchangeId"] for o in orders]), slow_pb(orders))[1]
+b.cancel("11", [o for o in b.my_orders.values() if o.eid == "11"], whole_exchange=True)
+sent.clear(); t0 = time.monotonic(); b.cycle(); took = time.monotonic() - t0
+check("a placement that hangs doesn't hold up the cycle", took < 1.5 and entered.is_set(), f"{took:.2f}s")
+b.feed.push(dirty={"11"}); n = len(sent); b.cycle()
+check("...and isn't sent again while it's in flight", not any("11" in x for x in sent[n:]), sent)
+gate2.set()
+for w in list(b.writes):
+    w.future.result(timeout=5)
+b.cycle()
+oids = [o["id"] for o in a.orders.values() if o["exchangeId"] == "11"]
+check("...when it lands, the bot records the orders and what they were for", len(oids) == 2 and
+      all(o in b.my_orders and o in b.order_meta for o in oids), (oids, list(b.my_orders)))
+
+# Writes really run side by side.
+a, b = make_bot(); lock_api(a)
+live, peak, lk = [0], [0], threading.Lock()
+real_pb = a.place_batch
+def counting_pb(orders):
+    with lk:
+        live[0] += 1; peak[0] = max(peak[0], live[0])
+    time.sleep(0.1)
+    with lk:
+        live[0] -= 1
+    return real_pb(orders)
+a.place_batch, b.cfg.batch_size = counting_pb, 2
+b.cycle()
+check("several order batches are in flight at once (parallel_writes)", peak[0] >= 2, peak)
+
+a, b = make_bot()
+b.cfg.parallel_writes = 1
+b.cycle()
+check("parallel_writes = 1: the old one-at-a-time path still quotes every market",
+      all(len(a.ours(e)) == 2 for e in ("11", "12", "21", "22")) and not b.writes)
+
+a, b = make_bot(); lock_api(a)
+gate3 = threading.Event()
+real_pb = a.place_batch
+a.place_batch = lambda orders: (gate3.wait(0.5), real_pb(orders))[1]
+b.cfg.write_wait_seconds = 0.05
+b.cycle()
+b.running = False
+b.shutdown()
+check("shutdown waits for writes in flight before cancelling everything (nothing left resting)", not a.orders, a.orders)
+
+# Review fixes: late cancels don't release old orders; pulls always go; counters never leak; queued writes dropped.
+a, b = make_bot(); lock_api(a)
+b.cycle()
+gate = threading.Event()
+real_ca = a.cancel_all
+a.cancel_all = lambda tid, eid=None: (gate.wait(5) if eid == "11" else None, real_ca(tid, eid))[1]
+b.cfg.write_wait_seconds = 0.1
+a.books["11"] = {"bids": [lvl(0.14, 1000)], "asks": [lvl(0.22, 1000)]}     # both sides need repricing
+b.feed = FakeFeed(); b.feed.push(dirty={"11"}); b.cycle()
+check("(setup) the cancel on 11 is still running after the cycle", b.ex["11"].cancelling)
+sent = []
+real_pb = a.place_batch
+a.place_batch = lambda orders: (sent.append([o["exchangeId"] for o in orders]), real_pb(orders))[1]
+threading.Timer(0.05, gate.set).start()
+b.cfg.write_wait_seconds = 0.5
+b.feed.push(dirty={"21"}); b.cycle()                      # the old cancel confirms DURING this cycle's wait
+check("a cancel from an earlier cycle that confirms later doesn't send that cycle's (old-price) orders",
+      not any("11" in x for x in sent), sent)
+b.feed.push(dirty={"11"}); b.cycle()
+check("...the next cycle re-plans that exchange and quotes it", len(a.ours("11")) == 2, a.ours("11"))
+
+a, b = make_bot(); b.cycle()
+from mm_bot import Change
+pulls = [Change(b.ex[e], [o for o in b.my_orders.values() if o.eid == e], True, [], (0, 1, 1, 0)) for e in ("11", "12", "21")]
+a.budget_left = lambda: 1
+b.send_changes(pulls)
+check("with the request budget nearly gone, every pull still goes out", all(not a.ours(e) for e in ("11", "12", "21")),
+      {e: a.ours(e) for e in ("11", "12", "21")})
+del a.budget_left
+
+a, b = make_bot(); b.cycle()
+real_apply = b.apply_batch
+b.apply_batch = lambda *x: (_ for _ in ()).throw(RuntimeError("boom"))
+for e in a.books:
+    a.books[e] = {"bids": [lvl(l["price"] + 0.03, 1000) for l in a.books[e]["bids"]], "asks": [lvl(l["price"] + 0.03, 1000) for l in a.books[e]["asks"]]}
+b.feed = FakeFeed(); b.feed.push(dirty=set(a.books))
+logging.disable(logging.CRITICAL); b.cycle(); logging.disable(logging.NOTSET)
+check("an error applying a write result never leaves an exchange stuck as 'write in flight'",
+      all(x.writes == 0 and not x.cancelling for x in b.ex.values()) and b.orders_stale)
+b.apply_batch = real_apply
+
+a, b = make_bot(); lock_api(a)
+gate = threading.Event()
+real_pb = a.place_batch
+a.place_batch = lambda orders: (gate.wait(5), real_pb(orders))[1]
+b.cfg.parallel_writes, b.cfg.batch_size, b.cfg.write_wait_seconds = 2, 1, 0.05
+b.writer = M.ThreadPoolExecutor(max_workers=2)
+b.cycle()
+queued = [w for w in b.writes if not w.future.running() and not w.future.done()]
+b.cancel_everything(); gate.set()
+for w in b.writes:
+    try: w.future.result(timeout=5)
+    except Exception: pass
+b.harvest_writes()
+check("cancel-everything drops order writes still queued (never sent after the cancel)",
+      queued and all(w.future.cancelled() for w in queued) and len(a.orders) <= 2, (len(queued), len(a.orders)))
+
+print("--- book freshness: re-check before calling a book stale (day one: 4.5-min cycles, then quotes pulled)")
+check("defaults: book_stale 900 s, 30 books per cycle, bulk re-check after 120 s",
+      (CFG.book_stale, CFG.max_books_per_cycle, CFG.book_reverify_seconds) == (900, 30, 120))
+a, b = make_bot(); b.cycle()
+b.feed = FakeFeed(); b.feed.ok = True; b.last_full_check = time.monotonic()      # event cycles only, no full check
+for e in b.ex.values():
+    e.verified -= 200
+a.calls.clear(); b.feed.push(dirty=set()); b.cycle()
+check("between full checks, books unconfirmed for 120 s get one bulk check (not a download each)",
+      len(a.sent("bulk")) == 1 and not a.sent("book") and all(time.monotonic() - e.verified < 5 for e in b.ex.values()),
+      a.calls)
+for e in b.ex.values():
+    e.verified -= 200
+a.books["21"]["bids"][0]["price"] = 0.50                 # this one moved
+a.calls.clear(); b.feed.push(dirty=set()); b.cycle()
+check("...a book whose best price moved is downloaded the next cycle", "21" in b.pending_dirty or ("book", "21") in a.calls)
+b.feed.push(dirty=set()); b.cycle()
+check("...and then it's current again", time.monotonic() - b.ex["21"].verified < 5)
+for e in b.ex.values():
+    e.verified -= 1000
+real_bulk = a.bulk_prices
+a.bulk_prices = lambda *x: (_ for _ in ()).throw(ApiError(503, "SERVICE_UNAVAILABLE", "down"))
+logging.disable(logging.CRITICAL); b.feed.push(dirty=set()); b.cycle(); logging.disable(logging.NOTSET)
+check("if the exchange can't be read at all, a book past book_stale still isn't quoted", not any(a.ours(e) for e in a.books),
+      {e: a.ours(e) for e in a.books})
+a.bulk_prices = real_bulk
+
+print("--- orders whose placement response was lost (day one: 55 of the first 82 fills unattributed)")
+a, b = make_bot()
+real_pb = a.place_batch
+def lands_but_times_out(orders):
+    real_pb(orders)                                       # the exchange places them...
+    raise ApiError(409, "REQUEST_IN_FLIGHT", "still in flight")   # ...but we never hear back
+a.place_batch = lands_but_times_out
+logging.disable(logging.CRITICAL); b.cycle(); logging.disable(logging.NOTSET)
+check("(setup) every exchange on hold, the bot doesn't know its orders", all(b.ex[e].pending_until > time.monotonic() for e in a.books)
+      and not b.my_orders and len(a.orders) == 8)
+a.place_batch = real_pb
+n = len(a.sent("batch")); b.cycle()
+oids = list(a.orders)
+check("next cycle: the landed orders are recognised from the open-orders list, with their notes",
+      all(o in b.my_orders and b.order_meta.get(o, {}).get("recovered") for o in oids), (oids, list(b.order_meta)))
+check("...the hold lifts at once (not after pending_seconds) and nothing is placed twice",
+      all(b.ex[e].pending_until == 0 for e in a.books) and len(a.orders) == 8 and not b.unconfirmed, (len(a.orders), b.unconfirmed))
+a.fill("11", True, 40)
+b.cycle()
+rows = list(csv.DictReader(open(b.cfg.fills_csv)))
+check("...and a fill on one is attributed to our bid with its quote price and fair value",
+      rows and rows[-1]["our_side"] == "bid" and rows[-1]["fv_at_quote"] != "", rows[-1:])
+
+a, b = make_bot()
+a.books["11"]["asks"] = [lvl(0.12, 50), lvl(0.18, 1000)]   # our 0.105 bid would not trade; make the ask cross:
+def fill_at_once(orders):
+    res = real_pb2(orders)
+    for o in list(a.orders.values()):                     # someone takes every order the moment it lands
+        is_bid, _ = a.yes_view(o)
+        a.fill(o["exchangeId"], is_bid, o["quantity"])
+    raise ApiError(0, "NETWORK", "read timed out")
+real_pb2 = a.place_batch
+a.place_batch = fill_at_once
+logging.disable(logging.CRITICAL); b.cycle(); logging.disable(logging.NOTSET)
+a.place_batch = real_pb2
+b.cycle()
+rows = list(csv.DictReader(open(b.cfg.fills_csv)))
+check("orders that filled before they were ever listed: their fills are still attributed (matched on side + price)",
+      rows and all(r["our_side"] in ("bid", "ask") for r in rows), [r["our_side"] for r in rows])
+b.cfg.recover_unconfirmed = False
+
+# Review fixes: a fill alone never lifts the hold; other holds (takes, self-test) are never lifted by a recovery.
+a, b = make_bot()
+real_pb3 = a.place_batch
+a.place_batch = lambda orders: (real_pb3(orders), (_ for _ in ()).throw(ApiError(0, "NETWORK", "timeout")))[1]
+logging.disable(logging.CRITICAL); b.cycle(); logging.disable(logging.NOTSET)
+a.place_batch = real_pb3
+oid11 = next(o["id"] for o in a.orders.values() if o["exchangeId"] == "11" and a.yes_view(o)[0])
+a.fill("11", True, 30)                                   # partly filled; the rest still rests
+hide = {o for o in a.orders if a.orders[o]["exchangeId"] == "11"}
+real_oo = a.open_orders
+a.open_orders = lambda tid, eid=None: [o for o in real_oo(tid, eid) if o["id"] not in hide]   # list lags
+b.log_fills({})
+check("a fill matched to a lost order attributes it but does NOT lift the hold (the rest may still rest)",
+      b.order_meta.get(oid11, {}).get("recovered") and b.ex["11"].pending_until > time.monotonic()
+      and b.filled_qty.get(oid11) == 30, (b.order_meta.get(oid11), b.ex["11"].pending_until - time.monotonic()))
+a.open_orders = real_oo
+b.ex["12"].pending_until = time.monotonic() + 500        # e.g. a take's unclear outcome, set later
+b.cycle()
+check("a recovery doesn't lift a hold something else set", b.ex["12"].pending_until > time.monotonic() + 400)
+check("...and the recovered part-filled order's shares left = placed - filled", b.my_orders.get(oid11) and
+      b.my_orders[oid11].qty == b.placed_qty[oid11] - 30, b.my_orders.get(oid11))
+
+a, b = make_bot()
+b.cfg.recover_unconfirmed = False
+a.place_batch = lambda orders: (real_pb_c(orders), (_ for _ in ()).throw(ApiError(409, "REQUEST_IN_FLIGHT", "x")))[1]
+real_pb_c = FakeApi.place_batch.__get__(a)
+logging.disable(logging.CRITICAL); b.cycle(); logging.disable(logging.NOTSET)
+a.place_batch = real_pb_c
+b.cycle()
+check("recover_unconfirmed = False: the old behaviour (hold for pending_seconds, no notes)",
+      all(b.ex[e].pending_until > time.monotonic() for e in a.books) and not b.unconfirmed)
+
+print("--- burst protection (slow exchange: fewer, smaller, wider quotes)")
+a, b = make_bot(); b.cycle()
+check("normal speed: no burst mode", not b.burst and b.health.get("burst_mode") is False)
+now_m = time.monotonic()
+b.write_log.extend([(now_m, 18.0, True), (now_m, 16.0, True), (now_m, 20.0, False)])
+b.cfg.burst_markets, b.size_plan = 2, {"11": 300, "12": 300, "21": 100, "22": 100}
+b.update_burst(now_m)
+check("2 write timeouts in a minute -> burst mode, top markets = the 2 biggest", b.burst and b.burst_set == {"11", "12"}, b.burst_set)
+before = {e: a.ours(e) for e in a.books}
+for e in a.books:                                          # every book moves 1.5c: all quotes want repricing
+    a.books[e] = {"bids": [lvl(round(l["price"] + 0.015, 3), 1000) for l in a.books[e]["bids"]],
+                  "asks": [lvl(round(l["price"] + 0.015, 3), 1000) for l in a.books[e]["asks"]]}
+b.feed = FakeFeed(); b.feed.push(dirty=set(a.books)); b.last_cycle_seconds = 0
+real_ub = b.update_burst
+b.update_burst = lambda now_m: None                       # hold burst mode on for this cycle
+a.calls.clear(); b.cycle()
+new21 = [x for x in a.ours("21") if x not in before["21"]]
+check("...e.g. Utah: no new orders there", not new21, (before["21"], a.ours("21")))
+moved = [x for x in a.ours("11") if x not in before["11"]]
+check("burst: top markets repriced at half size", moved and all(n == 50 for _, _, n in moved), (before["11"], a.ours("11")))
+b.cancel("22", [o for o in b.my_orders.values() if o.eid == "22"], whole_exchange=True)
+b.feed.push(dirty={"22"}); b.cycle()
+check("burst: outside the top markets an EMPTY side still gets a quote, at reduced size",
+      len(a.ours("22")) == 2 and all(n == 50 for _, _, n in a.ours("22")), a.ours("22"))
+b.update_burst = real_ub
+b.write_log.clear(); b.burst_calm_since = time.monotonic() - 121
+b.update_burst(time.monotonic())
+check("after burst_calm_seconds of normal speed: burst mode off", not b.burst)
+a, b = make_bot(); b.cfg.burst_protection = False
+b.write_log.extend([(time.monotonic(), 30.0, True)] * 5); b.update_burst(time.monotonic())
+check("burst_protection = False: never enters burst mode", not b.burst)
+
+a, b = make_bot()
+a.cancel_all = lambda tid, eid=None: (_ for _ in ()).throw(ApiError(0, "NETWORK", "read timed out"))
+b.cfg.selftest_enabled = False
+try:
+    logging.disable(logging.CRITICAL); run_cycles(b, 2); crashed = False
+except ApiError:
+    crashed = True
+finally:
+    logging.disable(logging.NOTSET)
+check("startup: a clean-slate cancel that times out doesn't crash the bot; it goes on quoting", not crashed and a.orders)
+
+print("--- churn control (crowded book: bots stepping in front of us all day)")
+a, b = make_bot(); b.cfg.churn_control = True; b.cycle()
+start = a.ours("11")
+a.books["11"]["bids"] = [lvl(0.11, 1000)]                # a rival pennies our 0.105 bid: target becomes 0.115
+b.feed = FakeFeed(); b.feed.push(dirty={"11"}); b.cycle()
+check("an order younger than min_quote_life_seconds isn't chased while it's safe", a.ours("11") == start, a.ours("11"))
+for o in list(b.recent_orders):
+    b.recent_orders[o] = (b.recent_orders[o][0], b.recent_orders[o][1] - 10)
+b.feed.push(dirty={"11"}); b.cycle()
+check("...older than that: repriced as before", ("bid", 0.115, 100) in a.ours("11"), a.ours("11"))
+b.ex["11"].reprices["bid"] = deque([time.monotonic()] * 4)
+a.books["11"]["bids"] = [lvl(0.12, 1000)]
+for o in list(b.recent_orders):
+    b.recent_orders[o] = (b.recent_orders[o][0], b.recent_orders[o][1] - 10)
+b.feed.push(dirty={"11"}); b.cycle()
+check("4 reprices in a minute on one side: it stops chasing (keeps its safe order, no ping-pong)",
+      ("bid", 0.115, 100) in a.ours("11"), a.ours("11"))
+a.books["11"]["bids"] = [lvl(0.08, 1000)]; a.books["11"]["asks"] = [lvl(0.09, 1000)]   # fair value drops below our bid
+b.feed.push(dirty={"11"}); b.cycle()
+check("...but an order that's no longer safe always moves", ("bid", 0.115, 100) not in a.ours("11"), a.ours("11"))
+a, b = make_bot(); b.cfg.churn_control = True; b.cycle()
+b.refs = FakeRefs({"Ohio Senate|Republican": 0.14})
+b.refs.last_moves, b.refs.version = {"Ohio Senate|Republican": 0.01}, 2
+b.mark_ref_moves()
+check("a Polymarket move of >= 0.5c makes that market's changes the most urgent",
+      b.change_key(b.ex["11"], pull=False)[0] == 0.5 and b.change_key(b.ex["21"], pull=False)[0] == 1)
+b.mark_ref_moves()
+check("...for that reading only", not b.ref_moved)
+
+# Review fixes (items 7-8)
+a, b = make_bot(); b.cycle()
+b.burst, b.burst_set, b.burst_cfg = True, set(), b.cfg
+b.update_burst = lambda now_m: None
+a.inv["21"] = 300                                          # long Utah, and the exit window has started
+for e in b.ex.values():
+    e.close = utcnow() + timedelta(hours=1)
+b.cycle(); b.cycle()
+check("burst mode never blocks the election-night exit (markets outside the top N still get exit orders)",
+      any(side == "ask" for side, _, _ in a.ours("21")), a.ours("21"))
+a, b = make_bot(); b.cfg.churn_control = True; b.cycle()
+o = next(x for x in b.my_orders.values() if x.eid == "11" and x.is_bid)
+check("churn hold never keeps an order bigger than the size now wanted",
+      not b.hold_side(b.ex["11"], [o], o.price, o.price + 0.01, o.qty - 10, True, utcnow(), time.monotonic()))
+wapi2 = Api(CFG, False)
+wapi2.gap, wapi2.budget, wapi2.wbudget, wapi2.BUDGET_WINDOW = 0.001, 100, 1, 1.0
+wapi2.throttle(write=True)
+th = threading.Thread(target=lambda: wapi2.throttle(write=True)); th.start()   # waits ~1 s for the write window
+time.sleep(0.05); t0 = time.monotonic(); wapi2.throttle(); waited = time.monotonic() - t0
+th.join()
+check("a write waiting on the write budget doesn't hold up reads", waited < 0.3, f"{waited:.2f}s")
+
+a, b = make_bot(); b.cycle()
+real_pos = a.positions
+a.positions = lambda: (_ for _ in ()).throw(ApiError(409, "CONFLICT", "Tournament holdings cannot be valued"))
+b.orders_stale = True
+logging.disable(logging.CRITICAL)
+try:
+    b.cycle(); ok = True
+except ApiError:
+    ok = False
+logging.disable(logging.NOTSET)
+a.positions = real_pos
+check("positions 409 'holdings cannot be valued' (day one 16:30): the cycle goes on with the last read", ok and b.orders_stale)
+
 print("--- parallel requests")
 a, b = make_bot()
 res = b.in_parallel(lambda x: 1 / x, [1, 0, 2])
@@ -949,6 +1457,18 @@ threads = [threading.Thread(target=lambda: [real_api.throttle() for _ in range(3
 [t.start() for t in threads]; [t.join() for t in threads]
 elapsed = time.monotonic() - t0
 check("rate limiter spaces 12 requests from 4 threads >= 0.05 s apart", 0.5 <= elapsed < 1.5, f"{elapsed:.2f}s")
+wapi = Api(CFG, False)
+wapi.gap, wapi.budget, wapi.wbudget, wapi.BUDGET_WINDOW = 0.001, 100, 3, 1.0     # 3 writes per 1 s, for speed
+t0 = time.monotonic()
+for _ in range(3):
+    wapi.throttle(write=True)
+for _ in range(5):
+    wapi.throttle()                                         # reads aren't held back by the write budget
+check("write budget: separate from reads (3 writes + 5 reads go at once)", time.monotonic() - t0 < 0.3 and wapi.writes_left() == 0,
+      wapi.writes_left())
+wapi.throttle(write=True)
+check("...a 4th write in the window waits for it", time.monotonic() - t0 >= 0.9, time.monotonic() - t0)
+check("default write budget: 30/min (conservative reading of the platform docs)", Config().writes_per_minute == 30)
 budget_api = Api(CFG, False)
 budget_api.gap, budget_api.budget, budget_api.BUDGET_WINDOW = 0.001, 5, 1.0   # 5 requests per 1 s, for speed
 t0 = time.monotonic()
