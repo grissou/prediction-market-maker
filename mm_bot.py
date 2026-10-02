@@ -884,8 +884,8 @@ def validate_overrides(raw, cfg):
     keys = ("order_ttl_busy", "order_ttl_quiet", "ttl_jitter_frac")
     tiers = [good.get(k, getattr(cfg, k)) for k in keys]
     refresh = good.get("refresh_before_expiry", cfg.refresh_before_expiry)
-    if min(tiers[0], tiers[1]) * (1 - tiers[2]) < 2 * refresh:
-        for k in keys + ("refresh_before_expiry",):
+    if good.get("ttl_tiers_enabled", cfg.ttl_tiers_enabled) and min(tiers[0], tiers[1]) * (1 - tiers[2]) < 2 * refresh:
+        for k in keys + ("refresh_before_expiry", "ttl_tiers_enabled"):
             if k in good:
                 del good[k]
                 bad.append(f"{k}: the shortest tier TTL after jitter ({min(tiers[0], tiers[1]) * (1 - tiers[2]):.0f}) "
@@ -4425,8 +4425,8 @@ class Bot:
                         ask_size=max(1, int(q.ask_size * k)) if q.ask_size else 0)
         bids = [o for o in resting if o.is_bid]
         asks = [o for o in resting if not o.is_bid]
-        fix_bid = self.side_fix(ex, bids, q.bid, q.bid_size, q.bid_limit, True, full_bid, fv, now)
-        fix_ask = self.side_fix(ex, asks, q.ask, q.ask_size, q.ask_limit, False, full_ask, fv, now)
+        fix_bid = self.side_fix(ex, bids, q.bid, q.bid_size, q.bid_limit, True, full_bid, fv, now, now_m)
+        fix_ask = self.side_fix(ex, asks, q.ask, q.ask_size, q.ask_limit, False, full_ask, fv, now, now_m)
         if self.cfg.ttl_expire_as_cancel:  # an order just left to expire: re-quote that side only after the grace
             if self.expiry_wait(ex, bids, True, now):
                 fix_bid = False
@@ -5111,11 +5111,18 @@ class Bot:
                 else cfg.order_size_frac * bank)
         return order_ttl_for(cfg, ttl_tier(ex.group in cfg.headline_races, size, bank, cfg), random.random())
 
-    def side_fix(self, ex, resting, price, size, limit, is_bid, max_size, fv, now):
+    def side_fix(self, ex, resting, price, size, limit, is_bid, max_size, fv, now, now_m=None):
         """plan_change's per-side test: side_needs_change, plus the write savers when on (no_chase_needs_change,
-        ttl_expire_as_cancel)."""
+        ttl_expire_as_cancel). No-chase never applies where the risk logic must be followed exactly (reduce-only,
+        flatten window, Polymarket just moved, a new fast-unload window), as hold_side."""
         cfg = self.cfg
         meta = (self.order_meta.get(resting[0].order_id) or {}) if len(resting) == 1 else {}
+        if cfg.no_chase_enabled and meta:
+            now_m = time.monotonic() if now_m is None else now_m
+            if (self.global_reduce or self.hours_to_close(ex) <= cfg.flatten_hours_before_close
+                    or ex.eid in self.ref_moved or now_m - ex.ref_moved_at < 15
+                    or self.unload_urgent(ex, now_m) == ("bid" if is_bid else "ask")):
+                meta = {}                         # (unknown placement notes -> the normal rules)
         return no_chase_needs_change(resting, price, size, cfg, now, limit, is_bid, max_size, fv, meta.get("fv"),
                                      ex.inv, meta.get("inv"), meta.get("qty"), expire_as_cancel=cfg.ttl_expire_as_cancel)
 
@@ -6354,7 +6361,7 @@ class Bot:
         if not self.selftest_needed():
             return True
         eid = self.selftest_start()
-        return self.selftest_finish(eid, self.selftest_run(eid, self.cfg.order_ttl))
+        return self.selftest_finish(eid, self.selftest_run(eid, self.selftest_ttl()))
 
     def selftest_needed(self):
         return self.cfg.selftest_enabled and self.api.live and bool(self.ex) and not self.selftest_passed
@@ -6373,10 +6380,23 @@ class Bot:
         self.selftest_gen = self.cancel_gen
         return eid
 
+    def selftest_ttl(self):
+        """The expiry the self-test checks: order_ttl, or with ttl_tiers_enabled the longest a tier can give."""
+        cfg = self.cfg
+        if not cfg.ttl_tiers_enabled:
+            return cfg.order_ttl
+        return max(cfg.order_ttl, min(MAX_ORDER_TTL, max(cfg.order_ttl_busy, cfg.order_ttl_quiet) * (1 + cfg.ttl_jitter_frac)))
+
     def selftest_run(self, eid, ttl):
         """One test (API calls only, no bot state touched, so it can run on any thread).
         Returns (verdict, problems, ttl): verdict "passed", "failed" or "busy"."""
         verdict, problems = self.selftest_attempt(eid, ttl)
+        if verdict == "rejected" and ttl > self.cfg.order_ttl:
+            # TTL saver: the longest tier TTL was refused -> the tiers go off (finish) and order_ttl is tried
+            log.warning("self-test: %.0f-min orders (TTL tiers) were rejected (%s) - trying order_ttl", ttl / 60,
+                        problems[0])
+            ttl = self.cfg.order_ttl
+            verdict, problems = self.selftest_attempt(eid, ttl)
         if verdict == "rejected" and ttl > 600:
             # The docs allow any future expiry, but if the exchange caps it, fall back rather than stop.
             log.warning("self-test: %.0f-min orders were rejected (%s) - trying 10-min ones", ttl / 60, problems[0])
@@ -6466,7 +6486,10 @@ class Bot:
         self.forget_orders([oid for oid, o in self.my_orders.items() if o.eid == eid])
         self.orders_stale = True
         if verdict == "passed":
-            if ttl != self.cfg.order_ttl:
+            if self.cfg.ttl_tiers_enabled and ttl < self.selftest_ttl():
+                alert(f"orders expiring in {self.selftest_ttl() / 60:.0f} min were rejected: TTL tiers switched off")
+                self.cfg.ttl_tiers_enabled = False
+            if ttl != self.cfg.order_ttl and ttl < self.cfg.order_ttl:
                 alert(f"orders expiring in {self.cfg.order_ttl / 60:.0f} min were rejected but {ttl / 60:.0f}-min "
                       f"ones work - using {ttl / 60:.0f}-min orders from now on")
                 self.cfg.order_ttl, self.cfg.refresh_before_expiry = ttl, ttl / 5
@@ -6505,7 +6528,7 @@ class Bot:
             return
         if time.monotonic() >= self.selftest_next:
             self.selftest_eid = self.selftest_start()
-            self.selftest_future = self.selftest_pool.submit(self.selftest_run, self.selftest_eid, self.cfg.order_ttl)
+            self.selftest_future = self.selftest_pool.submit(self.selftest_run, self.selftest_eid, self.selftest_ttl())
 
     def start_feed(self):
         """Start the realtime feed if it's enabled and the `realtime` package is installed."""

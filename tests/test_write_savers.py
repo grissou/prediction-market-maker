@@ -52,8 +52,8 @@ for raw, why in (({"no_chase_tolerance_ticks": 0}, "tolerance 0"), ({"no_chase_t
                  ({"no_chase_fv_epsilon": 0.05}, "epsilon 5c"), ({"order_ttl_quiet": 9000}, "quiet TTL 2.5 h"),
                  ({"order_ttl_busy": 200}, "busy TTL 200 s"), ({"ttl_jitter_frac": 0.6}, "jitter 60%"),
                  ({"ttl_expire_grace_seconds": 120}, "grace 2 min"), ({"ttl_busy_size_frac": -0.1}, "busy frac < 0"),
-                 ({"order_ttl_busy": 400}, "busy 400 s x 0.8 < 2 x refresh 180"),
-                 ({"order_ttl_busy": 1000, "refresh_before_expiry": 500, "order_ttl": 3600}, "refresh 500 vs busy 1000 x 0.8")):
+                 ({"order_ttl_busy": 400, "ttl_tiers_enabled": True}, "tiers on: busy 400 s x 0.8 < 2 x refresh 180"),
+                 ({"order_ttl_busy": 1000, "refresh_before_expiry": 500, "order_ttl": 3600, "ttl_tiers_enabled": True}, "tiers on: refresh 500 vs busy 1000 x 0.8")):
     good, bad = M.validate_overrides(raw, c)
     check(f"refused: {why}", bad and not any(k in good for k in raw if k in SAVER_KEYS), (good, bad))
 
@@ -295,6 +295,36 @@ for eac in (False, True):
         sim_exp.append(sim_reprices(cfg, m, 1800 - left, [(True, 0.45, 100, 0, 0.45)])[0])
 check("same expiry decision (refresh vs keep, expire-as-cancel off/on, 600/170/60 s left)", mm_exp == sim_exp,
       (mm_exp, sim_exp))
+
+# Red-team fixes: no-chase never overrides the risk logic; the tier check only with tiers on; the self-test checks
+# the longest tier TTL.
+a, b, bid = setup(no_chase=True)
+b.global_reduce = True
+check("no-chase OFF in a reduce-only window: a 2-tick move is followed", decide(b, bid)[0])
+a, b, bid = setup(no_chase=True)
+b.ref_moved.add("21")
+check("no-chase OFF right after a Polymarket move: a 2-tick move is followed", decide(b, bid)[0])
+a, b, bid = setup(no_chase=True)
+check("...and ON again in normal conditions (control)", not decide(b, bid)[0])
+c = M.Config()
+good, bad = M.validate_overrides({"order_ttl_quiet": 300.0, "ttl_jitter_frac": 0.5, "refresh_before_expiry": 180.0}, c)
+check("tier TTL check skipped while ttl_tiers_enabled is off (refresh_before_expiry not refused)",
+      "refresh_before_expiry" in good and not bad, (good, bad))
+good, bad = M.validate_overrides({"ttl_tiers_enabled": True, "order_ttl_quiet": 300.0, "ttl_jitter_frac": 0.5}, c)
+check("...but applied once tiers are on", "order_ttl_quiet" not in good and bad, (good, bad))
+a, b = make_bot()
+check("self-test expiry: order_ttl with tiers off", b.selftest_ttl() == b.cfg.order_ttl, b.selftest_ttl())
+b.cfg.ttl_tiers_enabled = True
+check("...the longest tier TTL (capped at MAX_ORDER_TTL) with tiers on", b.selftest_ttl() == M.MAX_ORDER_TTL,
+      b.selftest_ttl())
+tried = []
+def _attempt(eid, ttl):
+    tried.append(ttl)
+    return ("rejected", ["expiry too far"]) if ttl > 1800 else ("passed", [])
+b.selftest_attempt = _attempt
+verdict, _, ttl = b.selftest_run("21", b.selftest_ttl())
+check("tier TTL rejected -> falls back to order_ttl (not straight to 10 min)", verdict == "passed" and ttl == 1800
+      and tried == [M.MAX_ORDER_TTL, 1800], (verdict, ttl, tried))
 
 print(f"\n{sum(RESULTS)} of {len(RESULTS)} passed")
 sys.exit(0 if all(RESULTS) else 1)

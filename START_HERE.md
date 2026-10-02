@@ -5,7 +5,7 @@ The Builder's previous START_HERE is kept as `START_HERE_BUILDER.md`; Run A's no
 Plan: `PLAN.md`. Packages appear below as they become READY (commit messages start "READY: Package N").
 Deploy only commits whose message starts "READY"; the branch is cumulative.
 
-## Package 4 (Finisher, 2 Oct evening; branch `claude/finisher-package4`): Package 3 final + 28/60 defaults + ladder fixes + write savers (all new features OFF). Code deploy (handover restart).
+## Package 4 (READY, Finisher, 2 Oct evening; branch `claude/finisher-package4`): Package 3 final + 28/60 defaults + ladder fixes + write savers (all new features OFF). Code deploy (handover restart).
 **What changed against Package 3 final (439ac54):**
 - Defaults `writes_per_minute` 28, `writes_per_minute_max` 28, `burst_cycle_seconds` 60 (were 45 / 50 / 20): the owner's live overrides become the code
   defaults (2 Oct live: 4 x 429 while the budget climbed to 36-50/min, 0 at 28; normal cycles take 20-30 s, so the 20 s trigger fired with 0.4 s writes).
@@ -17,6 +17,12 @@ Deploy only commits whose message starts "READY"; the branch is cumulative.
   `ttl_tiers_enabled` (+ `order_ttl_busy` 3600, `order_ttl_quiet` 6000, `ttl_jitter_frac` 0.2, `ttl_busy_size_frac` 0.01; hard cap 7200 s);
   `ttl_expire_as_cancel` (+ `ttl_expire_grace_seconds` 5). Mirrored in `tests/strategy_sim.plan_changes`; `tests/test_write_savers.py` pins the two to
   one rule (1,152-case grid).
+- Red-team fixes (opus review of the merged diff: nothing high with every flag off; Package 4 with flags off = Package 3 + 28/60 defaults):
+  no-chase never applies in reduce-only, the flatten window, right after a Polymarket move or in a new fast-unload window; the self-test
+  checks the longest tier TTL when `ttl_tiers_enabled` is on and switches the tiers off if the exchange refuses it (falls back to order_ttl,
+  then 10 min); the tier-TTL validation runs only with tiers on, and a bad tier set refuses `ttl_tiers_enabled` too. Note: `ladder_move` is 2c
+  (was 1c; part of L3, no effect while the ladder is off). Known, unfixed (flags off: inert): expiry-as-cancel leaves a side empty ~20-30 s
+  per expiry and its 5 s grace trusts our clock; tiered TTLs make the dead-man's switch up to 2 h on quiet markets.
 - Simulator: `plan_changes` now models order expiry (base numbers not comparable with rounds <= 3b); `live_sim` prints per-gate ladder counters (`lg_*`).
 **Numbers (SIM_NOTES.md "Round 4"):** savers, 8 seeds x 3 h quiet (base 22.1 writes/min, 6,760 deferred/h): no-chase dP&L -43 ± 62, writes -0.26 ± 0.40
 (noise); TTL saver dP&L -43 ± 39, writes **-1.10 ± 0.35**/min. Neither passed clearly; the 16 x 6 confirmation was not run (the real cost is ~14.6
@@ -29,6 +35,8 @@ write saving), after a 16 x 6 quiet confirmation and after checking the exchange
 the overrides keep 28/28/60 there.
 **Watch in the first 10 minutes:** as Package 3; status.json write budget 28 and `rate_limited_total` 0; no burst entries on 20-30 s cycles; no
 "refused override" alerts; orders' expirationDate still order_ttl (30 min) since the TTL saver is off.
+**Suites (Package 4):** test_mm_bot 600, test_write_savers 75 (new), test_strategy 114, test_turnover 94, test_fast_unload 61,
+test_mark_frag 52, test_recorder_refill 37, test_ref_prices 37, test_behind_best 36, test_stress 20, and STRESS_LADDER=1 20/20 (0 duplicates); Python 3.11, py_compile on 3.10.
 **Not done:** item 4 (turnover control and ceiling 0.5 vs 0.25 in 16 x 6 news) was blocked: the session's permission classifier refused the run.
 Ladder P&L runs skipped: the gate diagnosis shows 0 ladder shares at start capital 0.90 and 0.80, so a P&L run would measure an idle ladder.
 
