@@ -271,3 +271,97 @@ large effects are the size of the headline quotes and whether the capital ceilin
 Limits: the sim does not value freed cash (no opportunity cost of capital), so it understates what a ceiling or a
 faster unload is worth to a capital-starved account. `_bg_cap` is an assumption: say which background level you
 believe and rerun (d).
+
+# Round 3: live start (tests/live_sim.py), Package 2 from the real book
+
+## What was built
+- **`tests/live_start_extract.py`** builds `tests/live_start.json` from status.json (08:14:50), the recorder's
+  snapshots (last book, fair value, Polymarket per market) and fills.csv. Lots are rebuilt the way
+  `Bot.seed_lots` does it; shares no fill covers are stamped at the first fill (16:02).
+- **`tests/live_sim.py`** (`python tests/live_sim.py SEEDS HOURS REGIME '{base}' '{variant}' ...`, paired seeds):
+  - **Markets:** the races of the 40 biggest positions by capital, both legs, which comes to 68 real markets. On top
+    of that, 3 synthetic outsider races (Dem + Rep Polymarket sum 0.90-0.97), for 74 markets in all.
+  - **Starting inventory:** the real positions with their real lot ages. The House legs are set to the 09:45 figures
+    (+10,834 / -9,396); Senate is 7,335 / 7,335.
+  - **Start mark:** P&L starts at 0, marked at Polymarket.
+  - **Account:** 101.5k. The markets not simulated are one fixed block of positions, sized so that capital in
+    positions starts at **90%**.
+  - **Cash constraint (new):** an order needs free cash for the part that adds to a position. Free cash = account +
+    P&L − positions − locks of our resting orders, which starts at about 10k.
+  - **Prices:** each race's legs share one Polymarket path, and each leg starts at its real tournament gap.
+  - **Quoting goes through the real Bot code,** not prototypes:
+    - `Bot.decide`, so race-netted limits, Kelly and headline limits, age skew from real lot ages, the capital
+      ceiling (`Bot.update_capital_ceiling`), the fast unload window and reduce_join_best all run.
+    - `Bot.refill_cooling`, with fills routed as fill dicts plus order_meta into `Bot.note_refills` and
+      `Bot.note_unloads`.
+    - `Bot.arb_plan` (pair unwind, sell-side and buy-side arbitrage) on the simulated other-trader books, every 10 s
+      with the bot's cooldowns, executed as immediate-or-cancel takes.
+    - `Bot.update_lots` and `Bot.total_worst_case`.
+- **Race calibration** (tournament noise anti-correlated 0.95 between legs, rivals' errors correlated, +0.3c lift):
+
+  | Measure | Simulator | Day one (real snapshots, ours included) |
+  |---|---|---|
+  | Race bid-sum ≥ 1.000 | 9-11% | 16.8% |
+  | Race bid-sum ≥ 1.005 | 4.5-6% | 5.3% |
+  | Race bid-sum ≥ 1.03 | 0.06-0.17% | 0.07% |
+  | Senate bid-sum max | 1.01 | 1.02 |
+  | Race ask-sum < 0.98 | 6.0-6.3% | 2.6% |
+
+  Buy-side arbitrage opportunities are therefore about 2x overstated.
+- **Not wired yet:** `arb_buy_min_ref_sum` (raw references) is not in this code. The buy guard tested here is the
+  existing one (asks ≥ `arb_buy_min_sum` and fair values summing to ≥ 0.9925).
+
+## Results (16 seeds; Δ = variant − ALL OFF over the whole run; capital = share of account value in positions)
+
+Base (all off), 6 h quiet: P&L +2,990 (lagged mark +894). Capital goes from 0.90 to 0.93 by the end (peak 0.98).
+Median held-share age at the end is 4.8 h. Peak worst case is 55k. 626k order sides were clipped for lack of cash.
+
+| Variant | ΔP&L | ΔP&L at lagged mark | Δcapital end / peak | Cash freed | Δage end | Sets unwound | Arb fills / locked | Δworst peak |
+|---|---|---|---|---|---|---|---|---|
+| **ALL ON, 6 h quiet** | -180 ± 160 | +219 ± 180 | **-8.4 / -4.9 pts** | **+8.5k** | **-0.6 h** | 11.4k sh | 4.1k sh / +286 | **-7.3k** |
+| **ALL ON, 6 h news** | **-293 ± 110** | +68 ± 97 | **-9.6 / -3.7 pts** | **+9.7k** | -0.1 h | 12.8k | 5.1k / +315 | **-8.1k** |
+| **ALL ON, 12 h quiet** | -38 ± 250 | **+597 ± 270** | **-13.6 / -7.4 pts** | **+13.8k** | **-2.0 h** | 18.2k | 4.9k / +430 | **-10.6k** |
+| age skew alone | +5 ± 98 | +45 ± 120 | -0.7 / -1.1 | +0.7k | **-0.48 h** | | | -1.5k |
+| capital ceiling 0.75 alone | **+251 ± 120** | +260 ± 150 | +1.0 / +0.7 | -1.1k | -0.1 | | | **-2.6k** |
+| race-netted limits alone | +185 ± 150 | **+407 ± 180** | -2.5 / **-3.1** | +2.5k | +0.7 | | | **-5.3k** |
+| refill cooldown alone | -120 ± 97 | -127 ± 120 | +0.7 / -0.2 | -0.7k | -0.4 | | | 0 |
+| **fast unload alone** | **-257 ± 94** | **-314 ± 90** | +0.4 / 0 | -0.4k | 0 | | | +0.4k |
+| reduce_join_best alone | -58 ± 61 | -134 ± 93 | +1.9 / +0.2 | -1.9k | +0.3 | | | +0.9k |
+| pair unwind alone | +88 ± 76 | +33 ± 86 | -1.0 / **-1.8** | +1.1k | **-0.85 h** | 6.4k | locked +66 | +1.5k |
+| arbitrage (both sides) alone | -54 ± 90 | -54 ± 100 | +0.2 / -0.3 | -0.2k | +0.3 | | 3.9k / +94 | 0 |
+
+Outsider races: 0 arbitrage fills in every run. Their ask-sums were ≤ 0.985 in 90-97% of minutes, so without the guard
+the bot would have bought sets that pay nothing if the outsider wins. The guard holds.
+
+## Reading
+- **The package works on what it is for.** All on, it releases 8.5-13.8k of cash and cuts 7-10k of worst case and
+  7-14 points of capital use. It unwinds 11-18k shares of sets. P&L at Polymarket is neutral over 12 h (-38 ± 250),
+  slightly negative in 6 h news (-293 ± 110), and **positive at the lagged mark over 12 h (+597 ± 270)**.
+- **Help:** race-netted limits (+185 / +407 at the lagged mark, -5.3k worst case) and the capital ceiling (+251 ± 120,
+  -2.6k worst case). With the cash constraint, quoting the adding side when we cannot pay for it only gets clipped.
+  Pair unwind turns over the oldest inventory (-0.85 h of age, 6.4k sets) and is P&L-neutral.
+- **Do nothing:** age skew (P&L ~0; age -0.5 h; worst case -1.5k), arbitrage (~0 net; +94 locked, 3.9k shares) and
+  refill cooldown (noise, slightly negative).
+- **Hurt:** fast unload (-257 ± 94; -314 ± 90 at the lagged mark), as in round 2. This is the earlier version: 0.5c
+  from fair for 300 s. The lead's new version (fair ± 1c for 180 s) is untested. reduce_join_best is noise-to-negative
+  (-58 / -134), also the earlier version.
+
+## Recommended defaults for Package 3
+- **Keep on:**
+  - limits_use_race_net (medium-high confidence).
+  - Capital ceiling 0.75 (medium).
+  - Pair unwind (medium).
+  - Age skew 0.0025/h (low: harmless, small turnover gain).
+  - Arbitrage, both sides, with the outsider guard (low: small, the guard works).
+- **Turn off or retest:** fast unload (medium: it hurt in two independent setups) and reduce_join_best (low).
+  Both must be retested in their new versions.
+- **Refill cooldown:** neutral; keep it only if live data shows same-side runs.
+
+## Limits
+- Only 68 of 237 markets are simulated; the rest are a static block.
+- Day-long effects (overnight, election news) are not modelled.
+- Buy-side arbitrage opportunities are about 2x real.
+- The lagged mark is a 30-min VWAP of trades.
+- Fills on legs not quoted are not modelled.
+- Not yet run: all-on minus fast unload, the new fast unload and reduce-join versions, and the R3 ladder at 11k cash
+  on the 032bdae head.
