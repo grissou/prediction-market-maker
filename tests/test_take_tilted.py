@@ -157,5 +157,30 @@ q_off, _ = run(books=far)
 q_on, _ = run(books=far, ref_tilt_enabled=True, take_tilted_ref=True)
 check("...so the take is smaller (or equal at a cap)", abs(q_on.get("11", 0)) <= abs(q_off.get("11", 0)), (q_on, q_off))
 
+print("--- red team: toggling take_tilted_ref restarts every confirmation clock")
+a, b = make_bot(books=json.loads(json.dumps(far)))
+b.cfg.ref_tilt_rampin_min = 0.0
+b.cfg.ref_tilt_enabled = True
+b.tilt.update = lambda samples, now_m: S
+b.tilt_s = S
+b.refs = FakeRefs(dict(REFS))
+b.cycle()                                                 # gap seen on the raw r (11: -1 on both raw and r')
+check("(gap seen: 11 direction -1, nothing taken yet)", b.ex["11"].take_dir == -1 and not a.inv.get("11"),
+      (b.ex["11"].take_dir, a.inv.get("11")))
+later(b)                                                  # the raw gap has been confirmed for 31 s ...
+b.cfg.take_tilted_ref = True                              # ... and then the take price switches to r'
+b.refs.new_reading(b.refs.prices, {})
+b.cycle()
+check("first cycle after the toggle: nothing taken (same direction, but r' not yet confirmed)",
+      not {k: v for k, v in a.inv.items() if v}, a.inv)
+check("...the clocks restarted (take_since this cycle)", b.ex["11"].take_dir == -1
+      and M.time.monotonic() - b.ex["11"].take_since < 30, (b.ex["11"].take_dir, b.ex["11"].take_since))
+later(b)
+b.refs.new_reading(b.refs.prices, {})
+b.cycle()
+check("...confirmed take_confirm_seconds later on r': taken", a.inv.get("11", 0) < 0, a.inv)
+_, b2 = run()
+check("no toggle: take_tilted_seen tracks the flag, no reset", b2.take_tilted_seen is False)
+
 print(f"\n{sum(RESULTS)}/{len(RESULTS)} passed")
 sys.exit(0 if all(RESULTS) else 1)

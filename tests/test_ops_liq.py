@@ -132,6 +132,33 @@ st = json.load(open(b.cfg.status_file))
 check("status.json: realised_pnl_scope = 'maker fills only'", st.get("realised_pnl_scope") == "maker fills only",
       st.get("realised_pnl_scope"))
 
+print("--- red team: a malformed row in the middle of a batch is skipped, the rest replayed, the offset kept")
+api, b = scripted()
+with open(b.cfg.fills_csv, "w", newline="") as f:
+    w = csv.writer(f)
+    w.writerow(M.FillLogger.COLUMNS)
+    w.writerow([1, M.iso(M.datetime.fromtimestamp(NOW - H, M.timezone.utc)), "22", "o1", "bid", 10, 0.40, 0.40, "",
+                "", 0])
+    w.writerow([2, "not-a-timestamp", "22", "o2", "bid", 50, 0.30, 0.30, "", "", 0])     # parse_ts raises
+    w.writerow([3, M.iso(M.datetime.fromtimestamp(NOW - H, M.timezone.utc)), "22", "o3", "ask", 10, 0.45, 0.45, "",
+                "", 0])
+try:
+    c4, err = b.ops_fills(NOW), None
+except Exception as e:                                       # noqa: BLE001 - the pre-fix behaviour
+    c4, err = None, e
+check("no exception out of ops_fills", err is None, repr(err))
+check("...the rows after it replayed: realised 10 x 0.05 = 0.5 (the bad row skipped)",
+      c4 is not None and close(c4["realised"], 0.5), c4 and c4["realised"])
+check("...the offset at the end of the file (cache kept, not re-read from 0 next time)",
+      b.ops_cache.get("off") == os.path.getsize(b.cfg.fills_csv), (b.ops_cache.get("off"),
+                                                                   os.path.getsize(b.cfg.fills_csv)))
+with open(b.cfg.fills_csv, "a", newline="") as f:
+    csv.writer(f).writerow([4, M.iso(M.datetime.fromtimestamp(NOW - 0.5 * H, M.timezone.utc)), "22", "o4", "bid", 10,
+                            0.50, 0.50, "", "", 0])
+c5 = b.ops_fills(NOW + 120)
+check("...next append read incrementally: realised still 0.5, one new lot of 10", close(c5["realised"], 0.5)
+      and c5["lots"].get("22") == [[10.0, 0.5]], (c5["realised"], c5["lots"]))
+
 print("--- None-safety")
 api, b = make_bot()
 o = b.ops_fields(NOW)
