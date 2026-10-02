@@ -580,3 +580,19 @@ biggest positions sit where the gaps are biggest: residual bias slope -1.9% on t
 Reading for the owner's tonight question: 0.85 alone or hysteresis alone buy little (both within noise, hysteresis costs writes). With T2.1 on,
 0.85 is worth ~+180 over T2.1 alone per 3 h here (noisy). Order: T2.1 first, then 0.85; not 0.85 alone, which adds worst-case room to a bot
 that still buys the tilt.
+
+## Switch-on with existing inventory: step vs ramp-in (owner's question, tilt world, d vs BASE)
+The live start IS a switch-on: 74 markets, 90% of capital in positions, most of it bought against the tournament. `ref_tilt_rampin_min`
+ramps the applied s from 0 to the estimate (blend and takes). Base 8 x 2 quiet: exit_ratio 0.92, shares 83k, pnl_liq +423, pnl +995 (Polymarket).
+| Run | d pnl_lag | d pnl_liq | d pnl (Polymarket) | d exit_ratio | d shares | d cap_end | d writes_pm | d deferred_h |
+|---|---|---|---|---|---|---|---|---|
+| 8 x 2 h, step-on (ramp 0) | +70 ± 39 | +174 ± 55 | -107 ± 25 | +0.163 ± 0.041 | +3.2k ± 1.9k | -0.066 ± 0.009 | -0.90 ± 0.77 | -360 ± 700 |
+| 8 x 2 h, ramp 120 min | -33 ± 39 | +38 ± 71 | -112 ± 28 | +0.110 ± 0.028 | -0.7k ± 2.0k | -0.044 ± 0.007 | -0.46 ± 0.59 | -340 ± 820 |
+| 8 x 3 h, step-on | +166 ± 72 | +163 ± 60 | -131 ± 51 | +0.105 ± 0.039 | +15k ± 4.3k | -0.076 ± 0.015 | -1.17 ± 0.46 | +70 ± 550 |
+| 8 x 3 h, ramp 120 min | -36 ± 150 | -70 ± 130 | -195 ± 86 | +0.069 ± 0.032 | +3.4k ± 5k | -0.047 ± 0.011 | +0.79 ± 0.53 | +1,070 ± 570 |
+The unwind in the first 2 h after a step-on: reduces up ~+5k shares and adds down ~-2k (from the exit ratio and share totals), i.e. the
+bot sells ~5k shares of inventory at tournament prices ~2c under Polymarket: -107 at the Polymarket mark, +174 at liquidation, +70 at the
+exchange-style mark. The ramp does NOT reduce the Polymarket-marked cost (-112 vs -107); it delays the gain, keeps the bot buying the tilt
+at a falling rate for 2 h, and re-prices continuously as fair value drifts (+0.8 writes/min, deferred +1,070/h at 3 h). Default set to 0
+(no ramp); the setting stays for the owner. The one-step switch-on re-prices ~157 of 229 live markets by >= 1c once (red team): ~10 min of
+the 28/min budget; do it in a quiet hour. (A 20-min ramp is screened below for the record.)
