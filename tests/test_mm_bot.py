@@ -1582,6 +1582,38 @@ M.alert = real_alert
 check("never overridable: secrets, URLs, files, the kill switch", not {"api_key", "base_url", "slug", "alert_url",
       "max_drawdown_pct", "fills_csv", "overrides_file"} & set(M.OVERRIDABLE))
 check("every overridable name is a real setting", all(hasattr(Config(), k) for k in M.OVERRIDABLE))
+_d = Config()
+_ok, _bad = validate_overrides({k: getattr(_d, k) for k in M.OVERRIDABLE}, _d)
+check("every default is inside its live range (the file can always restore it)", not _bad and len(_ok) == len(M.OVERRIDABLE),
+      _bad)
+_new = {"skew_per_quote": 0.01, "skew_max": 0.05, "max_skew_through": 0.01, "improve_ticks": 0, "undercut_step_back": 0.01,
+        "ref_only_enabled": False, "ref_only_max_gap": 0.05, "ref_only_min_edge": 0.02, "ref_only_size_frac": 0.002,
+        "ref_only_reduce_full": False, "risk_swing_shock": 0.2, "risk_z": 2.5, "worst_case_backstop_frac": 0.5,
+        "order_ttl": 3600, "refresh_before_expiry": 300, "batch_size": 5, "kelly_no_edge_frac": 0.002,
+        "writes_per_minute_max": 80, "write_budget_cut": 0.5, "never_defer_unsafe": False,
+        "startup_writes_per_minute": 20, "burst_startup_grace_seconds": 120, "take_ref_max_age_seconds": 60}
+_ok, _bad = validate_overrides(_new, _d)
+check("the new live settings are accepted (quoting, thin-book, risk, lifecycle, write budget, burst, take)",
+      not _bad and _ok == {k: (float(v) if isinstance(getattr(_d, k), float) else v) for k, v in _new.items()}, _bad)
+_out = {"skew_per_quote": 0.06, "skew_max": 0.2, "max_skew_through": -0.01, "improve_ticks": 4, "undercut_step_back": 0.1,
+        "ref_only_enabled": 1, "ref_only_max_gap": 0.001, "ref_only_min_edge": 0.2, "ref_only_size_frac": 0.05,
+        "ref_only_reduce_full": "yes", "risk_swing_shock": 0.01, "risk_z": 7, "worst_case_backstop_frac": 0.95,
+        "order_ttl": 100, "refresh_before_expiry": 1000, "batch_size": 0, "kelly_no_edge_frac": 0.02,
+        "writes_per_minute_max": 200, "write_budget_cut": 0.1, "never_defer_unsafe": 0,
+        "startup_writes_per_minute": -1, "burst_startup_grace_seconds": 601, "take_ref_max_age_seconds": 301}
+_ok, _bad = validate_overrides(_out, _d)
+check("...and refused out of range or of the wrong type (every one)", not _ok and len(_bad) == len(_out), (_ok, _bad))
+_ok, _bad = validate_overrides({"order_ttl": 600, "refresh_before_expiry": 400}, _d)
+check("refresh_before_expiry over half of order_ttl is refused (orders would be replaced every cycle)",
+      not _ok and len(_bad) == 2, (_ok, _bad))
+_ok, _bad = validate_overrides({"order_ttl": 300}, _d)                # default refresh 180 > 150
+check("...also against the current value of the one not in the file", not _ok and _bad, (_ok, _bad))
+a, b = make_bot(); b.cycle()
+with open(b.cfg.overrides_file, "w") as f:
+    json.dump({"batch_size": 3, "order_ttl": 3600, "writes_per_minute": 20, "writes_per_minute_max": 25}, f)
+b.check_overrides()
+check("live: batch_size / order_ttl apply, writes_per_minute resets the write budget, a lower ceiling caps it",
+      b.cfg.batch_size == 3 and b.cfg.order_ttl == 3600 and b.api.wbudget <= 25, (b.cfg.batch_size, b.api.wbudget))
 
 print("--- start-up clean slate only when needed; status during long cycles")
 a, b = make_bot(); b.cfg.selftest_enabled = False

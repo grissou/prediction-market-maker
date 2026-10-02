@@ -459,6 +459,15 @@ OVERRIDABLE = {
     "burst_timeouts": (1, 100), "burst_calm_seconds": (0.0, 3600.0), "burst_markets": (1, 300),
     "burst_size_factor": (0.05, 1.0), "burst_extra_edge": (0.0, 0.05), "burst_startup_grace_seconds": (0.0, 600.0),
     "slow_cycle_alert_seconds": (10.0, 3600.0), "summary_every_hours": (0, 24),
+    # Quoting (R4, skew), thin-book pricing (R5), risk (R7), order lifecycle. All read from cfg where used, every
+    # cycle, so a change applies on the next cycle (refresh_before_expiry is checked against order_ttl below).
+    "skew_per_quote": (0.0, 0.05), "skew_max": (0.0, 0.1), "max_skew_through": (0.0, 0.05),
+    "improve_ticks": (0, 3), "undercut_step_back": (0.0, 0.05),
+    "ref_only_enabled": (False, True), "ref_only_max_gap": (0.005, 0.2), "ref_only_min_edge": (0.0, 0.1),
+    "ref_only_size_frac": (0.0, 0.02), "ref_only_reduce_full": (False, True),
+    "risk_swing_shock": (0.05, 0.5), "risk_z": (1.0, 6.0), "worst_case_backstop_frac": (0.3, 0.9),
+    "order_ttl": (300.0, 7200.0), "refresh_before_expiry": (30.0, 900.0), "batch_size": (1, 50),
+    "kelly_no_edge_frac": (0.0, 0.01), "take_ref_max_age_seconds": (0.0, 300.0),
 }
 
 
@@ -489,6 +498,14 @@ def validate_overrides(raw, cfg):
             bad.append(f"{k}: {v} is outside {lo}..{hi}")
             continue
         good[k] = float(v) if isinstance(cur, float) else v
+    # An order must live well past its refresh point, or every order is "about to expire" as soon as it's placed
+    # and gets replaced every cycle. (A key not in the file is judged at its current value.)
+    ttl, refresh = good.get("order_ttl", cfg.order_ttl), good.get("refresh_before_expiry", cfg.refresh_before_expiry)
+    if refresh * 2 > ttl:
+        for k in ("order_ttl", "refresh_before_expiry"):
+            if k in good:
+                del good[k]
+                bad.append(f"{k}: refresh_before_expiry ({refresh:.0f}) must be at most half of order_ttl ({ttl:.0f})")
     return good, bad
 
 # =============================================================================================
