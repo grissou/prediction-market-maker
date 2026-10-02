@@ -210,8 +210,7 @@ b.cycle()
 check("R5c cycle: ...and with the books downloaded Utah is depth-priced (not R5)",
       "21" not in b.ref_only and "11" in b.ref_only, b.ref_only)
 
-# =============================================================================================
-# STARTUP PRIMING (books first after a start or handover restart)
+# ======================================================================================# STARTUP PRIMING (books first after a start or handover restart)
 
 many = [market(str(100 + i), str(1000 + i), "Republican", f"Race {i:03d}") for i in range(70)]
 a, b = make_bot(extra_markets=many)
@@ -274,6 +273,139 @@ a, b = make_bot(); b.cfg.selftest_enabled = False
 run_cycles(b, 1)
 check("priming: the trading loop sets trading_since (fresh start and handover alike: both go through run())",
       b.trading_since is not None)
+# =============================================================================================
+# FAVOURITE-LONGSHOT SIDE BIAS (fl_*): below 20c the bid is the bad side, above 80c the ask
+
+FL = Config()
+
+
+def flq(fv, inv=0, bb=None, ba=None, cfg=FL, prev=None, **kw):
+    side, e, f = fl_side(fv, prev, cfg)
+    side = "bid" if side == "mid" else side
+    return compute_quote(fv, inv, inv, bb, ba, cfg, order_size=200, bias_side=side, bias_edge=e, bias_size=f, **kw)
+
+
+def plain(fv, inv=0, bb=None, ba=None, cfg=FL, **kw):
+    return compute_quote(fv, inv, inv, bb, ba, cfg, order_size=200, **kw)
+
+
+check("FL: on by default, 20c / 80c, +1c, half size, 1c hysteresis, mid-band off",
+      (FL.fl_bias_enabled, FL.fl_low, FL.fl_high, FL.fl_bad_side_extra_edge, FL.fl_bad_side_size_factor,
+       FL.fl_hysteresis, FL.fl_mid_bid_extra_edge) == (True, 0.20, 0.80, 0.01, 0.5, 0.01, 0.0))
+check("FL: fl_side picks bid below 20c, ask above 80c, nothing between",
+      [fl_side(f, None, FL)[0] for f in (0.10, 0.199, 0.20, 0.50, 0.80, 0.801, 0.95)] ==
+      ["bid", "bid", None, None, None, "ask", "ask"])
+q0, q1 = plain(0.10, bb=0.095, ba=0.105), flq(0.10, bb=0.095, ba=0.105)
+check("FL: fv 10c, rival 0.5c away -> bid 2c from fair (0.08) at half size, was 0.09 x200",
+      (q0.bid, q0.bid_size, q1.bid, q1.bid_size, q1.bid_limit) == (0.09, 200, 0.08, 100, 0.08), (q0, q1))
+check("FL: fv 10c -> the ask (good side) is unchanged, still at the 1c floor",
+      (q1.ask, q1.ask_size) == (q0.ask, q0.ask_size) == (0.11, 200), (q0, q1))
+q0, q1 = plain(0.90, bb=0.895, ba=0.905), flq(0.90, bb=0.895, ba=0.905)
+check("FL: fv 90c -> ask 2c from fair (0.92) at half size; bid unchanged (0.89 x200)",
+      (q1.ask, q1.ask_size, q1.bid, q1.bid_size) == (0.92, 100, 0.89, 200) and q0.ask == 0.91, (q0, q1))
+check("FL: mid band (50c) identical to no bias", flq(0.50, bb=0.495, ba=0.505) == plain(0.50, bb=0.495, ba=0.505))
+q1 = flq(0.10, bb=0.06, ba=0.14)
+check("FL: wide book -> bad bid still pennies a rival outside its wider floor (0.065), at half size",
+      (q1.bid, q1.bid_size) == (0.065, 100), q1)
+off = Config(fl_bias_enabled=False)
+check("FL: disabled -> fl_side gives no bias and the quote is today's",
+      fl_side(0.10, "bid", off) == (None, 0.0, 1.0)
+      and flq(0.10, cfg=off, bb=0.095, ba=0.105) == plain(0.10, bb=0.095, ba=0.105))
+# A side that shrinks a position quotes normally.
+q0, q1 = plain(0.10, inv=-500, bb=0.095, ba=0.105), flq(0.10, inv=-500, bb=0.095, ba=0.105)
+check("FL: short 500 at 10c -> the bid unloads: same price and size as without the bias", q1 == q0, (q0, q1))
+q0, q1 = plain(0.90, inv=500, bb=0.895, ba=0.905), flq(0.90, inv=500, bb=0.895, ba=0.905)
+check("FL: long 500 at 90c -> the ask unloads: same as without the bias", q1 == q0, (q0, q1))
+q1 = flq(0.10, inv=-30, bb=0.095, ba=0.105)
+check("FL: short only 30 -> bid at the normal edge, but sized max(half size, position) = 100",
+      (q1.bid, q1.bid_size) == (plain(0.10, inv=-30, bb=0.095, ba=0.105).bid, 100), q1)
+q1 = flq(0.10, inv=500, bb=0.095, ba=0.105)
+check("FL: long 500 at 10c -> the bid (adds) is still biased: half size, at least 2c below fair",
+      q1.bid_size == 100 and q1.bid <= 0.08, q1)
+# Skew: the bias is measured from the skewed reservation price, and nothing quotes through fair.
+bad = []
+for inv in (-2000, -500, -100, 0, 100, 500, 2000):
+    for fv in (0.10, 0.15, 0.85, 0.90):
+        q1, q0 = flq(fv, inv=inv, bb=fv - 0.005, ba=fv + 0.005), plain(fv, inv=inv, bb=fv - 0.005, ba=fv + 0.005)
+        ok = ((q1.bid is None or (q1.bid <= fv + 1e-9 and q1.bid <= q0.bid + 1e-9 and q1.bid >= fv - 0.06 - 1e-9))
+              and (q1.ask is None or (q1.ask >= fv - 1e-9 and q1.ask >= q0.ask - 1e-9 and q1.ask <= fv + 0.06 + 1e-9)))
+        if not ok:
+            bad.append((fv, inv, q0, q1))
+check("FL + skew: never through fair, never tighter than without the bias, within skew + max_half_spread",
+      not bad, bad[:2])
+# max_half_spread cap
+big = Config(fl_bad_side_extra_edge=0.05)
+q1 = flq(0.10, cfg=big)
+check("FL: extra edge 5c with no rival -> bad bid capped at max_half_spread (0.06), as today's empty-book bid",
+      q1.bid == plain(0.10, cfg=big).bid == 0.06 and q1.bid_limit == 0.06, q1)
+q1 = flq(0.10, cfg=big, bb=0.095, ba=0.105)
+check("FL: extra edge 5c, rival 0.5c away -> bad bid at the 4c cap (0.06), never further", q1.bid == 0.06, q1)
+# ref_only path: the extra adds to ref_only_min_edge
+q0 = plain(0.10, bb=0.095, ba=0.105, min_edge=0.015)
+q1 = flq(0.10, bb=0.095, ba=0.105, min_edge=0.015)
+check("FL: ref_only edge 1.5c -> bad bid 2.5c from fair (0.075), good ask stays at 1.5c (0.115)",
+      (q0.bid, q1.bid, q1.ask) == (0.085, 0.075, 0.115) and q1.ask == q0.ask, (q0, q1))
+q1 = flq(0.10, inv=-1000, bb=0.095, ba=0.105, min_edge=0.015, reduce_size=1000)
+check("FL + R5b: ref_only, short 1,000 -> the bid unloads at the normal ref_only edge and full reduce size",
+      q1 == plain(0.10, inv=-1000, bb=0.095, ba=0.105, min_edge=0.015, reduce_size=1000), q1)
+# Hysteresis: a market sitting at 20c doesn't flip every cycle.
+prev, sides = None, []
+for f in (0.195, 0.203, 0.198, 0.209, 0.211, 0.205, 0.199):
+    prev = fl_side(f, prev, FL)[0]
+    sides.append(prev)
+check("FL: hysteresis at 20c: on below 0.20, stays on below 0.21, off from 0.21, back on only below 0.20",
+      sides == ["bid", "bid", "bid", "bid", None, None, "bid"], sides)
+prev, sides = None, []
+for f in (0.805, 0.795, 0.79, 0.80, 0.801):
+    prev = fl_side(f, prev, FL)[0]
+    sides.append(prev)
+check("FL: hysteresis at 80c: stays on above 0.79", sides == ["ask", "ask", None, None, "ask"], sides)
+mid = Config(fl_mid_bid_extra_edge=0.005)
+qm = flq(0.5, cfg=mid, bb=0.495, ba=0.505)
+check("FL: optional mid-band bid extra edge -> mid-band bid 0.5c wider at full size, ask unchanged",
+      fl_side(0.5, None, mid)[0] == "mid" and (qm.bid, qm.bid_size, qm.ask) == (0.485, 200, 0.51), qm)
+check("FL: settings are live-overridable", all(k in M.OVERRIDABLE for k in (
+      "fl_bias_enabled", "fl_low", "fl_high", "fl_hysteresis", "fl_bad_side_extra_edge", "fl_bad_side_size_factor",
+      "fl_mid_bid_extra_edge")))
+
+
+# Through the bot: Rep Ohio at 14c (bid is the bad side), Dem Ohio at 86c (ask), the Utah markets mid band.
+def yes_orders(on):
+    a, b = make_bot()
+    b.cfg.fl_bias_enabled = on
+    b.cycle()
+    return {(o["exchangeId"], yes_side(o)): (o["priceLimit"] if o["side"] == "yes" else round(1 - o["priceLimit"], 3),
+                                             o["quantity"]) for o in a.orders.values()}, b
+
+
+off_o, _ = yes_orders(False)
+on_o, b = yes_orders(True)
+check("FL in the bot: Rep Ohio (14c) bid and Dem Ohio (86c) ask at half size (50); the 8c-wide house leaves the "
+      "pennied prices (0.105 / 0.895) already more than 2c from fair, so they stay",
+      on_o[("11", "buy")] == (0.105, 50) and on_o[("12", "sell")] == (0.895, 50)
+      and off_o[("11", "buy")] == (0.105, 100) and off_o[("12", "sell")] == (0.895, 100), (off_o, on_o))
+check("FL in the bot: good sides and the mid-band Utah markets unchanged",
+      all(on_o[k] == off_o[k] for k in (("11", "sell"), ("12", "buy"), ("21", "buy"), ("21", "sell"), ("22", "buy"),
+                                        ("22", "sell"))), (off_o, on_o))
+check("FL in the bot: tag for the quote log line, counts in status.json",
+      b.ex["11"].fl_tag == " fl:bid+1c" and b.ex["12"].fl_tag == " fl:ask+1c" and b.ex["21"].fl_tag == ""
+      and b.health.get("fl_bias_markets") == {"bid": 1, "ask": 1}, (b.ex["11"].fl_tag, b.health.get("fl_bias_markets")))
+a, b = make_bot()
+b.cfg.fl_bias_enabled = True
+b.cycle()
+now_m = time.monotonic()
+b.write_log.extend([(now_m, 18.0, True), (now_m, 16.0, True)])
+b.cfg.burst_markets, b.size_plan = 2, {"11": 300, "12": 300, "21": 100, "22": 100}
+b.update_burst(now_m)
+for e in a.books:                                          # every book moves 1.5c: all quotes want repricing
+    a.books[e] = {"bids": [lvl(round(l["price"] + 0.015, 3), 1000) for l in a.books[e]["bids"]],
+                  "asks": [lvl(round(l["price"] + 0.015, 3), 1000) for l in a.books[e]["asks"]]}
+b.feed = FakeFeed(); b.feed.push(dirty=set(a.books)); b.last_cycle_seconds = 0
+b.update_burst = lambda now_m: None                       # hold burst mode on for this cycle
+b.cycle()
+sz = {(o["exchangeId"], yes_side(o)): o["quantity"] for o in a.orders.values() if o["exchangeId"] == "11"}
+check("FL + burst: size factors multiply (Rep Ohio bid 100 x 0.5 x 0.5 = 25, ask 100 x 0.5 = 50)",
+      b.burst and sz == {("11", "buy"): 25, ("11", "sell"): 50}, sz)
 
 # =============================================================================================
 # R7 CORRELATED SETTLEMENT RISK
