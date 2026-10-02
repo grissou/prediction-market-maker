@@ -1,9 +1,38 @@
 # START HERE (Team run, branch `claude/run-c-tournament-improvements-pycdet`)
 
-Status: **in progress** (started 2026-10-02 08:50 UTC). **Package 1 READY at 10:10 UTC, Package 2 READY at 11:05 UTC, hot-fix Package 2.1 READY at 12:05 UTC, hot-fix Package 2.2 READY at 12:40 UTC, Package 2.3 READY at 13:10 UTC (deploy this one)** (deploy-ready, cumulative). Package 2 is LIVE since 11:21:57. Base: `claude/live-2026-10-02b` (5c0463a), the code live since 08:34.
+Status: **wrapping up** (started 2026-10-02 08:50 UTC; credits nearly spent at 14:35 UTC). **Package 1 READY at 10:10 UTC, Package 2 READY at 11:05 UTC, hot-fix Package 2.1 READY at 12:05 UTC, hot-fix Package 2.2 READY at 12:40 UTC, Package 2.3 READY at 13:10 UTC (deploy this one)** (deploy-ready, cumulative). Package 2 is LIVE since 11:21:57. Base: `claude/live-2026-10-02b` (5c0463a), the code live since 08:34.
 The Builder's previous START_HERE is kept as `START_HERE_BUILDER.md`; Run A's notes are `ENGINEERING_NOTES.md`.
 Plan: `PLAN.md`. Packages appear below as they become READY (commit messages start "READY: Package N").
 Deploy only commits whose message starts "READY"; the branch is cumulative.
+
+## HANDOFF (read this if you are picking the work up)
+**State at 14:35 UTC, 2 Oct.** Live: Package 2 (83f6d45) since 11:21:57 with settings_override `{"arb_two_sided": false, "worst_case_backstop_frac": 0.8}`
+plus the stop-gap keys below. Deploy candidate: **Package 2.3 (c8e881f)**; Package 3 follows at HEAD once marked READY (same code plus the defaults
+below and the Package 3 features, most OFF).
+**Where everything is** (all on this branch, PR #5): `START_HERE.md` (this file: packages, parameter table, owner flags), `PLAN.md`, `deploy/RUNBOOK.md`
+(parameter-only, handover code deploy, rollback, emergency), `DATA_REPORT_2.md` + `analysis/*.py` (day-two analysis, valuation rule, outsider races,
+rival floors, turnover, mark fragility, mark rule, follow-ups), `ideas/IDEAS_ROUND1..3.md` + `analysis/explorer_r2/` (idea rounds with the data facts
+behind them), `SIM_NOTES.md` (simulator calibration and every sweep), `tests/strategy_sim.py` (crowded-book simulator), `tests/live_sim.py` +
+`tests/live_start.json` (simulator from the real book), `tests/scenario.py` (`ceiling` reproduces the 2-5 min cycle incident), the Builder's
+`START_HERE_BUILDER.md` and Run A's `ENGINEERING_NOTES.md`.
+**Stop-gap overrides to lift once 2.3 is live**: `never_defer_unsafe` true and `burst_protection` true are safe again; keep `writes_per_minute` 28-30 and
+`writes_per_minute_max` 30 unless `rate_limited_total` stays 0 for an hour (the exchange's write limit looks like ~30/min for the whole bot).
+**Owner decisions still open** (with the team's recommendation): (1) `worst_case_backstop_frac` 0.8 vs 0.69: keep 0.8 until the sum of maxima is below
+60k; (2) `arb_two_sided`: switch on after 2.3 (guard: liquid Polymarket on every leg, raw sum >= 0.99; expect 0 fills in outsider races); (3) election
+day (Run B W1): markets close 4 Nov 00:00 UTC, one hour after the first polls close and before returns, so there is no "take stale quotes on returns"
+window inside trading; the team recommends flattening from 24 h before, exempting complete sets only if SIG confirms settlement at the outcome, and no
+directional taking; (4) ask SIG: the write limit (30/min per account? a batch = 1?), Smart Score definition, end valuation of unresolved positions, whether a
+429 pauses reads; (5) Gamma rate limit before a Polymarket refresh below 5 s (not needed on the data: only 83 moves >= 1c in 16 h and adverse selection ~0,
+so the WebSocket idea is parked).
+**What is left (in value order, from ideas/IDEAS_ROUND3.md and the Strategist)**: no 0.5c chase when fair value and inventory are unchanged (24% of
+all quote changes were pure rival chases; fresh quotes earn less than resting ones); a quiet-tier cancel-less regime (wide, long-lived quotes: 68% of
+decisions for ~650 of edge); TTL refresh is a ~20% write tax (order_ttl 1800 / refresh 180; tiered TTL and expiry-as-cancel); headline re-quote only on a
+fair-value move or fill; a Gamma-outage guard for quoting; a daily scorecard from the recorder (positions' currentPrice, account marks: `analysis/mark_rule.py`
+pins the valuation rule once a day of data exists); run `analysis/rival_floor.py --mode sweep_only` on the server's market_data.sqlite to produce
+market_edge.json (the loader is ON and inert without the file); the ladder only after its write-churn fixes and a dry-run write count.
+**How the suites run**: `for t in test_mm_bot test_ref_prices test_strategy test_recorder_refill test_fast_unload test_turnover test_mark_frag
+test_behind_best test_stress; do python tests/$t.py | tail -1; done` (also `STRESS_LADDER=1 python tests/test_stress.py`); Python 3.10 is required on
+the server, everything here was run on 3.11 and a 3.10 venv.
 
 ## Carried over from the Builder and Run A (open items)
 - Owner decisions still open: R7 loosened reduce-only (live with the 69% backstop); rule questions for SIG (end valuation of
