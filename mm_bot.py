@@ -552,6 +552,18 @@ class Config:
                                           #   ref_only edge, not pennying), never through fair; 0 = fv rounded away
     fast_unload_size_mult: float = 1.0    # reducing size = shares still to unload x this, capped by the position
 
+    # --- REDUCING SIDE JOINS THE BEST -----------------------------------------------------------
+    # Data (Explorer): P(fill in 10 min) 33-34% AT the best, 6-8% one tick behind; our reducing side was at the
+    # best only 24% of the time; 11 of 12 positions >= 1,000 sh had no reducing fill in 6 h; round trips made all
+    # the realised profit (+1,824 on 254k shares). So the side that shrinks |race-netted position| joins the best.
+    reduce_join_best: bool = True         # that side quotes AT the best other price on its side (joins the queue,
+                                          #   no pennying), or at fair +- reduce_join_min_edge rounded away if the
+                                          #   best is closer than that; never crossing. The inventory / age skews
+                                          #   then only move the ADDING side (and the sizes); a fast unload window
+                                          #   still wins when closer to fair. Off in reduce-only (stricter anyway)
+    reduce_join_min_edge: float = 0.0     # closest the joining side may sit to fair value (0 = fv rounded away)
+    reduce_join_min_shares: int = 100     # only while |race-netted position| is at least this
+
     # --- CONNECTION / ALERTS (from the environment: see top of file) ------------------------
     summary_every_hours: int = 2          # phone summary every N hours, on the hour UTC (2 = 00:00, 02:00, 04:00...),
                                           #   covering what happened since the previous one. 0 = off. Live only
@@ -642,6 +654,9 @@ OVERRIDABLE = {
     "fast_unload_seconds": (0.0, 3600.0),
     "fast_unload_edge": (0.0, 0.05),
     "fast_unload_size_mult": (0.0, 10.0),
+    "reduce_join_best": (False, True),
+    "reduce_join_min_edge": (0.0, 0.05),
+    "reduce_join_min_shares": (0, 100000),
 }
 
 
@@ -1687,6 +1702,20 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
     if best_bid is not None:
         ask = max(ask, ceil_tick(best_bid + TICK))
 
+    # 4a. Reducing side joins the best other price on its side (reduce_join_best): never through fair, never crossing.
+    if cfg.reduce_join_best and not reduce_only and abs(eff_inv) >= max(1, cfg.reduce_join_min_shares):
+        if eff_inv > 0 and best_ask is not None:
+            ask = max(ceil_tick(best_ask), ceil_tick(fv + cfg.reduce_join_min_edge))
+            if best_bid is not None:
+                ask = max(ask, ceil_tick(best_bid + TICK))
+            ask_lo = min(ask_lo, ask)
+            bid = min(bid, floor_tick(ask - TICK))
+        elif eff_inv < 0 and best_bid is not None:
+            bid = min(floor_tick(best_bid), floor_tick(fv - cfg.reduce_join_min_edge))
+            if best_ask is not None:
+                bid = min(bid, floor_tick(best_ask - TICK))
+            bid_hi = max(bid_hi, bid)
+            ask = max(ask, ceil_tick(bid + TICK))
     # 4b. Fast unload window: the reducing side quotes near fair value (no pennying, never through fair).
     unload_bid = unload_side == "bid" and inv <= -1 and not reduce_only
     unload_ask = unload_side == "ask" and inv >= 1 and not reduce_only

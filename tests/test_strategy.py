@@ -43,7 +43,8 @@ check("R1: account value = the API's number, locked cash not added on top",
 # R2 SKEW SCALED TO THE QUOTE SIZE, NEVER THROUGH FAIR VALUE
 
 c = Config()
-q_old = compute_quote(0.50, 8000, 8000, 0.40, 0.60, Config(skew_mode="share", skew_max=1.0, max_skew_through=1.0),
+q_old = compute_quote(0.50, 8000, 8000, 0.40, 0.60, Config(skew_mode="share", skew_max=1.0, max_skew_through=1.0,
+                                                         reduce_join_best=False),
                       order_size=10000, position_limit=10000)
 q_new = compute_quote(0.50, 8000, 8000, 0.40, 0.60, c, order_size=10000, position_limit=10000)
 check("R2: old rule, 8,000-share headline long -> ask 4c THROUGH fair value", q_old.ask is not None and q_old.ask <= 0.465, q_old)
@@ -97,7 +98,7 @@ b.refs = FakeRefs({"Ohio Senate|Republican": 0.30, "Ohio Senate|Democratic": 0.7
 b.cycle()
 check("R5: switched off -> old behaviour (thin book unpriced)", not any(o["exchangeId"] == "11" for o in a.orders.values()))
 
-q = compute_quote(0.30, 2000, 2000, 0.25, 0.35, Config(), order_size=100, reduce_size=1500)
+q = compute_quote(0.30, 2000, 2000, 0.25, 0.35, Config(reduce_join_best=False), order_size=100, reduce_size=1500)
 check("R5b: reduce_size: long 2,000 -> sell side 1,470 (1,500 within the 1,000 cash cap), buy side stays 100",
       q.ask_size == 1470 and q.bid_size <= 100, q)
 q = compute_quote(0.30, -300, -300, 0.25, 0.35, Config(), order_size=100, reduce_size=1500)

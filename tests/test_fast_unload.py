@@ -40,8 +40,8 @@ cfg.skew_age_enabled = False
 kw = dict(bankroll=100000, order_size=100)
 base = M.compute_quote(0.50, 1000, 1000, 0.45, 0.55, cfg, **kw)
 q = M.compute_quote(0.50, 1000, 1000, 0.45, 0.55, cfg, unload_side="ask", unload_edge=0.005, unload_size=1000, **kw)
-check("long 1,000: ask at fv + 0.5c for 1,000 shares (normal: 0.54 at 100)",
-      (q.ask, q.ask_size) == (0.505, 1000) and (base.ask, base.ask_size) == (0.54, 100), (q, base))
+check("long 1,000: ask at fv + 0.5c for 1,000 shares (normal: joins the best ask 0.55 at 100)",
+      (q.ask, q.ask_size) == (0.505, 1000) and (base.ask, base.ask_size) == (0.55, 100), (q, base))
 check("...the adding side (bid) unchanged", (q.bid, q.bid_size) == (base.bid, base.bid_size), (q, base))
 check("...the keep limit follows the unload price (a resting unload order is safe)", q.ask_limit <= 0.505, q)
 q = M.compute_quote(0.50, 300, 300, 0.45, 0.55, cfg, unload_side="ask", unload_edge=0.005, unload_size=1000, **kw)
@@ -220,6 +220,41 @@ check("...closed once the position is gone", b.unload_side(ex, 300.0) is None an
 M.log.removeHandler(g)
 M.log.setLevel(old_level)
 M.log.propagate = True
+
+print("--- reduce_join_best: the reducing side joins the best")
+c = M.Config()
+check("defaults: on, 0c from fair, from 100 shares",
+      (c.reduce_join_best, c.reduce_join_min_edge, c.reduce_join_min_shares) == (True, 0.0, 100))
+good, bad = M.validate_overrides({"reduce_join_best": False, "reduce_join_min_edge": 0.005,
+                                  "reduce_join_min_shares": 500}, c)
+check("join settings are live-overridable", len(good) == 3 and not bad, bad)
+off = M.Config(reduce_join_best=False)
+kw = dict(bankroll=100000, order_size=100)
+
+
+def jq(inv, bb, ba, cfg=c, eff=None, **k):
+    return M.compute_quote(0.50, inv, inv if eff is None else eff, bb, ba, cfg, **kw, **k)
+
+
+q, q0 = jq(1000, 0.45, 0.505), jq(1000, 0.45, 0.505, off)
+check("long 1,000, best ask 0.505: our ask 0.505 at the normal reducing size", (q.ask, q.ask_size) == (0.505, q0.ask_size)
+      and q.ask_size > 0, (q, q0))
+q, q0 = jq(1000, 0.45, 0.52), jq(1000, 0.45, 0.52, off)
+check("best ask 0.52: join at 0.52 (today: pennies to 0.515)", q.ask == 0.52 and q0.ask == 0.515, (q, q0))
+check("...the adding side (bid) unchanged", (q.bid, q.bid_size) == (q0.bid, q0.bid_size), (q, q0))
+check("best ask 0.495 (through fair): ours at fair rounded away, 0.50", jq(1000, 0.45, 0.495).ask == 0.50)
+check("best bid 0.50, best ask 0.505: never crosses, ask 0.505", jq(1000, 0.50, 0.505).ask == 0.505)
+check("best bid 0.50, best ask 0.49 (crossed): still not a take, ask 0.505", jq(1000, 0.50, 0.49).ask == 0.505)
+check("reduce_join_min_edge 0.01, best ask 0.505: at fv + 1c",
+      jq(1000, 0.45, 0.505, M.Config(reduce_join_min_edge=0.01)).ask == 0.51)
+check("short 1,000, best bid 0.48: bid joins at 0.48", jq(-1000, 0.48, 0.55).bid == 0.48)
+check("race-netted: flat here, long 1,000 in the race -> the ask joins", jq(0, 0.45, 0.52, eff=1000).ask == 0.52)
+check("below min shares (50): today's quote", jq(50, 0.45, 0.52) == jq(50, 0.45, 0.52, off))
+check("reduce-only: unchanged (stricter anyway)",
+      jq(1000, 0.45, 0.52, reduce_only=True) == jq(1000, 0.45, 0.52, off, reduce_only=True))
+check("a fast unload window wins when closer to fair (0.505 < 0.52)",
+      jq(1000, 0.45, 0.52, unload_side="ask", unload_edge=0.005, unload_size=1000).ask == 0.505)
+check("the keep limit allows the joined price", q.ask_limit <= q.ask, q)
 
 print(f"\n{sum(RESULTS)}/{len(RESULTS)} passed")
 sys.exit(0 if all(RESULTS) else 1)
