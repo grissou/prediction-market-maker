@@ -599,7 +599,7 @@ class Config:
     # of turnover_dead_max_position_frac of the normal one. The reducing side and flat markets are unchanged. Until
     # ~turnover_window_hours of flow has been observed (this run plus what fills.csv / the recorder's trades table
     # cover), every market counts as alive.
-    turnover_control_enabled: bool = True
+    turnover_control_enabled: bool = False
     turnover_window_hours: float = 6.0
     turnover_min_shares_per_hour: float = 50.0
     turnover_dead_adding_factor: float = 0.25    # 0 = adding side withdrawn in dead markets

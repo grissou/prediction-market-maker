@@ -36,18 +36,16 @@ def iso_at(t):
 
 print("--- settings")
 c = M.Config()
-check("defaults: on, 6 h window, 50 sh/h, adding x0.25, limit x0.5, tape on",
+check("defaults: OFF until reviewed (Package 3), 6 h window, 50 sh/h, adding x0.25, limit x0.5, tape on",
       (c.turnover_control_enabled, c.turnover_window_hours, c.turnover_min_shares_per_hour,
        c.turnover_dead_adding_factor, c.turnover_dead_max_position_frac, c.turnover_use_tape)
-      == (True, 6.0, 50.0, 0.25, 0.5, True))
+      == (False, 6.0, 50.0, 0.25, 0.5, True))
 good, bad = M.validate_overrides({"turnover_control_enabled": False, "turnover_window_hours": 3.0,
                                   "turnover_min_shares_per_hour": 20.0, "turnover_dead_adding_factor": 0.0,
                                   "turnover_dead_max_position_frac": 0.3, "turnover_use_tape": False}, c)
 check("all six settings are live-overridable", len(good) == 6 and not bad, bad)
 keys = list(M.OVERRIDABLE)
-check("...added at the end of OVERRIDABLE", keys[-6:] == ["turnover_control_enabled", "turnover_window_hours",
-                                                          "turnover_min_shares_per_hour", "turnover_dead_adding_factor",
-                                                          "turnover_dead_max_position_frac", "turnover_use_tape"])
+check("...all six turnover settings are in OVERRIDABLE", all(k in M.OVERRIDABLE for k in ("turnover_control_enabled", "turnover_window_hours", "turnover_min_shares_per_hour", "turnover_dead_adding_factor", "turnover_dead_max_position_frac", "turnover_use_tape")))
 
 print("--- TurnoverTracker: deques and the window")
 now = 1_800_000_000.0
@@ -162,7 +160,7 @@ FV = 0.52                                                # market 21 (Rep Utah):
 
 
 def bot(**kw):
-    a, b = make_bot()
+    a, b = make_bot(); b.cfg.turnover_control_enabled = True   # OFF by default until reviewed; tested on
     for k, v in kw.items():
         setattr(b.cfg, k, v)
     b.cycle()
@@ -299,7 +297,7 @@ check("RealtimeFeed keeps a tape copy for turnover (other tournaments ignored)",
 check("...take_flow drains it, the recorder's trade_log is untouched", feed.take_flow() == [] and len(feed.trade_log) == 1)
 
 print("--- a restart seeds from fills.csv")
-a, b = make_bot()
+a, b = make_bot(); b.cfg.turnover_control_enabled = True   # OFF by default until reviewed; tested on
 with open(b.cfg.fills_csv, "w", newline="") as f:
     w = csv.writer(f)
     w.writerow(M.FillLogger.COLUMNS)
