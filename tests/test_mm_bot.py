@@ -1411,6 +1411,37 @@ check("4 reprices in a minute on one side: it stops chasing (keeps its safe orde
 a.books["11"]["bids"] = [lvl(0.08, 1000)]; a.books["11"]["asks"] = [lvl(0.09, 1000)]   # fair value drops below our bid
 b.feed.push(dirty={"11"}); b.cycle()
 check("...but an order that's no longer safe always moves", ("bid", 0.115, 100) not in a.ours("11"), a.ours("11"))
+# F10: a reprice counts toward churn_max_reprices only when its cancel is sent, not when the budget defers it.
+for count_sent in (True, False):
+    a, b = make_bot(); b.cfg.churn_control, b.cfg.churn_count_sent = True, count_sent; b.cycle()
+    for o in list(b.recent_orders):
+        b.recent_orders[o] = (b.recent_orders[o][0], b.recent_orders[o][1] - 10)
+    start = a.ours("11")
+    a.books["11"]["bids"] = [lvl(0.11, 1000)]            # target moves to 0.115: a reprice
+    a.writes_left = lambda: 0                             # ...but no write budget left this cycle
+    b.feed = FakeFeed(); b.feed.push(dirty={"11"})
+    logging.disable(logging.CRITICAL); b.cycle(); logging.disable(logging.NOTSET)
+    deferred = len(b.ex["11"].reprices.get("bid") or ())
+    if count_sent:
+        check("F10: a reprice deferred by the write budget is not counted (and nothing was sent)",
+              deferred == 0 and a.ours("11") == start, (deferred, a.ours("11")))
+        del a.writes_left
+        b.feed.push(dirty={"11"}); b.cycle()
+        check("F10: ...once it is actually sent, it counts once",
+              len(b.ex["11"].reprices.get("bid") or ()) == 1 and ("bid", 0.115, 100) in a.ours("11"),
+              (b.ex["11"].reprices, a.ours("11")))
+    else:
+        check("F10: churn_count_sent=False keeps the old count-when-planned behaviour", deferred == 1, deferred)
+a, b = make_bot(); b.cfg.churn_control = True; b.cycle()
+b.burst, b.burst_set, b.burst_cfg = True, set(), b.cfg
+b.update_burst = lambda now_m: None
+for o in list(b.recent_orders):
+    b.recent_orders[o] = (b.recent_orders[o][0], b.recent_orders[o][1] - 10)
+a.books["11"]["bids"] = [lvl(0.11, 1000)]                # off target but still safe: burst mode keeps it
+b.feed = FakeFeed(); b.feed.push(dirty={"11"}); b.cycle()
+check("F10: a reprice that burst mode drops (keeps the safe order) is not counted",
+      not b.ex["11"].reprices.get("bid"), b.ex["11"].reprices)
+
 a, b = make_bot(); b.cfg.churn_control = True; b.cycle()
 b.refs = FakeRefs({"Ohio Senate|Republican": 0.14})
 b.refs.last_moves, b.refs.version = {"Ohio Senate|Republican": 0.01}, 2

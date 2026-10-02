@@ -299,6 +299,10 @@ class Config:
                                           #   our limit price); unsafe ones, pulls and expiries always go
     churn_max_reprices: int = 4           # a side repriced this many times within churn_window_seconds stops
     churn_window_seconds: float = 60.0    #   chasing: its order stays while safe (no ping-pong with another bot)
+    churn_count_sent: bool = True         # count a reprice toward churn_max_reprices only when its cancel is actually
+                                          #   sent (False = when planned, as before: a change deferred by the request
+                                          #   budget or dropped by burst mode still counted, so a side could be held
+                                          #   off target for up to churn_window_seconds without ever repricing)
     urgent_ref_move: float = 0.005        # Polymarket moved this much since the last reading: that market's changes
                                           #   are sent first (stale quotes get picked off by the fastest bot)
 
@@ -434,6 +438,7 @@ OVERRIDABLE = {
     "burst_timeouts": (1, 100), "burst_calm_seconds": (0.0, 3600.0), "burst_markets": (1, 300),
     "burst_size_factor": (0.05, 1.0), "burst_extra_edge": (0.0, 0.05),
     "slow_cycle_alert_seconds": (10.0, 3600.0), "summary_every_hours": (0, 24),
+    "churn_count_sent": (False, True),
 }
 
 
@@ -1734,10 +1739,17 @@ def busy(ex, now_m):
 class Change:
     """What one exchange needs this cycle: orders to cancel first (all of them with whole=True), then new ones.
     key orders the work: pulls first, then party-control markets, then the biggest quotes."""
-    __slots__ = ("ex", "doomed", "whole", "new", "key")
+    __slots__ = ("ex", "doomed", "whole", "new", "key", "count")
 
-    def __init__(self, ex, doomed, whole, new, key):
+    def __init__(self, ex, doomed, whole, new, key, count=True):
         self.ex, self.doomed, self.whole, self.new, self.key = ex, doomed, whole, new, key
+        self.count = count            # its cancels count as reprices (churn control) once sent
+
+    def reprice_sides(self):
+        """The sides this change cancels resting orders on (what churn control counts as a reprice)."""
+        if not self.count:
+            return []
+        return [side for side, is_bid in (("bid", True), ("ask", False)) if any(o.is_bid == is_bid for o in self.doomed)]
 
 
 class Write:
@@ -2609,7 +2621,7 @@ class Bot:
         pulling orders is always allowed, unless a cancel is already on its way."""
         if busy(ex, now_m):
             if q.bid is None and q.ask is None and resting and not ex.cancelling:
-                return Change(ex, resting, True, [], self.change_key(ex, pull=True, reprice=True))
+                return Change(ex, resting, True, [], self.change_key(ex, pull=True, reprice=True), count=False)
             return None
 
         bids = [o for o in resting if o.is_bid]
@@ -2626,9 +2638,10 @@ class Bot:
                 fix_ask = False
         if not (fix_bid or fix_ask):
             return None                   # book already matches: keep our queue position
-        for side, fix, rest in (("bid", fix_bid, bids), ("ask", fix_ask, asks)):
-            if fix and rest:
-                ex.reprices.setdefault(side, deque()).append(now_m)
+        if not self.cfg.churn_count_sent:            # old behaviour: counted when planned (see count_reprices)
+            for side, fix, rest in (("bid", fix_bid, bids), ("ask", fix_ask, asks)):
+                if fix and rest:
+                    ex.reprices.setdefault(side, deque()).append(now_m)
 
         if self.burst and ex.eid not in self.burst_set and not critical:
             # Burst mode, not a top market: no reprices. Keep what rests while it's still safe (price inside the
@@ -2685,6 +2698,12 @@ class Bot:
             hist.popleft()
         return young or len(hist) >= cfg.churn_max_reprices
 
+    def count_reprices(self, ch, now_m):
+        """Churn control: this change's cancels are being sent now - count them as reprices of their sides."""
+        if self.cfg.churn_count_sent and ch is not None:
+            for side in ch.reprice_sides():
+                ch.ex.reprices.setdefault(side, deque()).append(now_m)
+
     def change_key(self, ex, pull, reprice=False):
         """Sending order: pulls first, then the party-control markets, then quotes for empty sides (cheap: a
         share of one batch), then reprices (a cancel each), biggest quotes first within each."""
@@ -2698,6 +2717,7 @@ class Bot:
         ch = self.plan_change(ex, q, resting, fv, now, now_m)
         if ch is None:
             return []
+        self.count_reprices(ch, now_m)
         if ch.doomed and not self.cancel(ex.eid, ch.doomed, whole_exchange=ch.whole):
             log.warning("%s: could not confirm cancels - retrying next cycle", ex.label)
             return []                     # never stack new quotes on top of old ones
@@ -2764,6 +2784,9 @@ class Bot:
             log.info("request budget: %d of %d order changes deferred to the next cycle",
                      len(changes) - len(kept), len(changes))
         changes = kept
+        now_m = time.monotonic()
+        for ch in changes:
+            self.count_reprices(ch, now_m)        # only what is sent counts (not what the budget deferred)
         waiting = set()
         for ch in changes:
             if ch.doomed:
