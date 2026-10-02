@@ -380,6 +380,11 @@ class Config:
     kill_file: str = "kill_switch.tripped"      # the kill switch creates it; delete it to allow trading again
     record_file: str = "market_data.sqlite"     # snapshots for tuning later ("" = off)
     record_seconds: float = 60.0          # one snapshot of every market this often (~15 MB a day)
+    record_books: bool = True             # also record OTHER traders' top book levels (with sizes) whenever a downloaded
+                                          #   book's top changed, and every tournament trade the feed reports: the data
+                                          #   to measure rival bots (repricing speed, floors, sizes, hours). No extra
+                                          #   requests; roughly 10-15 MB a day
+    record_book_levels: int = 3           # levels per side kept in those rows
 
     # --- CONNECTION / ALERTS (from the environment: see top of file) ------------------------
     summary_every_hours: int = 2          # phone summary every N hours, on the hour UTC (2 = 00:00, 02:00, 04:00...),
@@ -795,6 +800,7 @@ class RealtimeFeed:
         self.last_revision = {}           # topic -> last revision number accepted
         self.events = 0                   # messages received (shown in status.json)
         self.trade_counts = defaultdict(int)   # exchange -> tournament trades seen (all traders)
+        self.trade_log = deque(maxlen=20000)   # (unix time, trade item) for the recorder (see take_trades)
         self.socket_error = False         # the library logged that the socket closed (see _SocketErrorWatch)
         self.thread = threading.Thread(target=lambda: asyncio.run(self._run()), name="realtime", daemon=True)
 
@@ -809,6 +815,13 @@ class RealtimeFeed:
     def healthy(self):
         """Connected and joined to both channels, so pushed updates can be trusted to arrive."""
         return self.connected and len(self.topics_joined) >= 2
+
+    def take_trades(self):
+        """Tournament trades reported since the last call: [(unix time received, trade item)]."""
+        with self.lock:
+            out = list(self.trade_log)
+            self.trade_log.clear()
+        return out
 
     def take(self):
         """Everything reported since the last call: (dirty exchange ids, account changed?, resync?, settled?)."""
@@ -850,6 +863,7 @@ class RealtimeFeed:
             for item in data.get("trades") or []:              # how busy each market is (sizes quotes by it)
                 if item.get("exchangeId") is not None and item.get("tournamentId") in (None, self.tid):
                     self.trade_counts[str(item["exchangeId"])] += 1
+                    self.trade_log.append((time.time(), item))
             if data.get("marketSettled"):
                 self.settled = True
         self.wake.set()
@@ -1014,6 +1028,14 @@ def reserved_cash(raw_orders):
         if parse_order(o) and str(o.get("action")).lower() == "buy":
             total += float(o["quantity"]) * float(o["priceLimit"])
     return total
+
+
+def _num(x):
+    """float(x), or None if it isn't a number."""
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return None
 
 
 def strip_own(book, mine):
@@ -1629,6 +1651,7 @@ class Bot:
         self.take_version_seen = 0        # last Polymarket reading the take logic has counted
         self.db = self.open_recorder()
         self.last_record = -1e9
+        self.book_tops, self.book_rows = {}, []    # recorder: last top levels logged per eid, rows not yet written
         self.last_summary_slot = None     # (date, hour) of the last phone summary
         self.value_at_last_summary = None
         self.counts_at_last_summary = {"arbs": 0, "takes": 0, "errors": 0, "rate_limits": 0}
@@ -2110,6 +2133,19 @@ class Bot:
                 self.ex[eid].book = strip_own(book, mine_real.get(eid, []))
                 self.ex[eid].book_time = self.ex[eid].verified = time.monotonic()
                 self.pending_dirty.discard(eid)
+                self.note_book(eid, self.ex[eid].book)
+
+    def note_book(self, eid, book):
+        """Recorder: queue a row of other traders' top levels if they changed since the last row for eid."""
+        if not self.db or not self.cfg.record_books:
+            return
+        n = self.cfg.record_book_levels
+        top = tuple(tuple((rnd(l["price"]), round(float(l["quantity"]), 2)) for l in (book.get(k) or [])[:n])
+                    for k in ("bids", "asks"))
+        if self.book_tops.get(eid) == top:
+            return
+        self.book_tops[eid] = top
+        self.book_rows.append((round(time.time(), 3), eid, json.dumps(top[0]), json.dumps(top[1])))
 
     # ------------------------------------------------------------------------------ risk
     def account_value(self, pos, f_pnl):
@@ -3168,6 +3204,11 @@ class Bot:
                           ts TEXT, mode TEXT, account_value REAL, locked_in_orders REAL,
                           worst_case_loss REAL, party_delta REAL, orders_resting INTEGER)""")
         db.execute("CREATE INDEX IF NOT EXISTS snapshots_eid_ts ON snapshots (eid, ts)")
+        # Other traders' book tops (our own orders removed), one row per change: bids/asks = JSON [[price, size]...]
+        db.execute("CREATE TABLE IF NOT EXISTS books (ts REAL, eid TEXT, bids TEXT, asks TEXT)")
+        # Tournament trades from the realtime feed (all traders): price/quantity when the item carries them
+        db.execute("CREATE TABLE IF NOT EXISTS trades (ts REAL, eid TEXT, price REAL, quantity REAL, item TEXT)")
+        db.execute("CREATE INDEX IF NOT EXISTS books_eid_ts ON books (eid, ts)")
         db.commit()
         return db
 
@@ -3179,7 +3220,15 @@ class Bot:
         ts, mode, h = iso(utcnow()), "live" if self.api.live else "dry", self.health
         rows = [(ts, mode, eid, ex.label, *self.last_tops.get(eid, (None, None)), fvs.get(eid), ex.ref,
                  ex.quote.bid, ex.quote.ask, ex.inv) for eid, ex in self.ex.items()]
+        trades = []
+        if self.cfg.record_books and self.feed and hasattr(self.feed, "take_trades"):
+            for t, item in self.feed.take_trades():
+                trades.append((round(t, 3), str(item.get("exchangeId")), _num(item.get("price")),
+                               _num(item.get("quantity")), json.dumps(item, default=str)[:1000]))
+        book_rows, self.book_rows = self.book_rows, []
         try:
+            self.db.executemany("INSERT INTO books VALUES (?,?,?,?)", book_rows)
+            self.db.executemany("INSERT INTO trades VALUES (?,?,?,?,?)", trades)
             self.db.executemany("INSERT INTO snapshots VALUES (?,?,?,?,?,?,?,?,?,?,?)", rows)
             self.db.execute("INSERT INTO account VALUES (?,?,?,?,?,?,?)",
                             (ts, mode, h.get("account_value"), h.get("locked_in_orders"), h.get("worst_case_loss"),

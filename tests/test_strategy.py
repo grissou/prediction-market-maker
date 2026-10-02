@@ -4,8 +4,11 @@ Bot wiring, and a short run of the strategy simulator (tests/strategy_sim.py).
 
 Run:  python tests/test_strategy.py      (exit code 0 = all passed)
 """
+import json
 import logging
 import math
+import threading
+from collections import deque
 import os
 import sys
 
@@ -144,6 +147,40 @@ check("R7: switched off (sum_max) -> same book is reduce-only", b.health["reduce
 b.cfg.risk_model = "correlated"; b.cfg.worst_case_backstop_frac = 0.30; b.cycle()
 check("R7: sum-of-maxima backstop still forces reduce-only", b.health["reduce_only"])
 check("R7: risk never above the sum of maxima", b.health["settlement_risk"] <= b.health["worst_case_loss"] + 1e-6)
+
+# =============================================================================================
+# BOOK + TRADE RECORDER (data to measure the rival bots)
+
+import sqlite3, tempfile
+a, b = make_bot()
+b.cfg.record_file = os.path.join(tempfile.mkdtemp(), "md.sqlite")
+b.db = b.open_recorder()
+class TradeFeed(FakeFeed):
+    def __init__(self): super().__init__(); self.trades = []
+    def take_trades(self): out, self.trades = self.trades, []; return out
+b.feed = TradeFeed()
+b.feed.trades = [(1.0, {"exchangeId": "11", "price": 0.15, "quantity": 300, "tournamentId": "T"})]
+b.last_full_check = -1e9; b.cycle(); b.last_record = -1e9; b.record({}, 1e9)
+rows = b.db.execute("select eid, bids, asks from books order by eid").fetchall()
+check("recorder: one book row per market downloaded, other traders only (our orders stripped)",
+      len(rows) == 4 and json.loads(rows[0][1]) == [[0.10, 1000.0]] and json.loads(rows[0][2]) == [[0.18, 1000.0]], rows[:1])
+tr = b.db.execute("select eid, price, quantity from trades").fetchall()
+check("recorder: a tournament trade from the feed is stored with price and size", tr == [("11", 0.15, 300.0)], tr)
+b.download_books(["11", "12"], b.orders_by_eid(M.utcnow())); b.last_record = -1e9; b.record({}, 2e9)
+check("recorder: books downloaded again but unchanged -> no new rows",
+      b.db.execute("select count(*) from books").fetchone()[0] == 4)
+a.books["11"]["bids"].insert(0, lvl(0.12, 250))
+b.download_books(["11"], b.orders_by_eid(M.utcnow())); b.last_record = -1e9; b.record({}, 3e9)
+last = b.db.execute("select bids from books where eid='11' order by ts desc, rowid desc limit 1").fetchone()[0]
+check("recorder: a rival steps in at 0.12 x 250 -> new row with both levels",
+      json.loads(last) == [[0.12, 250.0], [0.10, 1000.0]], last)
+b.cfg.record_books = False
+a.books["11"]["bids"].insert(0, lvl(0.125, 50))
+b.download_books(["11"], b.orders_by_eid(M.utcnow())); b.last_record = -1e9; b.record({}, 4e9)
+check("recorder: record_books=False -> nothing more recorded", b.db.execute("select count(*) from books").fetchone()[0] == 5)
+f = RealtimeFeed.__new__(RealtimeFeed)
+f.lock, f.trade_log = threading.Lock(), deque([(1.0, {"exchangeId": "1"})])
+check("recorder: RealtimeFeed.take_trades drains its log", f.take_trades() == [(1.0, {"exchangeId": "1"})] and not f.trade_log)
 
 # =============================================================================================
 # CANCEL-EVERYTHING THAT FAILS MUST NOT FORGET LIVE ORDERS (bug on main and pr1; found by test_stress seed 3)
