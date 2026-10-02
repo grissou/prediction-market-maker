@@ -561,3 +561,22 @@ Reading: removing the tilt from fair value is the one change that pays at liquid
 Everything that only makes the exit more aggressive (A, lower ref_weight) sells into informed flow (mk15_mid) for no extra P&L; everything
 that only shrinks size (B, T2.4 at 0.10) gives up spread income. The 8 x 3 "+163" is 3 h on 74 markets: about +1,300 per day on the sim's
 share of the book, before anything the sim does not model.
+
+## The pinned world (`_bg_wc` 38000): the live reduce-only backstop, added 21:00 UTC after the owner's live findings
+Live since Package 3 (16:26 UTC) the bot is reduce-only in 81% of cycles: the sum-of-maxima worst case (77-82k) cycles against the
+backstop (0.80 x account, exit at 0.77). live_sim covered only the 74 biggest markets (worst case ~41k) and passed `global_reduce=False`,
+so no earlier round saw this. `_bg_wc` adds the rest of the account's worst case (38k -> total 79.5k at the start) and applies mm_bot's
+rule (cycle step 6, backstop part, with `reduce_only_hysteresis`); `ro_frac` = share of cycles in reduce-only. Pinned BASE (tilt world +
+`_bg_wc` 38000, 8 x 3 quiet): pnl_liq +1,004, pnl_mid +1,098, exit_ratio 1.13, hold_med 7.7 h, cap_end 0.853, writes_pm 16.1, ro_frac 0.42.
+The pinned world is noisier (SE 130-200 vs 60): reduce-only flips are chaotic. Effective tilt of the 74-market world is ~7% (the
+biggest positions sit where the gaps are biggest: residual bias slope -1.9% on top of the 5% + growth), and the estimator reads 6.1-7.2%.
+| Variant (pinned, 8 x 3 quiet) | d pnl_liq | d pnl_mid | d pnl_lag (exchange-style) | d ro_frac | d cap_end | d wc_end | d writes_pm | d deferred_h | d mk15_mid | d pick_cost | Verdict |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| T2.1 `ref_tilt_enabled` | +129 ± 190 | +147 ± 150 | +98 ± 140 | -0.33 ± 0.10 | -0.023 ± 0.017 | -3.4k ± 1.1k | +2.7 ± 1.2 | -740 ± 860 | -0.04 ± 0.07 | +35 ± 9 | positive, under-powered here (0.7 SE); frees the bot from reduce-only a third of the time |
+| `reduce_only_hysteresis` 0.01 (owner's candidate) | +22 ± 140 | +90 ± 110 | +98 ± 110 | -0.10 ± 0.06 | +0.020 ± 0.010 | +0.4k ± 0.6k | +2.6 ± 1.0 | **+2,390 ± 750 (+37%)** | -0.03 ± 0.05 | -5 ± 8 | neutral P&L, fails the deferred rule (more flips = more writes) |
+| `worst_case_backstop_frac` 0.85 (owner's candidate) | +72 ± 200 | +99 ± 190 | +139 ± 190 | -0.27 ± 0.09 | +0.034 ± 0.014 | +2.8k ± 1.1k | +3.6 ± 1.1 | +80 ± 760 | -0.01 ± 0.06 | -8 ± 5 | neutral; +3.4 pts capital, +2.8k worst case |
+| T2.1 + hysteresis 0.01 | +236 ± 130 | +190 ± 140 | +172 ± 140 | -0.31 ± 0.09 | -0.013 ± 0.013 | -1.3k ± 0.8k | +3.5 ± 1.2 | -430 ± 520 | +0.02 ± 0.08 | +35 ± 10 | positive (1.8 SE) |
+| **T2.1 + backstop 0.85** | **+311 ± 130** | +257 ± 120 | +285 ± 130 | **-0.42 ± 0.11** | -0.017 ± 0.020 | -2.1k ± 1.4k | +4.4 ± 1.2 (16.1 -> 20.5) | -260 ± 800 | +0.04 ± 0.07 | +26 ± 13 | **best (2.4 SE)**: T2.1 stops the worst case growing, 0.85 stops the churn; the bot is almost never reduce-only |
+Reading for the owner's tonight question: 0.85 alone or hysteresis alone buy little (both within noise, hysteresis costs writes). With T2.1 on,
+0.85 is worth ~+180 over T2.1 alone per 3 h here (noisy). Order: T2.1 first, then 0.85; not 0.85 alone, which adds worst-case room to a bot
+that still buys the tilt.
