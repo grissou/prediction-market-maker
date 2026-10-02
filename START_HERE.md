@@ -1,3 +1,9 @@
+<!-- STATUS (Finisher 2b, updated on every push) -->
+**STATUS 22:35 UTC 3 Oct (-1 day: 2 Oct):** phase = Package 5 build/measure (not READY). READY so far: nothing new (Package 4 c29f762 is the last READY).
+Key numbers: T2.1 `ref_tilt_enabled` +163 ± 60 at liquidation (8 x 3 quiet), +761 ± 160 (6 x 6 news), +129 ± 190 pinned; T2.1 + backstop 0.85 pinned +311 ± 130; A, B, T2.2, T2.4, C, T2.5 not positive.
+Next: ramp-in (`ref_tilt_rampin_min` 120) merged; confirmations 16 x 6 (free and pinned worlds), tilt-cap test in a high-tilt world, first-2-hour unwind measurement, X5/X11 screens.
+ETA: READY: Package 5 about 03:00 UTC 3 Oct; then Package 6 cycle on a new branch (research to ~05:30, implementation to ~07:45).
+
 # START HERE (Team run, branch `claude/run-c-tournament-improvements-pycdet`)
 
 Status: **complete** (Team complete at 14:45 UTC) (started 2026-10-02 08:50 UTC; credits nearly spent at 14:35 UTC). **Package 1 READY at 10:10 UTC, Package 2 READY at 11:05 UTC, hot-fix Package 2.1 READY at 12:05 UTC, hot-fix Package 2.2 READY at 12:40 UTC, Package 2.3 READY at 13:10 UTC, Package 3 READY at 14:45 UTC (deploy this one)** (deploy-ready, cumulative). Package 2 is LIVE since 11:21:57. Base: `claude/live-2026-10-02b` (5c0463a), the code live since 08:34.
