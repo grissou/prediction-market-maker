@@ -226,6 +226,53 @@ run_cycles(b, 1)
 check("switched off while a slice rests: state dropped, the passive ask replaced by the normal one",
       not b.pp and (0.64, 1000) not in asks(api, "11"), (b.pp, api.ours("11")))
 
+print("--- red team: a side decide() blocked stays blocked; older own orders never kept across the slice")
+api, b = bot()
+for e, bk in api.books.items():
+    b.ex[e].book = {k: [dict(x) for x in v] for k, v in bk.items()}
+b.pp["Ohio Senate"] = b.pair_passive_plan(["11", "12"], dict(api.inv), {})
+q0 = M.Quote(0.60, 100, None, 0, 0.61, None)
+check("long set, decide() blocked the ask (bid still quoted): quote returned unchanged, no slice ask",
+      b.pair_passive_quote(b.ex["11"], q0) is q0, b.pair_passive_quote(b.ex["11"], q0))
+q = b.pair_passive_quote(b.ex["11"], M.Quote(0.60, 100, 0.66, 100, 0.65, 0.66))
+check("long set: bid_limit 0.65 (>= slice ask 0.64) capped to 0.635: an older bid at 0.64 is never kept",
+      q.ask == 0.64 and q.bid == 0.60 and q.bid_limit is not None and q.bid_limit <= 0.635 + 1e-9, q)
+b.pp["Ohio Senate"] = dict(b.pp["Ohio Senate"], sign=-1, price=0.60)
+q0 = M.Quote(None, 0, 0.66, 100, None, 0.65)
+check("short set, decide() blocked the bid: quote returned unchanged", b.pair_passive_quote(b.ex["11"], q0) is q0)
+q = b.pair_passive_quote(b.ex["11"], M.Quote(0.55, 100, 0.66, 100, 0.56, 0.58))
+check("short set: ask_limit 0.58 (<= slice bid 0.60) raised to 0.605",
+      q.bid == 0.60 and q.ask_limit is not None and q.ask_limit >= 0.605 - 1e-9, q)
+
+print("--- red team: the second leg is taken only down to the floor 1 - price_x - max_cost - 0.5c")
+alerts = []
+real_alert = M.alert
+M.alert = lambda m: alerts.append(m)
+api, b = bot()
+run_cycles(b, 1)
+api.fill("11", False, 400)
+api.books["12"]["bids"] = [lvl(0.30, 1000)]                  # floor = 1 - 0.64 - 0.003 - 0.005 = 0.352
+run_cycles(b, 2)
+check("B's bid 0.30 below the floor 0.352: nothing sold, the owed leg waits", api.inv["12"] == SETS, api.inv)
+check("...the slice state (owed leg) is kept", "Ohio Senate" in b.pp, b.pp)
+check("...alerted once (not every cycle)", len([a for a in alerts if "Ohio Senate" in a]) == 1, alerts)
+api.books["12"]["bids"] = [lvl(0.355, 1000)]
+run_cycles(b, 1)
+check("bid back above the floor (0.355): the 400 are sold", api.inv["12"] == SETS - 400, api.inv)
+M.alert = real_alert
+
+print("--- red team: switched off live with an owed leg -> the owed leg is still finished, nothing new")
+api, b = bot()
+run_cycles(b, 1)
+api.fill("11", False, 400)
+b.cfg.pair_unwind_passive = False
+run_cycles(b, 1)
+check("flag off after A filled 400: the 400 owed on B are still sold", api.inv["12"] == SETS - 400, api.inv)
+run_cycles(b, 1)
+check("...then the state is dropped and no slice rests", not b.pp and (0.64, 1000) not in asks(api, "11")
+      and (0.64, 600) not in asks(api, "11"), (b.pp, api.ours("11")))
+check("...never more taken", api.inv["12"] == SETS - 400, api.inv)
+
 print("--- status.json")
 api, b = bot()
 run_cycles(b, 1)

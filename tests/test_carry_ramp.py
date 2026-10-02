@@ -1,7 +1,7 @@
 """
 Offline tests for T2.3, the carry ramp (ref_tilt_carry_days, HARD GATE, default 0): the pure helper carry_ramp and
 its use in blend_fv (off = identical, ramp values at N days, N/2 and 0 h, bounds, ref_tilt_enabled off = no effect),
-plus the setting and its live-override range. No network.
+plus the setting, which is NOT live-overridable (hard gate). No network.
 
 Run:  python tests/test_carry_ramp.py      (exit code 0 = all passed)
 """
@@ -30,15 +30,12 @@ def close(a, b, tol=1e-12):
 print("--- setting")
 c = M.Config()
 check("default 0 (off)", c.ref_tilt_carry_days == 0.0)
-check("live-overridable, range 0-30", M.OVERRIDABLE.get("ref_tilt_carry_days") == (0.0, 30.0))
-_ov = list(M.OVERRIDABLE)
-check("after the T2.5 settings", _ov.index("ref_tilt_carry_days") > _ov.index("pair_unwind_max_cost"))
+check("HARD GATE: NOT live-overridable (not in OVERRIDABLE)", "ref_tilt_carry_days" not in M.OVERRIDABLE)
 _f = [f.name for f in dataclasses.fields(M.Config)]
 check("in Config after the T2.5 block", _f.index("ref_tilt_carry_days") > _f.index("pair_unwind_max_cost"))
-good, bad = M.validate_overrides({"ref_tilt_carry_days": 31.0}, c)
-check("31 days refused", good == {} and len(bad) == 1, (good, bad))
-good, bad = M.validate_overrides({"ref_tilt_carry_days": 3.0}, c)
-check("3 days accepted", good == {"ref_tilt_carry_days": 3.0} and not bad, (good, bad))
+for v in (3.0, 0.0, 31.0):
+    good, bad = M.validate_overrides({"ref_tilt_carry_days": v}, c)
+    check(f"override to {v} refused (code change + restart only)", good == {} and len(bad) == 1, (good, bad))
 
 print("--- carry_ramp")
 s = 0.06
