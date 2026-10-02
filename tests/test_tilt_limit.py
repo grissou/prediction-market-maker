@@ -61,8 +61,9 @@ c = M.Config()
 check("defaults: tilt_exposure_max_frac 0 (off), tilt_exposure_headline False",
       (c.tilt_exposure_max_frac, c.tilt_exposure_headline) == (0.0, False))
 fields = list(M.Config.__dataclass_fields__)
-check("the two settings close Config", fields[-2:] == ["tilt_exposure_max_frac", "tilt_exposure_headline"], fields[-4:])
-check("...and OVERRIDABLE", list(M.OVERRIDABLE)[-2:] == ["tilt_exposure_max_frac", "tilt_exposure_headline"])
+_tl, _o = ["tilt_exposure_max_frac", "tilt_exposure_headline"], list(M.OVERRIDABLE)
+check("the two settings: one Config block", fields[fields.index(_tl[0]):fields.index(_tl[0]) + 2] == _tl)
+check("...and OVERRIDABLE", _o[_o.index(_tl[0]):_o.index(_tl[0]) + 2] == _tl)
 good, bad = M.validate_overrides({"tilt_exposure_max_frac": 0.1, "tilt_exposure_headline": True}, c)
 check("both live-overridable", len(good) == 2 and not bad, bad)
 

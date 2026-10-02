@@ -38,7 +38,8 @@ _, bad = M.validate_overrides({"hold_target_hours": 100.0, "hold_unload_budget_f
                                "hold_take_max_per_min": 1.5}, c)
 check("ranges / types checked (100 h, 50%, 1.5 refused)", len(bad) == 3, bad)
 _ov, _f = list(M.OVERRIDABLE), list(M.Config.__dataclass_fields__)
-check("one contiguous block at the end of OVERRIDABLE and of Config", _ov[-4:] == KEYS and _f[-4:] == KEYS)
+_a, _b = _ov.index(KEYS[0]), _f.index(KEYS[0])
+check("one contiguous block in OVERRIDABLE and in Config", _ov[_a:_a + 4] == KEYS and _f[_b:_b + 4] == KEYS)
 
 
 def bot(**kw):

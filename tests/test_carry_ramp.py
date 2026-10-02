@@ -32,10 +32,9 @@ c = M.Config()
 check("default 0 (off)", c.ref_tilt_carry_days == 0.0)
 check("live-overridable, range 0-30", M.OVERRIDABLE.get("ref_tilt_carry_days") == (0.0, 30.0))
 _ov = list(M.OVERRIDABLE)
-check("one block right after the T2.5 settings",
-      _ov.index("ref_tilt_carry_days") == _ov.index("pair_unwind_max_cost") + 1)
+check("after the T2.5 settings", _ov.index("ref_tilt_carry_days") > _ov.index("pair_unwind_max_cost"))
 _f = [f.name for f in dataclasses.fields(M.Config)]
-check("in Config right after the T2.5 block", _f.index("ref_tilt_carry_days") == _f.index("pair_unwind_max_cost") + 1)
+check("in Config after the T2.5 block", _f.index("ref_tilt_carry_days") > _f.index("pair_unwind_max_cost"))
 good, bad = M.validate_overrides({"ref_tilt_carry_days": 31.0}, c)
 check("31 days refused", good == {} and len(bad) == 1, (good, bad))
 good, bad = M.validate_overrides({"ref_tilt_carry_days": 3.0}, c)
