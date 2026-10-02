@@ -3117,11 +3117,6 @@ class Bot:
                 reduce_size = full
         ex.age = self.age_hours(ex)
         adding = cfg.capital_ceiling_adding_size_factor if self.capital_over else 1.0
-        return compute_quote(fv, ex.inv, inv_for_quote, best_bid, best_ask, cfg, reduce_only, no_bid, no_ask,
-                             bid_cap, ask_cap, kelly_p=kelly_p, bankroll=self.bankroll(),
-                             shift=self.party_shift(ex, party_delta), order_size=planned, position_limit=headline_limit,
-                             min_edge=edge, reduce_size=reduce_size, net_inv=ex.eff, age_hours=ex.age,
-                             adding_factor=adding)
         side, bias_edge, bias_size = fl_side(fv, ex.fl_side, cfg)
         ex.fl_side, tag = side, side
         side = "bid" if side == "mid" else side       # mid band: an optional extra edge on bids, full size
@@ -3130,8 +3125,8 @@ class Bot:
         return compute_quote(fv, ex.inv, inv_for_quote, best_bid, best_ask, cfg, reduce_only, no_bid, no_ask,
                              bid_cap, ask_cap, kelly_p=kelly_p, bankroll=self.bankroll(),
                              shift=self.party_shift(ex, party_delta), order_size=planned, position_limit=headline_limit,
-                             min_edge=edge, reduce_size=reduce_size, bias_side=side, bias_edge=bias_edge,
-                             bias_size=bias_size)
+                             min_edge=edge, reduce_size=reduce_size, net_inv=ex.eff, age_hours=ex.age,
+                             adding_factor=adding, bias_side=side, bias_edge=bias_edge, bias_size=bias_size)
 
     def update_size_plan(self, now_m, fvs):
         """Every size_plan_seconds: work out how many shares to quote in each market (see plan_sizes).

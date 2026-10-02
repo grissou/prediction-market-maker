@@ -337,7 +337,7 @@ for inv in (-2000, -500, -100, 0, 100, 500, 2000):
 check("FL + skew: never through fair, never tighter than without the bias, within skew + max_half_spread",
       not bad, bad[:2])
 # max_half_spread cap
-big = Config(fl_bad_side_extra_edge=0.05)
+big = Config(fl_bias_enabled=True, fl_bad_side_extra_edge=0.05)
 q1 = flq(0.10, cfg=big)
 check("FL: extra edge 5c with no rival -> bad bid capped at max_half_spread (0.06), as today's empty-book bid",
       q1.bid == plain(0.10, cfg=big).bid == 0.06 and q1.bid_limit == 0.06, q1)
@@ -363,7 +363,7 @@ for f in (0.805, 0.795, 0.79, 0.80, 0.801):
     prev = fl_side(f, prev, FL)[0]
     sides.append(prev)
 check("FL: hysteresis at 80c: stays on above 0.79", sides == ["ask", "ask", None, None, "ask"], sides)
-mid = Config(fl_mid_bid_extra_edge=0.005)
+mid = Config(fl_bias_enabled=True, fl_mid_bid_extra_edge=0.005)
 qm = flq(0.5, cfg=mid, bb=0.495, ba=0.505)
 check("FL: optional mid-band bid extra edge -> mid-band bid 0.5c wider at full size, ask unchanged",
       fl_side(0.5, None, mid)[0] == "mid" and (qm.bid, qm.bid_size, qm.ask) == (0.485, 200, 0.51), qm)
