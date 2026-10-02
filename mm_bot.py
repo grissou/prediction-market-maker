@@ -521,6 +521,24 @@ class Config:
                                           #   to measure rival bots (repricing speed, floors, sizes, hours). No extra
                                           #   requests; roughly 10-15 MB a day
     record_book_levels: int = 3           # levels per side kept in those rows
+    record_positions: bool = True         # also record the positions read (per position: quantity, the exchange's
+                                          #   mark currentPrice and every other number it gives) and the account
+                                          #   marks (account value, market value, cash, P&L) - the data to pin down
+                                          #   how the exchange values positions (analysis/mark_rule.py). No extra
+                                          #   requests: at most once per record_seconds plus once after a fill, and
+                                          #   a position's row only when it changed (or hourly). ~1-3 MB a day
+    record_positions_full_seconds: float = 3600.0   # ...but every position at least this often
+
+    # --- SAME-SIDE REFILL COOLDOWN ------------------------------------------------------------
+    # Data (Analyst 10b): the 3rd and later fills of a same-side run within 60 s lost -1.15c a share (81k shares,
+    # -936), within 10 s -1.68c: re-posting the same side straight after it was hit kept buying through fair value.
+    refill_cooldown_enabled: bool = True  # after a same-side run of fills that ADDED to the position, stop re-quoting
+                                          #   that side for a while (a safe resting order there is left alone; an
+                                          #   unsafe one is pulled as usual). A side that reduces the position is exempt
+    refill_cooldown_fills: int = 2        # ...this many fills on one side of one market
+    refill_cooldown_window_seconds: float = 60.0   # ...within this long
+    refill_cooldown_min_shares: int = 200  # ...totalling at least this many shares (1-share probes don't count)
+    refill_cooldown_seconds: float = 30.0  # how long that side stays withheld
 
     # --- CONNECTION / ALERTS (from the environment: see top of file) ------------------------
     summary_every_hours: int = 2          # phone summary every N hours, on the hour UTC (2 = 00:00, 02:00, 04:00...),
@@ -601,6 +619,11 @@ OVERRIDABLE = {
     "fl_bad_side_extra_edge": (0.0, 0.05),
     "fl_bad_side_size_factor": (0.0, 1.0),
     "fl_mid_bid_extra_edge": (0.0, 0.03),
+    "refill_cooldown_enabled": (False, True),
+    "refill_cooldown_fills": (1, 20),
+    "refill_cooldown_window_seconds": (1.0, 600.0),
+    "refill_cooldown_min_shares": (0, 100000),
+    "refill_cooldown_seconds": (0.0, 600.0),
 }
 
 
@@ -711,6 +734,26 @@ def utcnow():
 def iso(dt):
     """datetime -> '2026-10-01T16:00:00.000Z' (the format the API expects)."""
     return dt.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def numeric_fields(d, skip=()):
+    """{key: float} of a reply's numeric scalar fields (numbers sent as strings too; not ids, flags or nesting)."""
+    out = {}
+    for k, v in d.items():
+        if k in skip or isinstance(v, bool) or (k.lower().endswith("id") and k != "id"):
+            continue
+        if isinstance(v, (int, float)):
+            x = float(v)
+        elif isinstance(v, str):
+            try:
+                x = float(v)
+            except ValueError:
+                continue
+        else:
+            continue
+        if math.isfinite(x):
+            out[k] = x
+    return out
 
 
 def parse_ts(s):
@@ -2119,6 +2162,12 @@ class Bot:
         self.db = self.open_recorder()
         self.last_record = -1e9
         self.book_tops, self.book_rows = {}, []    # recorder: last top levels logged per eid, rows not yet written
+        self.last_pos_record, self.last_pos_full = -1e9, -1e9   # recorder: positions table (record_positions)
+        self.pos_seen = {}                # eid -> (values last written, wall time last read)
+        self.pos_record_due = False       # a fill was seen: record the next positions read
+        self.last_pnl_reply = (None, None)  # recorder: (latest P&L reply, wall time read)
+        self.refills = defaultdict(deque)  # (eid, "bid"/"ask") -> (time, shares) of recent fills that added
+        self.refill_until = {}            # (eid, side) -> monotonic time its refill cooldown ends
         self.last_summary_slot = None     # (date, hour) of the last phone summary
         self.value_at_last_summary = None
         self.counts_at_last_summary = {"arbs": 0, "takes": 0, "errors": 0, "rate_limits": 0}
@@ -2324,6 +2373,8 @@ class Bot:
                for p in pos.get("positions", []) if not p.get("settled")}
         reserved = reserved_cash(raw_orders)
         self.update_lots(inv, time.time())
+        if self.db and cfg.record_positions and read_positions and not pos_failed:
+            self.record_positions(pos, f_pnl, now_m, fill_event)
         if f_pnl is not None:
             self.last_equity = self.checked_account_value(self.account_value(pos, f_pnl), reserved, inv)
             if self.kill_switch(self.last_equity):
@@ -2381,7 +2432,7 @@ class Bot:
 
         # 4. Fills (every slow_poll_seconds, and straight after a fill) --------------------------------
         if read_fills:
-            self.log_fills(fvs)
+            self.note_refills(self.log_fills(fvs), inv, now_m)
 
         # 5. Guaranteed arbitrage inside races (takes liquidity; our quotes there are pulled first) --
         arb_races = self.take_arbitrage(inv, fvs, mine_real, now_m) if self.running else set()
@@ -3220,6 +3271,13 @@ class Bot:
         # Reduce-only, flatten and exit windows: always do exactly what the risk logic asks (no holding, no
         # burst-mode skipping), or a position could be left to grow or never be exited.
         critical = self.global_reduce or self.hours_to_close(ex) <= self.cfg.flatten_hours_before_close
+        # Refill cooldown: no new order on a side that was just hit repeatedly; what rests there stays while safe.
+        cool_bid = not critical and self.refill_cooling(ex, True, now_m)
+        cool_ask = not critical and self.refill_cooling(ex, False, now_m)
+        if cool_bid:
+            fix_bid = fix_bid and any(unsafe_order(o, q.bid, full_bid, q.bid_limit, True) for o in bids)
+        if cool_ask:
+            fix_ask = fix_ask and any(unsafe_order(o, q.ask, full_ask, q.ask_limit, False) for o in asks)
         if self.cfg.churn_control and not critical:
             if fix_bid and self.hold_side(ex, bids, q.bid, q.bid_limit, full_bid, True, now, now_m):
                 fix_bid = False                   # (full size: a full-size order is still safe in a burst)
@@ -3242,8 +3300,10 @@ class Bot:
                 o.price < (q.ask_limit if q.ask_limit is not None else q.ask) - 1e-9 or o.qty > full_ask + 1e-9 for o in asks))
             doomed = (bids if fix_bid else []) + (asks if fix_ask else [])
             new = [] if now_m < ex.pause_until else (
-                ([self.new_order(ex, True, q.bid, q.bid_size, fv, now)] if fix_bid and q.bid is not None and not bids else [])
-                + ([self.new_order(ex, False, q.ask, q.ask_size, fv, now)] if fix_ask and q.ask is not None and not asks else []))
+                ([self.new_order(ex, True, q.bid, q.bid_size, fv, now)]
+                 if fix_bid and q.bid is not None and not bids and not cool_bid else [])
+                + ([self.new_order(ex, False, q.ask, q.ask_size, fv, now)]
+                   if fix_ask and q.ask is not None and not asks and not cool_ask else []))
             if not doomed and not new:
                 return None
             return Change(ex, doomed, False, new, self.change_key(ex, pull=bool(doomed) or not new, reprice=bool(doomed)))
@@ -3251,9 +3311,9 @@ class Bot:
         doomed = (bids if fix_bid else []) + (asks if fix_ask else [])
         new = []
         if now_m >= ex.pause_until:       # (sizes already scaled for burst mode above)
-            if fix_bid and q.bid is not None:
+            if fix_bid and q.bid is not None and not cool_bid:
                 new.append(self.new_order(ex, True, q.bid, q.bid_size, fv, now))
-            if fix_ask and q.ask is not None:
+            if fix_ask and q.ask is not None and not cool_ask:
                 new.append(self.new_order(ex, False, q.ask, q.ask_size, fv, now))
         log.info("%s%-26.26s fv %s%s inv %+5.0f race %+5.0f%s | bid %s ask %s", "" if self.api.live else "[dry] ",
                  ex.label, f"{fv:.3f}" if fv is not None else "  -  ",
@@ -4125,6 +4185,50 @@ class Bot:
         if len(kept) != len(self.order_meta):
             self.order_meta, self.notes_dirty = kept, True
         self.save_order_notes()
+        return new
+
+    def note_refills(self, new, inv, now_m):
+        """Same-side refill cooldown: count each new fill of one of our quotes (not takes or arbitrage legs) that
+        ADDED to the position, per market and side; once refill_cooldown_fills of them, together at least
+        refill_cooldown_min_shares, landed within refill_cooldown_window_seconds, that side is withheld for
+        refill_cooldown_seconds (see plan_change)."""
+        if new:
+            self.pos_record_due = True            # recorder: note the positions straight after a fill
+        cfg = self.cfg
+        if not new or not cfg.refill_cooldown_enabled:
+            return
+        wall = utcnow().timestamp()
+        for f in reversed(new):                   # oldest first
+            meta = self.order_meta.get(f.get("orderId")) or {}
+            side, eid = meta.get("our_side"), str(f.get("exchangeId"))
+            if side not in ("bid", "ask") or meta.get("take") or meta.get("arb") or eid not in self.ex:
+                continue
+            try:
+                t = parse_ts(f.get("filledAt"))
+            except (TypeError, ValueError):
+                t = None
+            if t is not None and wall - t.timestamp() > cfg.refill_cooldown_window_seconds:
+                continue                          # an old fill seen late (e.g. after a restart): not a run now
+            pos = float(inv.get(eid, self.ex[eid].inv) if inv is not None else self.ex[eid].inv)
+            if (pos <= 0) if side == "bid" else (pos >= 0):
+                continue                          # it reduced (or closed) the position: unloading is good
+            key, qty = (eid, side), abs(float(f.get("quantity") or 0))
+            run = self.refills[key]
+            run.append((now_m, qty))
+            while run and now_m - run[0][0] > cfg.refill_cooldown_window_seconds:
+                run.popleft()
+            shares = sum(q for _, q in run)
+            if len(run) >= cfg.refill_cooldown_fills and shares >= cfg.refill_cooldown_min_shares:
+                if self.refill_until.get(key, -1e9) <= now_m:
+                    log.info("refill cooldown %s %s %.0f s: %d fills / %s sh in %.0f s", self.ex[eid].label, side,
+                             cfg.refill_cooldown_seconds, len(run), f"{shares:,.0f}", cfg.refill_cooldown_window_seconds)
+                self.refill_until[key] = now_m + cfg.refill_cooldown_seconds
+
+    def refill_cooling(self, ex, is_bid, now_m):
+        """True while this side is in its refill cooldown and quoting it would add to the position."""
+        if not self.cfg.refill_cooldown_enabled or self.refill_until.get((ex.eid, "bid" if is_bid else "ask"), -1e9) <= now_m:
+            return False
+        return ex.inv >= 0 if is_bid else ex.inv <= 0   # a side that would reduce the position is exempt
 
     def load_order_notes(self):
         """Order notes saved by a previous run (so fills that land around a restart get attributed)."""
@@ -4159,8 +4263,79 @@ class Bot:
         # Tournament trades from the realtime feed (all traders): price/quantity when the item carries them
         db.execute("CREATE TABLE IF NOT EXISTS trades (ts REAL, eid TEXT, price REAL, quantity REAL, item TEXT)")
         db.execute("CREATE INDEX IF NOT EXISTS books_eid_ts ON books (eid, ts)")
+        if self.cfg.record_positions:
+            # The exchange's own valuation, per position (a row when anything in it changed, or hourly): ts = when
+            # read, prev_ts = the previous read that saw it (so a change happened in (prev_ts, ts]), fields = JSON
+            # of every other number the API gives for it (cost basis, P&L, market value...).
+            db.execute("""CREATE TABLE IF NOT EXISTS positions (ts REAL, prev_ts REAL, eid TEXT, quantity REAL,
+                              current_price REAL, fields TEXT)""")
+            db.execute("CREATE INDEX IF NOT EXISTS positions_eid_ts ON positions (eid, ts)")
+            # Account totals at the same reads; P&L-endpoint numbers are from the read at pnl_ts (they're read
+            # every slow_poll_seconds); fields = JSON of every number in the P&L reply and the positions summary.
+            db.execute("""CREATE TABLE IF NOT EXISTS account_marks (ts REAL, account_value REAL, market_value REAL,
+                              cash REAL, realized REAL, unrealized REAL, pnl_ts REAL, fields TEXT)""")
         db.commit()
         return db
+
+    POS_PRICE_KEYS = ("currentPrice", "markPrice", "valuationPrice", "price")
+
+    def record_positions(self, pos, f_pnl, now_m, fill_event):
+        """Recorder (record_positions): the positions reply just read - no extra request. Written at most once per
+        record_seconds, plus at the first read after a fill; a position's row only when one of its numbers changed
+        since it was last written (or every record_positions_full_seconds), which keeps it to ~1-3 MB a day."""
+        cfg = self.cfg
+        if f_pnl is not None:
+            try:
+                self.last_pnl_reply = (f_pnl.result(), utcnow().timestamp())
+            except Exception:                     # the P&L read failing is handled (and logged) by account_value
+                pass
+        if not (fill_event or self.pos_record_due or now_m - self.last_pos_record >= cfg.record_seconds):
+            return
+        self.last_pos_record, self.pos_record_due = now_m, False
+        full = now_m - self.last_pos_full >= cfg.record_positions_full_seconds
+        if full:
+            self.last_pos_full = now_m
+        ts = round(utcnow().timestamp(), 3)
+        try:
+            rows, seen = [], set()
+            for p in pos.get("positions", []) or []:
+                if not isinstance(p, dict) or p.get("settled") or p.get("exchangeId") is None:
+                    continue
+                eid = str(p["exchangeId"])
+                seen.add(eid)
+                nums = numeric_fields(p, skip=("exchangeId",))
+                price = next((nums.pop(k) for k in self.POS_PRICE_KEYS if k in nums), None)
+                qty = nums.pop("quantity", None)
+                vals = (qty, price, json.dumps(nums, sort_keys=True, separators=(",", ":")))
+                old = self.pos_seen.get(eid)
+                if full or old is None or old[0] != vals:
+                    rows.append((ts, old[1] if old else None, eid, *vals))
+                self.pos_seen[eid] = (vals, ts)
+            for eid in [e for e in self.pos_seen if e not in seen]:   # closed (or settled): one row saying so
+                rows.append((ts, self.pos_seen.pop(eid)[1], eid, 0.0, None, "{}"))
+            pnl, pnl_ts = self.last_pnl_reply
+            pnl_n = numeric_fields(pnl) if isinstance(pnl, dict) else {}
+            summ = pos.get("summary")
+            sum_n = numeric_fields(summ) if isinstance(summ, dict) else {}
+            top_n = numeric_fields({k: v for k, v in pos.items() if k not in ("positions", "summary")})
+
+            def pick(want, avoid=None):
+                for src in (pnl_n, sum_n):
+                    for k, v in src.items():
+                        kl = k.lower()
+                        if any(w in kl for w in want) and not (avoid and avoid in kl):
+                            return v
+                return None
+            acct = (ts, pnl_n.get("totalAccountValue"), sum_n.get("totalMarketValue", pnl_n.get("totalMarketValue")),
+                    pick(("cash", "balance")), pick(("realized", "realised"), "unreali"),
+                    pick(("unrealized", "unrealised")), pnl_ts and round(pnl_ts, 3),
+                    json.dumps({**{"pnl." + k: v for k, v in pnl_n.items()}, **{"sum." + k: v for k, v in sum_n.items()},
+                                **top_n}, sort_keys=True, separators=(",", ":")))
+            self.db.executemany("INSERT INTO positions VALUES (?,?,?,?,?,?)", rows)
+            self.db.execute("INSERT INTO account_marks VALUES (?,?,?,?,?,?,?,?)", acct)
+            self.db.commit()
+        except (sqlite3.Error, AttributeError, TypeError, ValueError) as e:
+            log.warning("could not record positions: %s", e)
 
     def record(self, fvs, now_m):
         """One row per market (best bid/ask incl. ours, fair value, reference, our quote, position)."""
