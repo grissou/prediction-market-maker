@@ -731,6 +731,19 @@ class Config:
     # Short sets mirror it (rest a BID, take the other leg's ask). Selling both legs to others is not a self-trade.
     pair_unwind_passive: bool = False
     pair_unwind_max_cost: float = 0.003   # at most 0.3c per set below 1 (22 on 7,335 sets)
+    # --- Package 5: C hold target ---
+    # Backstop for positions we cannot exit. A market whose held lots' share-weighted age (age_hours) is
+    # >= hold_target_hours: its REDUCING side joins the best other price on that side (long -> ask at the best other
+    # ask, short -> bid at the best other bid), never more than 1c through the book's own price on the losing side
+    # and never at or through our own other side (hold_quote). >= 2 x hold_target_hours: take the best other bid
+    # (long) / ask (short), immediate-or-cancel, one order <= max_order_cash_frac of the account and the best level,
+    # never more than 1c through the book's price, at most hold_take_max_per_min takes a minute (bot-wide) and
+    # hold_unload_budget_frac of the account (notional) per rolling hour (take_aged). The hourly budget starts
+    # fully used: no take in the first hour after start (or after turning it on), so a restart can never dump.
+    hold_target_hours: float = 0.0        # 0 = off (try 4)
+    hold_unload_budget_frac: float = 0.02  # notional of takes per rolling hour, fraction of the account value
+    hold_take_max_per_min: int = 2        # takes per minute, bot-wide
+    hold_target_headline: bool = False    # False = not in headline_races markets (staging gate)
 
 
 CFG = Config()
@@ -873,6 +886,11 @@ OVERRIDABLE = {
     "reduce_from_book_headline": (False, True),
     "pair_unwind_passive": (False, True),
     "pair_unwind_max_cost": (0.0, 0.02),
+    # --- Package 5: C hold target ---
+    "hold_target_hours": (0.0, 48.0),
+    "hold_unload_budget_frac": (0.0, 0.10),
+    "hold_take_max_per_min": (0, 10),
+    "hold_target_headline": (False, True),
 }
 MAX_ORDER_TTL = 7200.0    # no order of ours lives longer than this (dead-man's switch), whatever the TTL settings
 LADDER_MAX_LEVELS = 8
@@ -3118,6 +3136,9 @@ class Bot:
         self.unwinds_total = 0            # pair unwinds since start (status.json pair_unwinds_total)
         self.pp = {}                      # T2.5 passive pair unwind: race -> slice state (pair_passive_step)
         self.pp_sets_total = 0            # ...complete sets closed by it since start (status.json)
+        self.hold_takes = deque()         # C hold target: (now_m, notional) of takes in the last hour (take_aged)
+        self.hold_open_at = None          # ...now_m from which takes may start (first enabled call + 1 h: restart-safe)
+        self.hold_takes_total = 0         # ...takes sent since start
         self.ops_last = {}                # ops fields of the latest status write (ops_fields): recorder, summary
         self.ops_cache = {}               # ops_fields: fills.csv-derived numbers, recomputed when the file changes
         self.ops_warned = False           # ops_fields failed once (logged once)
@@ -3531,6 +3552,8 @@ class Bot:
         # 6b. Take tournament quotes that Polymarket says are clearly stale (confirmed over 2 readings) ---
         taken = (self.take_stale_quotes(refs, liquid, fvs, inv, mine_real, global_reduce, party_delta, now_m)
                  if self.running else set())
+        if cfg.hold_target_hours > 0 and self.running:      # C hold target: aged lots taken within the hourly budget
+            taken |= self.take_aged(inv, book_fvs, mine_real, now_m)
 
         self.phase_mark("fills_risk_takes")
         # 7. Decide + reconcile each exchange. One write at a time (parallel_writes = 1): cancels happen now,
@@ -4562,6 +4585,8 @@ class Bot:
                              behind_best=ex.eid not in self.ref_only, reduce_fv=reduce_fv)
         ex.bb_tag = " bb" if q.behind else ""
         ex.lad_ctx = (adding, adding_limit, frag_limit)   # (R3 ladder: the same factors and limits)
+        if cfg.hold_target_hours > 0 and not reduce_only:   # C hold target: aged lots' reducing side joins the best
+            q = self.hold_quote(ex, q, best_bid, best_ask, book_fv if book_fv is not None else fv, cfg)
         return q
 
     def update_size_plan(self, now_m, fvs):
@@ -6130,6 +6155,180 @@ class Bot:
             self.notes_dirty = True
         log.info("take on %s: traded %s of %d", ex.label, data.get("quantityTraded", "?"), qty)
         return True
+
+    # ------------------------------------------------------------------------------ C hold target (Package 5)
+    HOLD_FLOOR = 0.01             # never more than 1c through the book's own price on the losing side
+
+    def hold_gate(self, ex, cfg):
+        """C: may this market use the hold target at all (book-priced, headline staging gate)?"""
+        return (cfg.hold_target_hours > 0 and ex.eid not in self.ref_only
+                and (cfg.hold_target_headline or ex.group not in cfg.headline_races))
+
+    def hold_quote(self, ex, q, best_bid, best_ask, price, cfg):
+        """C quote half: lots aged >= hold_target_hours -> the reducing side joins the best other price on its side
+        (long: ask = best other ask, short: bid = best other bid), never more than HOLD_FLOOR through `price` (the
+        book's own price) and never crossing the best other bid / ask; only ever moves in, never out. Our own
+        adding side is pulled back to a tick behind it (own bid < own ask). A side the decision left out (a guard,
+        reduce-only...) stays out. The adding side is otherwise unchanged."""
+        if (price is None or not self.hold_gate(ex, cfg) or getattr(ex, "age", 0.0) < cfg.hold_target_hours
+                or abs(ex.inv) < 1):
+            return q
+        if ex.inv >= 1 and q.ask is not None and q.ask_size >= 1 and best_ask is not None:
+            ask = max(ceil_tick(best_ask), ceil_tick(price - self.HOLD_FLOOR - 1e-9))
+            if best_bid is not None:
+                ask = max(ask, ceil_tick(best_bid + TICK))
+            if ask >= q.ask - 1e-9:
+                return q                          # already at or inside the best (or the floor stops it)
+            bid, bid_size, bid_limit = q.bid, q.bid_size, q.bid_limit
+            top = floor_tick(ask - TICK)
+            if bid is not None and bid > top + 1e-9:
+                bid = top
+            if bid_limit is not None and bid_limit > top + 1e-9:
+                bid_limit = top
+            if bid is not None and bid < PMIN - 1e-9:
+                bid, bid_size, bid_limit = None, 0, None
+            return replace(q, ask=ask, ask_limit=min(q.ask_limit, ask) if q.ask_limit is not None else None,
+                           bid=bid, bid_size=bid_size if bid is not None else 0, bid_limit=bid_limit)
+        if ex.inv <= -1 and q.bid is not None and q.bid_size >= 1 and best_bid is not None:
+            bid = min(floor_tick(best_bid), floor_tick(price + self.HOLD_FLOOR + 1e-9))
+            if best_ask is not None:
+                bid = min(bid, floor_tick(best_ask - TICK))
+            if bid <= q.bid + 1e-9:
+                return q
+            ask, ask_size, ask_limit = q.ask, q.ask_size, q.ask_limit
+            low = ceil_tick(bid + TICK)
+            if ask is not None and ask < low - 1e-9:
+                ask = low
+            if ask_limit is not None and ask_limit < low - 1e-9:
+                ask_limit = low
+            if ask is not None and ask > PMAX + 1e-9:
+                ask, ask_size, ask_limit = None, 0, None
+            return replace(q, bid=bid, bid_limit=max(q.bid_limit, bid) if q.bid_limit is not None else None,
+                           ask=ask, ask_size=ask_size if ask is not None else 0, ask_limit=ask_limit)
+        return q
+
+    def hold_take_plan(self, inv, book_fvs, now_m, eids=None):
+        """C take half, the pure plan (no state changed): for markets aged >= 2 x hold_target_hours, oldest first,
+        [{"eid", "buy", "qty", "price", "notional"}]: sell a long to the best other bid / buy back a short at the
+        best other ask, only if that price is at most HOLD_FLOOR through the book's price, qty <= the best level,
+        the position and max_order_cash_frac of the account (notional = shares x price for a long, x (1 - price)
+        for a short: what is unloaded), all within hold_take_max_per_min takes in the last 60 s and
+        hold_unload_budget_frac x account of notional in the last 3600 s (self.hold_takes). Nothing before
+        hold_open_at (the budget starts fully used). eids limits the markets looked at (live re-check)."""
+        cfg = self.cfg
+        if cfg.hold_target_hours <= 0 or self.hold_open_at is None or now_m < self.hold_open_at:
+            return []
+        bank = self.bankroll()
+        used = sum(n for t, n in self.hold_takes if now_m - t < 3600)
+        left = cfg.hold_unload_budget_frac * bank - used
+        slots = cfg.hold_take_max_per_min - sum(1 for t, _ in self.hold_takes if now_m - t < 60)
+        cands = []
+        for eid in (self.ex if eids is None else eids):
+            ex = self.ex.get(eid)
+            pos = inv.get(eid, 0.0)
+            if ex is None or abs(pos) < 1 or not self.hold_gate(ex, cfg) or busy(ex, now_m):
+                continue
+            if self.hours_to_close(ex) <= cfg.flatten_hours_before_close:
+                continue                          # the flatten / exit windows have their own rules
+            age = self.age_hours(ex)
+            if age >= 2 * cfg.hold_target_hours:
+                cands.append((-age, eid))
+        plan = []
+        for _, eid in sorted(cands):
+            if slots < 1 or left <= 0:
+                break
+            ex, pos, bfv = self.ex[eid], inv.get(eid, 0.0), book_fvs.get(eid)
+            buy = pos < 0
+            level = ((ex.book or {}).get("asks" if buy else "bids") or [None])[0]
+            if bfv is None or not level:
+                continue
+            price = level["price"]
+            if (price > bfv + self.HOLD_FLOOR + 1e-9) if buy else (price < bfv - self.HOLD_FLOOR - 1e-9):
+                continue                          # more than 1c through the book's price: not at any size
+            unit = max(1 - price if buy else price, TICK)
+            qty = int(min(abs(pos), level["quantity"], cfg.max_order_cash_frac * bank / unit, left / unit))
+            if qty < 1:
+                continue
+            plan.append({"eid": eid, "buy": buy, "qty": qty, "price": price, "notional": qty * unit})
+            slots, left = slots - 1, left - qty * unit
+        return plan
+
+    def take_aged(self, inv, book_fvs, mine_real, now_m, execute=None):
+        """C take half, run beside take_stale_quotes: execute hold_take_plan's takes (immediate-or-cancel: our
+        quotes there pulled first, the take, its leftover cancelled), recording each in the rolling budget.
+        Live: write budget first (3 writes, as execute_take), then a fresh book and the plan re-checked on it.
+        execute(eid, buy, qty, price) -> shares done replaces the exchange (simulator; the plan is the same).
+        Returns the exchanges traded (skipped by quoting this cycle)."""
+        cfg, taken = self.cfg, set()
+        if cfg.hold_target_hours <= 0:
+            return taken
+        if self.hold_open_at is None:             # restart-safe: the budget starts fully used for an hour
+            self.hold_open_at = now_m + 3600
+            log.info("hold target on: aged takes start in 60 min (budget %.1f%% of the account per hour)",
+                     100 * cfg.hold_unload_budget_frac)
+        while self.hold_takes and now_m - self.hold_takes[0][0] >= 3600:
+            self.hold_takes.popleft()
+        for p in self.hold_take_plan(inv, book_fvs, now_m):
+            if not self.running:
+                break
+            eid, ex = p["eid"], self.ex[p["eid"]]
+            if execute is not None:
+                self.hold_takes.append((now_m, p["notional"]))
+                self.hold_takes_total += 1
+                execute(eid, p["buy"], p["qty"], p["price"])
+                taken.add(eid)
+                continue
+            if self.api.live:
+                if not self.writes_ready(3):      # cancel + take + leftover cancel
+                    self.takes_skipped_budget += 1
+                    log.info("aged take on %s skipped: write budget busy (next cycle)", ex.label)
+                    break
+                try:                              # the cached book may be old: re-check the plan on a fresh one
+                    ex.book = strip_own(self.api.book(eid, self.tid), mine_real.get(eid, []))
+                    ex.book_time = ex.verified = time.monotonic()
+                except ApiError as e:
+                    log.warning("aged take on %s skipped: book download failed (%s)", ex.label, e)
+                    continue
+                again = self.hold_take_plan(inv, book_fvs, now_m, eids=[eid])
+                if not again:
+                    continue
+                p = again[0]
+            self.hold_takes.append((now_m, p["notional"]))     # counted when sent (an IOC may do less: safe side)
+            self.hold_takes_total += 1
+            taken.add(eid)
+            log.warning("%sAGED TAKE %s: held %.1f h -> %s %d YES at %.3f (%.0f of the hourly budget)",
+                        "" if self.api.live else "[dry] ", ex.label, self.age_hours(ex),
+                        "buying" if p["buy"] else "selling", p["qty"], p["price"], p["notional"])
+            if not self.api.live:
+                continue
+            if not self.cancel(eid, [], whole_exchange=True):  # never trade with ourselves
+                continue
+            order = {"exchangeId": eid, "side": "yes", "action": "buy" if p["buy"] else "sell", "quantity": p["qty"],
+                     "price": p["price"], "tournamentId": self.tid,
+                     "expirationDate": iso(utcnow() + timedelta(seconds=cfg.take_order_ttl))}
+            self.orders_stale = True
+            try:
+                results = self.api.place_batch([order])
+            except ApiError as e:
+                if e.code == "WRITE_BUDGET_WAIT":             # never sent (still counted: the budget errs safe)
+                    self.takes_skipped_budget += 1
+                    break
+                ex.pending_until = now_m + cfg.pending_seconds
+                alert(f"aged take on {ex.label} failed ({e}) - check positions")
+                if e.code in FATAL_API_CODES:
+                    fatal(f"orders rejected with {e.code}")
+                continue
+            res = results[0] if results else {}
+            data = res.get("data") or {}
+            if res.get("ok"):
+                self.remember_order(order, data, now_m)
+            self.cancel(eid, [], whole_exchange=True, quiet=True)
+            if data.get("orderId") is not None:
+                self.order_meta[data["orderId"]] = {"our_side": "bid" if p["buy"] else "ask", "price": p["price"],
+                                                    "take": True, "fv": book_fvs.get(eid), "t": time.time(),
+                                                    "eid": eid}
+                self.notes_dirty = True
+        return taken
 
     # ------------------------------------------------------------------------------ fills
     def log_fills(self, fvs):

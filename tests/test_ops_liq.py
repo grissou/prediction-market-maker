@@ -175,6 +175,8 @@ title, msg2 = M.build_summary(api, b.cfg.fills_csv, 100000.0, value=101500.0)
 check("...and is absent without one", want not in msg2)
 api, b = scripted()
 b.ops_last = b.ops_fields(NOW)
+for _k in ("tilt_s", "tilt_exposure"):      # (since the T2.1 merge Bot.__init__ sets them: remove to test the absence)
+    b.__dict__.pop(_k, None)
 check("bot: no tilt attributes -> no tilt part", "tilt" not in (b.summary_ops_line(100000.0) or "x tilt"),
       b.summary_ops_line(100000.0))
 b.tilt_s, b.tilt_exposure = 0.051, 15100.0
