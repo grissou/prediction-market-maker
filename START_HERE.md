@@ -1,6 +1,6 @@
 # START HERE (Team run, branch `claude/run-c-tournament-improvements-pycdet`)
 
-Status: **in progress** (started 2026-10-02 08:50 UTC). **Package 1 READY at 10:10 UTC** (deploy-ready). Base: `claude/live-2026-10-02b` (5c0463a), the code live since 08:34.
+Status: **in progress** (started 2026-10-02 08:50 UTC). **Package 1 READY at 10:10 UTC, Package 2 READY at 11:05 UTC** (deploy-ready, cumulative). Base: `claude/live-2026-10-02b` (5c0463a), the code live since 08:34.
 The Builder's previous START_HERE is kept as `START_HERE_BUILDER.md`; Run A's notes are `ENGINEERING_NOTES.md`.
 Plan: `PLAN.md`. Packages appear below as they become READY (commit messages start "READY: Package N").
 Deploy only commits whose message starts "READY"; the branch is cumulative.
@@ -39,12 +39,38 @@ Checked and found correct: thread-safety of shared state, order recovery vs dupl
   ceiling on positions, all behind settings), Engineer 5 (pair unwinder: sells a long pair when bids sum >= 1, frees ~17k), the
   Strategist's sweeps of R8 headline sizes, R2 strength, age skew, capital ceiling and fast unload with rival bots.
 
-### Package 2 (merged on the branch, NOT yet READY: Reviewer red-team and simulator numbers pending). Code deploy.
-All behind settings. Current defaults (to be confirmed by the Strategist's sweeps): pair unwinder ON, buy-side arbitrage ON
-(ask-sum <= 0.985), race-netted limits ON, age skew ON (0.25c/h after 1 h, max 2c), capital ceiling ON (75% of the account
-in positions -> adding sides withdrawn), thin-book pricing from bulk tops ON + start-up book priming ON, same-side refill
-cooldown ON (2 adding fills / 200 sh in 60 s -> 30 s pause), positions/account_marks recorder ON, favourite-longshot bias OFF.
-Suites after the merges: test_mm_bot 461, test_ref_prices 37, test_strategy 101, test_recorder_refill 37, test_stress 20.
+### Package 2 (READY 11:05 UTC): inventory turnover, capital use, coverage. Code deploy (handover restart). Commit "READY: Package 2".
+Strategy package, every change behind a setting (all live-overridable). Red-teamed by the Reviewer; its fixes are in.
+Suites: test_mm_bot 463, test_ref_prices 37, test_strategy 101, test_recorder_refill 37, test_stress 20; green on Python 3.11 and 3.10.
+Files that change: `mm_bot.py`, `tests/`, `analysis/` (new scripts), `deploy/RUNBOOK.md`; `.gitignore` (position_lots.json). The bot creates
+`position_lots.json` and the new recorder tables itself. Includes Package 1.
+
+| Change (default) | Mechanism | Evidence | Settings |
+|---|---|---|---|
+| **Pair unwinder (ON)** | we hold YES on every leg of a race (n complete sets): when other traders' bids sum to >= 1.005, sell up to n sets at the bids (10 s orders); mirror for short sets at asks <= 0.995. Runs in reduce-only too (it only shrinks). | 17,675 pair-shares held (7,335 x 2 U.S. Senate control): ~17% of the account earning nothing; U.S. Senate bid-sum >= 1.000 in 16% of snapshots. Riskless by construction; worth ~+50 in profit and ~17k of freed capital over days | `pair_unwind_enabled`, `_min_profit` 0.005, `_max_frac` 0.01, `_cooldown_seconds` 30 |
+| **Buy-side arbitrage (ON, flagged)** | asks of all legs sum to <= 0.985 AND our fair values sum to >= 0.9925 -> buy every leg (a set pays 1); the unwinder sells it back when bids reach 1.005 | ask-sum < 0.98 in 853 race-minutes/day (the live sell-side arb at 3c fired 0 times). Upper-end estimate +600-1,200/day; snapshot sums may include stale prices, so watch the fill logs | `arb_two_sided`, `arb_min_profit_buy` 0.015, `arb_buy_min_sum` 0.90 |
+| **Race-netted limits (ON)** | position limits and the Kelly cap also apply to the race-netted exposure on the side that grows it (a short Rep leg counts toward the Dem leg) | long 10,834 Dem House AND short 9,396 Rep House = the same ~20k bet twice under per-market limits of ~10k | `limits_use_race_net` |
+| **Age skew (ON)** | a position's share-weighted age (FIFO lots, persisted; rebuilt from fills.csv on first start) adds 0.25c of skew per hour held beyond 1 h, max 2c, toward unloading; never through fair | median held share 7.2 h old; 54% > 3 h; round trips were the whole realised profit, open lots gave their edge back | `skew_age_enabled`, `skew_age_after_hours` 1, `skew_age_per_hour` 0.0025, `skew_age_max` 0.02 |
+| **Capital ceiling (ON, flagged)** | when capital in positions > 75% of the account (the API's totalMarketValue, else our own valuation), every ADDING side quotes at a quarter size; reducing sides unchanged; off again below 70% | 90.5k of 101k tied up, 11k cash. **The ceiling will be ON at deploy**: adding sides shrink to 25% until positions turn over. Deliberate (owner's priority); lower/raise `capital_ceiling_adding_size_factor` live if coverage or fills drop too far | `capital_in_positions_max_frac` 0.75, `capital_ceiling_adding_size_factor` 0.25 |
+| **Thin-book pricing from bulk tops + start-up priming (ON)** | R5 may price from the bulk best bid/ask (3 requests for all markets) when no fresh book exists; our own order at the top blanks that side; on a (re)start books download first (60/cycle, 45/min) | after the 08:08 restart coverage rose 30 -> 101 in 6 min with 138 eligible markets waiting; scenario cold start: quoted at 2 min 17% -> 80-85% | `ref_only_use_tops`, `tops_max_age` 120, `startup_books_first`, `startup_prime_*` |
+| **Same-side refill cooldown (ON)** | 2 adding fills (>= 200 sh) on one side within 60 s -> that side withheld 30 s; reducing side exempt | 3rd+ fills in same-side runs: -1.15c on 81k shares (-936); mostly day one's skew bug, so this is cheap insurance | `refill_cooldown_*` |
+| **Mark recorder (ON)** | `positions` (quantity, currentPrice, all numeric fields) and `account_marks` tables, no extra requests; `analysis/mark_rule.py` fits the exchange's valuation rule | the exchange marks at a trade average (30-min VWAP or last ~5 trades fit); pins the rule for risk and rank accounting | `record_positions` |
+| **Favourite-longshot bias (OFF)** | wider, smaller "bad side" below 20c / above 80c | the apparent -0.5c was day one's skew quoting through fair value, not longshot flow (DATA_REPORT_2 §10c) | `fl_bias_enabled` False |
+| **Reviewer fixes** | capital ceiling factor 0 -> 0.25; buy-side arb fair-value-sum guard; unwinder margin/cap; zero-fill 4x cooldown; priming reserve; carried tops expire; positions rows only on quantity/mark changes | red-team of the merged diff | - |
+
+Parameter-only change shipped with this package (optional, revertible in 30 s via settings_override.json): `{"ref_weight": 0.8}`.
+Simulator (128 seeds, recalibrated to day two): ref_weight 0.85 +17 ± 6/h quiet, +20 ± 8/h news on a +499/h base, peak worst case +0.35k; the simulator
+treats Polymarket as the truth, so this is an upper bound; 0.8 is the conservative step (medium confidence). Everything else the Strategist swept stays:
+improve_ticks 0 loses -17 ± 6 (keep pennying), kelly 0.15 loses -22 ± 6, min_edge/max_half_spread/skew/size/write/churn changes are noise.
+
+Deploy: `deploy/RUNBOOK.md` section B (handover restart). Rollback: section C, or switch any single feature off via settings_override.json.
+Watch in the first 10 minutes: (1) status.json `capital_in_positions_frac` and `capital_ceiling_active`: active is expected; if resting orders fall by
+more than 40%, set `capital_ceiling_adding_size_factor` 0.5 live; (2) "PAIR UNWIND" / "ARBITRAGE ... buy" lines and the following "every leg filled N":
+N = 0 repeating on one race, or a buy in a two-leg race whose fair values do not sum to ~1 -> set `arb_two_sided` false; (3) `markets_priced_from_tops`
+and `books_loaded` climbing during priming, `rate_limited_total` 0; (4) "refill cooldown" lines rare and never on a side whose position has the
+opposite sign; (5) `position_lots.json` written, `portfolio_age_hours` plausible (not 0 with positions, not > 48 h), quote lines showing "age Nh".
+Owner flags: pair unwinder, buy-side arbitrage and the capital ceiling are new behaviour ON by default (data evidence, riskless or strictly
+risk-reducing by construction); ref_weight 0.8 is a parameter step on simulator evidence only.
 
 ## Parameter changes (cumulative against live)
 | Setting | Live | New | Evidence | Expected effect |
@@ -58,6 +84,13 @@ Suites after the merges: test_mm_bot 461, test_ref_prices 37, test_strategy 101,
 | burst_startup_grace_seconds (new) | - | 90 | 08:08 restart tripped burst | normal sizes after a restart |
 | take_ref_max_age_seconds (new) | - | 30 | Engineer 1 task 4 | no takes on a stale Polymarket price |
 | handover_exit_max_seconds (new) | - | 150 | audit #6 | a handover never hangs |
+| ref_weight | 0.7 | 0.8 (override snippet) | Strategist sweep, 128 seeds: 0.85 +17 ± 6 / +20 ± 8 per h; upper bound | slightly more edge, +0.35k peak worst case |
+| capital_in_positions_max_frac (new) | - | 0.75 (factor 0.25) | owner: 90% in positions | adding sides at quarter size until positions turn over |
+| skew_age_* (new) | - | 0.25c/h after 1 h, max 2c | median age 7.2 h | faster unloading of old positions |
+| pair_unwind_* / arb_two_sided (new) | - | on | 17.7k paired capital; ask-sum < 0.98 in 2.5% of race-minutes | capital freed; small riskless gains |
+| ref_only_use_tops / startup_books_first (new) | - | on | coverage 30 -> 101 in 6 min after restart | ~190 priced within 2 min of a restart |
+| refill_cooldown_* (new) | - | on | -936 on 3rd+ same-side fills | fewer walks against us |
+| fl_bias_enabled (new) | - | off | §10c: a skew artefact | none |
 
 ## Packages
 
