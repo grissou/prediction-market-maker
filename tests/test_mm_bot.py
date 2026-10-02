@@ -1666,6 +1666,38 @@ try:
 finally:
     M.log.removeHandler(grab); M.log.setLevel(real_level); M.log.propagate = real_prop
 
+# F6: a handover stop that hasn't exited within handover_exit_max_seconds exits at once (exit 0), so the deploy
+# script can start the new bot; never when it stopped being a handover (plain stop, kill switch) since.
+def handover_exits(setup):
+    a, b = make_bot()
+    exits = []
+    b.hard_exit = exits.append
+    b.cfg.handover_exit_max_seconds = 0.05
+    setup(b)
+    if b.handover_timer:
+        b.handover_timer.join(2)
+    return exits, b
+logging.disable(logging.CRITICAL)
+try:
+    exits, b = handover_exits(lambda b: b.request_handover())
+    check("F6: a handover still running after handover_exit_max_seconds exits at once with code 0", exits == [0], exits)
+    exits, b = handover_exits(lambda b: (b.request_handover(), b.request_handover()))
+    check("F6: ...one deadline per handover (a second SIGUSR1 doesn't start another)", exits == [0], exits)
+    exits, b = handover_exits(lambda b: (b.request_handover(), b.request_stop()))
+    check("F6: ...never after a plain stop (that one must cancel; systemd bounds it)", exits == [], exits)
+    def killed(b):
+        b.request_handover(); b.exit_code = M.EXIT_KILLED
+    exits, b = handover_exits(killed)
+    check("F6: ...never after the kill switch fired (it must cancel)", exits == [], exits)
+    def no_cap(b):
+        b.cfg.handover_exit_max_seconds = 0; b.request_handover()
+    exits, b = handover_exits(no_cap)
+    check("F6: handover_exit_max_seconds = 0: no deadline (the old behaviour)", exits == [] and b.handover_timer is None)
+finally:
+    logging.disable(logging.NOTSET)
+check("F6: the handover deadline is a live setting with a range", "handover_exit_max_seconds" in OVERRIDABLE
+      and _live.handover_exit_max_seconds == 150.0)
+
 print("--- parallel requests")
 a, b = make_bot()
 res = b.in_parallel(lambda x: 1 / x, [1, 0, 2])

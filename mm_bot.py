@@ -402,6 +402,12 @@ class Config:
     handover_file: str = "handover.json"        # written by a handover stop (SIGUSR1): the next start adopts the
     handover_max_age: float = 300.0             #   orders left resting instead of cancelling them, if within this
                                                 #   many seconds (else: clean slate as usual)
+    handover_exit_max_seconds: float = 150.0    # a handover stop that hasn't exited this long after SIGUSR1 exits at
+                                                #   once (exit 0): finishing the cycle, the 60 s write drain, then
+                                                #   queued writes on the writer threads (each up to ~4 x 15 s plus the
+                                                #   write-budget wait) had no bound. Writes still running are
+                                                #   abandoned: the next run re-reads the open-orders list (and without
+                                                #   a handover file starts from a clean slate). 0 = no cap
     record_file: str = "market_data.sqlite"     # snapshots for tuning later ("" = off)
     record_seconds: float = 60.0          # one snapshot of every market this often (~15 MB a day)
     record_books: bool = True             # also record OTHER traders' top book levels (with sizes) whenever a downloaded
@@ -447,6 +453,7 @@ OVERRIDABLE = {
     "churn_count_sent": (False, True),
     "positions_stale_max_cycles": (0, 100),
     "positions_stale_max_seconds": (0.0, 3600.0),
+    "handover_exit_max_seconds": (0.0, 600.0),
 }
 
 
@@ -1853,6 +1860,7 @@ class Bot:
         self.cycle_started, self.cycle_alerted = None, False
         self.last_analysis_day = None
         self.handover = False             # SIGUSR1: stop without cancelling (see request_handover)
+        self.handover_timer = None        # ...and its exit deadline (see handover_deadline)
         self.last_progress_write, self.last_slow_alert = -1e9, -1e9
         self.defaults = {k: getattr(cfg, k) for k in OVERRIDABLE}   # what a removed override goes back to
         self.overrides, self.overrides_mtime, self.last_overrides_check = {}, None, -1e9
@@ -3662,6 +3670,28 @@ class Bot:
         log.info("handover requested - stopping without cancelling; the next start adopts the resting orders")
         self.handover = True
         self.running = False
+        cap = self.cfg.handover_exit_max_seconds
+        if cap > 0 and self.handover_timer is None:
+            self.handover_timer = threading.Timer(cap, self.handover_deadline, args=(cap,))
+            self.handover_timer.daemon = True
+            self.handover_timer.start()
+
+    def handover_deadline(self, cap):
+        """Timer thread, handover_exit_max_seconds after a handover request: if the process is still here, exit
+        now, so the deploy script (which waits for the old bot to stop) can start the new one. Only while it is
+        still a handover (a plain stop or the kill switch since then must cancel; they're never cut short)."""
+        if not (self.handover and self.exit_code == 0):
+            return
+        log.error("handover: still running %.0f s after the request - exiting now (writes still in flight are "
+                  "abandoned; the next run re-reads the open-orders list)", cap)
+        for h in logging.getLogger().handlers + log.handlers:
+            try:
+                h.flush()
+            except Exception:
+                pass
+        self.hard_exit(0)
+
+    hard_exit = staticmethod(os._exit)    # no interpreter clean-up: it would wait for the writer threads
 
     def adopt_handover(self):
         """At start: True if the previous run handed over recently (its orders are ours to manage, not cancel)."""
