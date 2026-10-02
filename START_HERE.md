@@ -1,8 +1,8 @@
 <!-- STATUS (Finisher 2b, updated on every push) -->
-**STATUS 22:35 UTC 3 Oct (-1 day: 2 Oct):** phase = Package 5 build/measure (not READY). READY so far: nothing new (Package 4 c29f762 is the last READY).
-Key numbers: T2.1 `ref_tilt_enabled` +163 ± 60 at liquidation (8 x 3 quiet), +761 ± 160 (6 x 6 news), +129 ± 190 pinned; T2.1 + backstop 0.85 pinned +311 ± 130; A, B, T2.2, T2.4, C, T2.5 not positive.
-Next: ramp-in (`ref_tilt_rampin_min` 120) merged; confirmations 16 x 6 (free and pinned worlds), tilt-cap test in a high-tilt world, first-2-hour unwind measurement, X5/X11 screens.
-ETA: READY: Package 5 about 03:00 UTC 3 Oct; then Package 6 cycle on a new branch (research to ~05:30, implementation to ~07:45).
+**STATUS 23:58 UTC 2 Oct:** phase = Package 5 confirmations running (not READY yet; code frozen except fixes). READY so far: Package 4 (c29f762).
+Key numbers (judge: exchange-style mark / liquidation): T2.1 `ref_tilt_enabled` +166 ± 72 / +163 ± 60 (8 x 3 quiet), +670 ± 180 / +761 ± 160 (news), pinned +98 ± 140 / +129 ± 190; T2.1 + backstop 0.85 pinned +285 ± 130 / +311 ± 130. Ramp-in not needed (default 0); `ref_tilt_max` 0.20. A, B, C, T2.2, T2.4, T2.5, X5, X11, ladder: not positive, OFF.
+Next: pinned 16 x 6 (T2.1 / +0.85 / +hysteresis 0.01), free 16 x 6, C/T2.5 re-screen, calibrated growth, pinned X5/X11; then START_HERE write-up, STRESS_LADDER run, READY commit, draft PR.
+ETA: READY: Package 5 ~04:00 UTC 3 Oct; Package 6 cycle (branch claude/finisher-package6: reduce-only exit quoting, backstop soft band) after that, research to ~06:30, implementation to ~08:45.
 
 # START HERE (Team run, branch `claude/run-c-tournament-improvements-pycdet`)
 
