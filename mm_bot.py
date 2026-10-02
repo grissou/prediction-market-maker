@@ -158,6 +158,19 @@ class Config:
                                           #   usual, until it is back below this - 0.05. 2 Oct: 90.5k of 101k sat in
                                           #   positions, 11k cash left to quote with. 0 = off
     capital_ceiling_adding_size_factor: float = 0.25  # ...0 = adding side not quoted at all, 0.5 = half size
+    mark_frag_enabled: bool = False       # mark-fragility cap (sizing only): a position's mark noise = |position| x sd
+                                          #   of the 10-min change of the tournament mid (recorder snapshots). The
+                                          #   ADDING side's position limit = max(one quote, mark_frag_max_step_cash / sd).
+                                          #   1 Oct snapshot: 1,186 $ per 10-min step over 159 positions, RI Senate legs
+                                          #   200 and 181 alone (analysis/mark_fragility.py). Off until checked on live
+                                          #   data; the numbers are in status.json either way (mark_frag_*)
+    mark_frag_max_step_cash: float = 100.0  # ...at most this many $ of mark noise per 10-min step from one position
+    mark_frag_window_hours: float = 24.0  # ...sd over the last this many hours of snapshots (refreshed every 30 min)
+    mark_frag_min_samples: int = 60       # ...fewer 10-min changes than this in the window -> no estimate, no cap
+    mark_frag_floor_sd: float = 0.002     # ...an sd below 0.2c counts as 0.2c, so the limit never explodes
+    mark_frag_total_max_cash: float = 2000.0  # ...sum over positions of |pos| x sd above this -> every adding side
+                                          #   withdrawn (like the capital ceiling at factor 0) until below 80% of it.
+                                          #   Only with mark_frag_enabled. 0 = no total cap
     max_order_cash_frac: float = 0.01     # max cash tied up in a single order: 1,000 at 100k
     tail_low: float = 0.05                # fair value below this: don't SELL YES (risks ~95c a share to earn ~1c)...
     tail_high: float = 0.95               # ...above this: don't BUY YES. Either side still allowed to shrink a position
@@ -666,6 +679,12 @@ OVERRIDABLE = {
     "reduce_join_min_shares": (0, 100000),
     "market_edge_enabled": (False, True),
     "market_edge_max": (0.005, 0.05),
+    "mark_frag_enabled": (False, True),
+    "mark_frag_max_step_cash": (1.0, 100000.0),
+    "mark_frag_window_hours": (1.0, 168.0),
+    "mark_frag_min_samples": (2, 100000),
+    "mark_frag_floor_sd": (0.0005, 0.10),
+    "mark_frag_total_max_cash": (0.0, 1000000.0),
 }
 
 
@@ -1648,11 +1667,44 @@ def fl_side(fv, prev, cfg=CFG):
     return None, 0.0, 1.0
 
 
+MARK_FRAG_STEP_SECONDS = 600.0       # the mark-fragility step: 10 minutes
+MARK_FRAG_MAX_STEP_FACTOR = 1.5      # two snapshots further apart than 15 min are a gap, not a step
+
+
+def mark_step_changes(series, step=MARK_FRAG_STEP_SECONDS, max_factor=MARK_FRAG_MAX_STEP_FACTOR):
+    """series = [(seconds, mid)] oldest first -> the mid's changes over ~step seconds: each point paired with the
+    first point at least `step` later, if that one is at most step x max_factor later (overlapping pairs)."""
+    out, j, n = [], 0, len(series)
+    for i in range(n):
+        t0, m0 = series[i]
+        j = max(j, i + 1)
+        while j < n and series[j][0] < t0 + step:
+            j += 1
+        if j < n and series[j][0] <= t0 + step * max_factor:
+            out.append(series[j][1] - m0)
+    return out
+
+
+def mark_step_sd(series, min_samples=60, floor=0.002, step=MARK_FRAG_STEP_SECONDS):
+    """Mark-fragility estimator: sd of the 10-min change of one market's mid, at least `floor`; None with fewer
+    than min_samples changes (no estimate -> no cap)."""
+    ch = mark_step_changes(series, step)
+    if len(ch) < max(2, min_samples):
+        return None
+    mean = sum(ch) / len(ch)
+    return max(math.sqrt(sum((c - mean) ** 2 for c in ch) / (len(ch) - 1)), floor)
+
+
+def mark_frag_limit(sd, cfg, quote_size):
+    """The adding side's position limit from the mark-fragility cap: max_step_cash / sd, never below one quote."""
+    return max(cfg.mark_frag_max_step_cash / sd, quote_size or 0.0)
+
+
 def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=False, no_bid=False, no_ask=False,
                   bid_cap=None, ask_cap=None, kelly_p=None, bankroll=None, shift=0.0, order_size=None,
                   position_limit=None, min_edge=None, reduce_size=None, net_inv=None, age_hours=0.0,
                   adding_factor=1.0, bias_side=None, bias_edge=0.0, bias_size=1.0, unload_side=None,
-                  unload_edge=0.0, unload_size=None):
+                  unload_edge=0.0, unload_size=None, frag_limit=None):
     """
     fv         fair YES probability
     inv        our net YES shares on THIS exchange (negative = net NO); drives the hard position limit
@@ -1682,6 +1734,8 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
     unload_side        "bid" / "ask" / None: fast unload window (see Bot.note_unloads). That side, if it shrinks this
                        exchange's position, quotes unload_edge from fv (or closer, if the skews already put it
                        there), never crossing the best other order, at unload_size shares capped by the position
+    frag_limit         mark-fragility cap (Bot.mark_frag_limit_for): limit on |this exchange's position| on the side
+                       that GROWS it only (bid when inv >= 0, ask when inv <= 0); the shrinking side is untouched
     """
     bankroll = bankroll or DEFAULT_BANKROLL
     max_order_cash = cfg.max_order_cash_frac * bankroll
@@ -1788,6 +1842,11 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
             bid_size = min(bid_size, long_limit - net)
         elif net < 0:
             ask_size = min(ask_size, short_limit + net)
+    if frag_limit is not None:                # mark-fragility cap: only the side growing |inv| here
+        if inv >= 0:
+            bid_size = min(bid_size, frag_limit - inv)
+        if inv <= 0:
+            ask_size = min(ask_size, frag_limit + inv)
     bid_size = min(bid_size, max_order_cash / bid)          # buying YES costs `bid` a share
     ask_size = min(ask_size, max_order_cash / (1 - ask))    # selling YES = buying NO at 1-ask
     if unload_bid and unload_size is not None:              # only what it holds: never flips the position
@@ -1999,6 +2058,12 @@ def build_summary(api, fills_path, initial_balance, value=None, value_prev=None,
                          f"> 3h, {health.get('positions_over_12h', 0)} > 12h), capital in positions "
                          + (f"{100 * frac:.0f}%" if frac is not None else "?")
                          + (" - CEILING: adding sides cut" if health.get("capital_ceiling_active") else ""))
+        if health.get("mark_frag_estimates"):
+            top = next(iter((health.get("mark_frag_top") or {}).items()), None)
+            lines.append(f"Mark noise: {health['mark_frag_total_cash']:,.0f} $ per 10 min, "
+                         f"{health.get('mark_frag_capped_markets', 0)} positions at the cap"
+                         + (f", biggest {top[0]} {top[1]:,.0f}" if top else "")
+                         + (" - TOTAL CAP: adding sides withdrawn" if health.get("mark_frag_total_cap_active") else ""))
     return title, "\n".join(lines)
 
 
@@ -2239,6 +2304,9 @@ class Bot:
         self.lots_seeded = False          # first reconcile rebuilds missing ones from fills.csv
         self.lots_dirty = False
         self.capital_over = False         # capital ceiling active (capital_in_positions_max_frac)
+        self.mark_sd = {}                 # eid -> sd of the 10-min mid change (mark_frag_*; from the recorder)
+        self.mark_sd_time = -1e9          # monotonic time of the last estimate (refreshed every MARK_SD_REFRESH_SECONDS)
+        self.mark_frag_over = False       # mark-fragility total cap active (mark_frag_total_max_cash)
         self.notes_dirty = False
         self.exit_code = 0                # what the process exits with (see EXIT_* codes)
         self.health = {}                  # latest cycle summary, written to status.json
@@ -2602,6 +2670,8 @@ class Bot:
         capital = self.capital_in_positions(pos, inv, fvs)
         cap_frac = capital / equity if equity else None
         self.update_capital_ceiling(cap_frac, cfg)
+        self.refresh_mark_sd(now_m)
+        frag = self.update_mark_frag(inv, cfg)
         ages = self.portfolio_age(time.time())
         if full:                                  # summary line on full checks only (event cycles can be every 2 s)
             log.info("%s | account %s (locked in orders %.0f, %s) | worst-case loss %.0f (risk %.0f)%s | party delta %+.0f | "
@@ -2637,6 +2707,7 @@ class Bot:
                        "capital_ceiling_active": self.capital_over,
                        "portfolio_age_hours": round(ages[0], 2), "positions_over_3h": ages[1],
                        "positions_over_12h": ages[2],
+                       **frag,
                        "positions": {self.ex[e].label: q for e, q in inv.items() if q and e in self.ex}}
 
         self.health.update(books_loaded=self.books_loaded(), markets_priced_from_tops=len(self.ref_tops))
@@ -3202,6 +3273,66 @@ class Bot:
             total += abs(q) * (p if q > 0 else 1 - p)
         return total
 
+    MARK_SD_REFRESH_SECONDS = 1800.0
+
+    def refresh_mark_sd(self, now_m, force=False):
+        """Mark-fragility estimator, every 30 min (and at the first cycle): per market, the sd of the 10-min change
+        of the tournament mid over the last mark_frag_window_hours of the recorder's snapshots (one SQL). Main
+        thread, like the recorder's writes. No recorder, or too few samples -> no estimate for that market."""
+        if not self.db or (not force and now_m - self.mark_sd_time < self.MARK_SD_REFRESH_SECONDS):
+            return
+        self.mark_sd_time = now_m
+        cfg = self.cfg
+        cutoff = iso(utcnow() - timedelta(hours=cfg.mark_frag_window_hours))
+        try:
+            rows = self.db.execute(
+                "SELECT eid, ts, best_bid, best_ask FROM snapshots WHERE mode = ? AND ts >= ? "
+                "AND best_bid IS NOT NULL AND best_ask IS NOT NULL ORDER BY eid, ts",
+                ("live" if self.api.live else "dry", cutoff)).fetchall()
+        except sqlite3.Error as e:
+            log.warning("mark fragility: could not read snapshots (%s) - keeping the previous estimate", e)
+            return
+        secs, series = {}, defaultdict(list)
+        for eid, ts, bb, ba in rows:
+            t = secs.get(ts)
+            if t is None:
+                try:
+                    t = secs[ts] = parse_ts(ts).timestamp()
+                except (TypeError, ValueError):
+                    continue
+            series[str(eid)].append((t, (float(bb) + float(ba)) / 2))
+        est = {}
+        for eid, ser in series.items():
+            sd = mark_step_sd(ser, cfg.mark_frag_min_samples, cfg.mark_frag_floor_sd)
+            if sd is not None:
+                est[eid] = sd
+        self.mark_sd = est
+        log.info("mark fragility: sd of the 10-min mid step for %d of %d markets (%d snapshot rows, %g h)",
+                 len(est), len(series), len(rows), cfg.mark_frag_window_hours)
+
+    def update_mark_frag(self, inv, cfg):
+        """Sum over positions of |pos| x sd (mark noise in $ per 10-min step), the total cap with hysteresis (on above
+        mark_frag_total_max_cash, off below 80% of it; only with mark_frag_enabled) and the status.json fields."""
+        steps = {e: abs(q) * self.mark_sd[e] for e, q in inv.items() if q and e in self.mark_sd}
+        total = sum(steps.values())
+        cap = cfg.mark_frag_total_max_cash
+        if not cfg.mark_frag_enabled or cap <= 0:
+            on = False
+        elif self.mark_frag_over:
+            on = total >= 0.8 * cap
+        else:
+            on = total > cap
+        if on != self.mark_frag_over:
+            log.warning("%s mark-fragility cap: positions add %.0f $ of mark noise per 10 min (cap %.0f) - adding sides %s",
+                        "ENTERING" if on else "leaving", total, cap, "withdrawn" if on else "back to normal")
+        self.mark_frag_over = on
+        top = sorted(steps.items(), key=lambda kv: -kv[1])[:10]
+        return {"mark_frag_total_cash": round(total, 2),
+                "mark_frag_top": {(self.ex[e].label if e in self.ex else e): round(c, 2) for e, c in top},
+                "mark_frag_capped_markets": sum(1 for c in steps.values() if c >= cfg.mark_frag_max_step_cash),
+                "mark_frag_estimates": len(self.mark_sd),
+                "mark_frag_total_cap_active": on}
+
     def update_capital_ceiling(self, frac, cfg):
         """Capital ceiling on above capital_in_positions_max_frac, off again below it - 0.05; each change logged once.
         An unknown account value keeps the current state."""
@@ -3319,6 +3450,14 @@ class Bot:
             edge = own if edge is None else max(edge, own)
         ex.age = self.age_hours(ex)
         adding = cfg.capital_ceiling_adding_size_factor if self.capital_over else 1.0
+        frag_limit = None
+        if cfg.mark_frag_enabled:                 # mark-fragility cap: the adding side's limit, and the total cap
+            if self.mark_frag_over:
+                adding = 0.0
+            sd = self.mark_sd.get(ex.eid)
+            if sd:
+                frag_limit = mark_frag_limit(sd, cfg, planned if planned is not None
+                                             else cfg.order_size_frac * self.bankroll())
         side, bias_edge, bias_size = fl_side(fv, ex.fl_side, cfg)
         ex.fl_side, tag = side, side
         side = "bid" if side == "mid" else side       # mid band: an optional extra edge on bids, full size
@@ -3331,7 +3470,8 @@ class Bot:
                              shift=self.party_shift(ex, party_delta), order_size=planned, position_limit=headline_limit,
                              min_edge=edge, reduce_size=reduce_size, net_inv=ex.eff, age_hours=ex.age,
                              adding_factor=adding, bias_side=side, bias_edge=bias_edge, bias_size=bias_size,
-                             unload_side=u_side, unload_edge=cfg.fast_unload_edge, unload_size=u_size)
+                             unload_side=u_side, unload_edge=cfg.fast_unload_edge, unload_size=u_size,
+                             frag_limit=frag_limit)
 
     def update_size_plan(self, now_m, fvs):
         """Every size_plan_seconds: work out how many shares to quote in each market (see plan_sizes).
