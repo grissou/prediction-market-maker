@@ -223,8 +223,8 @@ M.log.propagate = True
 
 print("--- reduce_join_best: the reducing side joins the best")
 c = M.Config()
-check("defaults: on, 0c from fair, from 100 shares",
-      (c.reduce_join_best, c.reduce_join_min_edge, c.reduce_join_min_shares) == (True, 0.0, 100))
+check("defaults: on, 0.5c from fair at the closest (the simulator showed edge/share 1.27c -> 1.14c at 0c), from 100 shares",
+      (c.reduce_join_best, c.reduce_join_min_edge, c.reduce_join_min_shares) == (True, 0.005, 100))
 good, bad = M.validate_overrides({"reduce_join_best": False, "reduce_join_min_edge": 0.005,
                                   "reduce_join_min_shares": 500}, c)
 check("join settings are live-overridable", len(good) == 3 and not bad, bad)
@@ -242,7 +242,8 @@ check("long 1,000, best ask 0.505: our ask 0.505 at the normal reducing size", (
 q, q0 = jq(1000, 0.45, 0.52), jq(1000, 0.45, 0.52, off)
 check("best ask 0.52: join at 0.52 (today: pennies to 0.515)", q.ask == 0.52 and q0.ask == 0.515, (q, q0))
 check("...the adding side (bid) unchanged", (q.bid, q.bid_size) == (q0.bid, q0.bid_size), (q, q0))
-check("best ask 0.495 (through fair): ours at fair rounded away, 0.50", jq(1000, 0.45, 0.495).ask == 0.50)
+check("best ask 0.495 (through fair): ours at the 0.5c floor from fair, 0.505", jq(1000, 0.45, 0.495).ask == 0.505)
+
 check("best bid 0.50, best ask 0.505: never crosses, ask 0.505", jq(1000, 0.50, 0.505).ask == 0.505)
 check("best bid 0.50, best ask 0.49 (crossed): still not a take, ask 0.505", jq(1000, 0.50, 0.49).ask == 0.505)
 check("reduce_join_min_edge 0.01, best ask 0.505: at fv + 1c",

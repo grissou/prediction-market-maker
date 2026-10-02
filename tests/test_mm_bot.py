@@ -2338,7 +2338,8 @@ _qb = compute_quote(0.50, 400, 400, None, None, _c, order_size=100, age_hours=30
 check("age skew: added after the inventory cap (2c + 2c = 4c lower bid), ask never below fair value",
       _qb.bid == 0.42 and _qb.ask == 0.50, _qb)
 _qs = compute_quote(0.50, -400, -400, 0.52, None, _c, order_size=100, age_hours=30.0)
-check("age skew: an old short bids at most fair value (would penny 0.525)", _qs.bid == 0.50, _qs)
+check("age skew: an old short bids at most fair value (would penny 0.525; the joining reducing side sits 0.5c under fair)",
+      _qs.bid <= 0.50 + 1e-9 and _qs.bid >= 0.495 - 1e-9, _qs)
 _c.skew_age_enabled = False
 check("age skew disabled = today's quote", compute_quote(0.50, 50, 50, None, None, _c, order_size=100, age_hours=30.0) == _q0)
 _c.skew_age_enabled = True
