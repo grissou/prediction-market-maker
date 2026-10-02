@@ -187,3 +187,181 @@ Simulator-suggested parameters: offsets 1.5/2.5/3.5c (2/3.5/5c is as good: +46 v
 `_share` (share of writes_per_minute), `_rival_inv` (0 = rivals without inventory caps), `_ladder` (1 or a dict of
 LADDER changes), `_rival_aware` (step, price units). `SIM_CAL=day1` = the Builder's calibration.
 Runtime: ~1.5 s per seed-hour per core. Use >= 32 seeds; 128 when |Δ| < 2 se.
+
+# Round 2: inventory turnover and capital (on 21523e8: age skew, capital ceiling, race-net limits, fl-bias)
+
+## What changed in the simulator
+- `compute_quote` now gets `net_inv` (= inv), `age_hours` (share-weighted age of FIFO lots of our fills, as
+  `Bot.age_hours`) and `adding_factor` (`capital_ceiling_adding_size_factor` while the capital fraction is over
+  `capital_in_positions_max_frac`).
+- Capital fraction = (`_bg_cap` + our positions here) / 100k. `_bg_cap` stands for the other ~225 markets'
+  positions (default 60k). At 60k, free cash = 100k − 60k − positions (~9k) − cash in level-0 orders (~20k) ≈ 11k,
+  the live figure. Live positions are 90k, but at bg 70k+ the 0.75 ceiling already binds, see (d).
+- **Lagged mark** (`pnl_lag`) = cash + inventory × VWAP of every trade in that market over the last 30 min (last trade
+  if none): a proxy for the exchange's `currentPrice`. **Position age**: share-weighted median age of held shares
+  at the end. "cap" = peak cash in our positions here / peak capital fraction.
+- Prototypes: `_fast_unload` (after our fill with >= 2c edge, the reducing side at fv −/+ 0.5c for 300 s, size = the
+  fill, only if better than the normal quote), `_lad_gate` (ladder only while free cash >= x × account).
+- Note: the age skew cannot act in 1 h runs (it starts after 1 h): use the 3 h table for (c).
+
+## 1 h, 32 seeds (ΔP&L/h vs live defaults; base quiet +501 ± 39 (lagged mark +329), news +419 ± 27 (+221); cap 9.2k / 0.69; age 0.5 h)
+
+| Variant | ΔP&L q | Δlag q | ΔP&L n | Δlag n | cap q | age q | Verdict |
+|---|---|---|---|---|---|---|---|
+| (a) headline 0.05 | **-56 ± 18** | **-56 ± 16** | -33 ± 17 | -19 ± 15 | 7.8k | 0.49 | real loss; -1.4k capital |
+| headline 0.03 | **-115 ± 22** | **-96 ± 21** | **-70 ± 22** | -40 ± 18 | 6.7k | 0.46 | real loss |
+| size_max 0.01 | -14 ± 13 | -12 ± 14 | +22 ± 19 | +20 ± 16 | 8.7k | 0.46 | noise |
+| headline 0.05 + size_max 0.01 | -68 ± 18 | -57 ± 19 | +1 ± 19 | +5 ± 15 | 7.5k | 0.44 | loss (quiet) |
+| headline 0.03 + size_max 0.01 | -121 ± 20 | -99 ± 22 | -58 ± 21 | -26 ± 19 | 6.2k | 0.41 | real loss |
+| (b) skew_per_quote 0.0075 | -16 ± 11 | -22 ± 13 | -1 ± 14 | -2 ± 10 | 8.7k | 0.46 | noise |
+| skew_per_quote 0.01 | -35 ± 12 | -25 ± 15 | -3 ± 13 | -4 ± 13 | 8.1k | 0.48 | slight loss (quiet) |
+| (c) age skew off / 0.005 per hour | 0 | 0 | 0 | 0 | | | no positions older than 1 h in 1 h runs |
+| (e) fast unload | -10 ± 9 | -9 ± 12 | +1 ± 8 | 0 ± 9 | 9.2k | 0.48 | noise |
+| (f) ref_weight 0.8 | +17 ± 13 | +15 ± 15 | **+52 ± 19** | **+41 ± 15** | 9.9k | 0.49 | gain in news only (1 h) |
+| ref_weight 0.85 | +22 ± 17 | +16 ± 21 | +31 ± 15 | +21 ± 11 | 9.5k | 0.50 | weak gain (1 h), but see 3 h |
+| (d) bg 60k: ceiling off / 0.90 | 0 | 0 | 0 | +1 ± 1 | 9.2k / 0.69 | | 0.75 never binds at bg 60k |
+| bg 60k: ceiling 0.60 (factor 0) | **-459 ± 38** | **-301 ± 38** | **-356 ± 26** | **-175 ± 30** | 0.8k / 0.61 | 0.74 | stops all adding quotes: -90% volume |
+| bg 60k: ceiling 0.60, factor 0.5 | -69 ± 15 | -51 ± 14 | -17 ± 13 | -7 ± 14 | 7.9k / 0.68 | 0.50 | half size on the adding side costs far less |
+| bg 70k base (ceiling 0.75 binds) | (+370 ± 33, lag +248) | | (+286 ± 22, lag +155) | | 6.6k / 0.77 | | the live default is a cliff |
+| bg 70k: ceiling off / 0.90 | **+131 ± 21** | **+80 ± 21** | **+134 ± 21** | **+67 ± 18** | 9.2k / 0.79 | | the 0.75 ceiling costs ~26% of P&L when it binds |
+| bg 70k: factor 0.5 | **+92 ± 17** | **+49 ± 15** | **+102 ± 19** | **+60 ± 16** | 8.4k / 0.78 | | recovers ~70% of that |
+| bg 70k: ceiling 0.60 | -370 | -248 | -286 | -155 | 0 | | no quoting at all |
+| (g) ladder 1.5/2.5/3.5c, no gate | +17 ± 14 | +9 ± 18 | **+43 ± 15** | **+29 ± 14** | 9.7k | 0.51 | gain in news; ~+14k in orders |
+| ladder, gate 10% free cash | +18 ± 15 | +9 ± 18 | +42 ± 15 | +29 ± 14 | 9.7k | 0.51 | gate rarely shuts (free cash ~11k) |
+| ladder, gate 20% free cash | 0 ± 14 | +5 ± 16 | +19 ± 13 | +20 ± 13 | 9.4k | 0.48 | ladder mostly off at 11k free cash |
+
+## 3 h, 32 seeds (Δ per 3 h; base quiet +1,205 ± 55 (lag +887), news +1,008 ± 83 (lag +672); cap 13.5k / 0.73; age 1.2 h)
+
+| Variant | ΔP&L q | Δlag q | ΔP&L n | Δlag n | cap q / frac | age q / n | Verdict |
+|---|---|---|---|---|---|---|---|
+| age skew off | -5 ± 11 | -13 ± 11 | -6 ± 9 | -6 ± 15 | 13.6k / 0.74 | 1.28 / 1.25 | age skew: noise in P&L, ages ~6% lower |
+| skew_age_per_hour 0.005 | +2 ± 11 | -3 ± 14 | -12 ± 18 | -4 ± 19 | 13.5k / 0.73 | 1.16 / 1.18 | noise |
+| skew_per_quote 0.0075 | +6 ± 22 | -2 ± 27 | +36 ± 29 | +46 ± 34 | 12.8k / 0.73 | 1.17 / 0.99 | noise; -5% capital, -16% age (news) |
+| skew_per_quote 0.01 | -11 ± 29 | -8 ± 29 | -11 ± 35 | +1 ± 37 | 12.5k / 0.73 | 1.08 / 0.96 | noise; -7% capital |
+| 0.0075 + age 0.005 | -1 ± 23 | -8 ± 26 | +11 ± 28 | +37 ± 30 | 12.6k / 0.73 | 1.10 / 0.93 | noise; youngest inventory |
+| fast unload | -18 ± 17 | -24 ± 22 | -2 ± 22 | -8 ± 22 | 13.7k / 0.74 | 1.18 / 1.14 | noise-to-negative |
+| headline 0.05 | **-94 ± 31** | **-117 ± 28** | -28 ± 35 | -26 ± 43 | 12.4k / 0.72 | 1.17 / 0.99 | real loss |
+| ceiling off (bg 60k) | **+21 ± 9** | +11 ± 9 | +9 ± 7 | +4 ± 8 | 13.7k / 0.74 | | the ceiling starts to bind after 2-3 h |
+| ref_weight 0.85 | -23 ± 24 | **-46 ± 28** | -15 ± 27 | +5 ± 26 | 13.9k / 0.74 | 1.30 / 1.33 | **the 1 h gain does not hold over 3 h**; older inventory |
+
+## Ranking: Δ P&L at the lagged mark (quiet + news, per hour), capital fraction <= 0.75 (bg 60k)
+1. ref_weight 0.8: +15 / +41 (1 h), but ref_weight 0.85 is -46 / +5 per 3 h. Unproven.
+2. R3 ladder ungated or gated at 10%: +9 / +29 (1 h), with ~14k more cash in orders.
+3. Live defaults: 0.
+4. Ceiling off: +11 / +4 per 3 h. Peak fraction 0.74 here; it would exceed 0.75 live.
+5. Fast unload: -9 / 0. Age skew 0.005: -3 / -4 per 3 h. Skew 0.0075: -22 / -2 (1 h), -2 / +46 per 3 h.
+6. Last: headline 0.05 (-56 / -19), headline 0.03 (-96 / -40), any ceiling at 0.60 with factor 0 (-301 / -175).
+
+None of the inventory levers (skew strength, age skew, fast unload) changes P&L by more than about 2 se. The only
+large effects are the size of the headline quotes and whether the capital ceiling shuts the adding side.
+
+## Recommended defaults (round 2)
+| Setting | Recommend | Confidence | Why |
+|---|---|---|---|
+| headline_size_frac | 0.10 (keep) | high | 0.05 costs -56 ± 18 / -94 ± 31 per 3 h, and only saves ~1.4k of capital here |
+| size_max_frac | 0.02 (keep) | medium | 0.01 is noise |
+| skew_per_quote | 0.005, or 0.0075 if capital is the binding problem | low | P&L neutral; 0.0075 gives -5% capital and -16% age over 3 h in news |
+| skew_age_* | on, 0.0025 per hour (as merged) | low | P&L neutral; ages ~6% lower than with it off |
+| capital_in_positions_max_frac | 0.75 with **capital_ceiling_adding_size_factor 0.5** (not 0) | medium | factor 0 is a cliff: -131 / -134 per hour once the ceiling binds; 0.5 keeps ~70% of that P&L |
+| fast unload | do not ship it as tested | low | noise-to-negative; in the sim the normal skewed quote already sits near fair |
+| kelly_fraction | 0.25 | high | round 1: 0.15 is -22 / -23 |
+| ref_weight | 0.7 (keep) | medium | the 1 h gain (+15 to +52) does not hold over 3 h (-23 / -15; lagged mark -46) |
+| ladder | build; gate at ladder_min_cash_frac 0.1 | low-medium | +9 / +29 at the lagged mark; a 20% gate turns it off at today's 11k free cash |
+
+Limits: the sim does not value freed cash (no opportunity cost of capital), so it understates what a ceiling or a
+faster unload is worth to a capital-starved account. `_bg_cap` is an assumption: say which background level you
+believe and rerun (d).
+
+# Round 3: live start (tests/live_sim.py), Package 2 from the real book
+
+## What was built
+- **`tests/live_start_extract.py`** builds `tests/live_start.json` from status.json (08:14:50), the recorder's
+  snapshots (last book, fair value, Polymarket per market) and fills.csv. Lots are rebuilt the way
+  `Bot.seed_lots` does it; shares no fill covers are stamped at the first fill (16:02).
+- **`tests/live_sim.py`** (`python tests/live_sim.py SEEDS HOURS REGIME '{base}' '{variant}' ...`, paired seeds):
+  - **Markets:** the races of the 40 biggest positions by capital, both legs, which comes to 68 real markets. On top
+    of that, 3 synthetic outsider races (Dem + Rep Polymarket sum 0.90-0.97), for 74 markets in all.
+  - **Starting inventory:** the real positions with their real lot ages. The House legs are set to the 09:45 figures
+    (+10,834 / -9,396); Senate is 7,335 / 7,335.
+  - **Start mark:** P&L starts at 0, marked at Polymarket.
+  - **Account:** 101.5k. The markets not simulated are one fixed block of positions, sized so that capital in
+    positions starts at **90%**.
+  - **Cash constraint (new):** an order needs free cash for the part that adds to a position. Free cash = account +
+    P&L − positions − locks of our resting orders, which starts at about 10k.
+  - **Prices:** each race's legs share one Polymarket path, and each leg starts at its real tournament gap.
+  - **Quoting goes through the real Bot code,** not prototypes:
+    - `Bot.decide`, so race-netted limits, Kelly and headline limits, age skew from real lot ages, the capital
+      ceiling (`Bot.update_capital_ceiling`), the fast unload window and reduce_join_best all run.
+    - `Bot.refill_cooling`, with fills routed as fill dicts plus order_meta into `Bot.note_refills` and
+      `Bot.note_unloads`.
+    - `Bot.arb_plan` (pair unwind, sell-side and buy-side arbitrage) on the simulated other-trader books, every 10 s
+      with the bot's cooldowns, executed as immediate-or-cancel takes.
+    - `Bot.update_lots` and `Bot.total_worst_case`.
+- **Race calibration** (tournament noise anti-correlated 0.95 between legs, rivals' errors correlated, +0.3c lift):
+
+  | Measure | Simulator | Day one (real snapshots, ours included) |
+  |---|---|---|
+  | Race bid-sum ≥ 1.000 | 9-11% | 16.8% |
+  | Race bid-sum ≥ 1.005 | 4.5-6% | 5.3% |
+  | Race bid-sum ≥ 1.03 | 0.06-0.17% | 0.07% |
+  | Senate bid-sum max | 1.01 | 1.02 |
+  | Race ask-sum < 0.98 | 6.0-6.3% | 2.6% |
+
+  Buy-side arbitrage opportunities are therefore about 2x overstated.
+- **Not wired yet:** `arb_buy_min_ref_sum` (raw references) is not in this code. The buy guard tested here is the
+  existing one (asks ≥ `arb_buy_min_sum` and fair values summing to ≥ 0.9925).
+
+## Results (16 seeds; Δ = variant − ALL OFF over the whole run; capital = share of account value in positions)
+
+Base (all off), 6 h quiet: P&L +2,990 (lagged mark +894). Capital goes from 0.90 to 0.93 by the end (peak 0.98).
+Median held-share age at the end is 4.8 h. Peak worst case is 55k. 626k order sides were clipped for lack of cash.
+
+| Variant | ΔP&L | ΔP&L at lagged mark | Δcapital end / peak | Cash freed | Δage end | Sets unwound | Arb fills / locked | Δworst peak |
+|---|---|---|---|---|---|---|---|---|
+| **ALL ON, 6 h quiet** | -180 ± 160 | +219 ± 180 | **-8.4 / -4.9 pts** | **+8.5k** | **-0.6 h** | 11.4k sh | 4.1k sh / +286 | **-7.3k** |
+| **ALL ON, 6 h news** | **-293 ± 110** | +68 ± 97 | **-9.6 / -3.7 pts** | **+9.7k** | -0.1 h | 12.8k | 5.1k / +315 | **-8.1k** |
+| **ALL ON, 12 h quiet** | -38 ± 250 | **+597 ± 270** | **-13.6 / -7.4 pts** | **+13.8k** | **-2.0 h** | 18.2k | 4.9k / +430 | **-10.6k** |
+| age skew alone | +5 ± 98 | +45 ± 120 | -0.7 / -1.1 | +0.7k | **-0.48 h** | | | -1.5k |
+| capital ceiling 0.75 alone | **+251 ± 120** | +260 ± 150 | +1.0 / +0.7 | -1.1k | -0.1 | | | **-2.6k** |
+| race-netted limits alone | +185 ± 150 | **+407 ± 180** | -2.5 / **-3.1** | +2.5k | +0.7 | | | **-5.3k** |
+| refill cooldown alone | -120 ± 97 | -127 ± 120 | +0.7 / -0.2 | -0.7k | -0.4 | | | 0 |
+| **fast unload alone** | **-257 ± 94** | **-314 ± 90** | +0.4 / 0 | -0.4k | 0 | | | +0.4k |
+| reduce_join_best alone | -58 ± 61 | -134 ± 93 | +1.9 / +0.2 | -1.9k | +0.3 | | | +0.9k |
+| pair unwind alone | +88 ± 76 | +33 ± 86 | -1.0 / **-1.8** | +1.1k | **-0.85 h** | 6.4k | locked +66 | +1.5k |
+| arbitrage (both sides) alone | -54 ± 90 | -54 ± 100 | +0.2 / -0.3 | -0.2k | +0.3 | | 3.9k / +94 | 0 |
+
+Outsider races: 0 arbitrage fills in every run. Their ask-sums were ≤ 0.985 in 90-97% of minutes, so without the guard
+the bot would have bought sets that pay nothing if the outsider wins. The guard holds.
+
+## Reading
+- **The package works on what it is for.** All on, it releases 8.5-13.8k of cash and cuts 7-10k of worst case and
+  7-14 points of capital use. It unwinds 11-18k shares of sets. P&L at Polymarket is neutral over 12 h (-38 ± 250),
+  slightly negative in 6 h news (-293 ± 110), and **positive at the lagged mark over 12 h (+597 ± 270)**.
+- **Help:** race-netted limits (+185 / +407 at the lagged mark, -5.3k worst case) and the capital ceiling (+251 ± 120,
+  -2.6k worst case). With the cash constraint, quoting the adding side when we cannot pay for it only gets clipped.
+  Pair unwind turns over the oldest inventory (-0.85 h of age, 6.4k sets) and is P&L-neutral.
+- **Do nothing:** age skew (P&L ~0; age -0.5 h; worst case -1.5k), arbitrage (~0 net; +94 locked, 3.9k shares) and
+  refill cooldown (noise, slightly negative).
+- **Hurt:** fast unload (-257 ± 94; -314 ± 90 at the lagged mark), as in round 2. This is the earlier version: 0.5c
+  from fair for 300 s. The lead's new version (fair ± 1c for 180 s) is untested. reduce_join_best is noise-to-negative
+  (-58 / -134), also the earlier version.
+
+## Recommended defaults for Package 3
+- **Keep on:**
+  - limits_use_race_net (medium-high confidence).
+  - Capital ceiling 0.75 (medium).
+  - Pair unwind (medium).
+  - Age skew 0.0025/h (low: harmless, small turnover gain).
+  - Arbitrage, both sides, with the outsider guard (low: small, the guard works).
+- **Turn off or retest:** fast unload (medium: it hurt in two independent setups) and reduce_join_best (low).
+  Both must be retested in their new versions.
+- **Refill cooldown:** neutral; keep it only if live data shows same-side runs.
+
+## Limits
+- Only 68 of 237 markets are simulated; the rest are a static block.
+- Day-long effects (overnight, election news) are not modelled.
+- Buy-side arbitrage opportunities are about 2x real.
+- The lagged mark is a 30-min VWAP of trades.
+- Fills on legs not quoted are not modelled.
+- Not yet run: all-on minus fast unload, the new fast unload and reduce-join versions, and the R3 ladder at 11k cash
+  on the 032bdae head.

@@ -1,0 +1,4432 @@
+{
+"updated": "2026-10-02T08:14:50.851Z",
+"account_value": 101498.41,
+"locked_in_orders": 33281.59,
+"party_delta": -509.0,
+"markets": [
+{
+"eid": "1000",
+"label": "Rep Tennessee Governor",
+"party": "Republican",
+"race": "Tennessee Governor",
+"best_bid": 0.94,
+"best_ask": 0.95,
+"fv": 0.9467,
+"ref": 0.9484999999999999,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "1001",
+"label": "Dem Vermont Governor",
+"party": "Democratic",
+"race": "Vermont Governor",
+"best_bid": 0.165,
+"best_ask": 0.17,
+"fv": 0.15515848366348292,
+"ref": 0.1485,
+"pos": -488.0,
+"lots": [
+[
+-488.0,
+-58355
+]
+],
+"fills16h": 4
+},
+{
+"eid": "1002",
+"label": "Rep Vermont Governor",
+"party": "Republican",
+"race": "Vermont Governor",
+"best_bid": 0.825,
+"best_ask": 0.835,
+"fv": 0.8448415163365172,
+"ref": 0.845,
+"pos": -100.0,
+"lots": [
+[
+-58.0,
+-45833
+],
+[
+-39.0,
+-45068
+],
+[
+-3.0,
+-45068
+]
+],
+"fills16h": 6
+},
+{
+"eid": "1003",
+"label": "Dem Wisconsin Governor",
+"party": "Democratic",
+"race": "Wisconsin Governor",
+"best_bid": 0.795,
+"best_ask": 0.8,
+"fv": 0.8145,
+"ref": 0.825,
+"pos": 100.0,
+"lots": [
+[
+100.0,
+-39475
+]
+],
+"fills16h": 21
+},
+{
+"eid": "1004",
+"label": "Rep Wisconsin Governor",
+"party": "Republican",
+"race": "Wisconsin Governor",
+"best_bid": 0.205,
+"best_ask": 0.21,
+"fv": 0.1855,
+"ref": 0.175,
+"pos": 100.0,
+"lots": [
+[
+100.0,
+-57231
+]
+],
+"fills16h": 7
+},
+{
+"eid": "1005",
+"label": "Dem Wyoming Governor",
+"party": "Democratic",
+"race": "Wyoming Governor",
+"best_bid": 0.04,
+"best_ask": 0.055,
+"fv": 0.034937833290308654,
+"ref": 0.029500000000000002,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "1006",
+"label": "Rep Wyoming Governor",
+"party": "Republican",
+"race": "Wyoming Governor",
+"best_bid": 0.945,
+"best_ask": 0.965,
+"fv": 0.9650621667096914,
+"ref": 0.9675,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "1007",
+"label": "Dem AL-02 House race",
+"party": "Democratic",
+"race": "AL-02 House race",
+"best_bid": 0.255,
+"best_ask": 0.265,
+"fv": 0.2605418784923446,
+"ref": 0.265,
+"pos": -100.0,
+"lots": [
+[
+-100.0,
+-49194
+]
+],
+"fills16h": 15
+},
+{
+"eid": "1008",
+"label": "Rep AL-02 House race",
+"party": "Republican",
+"race": "AL-02 House race",
+"best_bid": 0.745,
+"best_ask": 0.75,
+"fv": 0.7394581215076553,
+"ref": 0.745,
+"pos": -4.0,
+"lots": [
+[
+-4.0,
+-26040
+]
+],
+"fills16h": 12
+},
+{
+"eid": "1009",
+"label": "Dem FL-07 House race",
+"party": "Democratic",
+"race": "FL-07 House race",
+"best_bid": 0.33,
+"best_ask": 0.34,
+"fv": 0.3345,
+"ref": 0.335,
+"pos": 66.0,
+"lots": [
+[
+66.0,
+-56779
+]
+],
+"fills16h": 10
+},
+{
+"eid": "1010",
+"label": "Rep FL-07 House race",
+"party": "Republican",
+"race": "FL-07 House race",
+"best_bid": 0.665,
+"best_ask": 0.675,
+"fv": 0.6655,
+"ref": 0.665,
+"pos": 66.0,
+"lots": [
+[
+66.0,
+-15101
+]
+],
+"fills16h": 1
+},
+{
+"eid": "1011",
+"label": "Rep FL-09 House race",
+"party": "Republican",
+"race": "FL-09 House race",
+"best_bid": 0.7,
+"best_ask": 0.71,
+"fv": 0.69025,
+"ref": 0.685,
+"pos": -595.0,
+"lots": [
+[
+-595.0,
+-58355
+]
+],
+"fills16h": 7
+},
+{
+"eid": "1012",
+"label": "Dem FL-13 House race",
+"party": "Democratic",
+"race": "FL-13 House race",
+"best_bid": 0.265,
+"best_ask": 0.27,
+"fv": 0.244,
+"ref": 0.235,
+"pos": -600.0,
+"lots": [
+[
+-600.0,
+-45888
+]
+],
+"fills16h": 2
+},
+{
+"eid": "1013",
+"label": "Dem FL-16 House race",
+"party": "Democratic",
+"race": "FL-16 House race",
+"best_bid": 0.15,
+"best_ask": 0.18,
+"fv": 0.16176470588235298,
+"ref": 0.155,
+"pos": -850.0,
+"lots": [
+[
+-850.0,
+-58355
+]
+],
+"fills16h": 1
+},
+{
+"eid": "1014",
+"label": "Rep FL-16 House race",
+"party": "Republican",
+"race": "FL-16 House race",
+"best_bid": 0.825,
+"best_ask": 0.84,
+"fv": 0.8382352941176471,
+"ref": 0.825,
+"pos": -850.0,
+"lots": [
+[
+-658.0,
+-58355
+],
+[
+-100.0,
+-57308
+],
+[
+-92.0,
+-2346
+]
+],
+"fills16h": 6
+},
+{
+"eid": "1015",
+"label": "Dem FL-20 House race",
+"party": "Democratic",
+"race": "FL-20 House race",
+"best_bid": 0.91,
+"best_ask": 0.935,
+"fv": 0.9671776971388213,
+"ref": 0.955,
+"pos": 41.0,
+"lots": [
+[
+41.0,
+-58355
+]
+],
+"fills16h": 1
+},
+{
+"eid": "1016",
+"label": "Rep FL-20 House race",
+"party": "Republican",
+"race": "FL-20 House race",
+"best_bid": 0.045,
+"best_ask": 0.055,
+"fv": 0.03282230286117866,
+"ref": 0.021500000000000002,
+"pos": 41.0,
+"lots": [
+[
+41.0,
+-28955
+]
+],
+"fills16h": 1
+},
+{
+"eid": "1017",
+"label": "Dem FL-22 House race",
+"party": "Democratic",
+"race": "FL-22 House race",
+"best_bid": 0.53,
+"best_ask": 0.535,
+"fv": 0.5164201519819881,
+"ref": 0.505,
+"pos": -1109.0,
+"lots": [
+[
+-313.0,
+-58355
+],
+[
+-296.0,
+-54239
+],
+[
+-2.0,
+-29989
+],
+[
+-498.0,
+-29989
+]
+],
+"fills16h": 12
+},
+{
+"eid": "1018",
+"label": "Rep FL-22 House race",
+"party": "Republican",
+"race": "FL-22 House race",
+"best_bid": 0.47,
+"best_ask": 0.475,
+"fv": 0.4835798480180119,
+"ref": 0.485,
+"pos": -593.0,
+"lots": [
+[
+-593.0,
+-42132
+]
+],
+"fills16h": 12
+},
+{
+"eid": "1019",
+"label": "Dem MI-07 House race",
+"party": "Democratic",
+"race": "MI-07 House race",
+"best_bid": 0.575,
+"best_ask": 0.585,
+"fv": 0.5689491315136477,
+"ref": 0.565,
+"pos": -100.0,
+"lots": [
+[
+-100.0,
+-40454
+]
+],
+"fills16h": 7
+},
+{
+"eid": "1020",
+"label": "Rep MI-07 House race",
+"party": "Republican",
+"race": "MI-07 House race",
+"best_bid": 0.42,
+"best_ask": 0.44,
+"fv": 0.4310508684863523,
+"ref": 0.435,
+"pos": -100.0,
+"lots": [
+[
+-100.0,
+-58355
+]
+],
+"fills16h": 2
+},
+{
+"eid": "1021",
+"label": "Dem MI-10 House race",
+"party": "Democratic",
+"race": "MI-10 House race",
+"best_bid": 0.655,
+"best_ask": 0.66,
+"fv": 0.6557499999999999,
+"ref": 0.655,
+"pos": -293.0,
+"lots": [
+[
+-193.0,
+-58355
+],
+[
+-100.0,
+-48375
+]
+],
+"fills16h": 9
+},
+{
+"eid": "1022",
+"label": "Rep MI-10 House race",
+"party": "Republican",
+"race": "MI-10 House race",
+"best_bid": 0.34,
+"best_ask": 0.345,
+"fv": 0.34425,
+"ref": 0.345,
+"pos": 100.0,
+"lots": [
+[
+100.0,
+-58355
+]
+],
+"fills16h": 1
+},
+{
+"eid": "1023",
+"label": "Dem MN-01 House race",
+"party": "Democratic",
+"race": "MN-01 House race",
+"best_bid": 0.245,
+"best_ask": 0.255,
+"fv": 0.22927088971283757,
+"ref": 0.215,
+"pos": -2666.0,
+"lots": [
+[
+-80.0,
+-39783
+],
+[
+-1100.0,
+-38365
+],
+[
+-1486.0,
+-301
+]
+],
+"fills16h": 10
+},
+{
+"eid": "1024",
+"label": "Rep MN-01 House race",
+"party": "Republican",
+"race": "MN-01 House race",
+"best_bid": 0.75,
+"best_ask": 0.76,
+"fv": 0.7707291102871624,
+"ref": 0.765,
+"pos": -100.0,
+"lots": [
+[
+-100.0,
+-58355
+]
+],
+"fills16h": 5
+},
+{
+"eid": "1025",
+"label": "Dem MN-02 House race",
+"party": "Democratic",
+"race": "MN-02 House race",
+"best_bid": 0.925,
+"best_ask": 0.93,
+"fv": 0.9427779672631806,
+"ref": 0.9404999999999999,
+"pos": 177.0,
+"lots": [
+[
+77.0,
+-58355
+],
+[
+49.0,
+-53480
+],
+[
+51.0,
+-53043
+]
+],
+"fills16h": 7
+},
+{
+"eid": "1026",
+"label": "Rep MN-02 House race",
+"party": "Republican",
+"race": "MN-02 House race",
+"best_bid": 0.075,
+"best_ask": 0.08,
+"fv": 0.05722203273681938,
+"ref": 0.047,
+"pos": -234.0,
+"lots": [
+[
+-14.0,
+-58355
+],
+[
+-10.0,
+-52344
+],
+[
+-10.0,
+-52339
+],
+[
+-50.0,
+-306
+],
+[
+-50.0,
+-247
+],
+[
+-50.0,
+-139
+],
+[
+-50.0,
+-44
+]
+],
+"fills16h": 8
+},
+{
+"eid": "1027",
+"label": "Dem MN-05 House race",
+"party": "Democratic",
+"race": "MN-05 House race",
+"best_bid": 0.92,
+"best_ask": 0.97,
+"fv": 0.9779550025708056,
+"ref": 0.9844999999999999,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "1028",
+"label": "Rep MN-05 House race",
+"party": "Republican",
+"race": "MN-05 House race",
+"best_bid": 0.035,
+"best_ask": 0.04,
+"fv": 0.022044997429194354,
+"ref": 0.016,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "1029",
+"label": "Dem TN-05 House race",
+"party": "Democratic",
+"race": "TN-05 House race",
+"best_bid": 0.095,
+"best_ask": 0.1,
+"fv": 0.08355448061182216,
+"ref": 0.07400000000000001,
+"pos": -979.0,
+"lots": [
+[
+-163.0,
+-37018
+],
+[
+-816.0,
+-36822
+]
+],
+"fills16h": 11
+},
+{
+"eid": "1030",
+"label": "Rep TN-05 House race",
+"party": "Republican",
+"race": "TN-05 House race",
+"best_bid": 0.9,
+"best_ask": 0.91,
+"fv": 0.9164455193881778,
+"ref": 0.915,
+"pos": -178.0,
+"lots": [
+[
+-78.0,
+-58355
+],
+[
+-100.0,
+-56690
+]
+],
+"fills16h": 6
+},
+{
+"eid": "1031",
+"label": "Dem VA-01 House race",
+"party": "Democratic",
+"race": "VA-01 House race",
+"best_bid": 0.47,
+"best_ask": 0.485,
+"fv": 0.473,
+"ref": 0.47,
+"pos": -230.0,
+"lots": [
+[
+-91.0,
+-58355
+],
+[
+-100.0,
+-38276
+],
+[
+-39.0,
+-37133
+]
+],
+"fills16h": 8
+},
+{
+"eid": "1032",
+"label": "Dem VA-02 House race",
+"party": "Democratic",
+"race": "VA-02 House race",
+"best_bid": 0.79,
+"best_ask": 0.805,
+"fv": 0.8105,
+"ref": 0.815,
+"pos": 202.0,
+"lots": [
+[
+2.0,
+-58355
+],
+[
+200.0,
+-22210
+]
+],
+"fills16h": 4
+},
+{
+"eid": "1033",
+"label": "Dem VA-05 House race",
+"party": "Democratic",
+"race": "VA-05 House race",
+"best_bid": 0.205,
+"best_ask": 0.22,
+"fv": 0.21358068459657703,
+"ref": 0.215,
+"pos": -289.0,
+"lots": [
+[
+-289.0,
+-14801
+]
+],
+"fills16h": 8
+},
+{
+"eid": "1034",
+"label": "Rep VA-05 House race",
+"party": "Republican",
+"race": "VA-05 House race",
+"best_bid": 0.795,
+"best_ask": 0.805,
+"fv": 0.786419315403423,
+"ref": 0.785,
+"pos": -133.0,
+"lots": [
+[
+-33.0,
+-55409
+],
+[
+-100.0,
+-55195
+]
+],
+"fills16h": 13
+},
+{
+"eid": "1035",
+"label": "Rep VA-07 House race",
+"party": "Republican",
+"race": "VA-07 House race",
+"best_bid": 0.055,
+"best_ask": 0.07,
+"fv": 0.0625,
+"ref": 0.0365,
+"pos": 211.0,
+"lots": [
+[
+1.0,
+-996
+],
+[
+1.0,
+-992
+],
+[
+100.0,
+-984
+],
+[
+1.0,
+-977
+],
+[
+49.0,
+-898
+],
+[
+49.0,
+-897
+],
+[
+1.0,
+-886
+],
+[
+9.0,
+-883
+]
+],
+"fills16h": 8
+},
+{
+"eid": "1036",
+"label": "Dem WA-03 House race",
+"party": "Democratic",
+"race": "WA-03 House race",
+"best_bid": 0.89,
+"best_ask": 0.9,
+"fv": 0.9063456603170081,
+"ref": 0.905,
+"pos": 100.0,
+"lots": [
+[
+100.0,
+-148
+]
+],
+"fills16h": 7
+},
+{
+"eid": "1037",
+"label": "Rep WA-03 House race",
+"party": "Republican",
+"race": "WA-03 House race",
+"best_bid": 0.11,
+"best_ask": 0.115,
+"fv": 0.09365433968299186,
+"ref": 0.08499999999999999,
+"pos": -200.0,
+"lots": [
+[
+-100.0,
+-153
+],
+[
+-100.0,
+-147
+]
+],
+"fills16h": 6
+},
+{
+"eid": "1038",
+"label": "Dem WI-01 House race",
+"party": "Democratic",
+"race": "WI-01 House race",
+"best_bid": 0.35,
+"best_ask": 0.365,
+"fv": 0.3395,
+"ref": 0.335,
+"pos": -153.0,
+"lots": [
+[
+-53.0,
+-58355
+],
+[
+-100.0,
+-974
+]
+],
+"fills16h": 9
+},
+{
+"eid": "1039",
+"label": "Rep WI-01 House race",
+"party": "Republican",
+"race": "WI-01 House race",
+"best_bid": 0.64,
+"best_ask": 0.66,
+"fv": 0.6605,
+"ref": 0.665,
+"pos": 400.0,
+"lots": [
+[
+50.0,
+-35672
+],
+[
+350.0,
+-28993
+]
+],
+"fills16h": 10
+},
+{
+"eid": "1040",
+"label": "Dem WI-03 House race",
+"party": "Democratic",
+"race": "WI-03 House race",
+"best_bid": 0.715,
+"best_ask": 0.72,
+"fv": 0.7319260694499107,
+"ref": 0.725,
+"pos": -900.0,
+"lots": [
+[
+-300.0,
+-40541
+],
+[
+-1.0,
+-39783
+],
+[
+-133.0,
+-39782
+],
+[
+-131.0,
+-39780
+],
+[
+-131.0,
+-39778
+],
+[
+-131.0,
+-39777
+],
+[
+-73.0,
+-39767
+]
+],
+"fills16h": 17
+},
+{
+"eid": "1041",
+"label": "Rep WI-03 House race",
+"party": "Republican",
+"race": "WI-03 House race",
+"best_bid": 0.28,
+"best_ask": 0.285,
+"fv": 0.2680739305500893,
+"ref": 0.255,
+"pos": -1407.0,
+"lots": [
+[
+-1007.0,
+-58355
+],
+[
+-100.0,
+-55425
+],
+[
+-100.0,
+-55205
+],
+[
+-100.0,
+-54811
+],
+[
+-100.0,
+-35721
+]
+],
+"fills16h": 15
+},
+{
+"eid": "1042",
+"label": "Dem Delaware Senate",
+"party": "Democratic",
+"race": "Delaware Senate",
+"best_bid": 0.95,
+"best_ask": 0.965,
+"fv": 0.9742537037037037,
+"ref": 0.9864999999999999,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "1043",
+"label": "Dem Florida Senate",
+"party": "Democratic",
+"race": "Florida Senate",
+"best_bid": 0.115,
+"best_ask": 0.12,
+"fv": 0.09773256289553725,
+"ref": 0.09,
+"pos": -368.0,
+"lots": [
+[
+-200.0,
+-58355
+],
+[
+-100.0,
+-50075
+],
+[
+-68.0,
+-49819
+]
+],
+"fills16h": 5
+},
+{
+"eid": "1044",
+"label": "Rep Florida Senate",
+"party": "Republican",
+"race": "Florida Senate",
+"best_bid": 0.885,
+"best_ask": 0.89,
+"fv": 0.9022674371044627,
+"ref": 0.915,
+"pos": 592.0,
+"lots": [
+[
+492.0,
+-58355
+],
+[
+100.0,
+-51051
+]
+],
+"fills16h": 6
+},
+{
+"eid": "1045",
+"label": "Dem Kansas Senate",
+"party": "Democratic",
+"race": "Kansas Senate",
+"best_bid": 0.31,
+"best_ask": 0.325,
+"fv": 0.29579629629629633,
+"ref": 0.28500000000000003,
+"pos": -500.0,
+"lots": [
+[
+-300.0,
+-52143
+],
+[
+-100.0,
+-133
+],
+[
+-100.0,
+-34
+]
+],
+"fills16h": 23
+},
+{
+"eid": "1046",
+"label": "Rep Kansas Senate",
+"party": "Republican",
+"race": "Kansas Senate",
+"best_bid": 0.685,
+"best_ask": 0.69,
+"fv": 0.7042037037037037,
+"ref": 0.715,
+"pos": -300.0,
+"lots": [
+[
+-300.0,
+-58355
+]
+],
+"fills16h": 1
+},
+{
+"eid": "1047",
+"label": "Dem Michigan Senate",
+"party": "Democratic",
+"race": "Michigan Senate",
+"best_bid": 0.72,
+"best_ask": 0.725,
+"fv": 0.7158465346534653,
+"ref": 0.715,
+"pos": -1054.0,
+"lots": [
+[
+-903.0,
+-58355
+],
+[
+-14.0,
+-15898
+],
+[
+-78.0,
+-967
+],
+[
+-59.0,
+-913
+]
+],
+"fills16h": 11
+},
+{
+"eid": "1048",
+"label": "Rep Michigan Senate",
+"party": "Republican",
+"race": "Michigan Senate",
+"best_bid": 0.28,
+"best_ask": 0.285,
+"fv": 0.2841534653465347,
+"ref": 0.28500000000000003,
+"pos": -917.0,
+"lots": [
+[
+-917.0,
+-47980
+]
+],
+"fills16h": 52
+},
+{
+"eid": "1049",
+"label": "Dem Minnesota Senate",
+"party": "Democratic",
+"race": "Minnesota Senate",
+"best_bid": 0.86,
+"best_ask": 0.865,
+"fv": 0.8851466165413534,
+"ref": 0.895,
+"pos": 836.0,
+"lots": [
+[
+836.0,
+-37023
+]
+],
+"fills16h": 26
+},
+{
+"eid": "1050",
+"label": "Rep Minnesota Senate",
+"party": "Republican",
+"race": "Minnesota Senate",
+"best_bid": 0.135,
+"best_ask": 0.14,
+"fv": 0.11485338345864664,
+"ref": 0.10500000000000001,
+"pos": 100.0,
+"lots": [
+[
+100.0,
+-17813
+]
+],
+"fills16h": 28
+},
+{
+"eid": "1051",
+"label": "Dem Tennessee Senate",
+"party": "Democratic",
+"race": "Tennessee Senate",
+"best_bid": 0.035,
+"best_ask": 0.045,
+"fv": 0.02606128932560721,
+"ref": 0.02,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "1052",
+"label": "Rep Tennessee Senate",
+"party": "Republican",
+"race": "Tennessee Senate",
+"best_bid": 0.96,
+"best_ask": 0.965,
+"fv": 0.9739387106743929,
+"ref": 0.975,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "1053",
+"label": "Rep Virginia Senate",
+"party": "Republican",
+"race": "Virginia Senate",
+"best_bid": 0.03,
+"best_ask": 0.04,
+"fv": 0.0235,
+"ref": 0.0175,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "1054",
+"label": "Dem Wyoming Senate",
+"party": "Democratic",
+"race": "Wyoming Senate",
+"best_bid": 0.04,
+"best_ask": 0.05,
+"fv": 0.031205583756345176,
+"ref": 0.025,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "1055",
+"label": "Rep Wyoming Senate",
+"party": "Republican",
+"race": "Wyoming Senate",
+"best_bid": 0.935,
+"best_ask": 0.96,
+"fv": 0.9687944162436548,
+"ref": 0.975,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "1057",
+"label": "Dem Alaska Governor",
+"party": "Democratic",
+"race": "Alaska Governor",
+"best_bid": 0.745,
+"best_ask": 0.765,
+"fv": 0.7468982630272953,
+"ref": null,
+"pos": 11.0,
+"lots": [
+[
+11.0,
+-1273
+]
+],
+"fills16h": 8
+},
+{
+"eid": "1058",
+"label": "Rep Alaska Governor",
+"party": "Republican",
+"race": "Alaska Governor",
+"best_bid": 0.25,
+"best_ask": 0.26,
+"fv": 0.25310173697270477,
+"ref": null,
+"pos": 300.0,
+"lots": [
+[
+100.0,
+-40667
+],
+[
+100.0,
+-32095
+],
+[
+100.0,
+-925
+]
+],
+"fills16h": 41
+},
+{
+"eid": "1059",
+"label": "Dem Massachusetts Governor",
+"party": "Democratic",
+"race": "Massachusetts Governor",
+"best_bid": 0.935,
+"best_ask": 0.94,
+"fv": 0.9586116831583705,
+"ref": 0.9624999999999999,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "1060",
+"label": "Rep Massachusetts Governor",
+"party": "Republican",
+"race": "Massachusetts Governor",
+"best_bid": 0.065,
+"best_ask": 0.07,
+"fv": 0.04138831684162941,
+"ref": 0.031,
+"pos": 0.0,
+"lots": [],
+"fills16h": 6
+},
+{
+"eid": "1061",
+"label": "Dem New Hampshire Governor",
+"party": "Democratic",
+"race": "New Hampshire Governor",
+"best_bid": 0.11,
+"best_ask": 0.125,
+"fv": 0.06342462686567166,
+"ref": 0.0405,
+"pos": -2247.0,
+"lots": [
+[
+-200.0,
+-58355
+],
+[
+-100.0,
+-57184
+],
+[
+-1104.0,
+-30580
+],
+[
+-805.0,
+-29037
+],
+[
+-13.0,
+-28774
+],
+[
+-25.0,
+-175
+]
+],
+"fills16h": 8
+},
+{
+"eid": "1062",
+"label": "Rep New Hampshire Governor",
+"party": "Republican",
+"race": "New Hampshire Governor",
+"best_bid": 0.875,
+"best_ask": 0.9,
+"fv": 0.9365753731343284,
+"ref": 0.9595,
+"pos": 2272.0,
+"lots": [
+[
+300.0,
+-58355
+],
+[
+100.0,
+-41669
+],
+[
+1111.0,
+-1033
+],
+[
+563.0,
+-177
+],
+[
+148.0,
+-177
+],
+[
+50.0,
+-159
+]
+],
+"fills16h": 11
+},
+{
+"eid": "1063",
+"label": "Rep Oklahoma Governor",
+"party": "Republican",
+"race": "Oklahoma Governor",
+"best_bid": 0.91,
+"best_ask": 0.92,
+"fv": 0.929,
+"ref": 0.935,
+"pos": 125.0,
+"lots": [
+[
+25.0,
+-58355
+],
+[
+100.0,
+-1009
+]
+],
+"fills16h": 3
+},
+{
+"eid": "1064",
+"label": "Dem NH-01 House race",
+"party": "Democratic",
+"race": "NH-01 House race",
+"best_bid": 0.925,
+"best_ask": 0.93,
+"fv": 0.9503379011781315,
+"ref": 0.9359999999999999,
+"pos": 0.0,
+"lots": [],
+"fills16h": 5
+},
+{
+"eid": "1065",
+"label": "Rep NH-01 House race",
+"party": "Republican",
+"race": "NH-01 House race",
+"best_bid": 0.065,
+"best_ask": 0.085,
+"fv": 0.04966209882186849,
+"ref": 0.0355,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "1066",
+"label": "Dem Alaska Senate",
+"party": "Democratic",
+"race": "Alaska Senate",
+"best_bid": 0.65,
+"best_ask": 0.665,
+"fv": 0.6584158415841584,
+"ref": null,
+"pos": 89.0,
+"lots": [
+[
+52.0,
+-58355
+],
+[
+37.0,
+-15113
+]
+],
+"fills16h": 5
+},
+{
+"eid": "1067",
+"label": "Rep Alaska Senate",
+"party": "Republican",
+"race": "Alaska Senate",
+"best_bid": 0.335,
+"best_ask": 0.35,
+"fv": 0.34158415841584155,
+"ref": null,
+"pos": 89.0,
+"lots": [
+[
+89.0,
+-48439
+]
+],
+"fills16h": 51
+},
+{
+"eid": "1068",
+"label": "Dem Massachusetts Senate",
+"party": "Democratic",
+"race": "Massachusetts Senate",
+"best_bid": 0.965,
+"best_ask": 0.97,
+"fv": 0.9723419180278585,
+"ref": 0.979,
+"pos": 0.0,
+"lots": [],
+"fills16h": 2
+},
+{
+"eid": "1069",
+"label": "Rep Massachusetts Senate",
+"party": "Republican",
+"race": "Massachusetts Senate",
+"best_bid": 0.035,
+"best_ask": 0.045,
+"fv": 0.027658081972141504,
+"ref": 0.018000000000000002,
+"pos": -50.0,
+"lots": [
+[
+-50.0,
+-25901
+]
+],
+"fills16h": 8
+},
+{
+"eid": "1070",
+"label": "Dem New Hampshire Senate",
+"party": "Democratic",
+"race": "New Hampshire Senate",
+"best_bid": 0.825,
+"best_ask": 0.84,
+"fv": 0.856,
+"ref": 0.865,
+"pos": -100.0,
+"lots": [
+[
+-58.0,
+-24594
+],
+[
+-42.0,
+-24329
+]
+],
+"fills16h": 39
+},
+{
+"eid": "1071",
+"label": "Rep New Hampshire Senate",
+"party": "Republican",
+"race": "New Hampshire Senate",
+"best_bid": 0.155,
+"best_ask": 0.175,
+"fv": 0.14400000000000004,
+"ref": 0.135,
+"pos": -750.0,
+"lots": [
+[
+-650.0,
+-52311
+],
+[
+-100.0,
+-38691
+]
+],
+"fills16h": 37
+},
+{
+"eid": "1072",
+"label": "Dem Oklahoma Senate",
+"party": "Democratic",
+"race": "Oklahoma Senate",
+"best_bid": 0.09,
+"best_ask": 0.1,
+"fv": 0.040900000000000006,
+"ref": 0.014499999999999999,
+"pos": -197.0,
+"lots": [
+[
+-197.0,
+-1221
+]
+],
+"fills16h": 3
+},
+{
+"eid": "1073",
+"label": "Dem Rhode Island Governor",
+"party": "Democratic",
+"race": "Rhode Island Governor",
+"best_bid": 0.92,
+"best_ask": 0.93,
+"fv": 0.9547999999999999,
+"ref": 0.9664999999999999,
+"pos": 200.0,
+"lots": [
+[
+100.0,
+-58355
+],
+[
+100.0,
+-950
+]
+],
+"fills16h": 3
+},
+{
+"eid": "1074",
+"label": "Rep Rhode Island Governor",
+"party": "Republican",
+"race": "Rhode Island Governor",
+"best_bid": 0.065,
+"best_ask": 0.075,
+"fv": 0.0357,
+"ref": 0.020999999999999998,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "1075",
+"label": "Rep Delaware Senate",
+"party": "Republican",
+"race": "Delaware Senate",
+"best_bid": 0.05,
+"best_ask": 0.06,
+"fv": 0.0257462962962963,
+"ref": 0.0135,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "1076",
+"label": "Dem Rhode Island Senate",
+"party": "Democratic",
+"race": "Rhode Island Senate",
+"best_bid": 0.91,
+"best_ask": 0.925,
+"fv": 0.9678879397887813,
+"ref": 0.9924999999999999,
+"pos": 2185.0,
+"lots": [
+[
+1075.0,
+-33381
+],
+[
+1081.0,
+-30595
+],
+[
+29.0,
+-29050
+]
+],
+"fills16h": 3
+},
+{
+"eid": "1077",
+"label": "Rep Rhode Island Senate",
+"party": "Republican",
+"race": "Rhode Island Senate",
+"best_bid": 0.085,
+"best_ask": 0.09,
+"fv": 0.032112060211218735,
+"ref": 0.0085,
+"pos": -2173.0,
+"lots": [
+[
+-1075.0,
+-33013
+],
+[
+-1075.0,
+-29057
+],
+[
+-12.0,
+-28313
+],
+[
+-11.0,
+-20810
+]
+],
+"fills16h": 4
+},
+{
+"eid": "840",
+"label": "Dem U.S. House",
+"party": "Democratic",
+"race": "U.S. House",
+"best_bid": 0.88,
+"best_ask": 0.895,
+"fv": 0.9087195121951219,
+"ref": 0.925,
+"pos": 722.0,
+"lots": [
+[
+522.0,
+-55469
+],
+[
+100.0,
+-40197
+],
+[
+100.0,
+-32968
+]
+],
+"fills16h": 31
+},
+{
+"eid": "841",
+"label": "Rep U.S. House",
+"party": "Republican",
+"race": "U.S. House",
+"best_bid": 0.125,
+"best_ask": 0.135,
+"fv": 0.09128048780487805,
+"ref": 0.07500000000000001,
+"pos": -8346.0,
+"lots": [
+[
+-8246.0,
+-20521
+],
+[
+-100.0,
+-36
+]
+],
+"fills16h": 32
+},
+{
+"eid": "842",
+"label": "Dem U.S. Senate",
+"party": "Democratic",
+"race": "U.S. Senate",
+"best_bid": 0.62,
+"best_ask": 0.635,
+"fv": 0.6311137763338344,
+"ref": 0.625,
+"pos": 7335.0,
+"lots": [
+[
+7335.0,
+-58355
+]
+],
+"fills16h": 23
+},
+{
+"eid": "843",
+"label": "Rep U.S. Senate",
+"party": "Republican",
+"race": "U.S. Senate",
+"best_bid": 0.365,
+"best_ask": 0.37,
+"fv": 0.3688862236661657,
+"ref": 0.365,
+"pos": 7335.0,
+"lots": [
+[
+7285.0,
+-49931
+],
+[
+50.0,
+-31962
+]
+],
+"fills16h": 82
+},
+{
+"eid": "844",
+"label": "Dem Alabama Governor",
+"party": "Democratic",
+"race": "Alabama Governor",
+"best_bid": 0.085,
+"best_ask": 0.1,
+"fv": 0.08556479029629929,
+"ref": 0.0695,
+"pos": -158.0,
+"lots": [
+[
+-158.0,
+-35730
+]
+],
+"fills16h": 4
+},
+{
+"eid": "845",
+"label": "Rep Alabama Governor",
+"party": "Republican",
+"race": "Alabama Governor",
+"best_bid": 0.895,
+"best_ask": 0.92,
+"fv": 0.9144352097037007,
+"ref": 0.925,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "846",
+"label": "Dem Arkansas Governor",
+"party": "Democratic",
+"race": "Arkansas Governor",
+"best_bid": 0.035,
+"best_ask": 0.05,
+"fv": 0.03008715534503269,
+"ref": 0.0265,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "847",
+"label": "Rep Arkansas Governor",
+"party": "Republican",
+"race": "Arkansas Governor",
+"best_bid": 0.92,
+"best_ask": 0.97,
+"fv": 0.9699128446549673,
+"ref": 0.968,
+"pos": 0.0,
+"lots": [],
+"fills16h": 2
+},
+{
+"eid": "848",
+"label": "Dem Arizona Governor",
+"party": "Democratic",
+"race": "Arizona Governor",
+"best_bid": 0.875,
+"best_ask": 0.88,
+"fv": 0.8848523825192186,
+"ref": 0.885,
+"pos": -100.0,
+"lots": [
+[
+-100.0,
+-28872
+]
+],
+"fills16h": 15
+},
+{
+"eid": "849",
+"label": "Rep Arizona Governor",
+"party": "Republican",
+"race": "Arizona Governor",
+"best_bid": 0.13,
+"best_ask": 0.135,
+"fv": 0.11514761748078131,
+"ref": 0.10500000000000001,
+"pos": -216.0,
+"lots": [
+[
+-216.0,
+-34703
+]
+],
+"fills16h": 24
+},
+{
+"eid": "850",
+"label": "Dem California Governor",
+"party": "Democratic",
+"race": "California Governor",
+"best_bid": 0.95,
+"best_ask": 0.965,
+"fv": 0.9573934837092732,
+"ref": null,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "851",
+"label": "Rep California Governor",
+"party": "Republican",
+"race": "California Governor",
+"best_bid": 0.035,
+"best_ask": 0.055,
+"fv": 0.04260651629072682,
+"ref": null,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "852",
+"label": "Dem Colorado Governor",
+"party": "Democratic",
+"race": "Colorado Governor",
+"best_bid": 0.92,
+"best_ask": 0.96,
+"fv": 0.9572431936907287,
+"ref": 0.965,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "853",
+"label": "Rep Colorado Governor",
+"party": "Republican",
+"race": "Colorado Governor",
+"best_bid": 0.035,
+"best_ask": 0.055,
+"fv": 0.04275680630927122,
+"ref": 0.028999999999999998,
+"pos": 0.0,
+"lots": [],
+"fills16h": 2
+},
+{
+"eid": "854",
+"label": "Rep Connecticut Governor",
+"party": "Republican",
+"race": "Connecticut Governor",
+"best_bid": 0.035,
+"best_ask": 0.05,
+"fv": 0.0344,
+"ref": 0.0245,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "855",
+"label": "Dem Georgia Governor",
+"party": "Democratic",
+"race": "Georgia Governor",
+"best_bid": 0.48,
+"best_ask": 0.485,
+"fv": 0.469043532820314,
+"ref": 0.46499999999999997,
+"pos": -77.0,
+"lots": [
+[
+-77.0,
+-36967
+]
+],
+"fills16h": 4
+},
+{
+"eid": "856",
+"label": "Rep Georgia Governor",
+"party": "Republican",
+"race": "Georgia Governor",
+"best_bid": 0.515,
+"best_ask": 0.53,
+"fv": 0.5309564671796859,
+"ref": 0.54,
+"pos": 823.0,
+"lots": [
+[
+823.0,
+-36493
+]
+],
+"fills16h": 4
+},
+{
+"eid": "857",
+"label": "Dem Iowa Governor",
+"party": "Democratic",
+"race": "Iowa Governor",
+"best_bid": 0.795,
+"best_ask": 0.82,
+"fv": 0.8400942274312145,
+"ref": 0.845,
+"pos": -56.0,
+"lots": [
+[
+-56.0,
+-41686
+]
+],
+"fills16h": 2
+},
+{
+"eid": "858",
+"label": "Rep Iowa Governor",
+"party": "Republican",
+"race": "Iowa Governor",
+"best_bid": 0.18,
+"best_ask": 0.195,
+"fv": 0.15990577256878555,
+"ref": 0.14500000000000002,
+"pos": -377.0,
+"lots": [
+[
+-100.0,
+-58355
+],
+[
+-100.0,
+-54133
+],
+[
+-177.0,
+-32967
+]
+],
+"fills16h": 9
+},
+{
+"eid": "859",
+"label": "Dem Idaho Governor",
+"party": "Democratic",
+"race": "Idaho Governor",
+"best_bid": 0.04,
+"best_ask": 0.075,
+"fv": 0.03217814608573086,
+"ref": 0.0215,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "860",
+"label": "Rep Idaho Governor",
+"party": "Republican",
+"race": "Idaho Governor",
+"best_bid": 0.935,
+"best_ask": 0.965,
+"fv": 0.9678218539142691,
+"ref": 0.982,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "861",
+"label": "Dem Illinois Governor",
+"party": "Democratic",
+"race": "Illinois Governor",
+"best_bid": 0.955,
+"best_ask": 0.97,
+"fv": 0.97065,
+"ref": 0.9795,
+"pos": 0.0,
+"lots": [],
+"fills16h": 3
+},
+{
+"eid": "862",
+"label": "Rep Illinois Governor",
+"party": "Republican",
+"race": "Illinois Governor",
+"best_bid": 0.035,
+"best_ask": 0.105,
+"fv": null,
+"ref": 0.022,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "863",
+"label": "Dem Maryland Governor",
+"party": "Democratic",
+"race": "Maryland Governor",
+"best_bid": 0.96,
+"best_ask": 0.975,
+"fv": null,
+"ref": 0.9655,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "864",
+"label": "Rep Maryland Governor",
+"party": "Republican",
+"race": "Maryland Governor",
+"best_bid": 0.015,
+"best_ask": 0.045,
+"fv": null,
+"ref": 0.013000000000000001,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "865",
+"label": "Dem Maine Governor",
+"party": "Democratic",
+"race": "Maine Governor",
+"best_bid": 0.915,
+"best_ask": 0.92,
+"fv": null,
+"ref": 0.9495,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "866",
+"label": "Rep Maine Governor",
+"party": "Republican",
+"race": "Maine Governor",
+"best_bid": 0.08,
+"best_ask": 0.105,
+"fv": null,
+"ref": 0.0435,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "867",
+"label": "Dem Nebraska Governor",
+"party": "Democratic",
+"race": "Nebraska Governor",
+"best_bid": 0.11,
+"best_ask": 0.125,
+"fv": null,
+"ref": 0.08499999999999999,
+"pos": 100.0,
+"lots": [
+[
+100.0,
+-35696
+]
+],
+"fills16h": 4
+},
+{
+"eid": "868",
+"label": "Rep Nebraska Governor",
+"party": "Republican",
+"race": "Nebraska Governor",
+"best_bid": 0.89,
+"best_ask": 0.895,
+"fv": null,
+"ref": 0.905,
+"pos": 282.0,
+"lots": [
+[
+182.0,
+-58355
+],
+[
+100.0,
+-46350
+]
+],
+"fills16h": 4
+},
+{
+"eid": "869",
+"label": "Dem New Mexico Governor",
+"party": "Democratic",
+"race": "New Mexico Governor",
+"best_bid": 0.915,
+"best_ask": 0.935,
+"fv": null,
+"ref": 0.955,
+"pos": -100.0,
+"lots": [
+[
+-100.0,
+-36679
+]
+],
+"fills16h": 1
+},
+{
+"eid": "870",
+"label": "Rep New Mexico Governor",
+"party": "Republican",
+"race": "New Mexico Governor",
+"best_bid": 0.075,
+"best_ask": 0.095,
+"fv": null,
+"ref": 0.045,
+"pos": -512.0,
+"lots": [
+[
+-512.0,
+-43312
+]
+],
+"fills16h": 5
+},
+{
+"eid": "871",
+"label": "Dem Nevada Governor",
+"party": "Democratic",
+"race": "Nevada Governor",
+"best_bid": 0.46,
+"best_ask": 0.48,
+"fv": null,
+"ref": 0.485,
+"pos": 76.0,
+"lots": [
+[
+26.0,
+-22573
+],
+[
+50.0,
+-22571
+]
+],
+"fills16h": 18
+},
+{
+"eid": "872",
+"label": "Rep Nevada Governor",
+"party": "Republican",
+"race": "Nevada Governor",
+"best_bid": 0.53,
+"best_ask": 0.545,
+"fv": null,
+"ref": 0.505,
+"pos": -150.0,
+"lots": [
+[
+-150.0,
+-58355
+]
+],
+"fills16h": 1
+},
+{
+"eid": "873",
+"label": "Dem New York Governor",
+"party": "Democratic",
+"race": "New York Governor",
+"best_bid": 0.94,
+"best_ask": 0.955,
+"fv": null,
+"ref": 0.955,
+"pos": -107.0,
+"lots": [
+[
+-7.0,
+-58355
+],
+[
+-100.0,
+-30197
+]
+],
+"fills16h": 2
+},
+{
+"eid": "874",
+"label": "Rep New York Governor",
+"party": "Republican",
+"race": "New York Governor",
+"best_bid": 0.065,
+"best_ask": 0.08,
+"fv": null,
+"ref": 0.045,
+"pos": -107.0,
+"lots": [
+[
+-107.0,
+-25449
+]
+],
+"fills16h": 2
+},
+{
+"eid": "875",
+"label": "Dem Oklahoma Governor",
+"party": "Democratic",
+"race": "Oklahoma Governor",
+"best_bid": 0.095,
+"best_ask": 0.105,
+"fv": null,
+"ref": 0.07500000000000001,
+"pos": 25.0,
+"lots": [
+[
+25.0,
+-58355
+]
+],
+"fills16h": 1
+},
+{
+"eid": "876",
+"label": "Dem Oregon Governor",
+"party": "Democratic",
+"race": "Oregon Governor",
+"best_bid": 0.7,
+"best_ask": 0.705,
+"fv": null,
+"ref": 0.705,
+"pos": 106.0,
+"lots": [
+[
+106.0,
+-21453
+]
+],
+"fills16h": 28
+},
+{
+"eid": "877",
+"label": "Rep Oregon Governor",
+"party": "Republican",
+"race": "Oregon Governor",
+"best_bid": 0.305,
+"best_ask": 0.315,
+"fv": null,
+"ref": 0.305,
+"pos": -300.0,
+"lots": [
+[
+-200.0,
+-58355
+],
+[
+-100.0,
+-53659
+]
+],
+"fills16h": 8
+},
+{
+"eid": "878",
+"label": "Dem Pennsylvania Governor",
+"party": "Democratic",
+"race": "Pennsylvania Governor",
+"best_bid": 0.95,
+"best_ask": 0.97,
+"fv": null,
+"ref": 0.97,
+"pos": 0.0,
+"lots": [],
+"fills16h": 5
+},
+{
+"eid": "879",
+"label": "Rep Pennsylvania Governor",
+"party": "Republican",
+"race": "Pennsylvania Governor",
+"best_bid": 0.05,
+"best_ask": 0.07,
+"fv": null,
+"ref": 0.026000000000000002,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "880",
+"label": "Ind Rhode Island Governor",
+"party": null,
+"race": "Ind Rhode Island Governor",
+"best_bid": 0.01,
+"best_ask": 0.06,
+"fv": null,
+"ref": 0.009,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "881",
+"label": "Dem South Carolina Governor",
+"party": "Democratic",
+"race": "South Carolina Governor",
+"best_bid": 0.06,
+"best_ask": 0.075,
+"fv": null,
+"ref": 0.047,
+"pos": -100.0,
+"lots": [
+[
+-100.0,
+-40180
+]
+],
+"fills16h": 1
+},
+{
+"eid": "882",
+"label": "Rep South Carolina Governor",
+"party": "Republican",
+"race": "South Carolina Governor",
+"best_bid": 0.915,
+"best_ask": 0.93,
+"fv": null,
+"ref": 0.945,
+"pos": 100.0,
+"lots": [
+[
+100.0,
+-58355
+]
+],
+"fills16h": 1
+},
+{
+"eid": "883",
+"label": "Dem South Dakota Governor",
+"party": "Democratic",
+"race": "South Dakota Governor",
+"best_bid": 0.045,
+"best_ask": 0.06,
+"fv": null,
+"ref": 0.028000000000000004,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "884",
+"label": "Dem Texas Governor",
+"party": "Democratic",
+"race": "Texas Governor",
+"best_bid": 0.205,
+"best_ask": 0.21,
+"fv": null,
+"ref": 0.175,
+"pos": -120.0,
+"lots": [
+[
+-20.0,
+-48805
+],
+[
+-100.0,
+-21409
+]
+],
+"fills16h": 21
+},
+{
+"eid": "885",
+"label": "Rep Texas Governor",
+"party": "Republican",
+"race": "Texas Governor",
+"best_bid": 0.79,
+"best_ask": 0.805,
+"fv": null,
+"ref": 0.8254999999999999,
+"pos": 767.0,
+"lots": [
+[
+667.0,
+-47945
+],
+[
+100.0,
+-28836
+]
+],
+"fills16h": 17
+},
+{
+"eid": "886",
+"label": "Dem AZ-01 House race",
+"party": "Democratic",
+"race": "AZ-01 House race",
+"best_bid": 0.78,
+"best_ask": 0.795,
+"fv": null,
+"ref": 0.795,
+"pos": 100.0,
+"lots": [
+[
+100.0,
+-40098
+]
+],
+"fills16h": 5
+},
+{
+"eid": "887",
+"label": "Rep AZ-01 House race",
+"party": "Republican",
+"race": "AZ-01 House race",
+"best_bid": 0.215,
+"best_ask": 0.225,
+"fv": null,
+"ref": 0.215,
+"pos": 100.0,
+"lots": [
+[
+95.0,
+-20112
+],
+[
+1.0,
+-20094
+],
+[
+4.0,
+-19999
+]
+],
+"fills16h": 13
+},
+{
+"eid": "888",
+"label": "Dem AZ-06 House race",
+"party": "Democratic",
+"race": "AZ-06 House race",
+"best_bid": 0.82,
+"best_ask": 0.835,
+"fv": null,
+"ref": 0.825,
+"pos": 40.0,
+"lots": [
+[
+40.0,
+-10721
+]
+],
+"fills16h": 5
+},
+{
+"eid": "889",
+"label": "Rep AZ-06 House race",
+"party": "Republican",
+"race": "AZ-06 House race",
+"best_bid": 0.175,
+"best_ask": 0.18,
+"fv": null,
+"ref": 0.175,
+"pos": 40.0,
+"lots": [
+[
+40.0,
+-29186
+]
+],
+"fills16h": 26
+},
+{
+"eid": "890",
+"label": "Dem CA-22 House race",
+"party": "Democratic",
+"race": "CA-22 House race",
+"best_bid": 0.85,
+"best_ask": 0.895,
+"fv": null,
+"ref": null,
+"pos": 2.0,
+"lots": [
+[
+2.0,
+-48580
+]
+],
+"fills16h": 16
+},
+{
+"eid": "891",
+"label": "Rep CA-22 House race",
+"party": "Republican",
+"race": "CA-22 House race",
+"best_bid": 0.115,
+"best_ask": 0.13,
+"fv": null,
+"ref": null,
+"pos": 173.0,
+"lots": [
+[
+2.0,
+-29300
+],
+[
+50.0,
+-29300
+],
+[
+10.0,
+-29276
+],
+[
+11.0,
+-29194
+],
+[
+85.0,
+-28835
+],
+[
+15.0,
+-28831
+]
+],
+"fills16h": 46
+},
+{
+"eid": "892",
+"label": "Dem CA-48 House race",
+"party": "Democratic",
+"race": "CA-48 House race",
+"best_bid": 0.86,
+"best_ask": 0.89,
+"fv": null,
+"ref": 0.905,
+"pos": 200.0,
+"lots": [
+[
+200.0,
+-58355
+]
+],
+"fills16h": 1
+},
+{
+"eid": "893",
+"label": "Rep CA-48 House race",
+"party": "Republican",
+"race": "CA-48 House race",
+"best_bid": 0.105,
+"best_ask": 0.11,
+"fv": null,
+"ref": 0.08499999999999999,
+"pos": -200.0,
+"lots": [
+[
+-50.0,
+-58355
+],
+[
+-12.0,
+-21994
+],
+[
+-12.0,
+-21994
+],
+[
+-12.0,
+-21984
+],
+[
+-114.0,
+-21980
+]
+],
+"fills16h": 13
+},
+{
+"eid": "894",
+"label": "Dem CO-03 House race",
+"party": "Democratic",
+"race": "CO-03 House race",
+"best_bid": 0.27,
+"best_ask": 0.285,
+"fv": null,
+"ref": 0.255,
+"pos": -150.0,
+"lots": [
+[
+-150.0,
+-58355
+]
+],
+"fills16h": 3
+},
+{
+"eid": "895",
+"label": "Rep CO-03 House race",
+"party": "Republican",
+"race": "CO-03 House race",
+"best_bid": 0.7,
+"best_ask": 0.71,
+"fv": null,
+"ref": 0.735,
+"pos": 336.0,
+"lots": [
+[
+336.0,
+-48561
+]
+],
+"fills16h": 23
+},
+{
+"eid": "896",
+"label": "Dem CO-04 House race",
+"party": "Democratic",
+"race": "CO-04 House race",
+"best_bid": 0.29,
+"best_ask": 0.305,
+"fv": null,
+"ref": 0.295,
+"pos": 100.0,
+"lots": [
+[
+100.0,
+-58355
+]
+],
+"fills16h": 1
+},
+{
+"eid": "897",
+"label": "Rep CO-04 House race",
+"party": "Republican",
+"race": "CO-04 House race",
+"best_bid": 0.7,
+"best_ask": 0.705,
+"fv": null,
+"ref": 0.695,
+"pos": 100.0,
+"lots": [
+[
+100.0,
+-58355
+]
+],
+"fills16h": 10
+},
+{
+"eid": "898",
+"label": "Dem CO-08 House race",
+"party": "Democratic",
+"race": "CO-08 House race",
+"best_bid": 0.83,
+"best_ask": 0.835,
+"fv": null,
+"ref": 0.855,
+"pos": 200.0,
+"lots": [
+[
+50.0,
+-45883
+],
+[
+150.0,
+-22242
+]
+],
+"fills16h": 3
+},
+{
+"eid": "899",
+"label": "Rep CO-08 House race",
+"party": "Republican",
+"race": "CO-08 House race",
+"best_bid": 0.17,
+"best_ask": 0.175,
+"fv": null,
+"ref": 0.155,
+"pos": 50.0,
+"lots": [
+[
+50.0,
+-19484
+]
+],
+"fills16h": 3
+},
+{
+"eid": "900",
+"label": "Dem FL-09 House race",
+"party": "Democratic",
+"race": "FL-09 House race",
+"best_bid": 0.29,
+"best_ask": 0.3,
+"fv": null,
+"ref": 0.295,
+"pos": -595.0,
+"lots": [
+[
+-100.0,
+-58355
+],
+[
+-495.0,
+-35052
+]
+],
+"fills16h": 4
+},
+{
+"eid": "901",
+"label": "Rep FL-13 House race",
+"party": "Republican",
+"race": "FL-13 House race",
+"best_bid": 0.735,
+"best_ask": 0.75,
+"fv": null,
+"ref": 0.755,
+"pos": -100.0,
+"lots": [
+[
+-100.0,
+-35322
+]
+],
+"fills16h": 6
+},
+{
+"eid": "902",
+"label": "Dem IA-01 House race",
+"party": "Democratic",
+"race": "IA-01 House race",
+"best_bid": 0.79,
+"best_ask": 0.815,
+"fv": null,
+"ref": 0.815,
+"pos": 297.0,
+"lots": [
+[
+47.0,
+-28683
+],
+[
+250.0,
+-28657
+]
+],
+"fills16h": 47
+},
+{
+"eid": "903",
+"label": "Rep IA-01 House race",
+"party": "Republican",
+"race": "IA-01 House race",
+"best_bid": 0.19,
+"best_ask": 0.195,
+"fv": null,
+"ref": 0.185,
+"pos": 103.0,
+"lots": [
+[
+3.0,
+-26557
+],
+[
+100.0,
+-26458
+]
+],
+"fills16h": 12
+},
+{
+"eid": "904",
+"label": "Dem IA-02 House race",
+"party": "Democratic",
+"race": "IA-02 House race",
+"best_bid": 0.52,
+"best_ask": 0.535,
+"fv": null,
+"ref": 0.525,
+"pos": -734.0,
+"lots": [
+[
+-234.0,
+-58355
+],
+[
+-500.0,
+-36487
+]
+],
+"fills16h": 4
+},
+{
+"eid": "905",
+"label": "Rep IA-02 House race",
+"party": "Republican",
+"race": "IA-02 House race",
+"best_bid": 0.465,
+"best_ask": 0.475,
+"fv": null,
+"ref": 0.455,
+"pos": -700.0,
+"lots": [
+[
+-124.0,
+-58355
+],
+[
+-426.0,
+-40767
+],
+[
+-150.0,
+-22171
+]
+],
+"fills16h": 16
+},
+{
+"eid": "906",
+"label": "Dem IA-03 House race",
+"party": "Democratic",
+"race": "IA-03 House race",
+"best_bid": 0.76,
+"best_ask": 0.765,
+"fv": null,
+"ref": 0.765,
+"pos": 0.0,
+"lots": [],
+"fills16h": 2
+},
+{
+"eid": "907",
+"label": "Rep IA-03 House race",
+"party": "Republican",
+"race": "IA-03 House race",
+"best_bid": 0.24,
+"best_ask": 0.25,
+"fv": null,
+"ref": 0.235,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "908",
+"label": "Dem KY-04 House race",
+"party": "Democratic",
+"race": "KY-04 House race",
+"best_bid": 0.045,
+"best_ask": 0.06,
+"fv": null,
+"ref": 0.023,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "909",
+"label": "Rep KY-04 House race",
+"party": "Republican",
+"race": "KY-04 House race",
+"best_bid": 0.935,
+"best_ask": 0.95,
+"fv": null,
+"ref": 0.9624999999999999,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "910",
+"label": "Dem ME-02 House race",
+"party": "Democratic",
+"race": "ME-02 House race",
+"best_bid": 0.345,
+"best_ask": 0.365,
+"fv": null,
+"ref": 0.355,
+"pos": -248.0,
+"lots": [
+[
+-248.0,
+-58355
+]
+],
+"fills16h": 1
+},
+{
+"eid": "911",
+"label": "Rep ME-02 House race",
+"party": "Republican",
+"race": "ME-02 House race",
+"best_bid": 0.635,
+"best_ask": 0.64,
+"fv": null,
+"ref": 0.625,
+"pos": -248.0,
+"lots": [
+[
+-248.0,
+-58355
+]
+],
+"fills16h": 2
+},
+{
+"eid": "912",
+"label": "Dem MT-01 House race",
+"party": "Democratic",
+"race": "MT-01 House race",
+"best_bid": 0.325,
+"best_ask": 0.335,
+"fv": null,
+"ref": 0.325,
+"pos": -217.0,
+"lots": [
+[
+-217.0,
+-34578
+]
+],
+"fills16h": 14
+},
+{
+"eid": "913",
+"label": "Rep MT-01 House race",
+"party": "Republican",
+"race": "MT-01 House race",
+"best_bid": 0.665,
+"best_ask": 0.675,
+"fv": null,
+"ref": 0.675,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "914",
+"label": "Dem NE-02 House race",
+"party": "Democratic",
+"race": "NE-02 House race",
+"best_bid": 0.9,
+"best_ask": 0.905,
+"fv": null,
+"ref": 0.915,
+"pos": 200.0,
+"lots": [
+[
+200.0,
+-58355
+]
+],
+"fills16h": 2
+},
+{
+"eid": "915",
+"label": "Rep NE-02 House race",
+"party": "Republican",
+"race": "NE-02 House race",
+"best_bid": 0.09,
+"best_ask": 0.115,
+"fv": null,
+"ref": 0.0865,
+"pos": 50.0,
+"lots": [
+[
+50.0,
+-50335
+]
+],
+"fills16h": 4
+},
+{
+"eid": "916",
+"label": "Dem NJ-07 House race",
+"party": "Democratic",
+"race": "NJ-07 House race",
+"best_bid": 0.855,
+"best_ask": 0.87,
+"fv": null,
+"ref": 0.895,
+"pos": -259.0,
+"lots": [
+[
+-259.0,
+-36408
+]
+],
+"fills16h": 18
+},
+{
+"eid": "917",
+"label": "Rep NJ-07 House race",
+"party": "Republican",
+"race": "NJ-07 House race",
+"best_bid": 0.12,
+"best_ask": 0.135,
+"fv": null,
+"ref": 0.10500000000000001,
+"pos": -560.0,
+"lots": [
+[
+-210.0,
+-58355
+],
+[
+-350.0,
+-24946
+]
+],
+"fills16h": 3
+},
+{
+"eid": "918",
+"label": "Dem NY-13 House race",
+"party": "Democratic",
+"race": "NY-13 House race",
+"best_bid": 0.95,
+"best_ask": 0.97,
+"fv": null,
+"ref": 0.9724999999999999,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "919",
+"label": "Rep NY-13 House race",
+"party": "Republican",
+"race": "NY-13 House race",
+"best_bid": 0.02,
+"best_ask": 0.065,
+"fv": null,
+"ref": 0.0235,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "920",
+"label": "Dem NY-17 House race",
+"party": "Democratic",
+"race": "NY-17 House race",
+"best_bid": 0.635,
+"best_ask": 0.65,
+"fv": null,
+"ref": 0.635,
+"pos": -333.0,
+"lots": [
+[
+-333.0,
+-28779
+]
+],
+"fills16h": 26
+},
+{
+"eid": "921",
+"label": "Rep NY-17 House race",
+"party": "Republican",
+"race": "NY-17 House race",
+"best_bid": 0.36,
+"best_ask": 0.375,
+"fv": null,
+"ref": 0.365,
+"pos": 13.0,
+"lots": [
+[
+13.0,
+-41863
+]
+],
+"fills16h": 9
+},
+{
+"eid": "922",
+"label": "Dem PA-01 House race",
+"party": "Democratic",
+"race": "PA-01 House race",
+"best_bid": 0.36,
+"best_ask": 0.37,
+"fv": null,
+"ref": 0.335,
+"pos": 62.0,
+"lots": [
+[
+62.0,
+-57081
+]
+],
+"fills16h": 5
+},
+{
+"eid": "923",
+"label": "Rep PA-01 House race",
+"party": "Republican",
+"race": "PA-01 House race",
+"best_bid": 0.64,
+"best_ask": 0.655,
+"fv": null,
+"ref": 0.655,
+"pos": 449.0,
+"lots": [
+[
+449.0,
+-58355
+]
+],
+"fills16h": 7
+},
+{
+"eid": "924",
+"label": "Dem PA-07 House race",
+"party": "Democratic",
+"race": "PA-07 House race",
+"best_bid": 0.825,
+"best_ask": 0.83,
+"fv": null,
+"ref": 0.84,
+"pos": -100.0,
+"lots": [
+[
+-100.0,
+-36667
+]
+],
+"fills16h": 21
+},
+{
+"eid": "925",
+"label": "Rep PA-07 House race",
+"party": "Republican",
+"race": "PA-07 House race",
+"best_bid": 0.175,
+"best_ask": 0.18,
+"fv": null,
+"ref": 0.155,
+"pos": -550.0,
+"lots": [
+[
+-100.0,
+-41083
+],
+[
+-450.0,
+-40893
+]
+],
+"fills16h": 11
+},
+{
+"eid": "926",
+"label": "Dem PA-08 House race",
+"party": "Democratic",
+"race": "PA-08 House race",
+"best_bid": 0.665,
+"best_ask": 0.675,
+"fv": null,
+"ref": 0.665,
+"pos": -183.0,
+"lots": [
+[
+-117.0,
+-58355
+],
+[
+-66.0,
+-1085
+]
+],
+"fills16h": 3
+},
+{
+"eid": "927",
+"label": "Rep PA-08 House race",
+"party": "Republican",
+"race": "PA-08 House race",
+"best_bid": 0.325,
+"best_ask": 0.335,
+"fv": null,
+"ref": 0.315,
+"pos": -183.0,
+"lots": [
+[
+-83.0,
+-36720
+],
+[
+-100.0,
+-36123
+]
+],
+"fills16h": 5
+},
+{
+"eid": "928",
+"label": "Dem PA-10 House race",
+"party": "Democratic",
+"race": "PA-10 House race",
+"best_bid": 0.79,
+"best_ask": 0.8,
+"fv": null,
+"ref": 0.815,
+"pos": 100.0,
+"lots": [
+[
+100.0,
+-56774
+]
+],
+"fills16h": 3
+},
+{
+"eid": "929",
+"label": "Rep PA-10 House race",
+"party": "Republican",
+"race": "PA-10 House race",
+"best_bid": 0.2,
+"best_ask": 0.235,
+"fv": null,
+"ref": 0.195,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "930",
+"label": "Dem SC-01 House race",
+"party": "Democratic",
+"race": "SC-01 House race",
+"best_bid": 0.255,
+"best_ask": 0.26,
+"fv": null,
+"ref": 0.25,
+"pos": -617.0,
+"lots": [
+[
+-483.0,
+-56163
+],
+[
+-134.0,
+-56158
+]
+],
+"fills16h": 5
+},
+{
+"eid": "931",
+"label": "Rep SC-01 House race",
+"party": "Republican",
+"race": "SC-01 House race",
+"best_bid": 0.73,
+"best_ask": 0.735,
+"fv": null,
+"ref": 0.745,
+"pos": -153.0,
+"lots": [
+[
+-153.0,
+-56325
+]
+],
+"fills16h": 7
+},
+{
+"eid": "932",
+"label": "Dem TX-15 House race",
+"party": "Democratic",
+"race": "TX-15 House race",
+"best_bid": 0.78,
+"best_ask": 0.785,
+"fv": null,
+"ref": 0.785,
+"pos": 227.0,
+"lots": [
+[
+27.0,
+-58355
+],
+[
+100.0,
+-40533
+],
+[
+100.0,
+-21558
+]
+],
+"fills16h": 19
+},
+{
+"eid": "933",
+"label": "Rep TX-15 House race",
+"party": "Republican",
+"race": "TX-15 House race",
+"best_bid": 0.215,
+"best_ask": 0.225,
+"fv": null,
+"ref": 0.195,
+"pos": 0.0,
+"lots": [],
+"fills16h": 5
+},
+{
+"eid": "934",
+"label": "Dem TX-23 House race",
+"party": "Democratic",
+"race": "TX-23 House race",
+"best_bid": 0.35,
+"best_ask": 0.36,
+"fv": null,
+"ref": 0.355,
+"pos": 100.0,
+"lots": [
+[
+100.0,
+-56504
+]
+],
+"fills16h": 17
+},
+{
+"eid": "935",
+"label": "Rep TX-23 House race",
+"party": "Republican",
+"race": "TX-23 House race",
+"best_bid": 0.645,
+"best_ask": 0.655,
+"fv": null,
+"ref": 0.635,
+"pos": 100.0,
+"lots": [
+[
+100.0,
+-55952
+]
+],
+"fills16h": 4
+},
+{
+"eid": "936",
+"label": "Dem TX-28 House race",
+"party": "Democratic",
+"race": "TX-28 House race",
+"best_bid": 0.87,
+"best_ask": 0.885,
+"fv": null,
+"ref": 0.885,
+"pos": -200.0,
+"lots": [
+[
+-15.0,
+-26046
+],
+[
+-185.0,
+-25960
+]
+],
+"fills16h": 3
+},
+{
+"eid": "937",
+"label": "Rep TX-28 House race",
+"party": "Republican",
+"race": "TX-28 House race",
+"best_bid": 0.12,
+"best_ask": 0.13,
+"fv": null,
+"ref": 0.10500000000000001,
+"pos": -600.0,
+"lots": [
+[
+-100.0,
+-58355
+],
+[
+-500.0,
+-49368
+]
+],
+"fills16h": 2
+},
+{
+"eid": "938",
+"label": "Rep VA-01 House race",
+"party": "Republican",
+"race": "VA-01 House race",
+"best_bid": 0.525,
+"best_ask": 0.535,
+"fv": null,
+"ref": 0.53,
+"pos": -101.0,
+"lots": [
+[
+-1.0,
+-20429
+],
+[
+-100.0,
+-15396
+]
+],
+"fills16h": 10
+},
+{
+"eid": "939",
+"label": "Rep VA-02 House race",
+"party": "Republican",
+"race": "VA-02 House race",
+"best_bid": 0.195,
+"best_ask": 0.215,
+"fv": null,
+"ref": 0.185,
+"pos": 10.0,
+"lots": [
+[
+10.0,
+-58355
+]
+],
+"fills16h": 6
+},
+{
+"eid": "940",
+"label": "Dem VA-07 House race",
+"party": "Democratic",
+"race": "VA-07 House race",
+"best_bid": 0.925,
+"best_ask": 0.945,
+"fv": null,
+"ref": 0.9564999999999999,
+"pos": -49.0,
+"lots": [
+[
+-49.0,
+-807
+]
+],
+"fills16h": 1
+},
+{
+"eid": "941",
+"label": "Dem Alabama Senate",
+"party": "Democratic",
+"race": "Alabama Senate",
+"best_bid": 0.04,
+"best_ask": 0.07,
+"fv": null,
+"ref": 0.0165,
+"pos": 0.0,
+"lots": [],
+"fills16h": 10
+},
+{
+"eid": "942",
+"label": "Rep Alabama Senate",
+"party": "Republican",
+"race": "Alabama Senate",
+"best_bid": 0.945,
+"best_ask": 0.975,
+"fv": null,
+"ref": 0.98,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "943",
+"label": "Dem Arkansas Senate",
+"party": "Democratic",
+"race": "Arkansas Senate",
+"best_bid": 0.055,
+"best_ask": 0.06,
+"fv": null,
+"ref": 0.051500000000000004,
+"pos": -340.0,
+"lots": [
+[
+-340.0,
+-39001
+]
+],
+"fills16h": 10
+},
+{
+"eid": "944",
+"label": "Rep Arkansas Senate",
+"party": "Republican",
+"race": "Arkansas Senate",
+"best_bid": 0.93,
+"best_ask": 0.94,
+"fv": null,
+"ref": 0.9475,
+"pos": 165.0,
+"lots": [
+[
+165.0,
+-43173
+]
+],
+"fills16h": 8
+},
+{
+"eid": "945",
+"label": "Dem Colorado Senate",
+"party": "Democratic",
+"race": "Colorado Senate",
+"best_bid": 0.94,
+"best_ask": 0.975,
+"fv": null,
+"ref": 0.981,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "946",
+"label": "Rep Colorado Senate",
+"party": "Republican",
+"race": "Colorado Senate",
+"best_bid": 0.02,
+"best_ask": 0.04,
+"fv": null,
+"ref": 0.0155,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "947",
+"label": "Dem Georgia Senate",
+"party": "Democratic",
+"race": "Georgia Senate",
+"best_bid": 0.945,
+"best_ask": 0.955,
+"fv": null,
+"ref": 0.9715,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "948",
+"label": "Rep Georgia Senate",
+"party": "Republican",
+"race": "Georgia Senate",
+"best_bid": 0.05,
+"best_ask": 0.065,
+"fv": null,
+"ref": 0.0315,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "949",
+"label": "Dem Iowa Senate",
+"party": "Democratic",
+"race": "Iowa Senate",
+"best_bid": 0.46,
+"best_ask": 0.465,
+"fv": null,
+"ref": 0.415,
+"pos": -500.0,
+"lots": [
+[
+-400.0,
+-40712
+],
+[
+-100.0,
+-959
+]
+],
+"fills16h": 17
+},
+{
+"eid": "950",
+"label": "Rep Iowa Senate",
+"party": "Republican",
+"race": "Iowa Senate",
+"best_bid": 0.57,
+"best_ask": 0.575,
+"fv": null,
+"ref": 0.585,
+"pos": -300.0,
+"lots": [
+[
+-300.0,
+-42236
+]
+],
+"fills16h": 10
+},
+{
+"eid": "951",
+"label": "Dem Idaho Senate",
+"party": "Democratic",
+"race": "Idaho Senate",
+"best_bid": 0.035,
+"best_ask": 0.055,
+"fv": null,
+"ref": 0.001,
+"pos": 0.0,
+"lots": [],
+"fills16h": 5
+},
+{
+"eid": "952",
+"label": "Rep Idaho Senate",
+"party": "Republican",
+"race": "Idaho Senate",
+"best_bid": 0.925,
+"best_ask": 0.935,
+"fv": null,
+"ref": 0.9455,
+"pos": 0.0,
+"lots": [],
+"fills16h": 27
+},
+{
+"eid": "953",
+"label": "Dem Illinois Senate",
+"party": "Democratic",
+"race": "Illinois Senate",
+"best_bid": 0.955,
+"best_ask": 0.975,
+"fv": null,
+"ref": 0.979,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "954",
+"label": "Rep Illinois Senate",
+"party": "Republican",
+"race": "Illinois Senate",
+"best_bid": 0.025,
+"best_ask": 0.035,
+"fv": null,
+"ref": 0.0215,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "955",
+"label": "Dem Kentucky Senate",
+"party": "Democratic",
+"race": "Kentucky Senate",
+"best_bid": 0.045,
+"best_ask": 0.05,
+"fv": null,
+"ref": 0.026000000000000002,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "956",
+"label": "Rep Kentucky Senate",
+"party": "Republican",
+"race": "Kentucky Senate",
+"best_bid": 0.945,
+"best_ask": 0.96,
+"fv": null,
+"ref": 0.965,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "957",
+"label": "Dem Louisiana Senate",
+"party": "Democratic",
+"race": "Louisiana Senate",
+"best_bid": 0.075,
+"best_ask": 0.085,
+"fv": null,
+"ref": 0.065,
+"pos": 200.0,
+"lots": [
+[
+100.0,
+-58355
+],
+[
+100.0,
+-49818
+]
+],
+"fills16h": 2
+},
+{
+"eid": "958",
+"label": "Rep Louisiana Senate",
+"party": "Republican",
+"race": "Louisiana Senate",
+"best_bid": 0.91,
+"best_ask": 0.93,
+"fv": null,
+"ref": 0.935,
+"pos": 557.0,
+"lots": [
+[
+457.0,
+-58355
+],
+[
+100.0,
+-55614
+]
+],
+"fills16h": 5
+},
+{
+"eid": "959",
+"label": "Dem Maine Senate",
+"party": "Democratic",
+"race": "Maine Senate",
+"best_bid": 0.58,
+"best_ask": 0.59,
+"fv": null,
+"ref": 0.5700000000000001,
+"pos": -500.0,
+"lots": [
+[
+-500.0,
+-17629
+]
+],
+"fills16h": 13
+},
+{
+"eid": "960",
+"label": "Rep Maine Senate",
+"party": "Republican",
+"race": "Maine Senate",
+"best_bid": 0.41,
+"best_ask": 0.43,
+"fv": null,
+"ref": 0.415,
+"pos": -500.0,
+"lots": [
+[
+-500.0,
+-36996
+]
+],
+"fills16h": 28
+},
+{
+"eid": "961",
+"label": "Dem Mississippi Senate",
+"party": "Democratic",
+"race": "Mississippi Senate",
+"best_bid": 0.1,
+"best_ask": 0.11,
+"fv": null,
+"ref": 0.095,
+"pos": -609.0,
+"lots": [
+[
+-35.0,
+-923
+],
+[
+-574.0,
+-922
+]
+],
+"fills16h": 2
+},
+{
+"eid": "962",
+"label": "Rep Mississippi Senate",
+"party": "Republican",
+"race": "Mississippi Senate",
+"best_bid": 0.895,
+"best_ask": 0.905,
+"fv": null,
+"ref": 0.905,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "963",
+"label": "Dem Montana Senate",
+"party": "Democratic",
+"race": "Montana Senate",
+"best_bid": 0.025,
+"best_ask": 0.055,
+"fv": null,
+"ref": 0.0015,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "964",
+"label": "Rep Montana Senate",
+"party": "Republican",
+"race": "Montana Senate",
+"best_bid": 0.895,
+"best_ask": 0.91,
+"fv": null,
+"ref": 0.915,
+"pos": 200.0,
+"lots": [
+[
+100.0,
+-58355
+],
+[
+50.0,
+-894
+],
+[
+50.0,
+-834
+]
+],
+"fills16h": 5
+},
+{
+"eid": "965",
+"label": "Ind Montana Senate",
+"party": null,
+"race": "Ind Montana Senate",
+"best_bid": 0.07,
+"best_ask": 0.08,
+"fv": null,
+"ref": 0.086,
+"pos": 145.0,
+"lots": [
+[
+73.0,
+-58355
+],
+[
+48.0,
+-20099
+],
+[
+24.0,
+-20086
+]
+],
+"fills16h": 3
+},
+{
+"eid": "966",
+"label": "Dem North Carolina Senate",
+"party": "Democratic",
+"race": "North Carolina Senate",
+"best_bid": 0.89,
+"best_ask": 0.905,
+"fv": null,
+"ref": 0.955,
+"pos": 1204.0,
+"lots": [
+[
+100.0,
+-47948
+],
+[
+1104.0,
+-1029
+]
+],
+"fills16h": 2
+},
+{
+"eid": "967",
+"label": "Rep North Carolina Senate",
+"party": "Republican",
+"race": "North Carolina Senate",
+"best_bid": 0.075,
+"best_ask": 0.1,
+"fv": null,
+"ref": 0.045,
+"pos": -150.0,
+"lots": [
+[
+-50.0,
+-49417
+],
+[
+-41.0,
+-36422
+],
+[
+-59.0,
+-36422
+]
+],
+"fills16h": 5
+},
+{
+"eid": "968",
+"label": "Dem Nebraska Senate",
+"party": "Democratic",
+"race": "Nebraska Senate",
+"best_bid": 0.02,
+"best_ask": 0.055,
+"fv": null,
+"ref": 0.002,
+"pos": 0.0,
+"lots": [],
+"fills16h": 20
+},
+{
+"eid": "969",
+"label": "Ind Nebraska Senate",
+"party": null,
+"race": "Ind Nebraska Senate",
+"best_bid": 0.28,
+"best_ask": 0.285,
+"fv": null,
+"ref": 0.255,
+"pos": 150.0,
+"lots": [
+[
+43.0,
+-51202
+],
+[
+7.0,
+-51127
+],
+[
+100.0,
+-44052
+]
+],
+"fills16h": 5
+},
+{
+"eid": "970",
+"label": "Rep Nebraska Senate",
+"party": "Republican",
+"race": "Nebraska Senate",
+"best_bid": 0.71,
+"best_ask": 0.715,
+"fv": null,
+"ref": 0.74,
+"pos": 426.0,
+"lots": [
+[
+76.0,
+-58355
+],
+[
+250.0,
+-57030
+],
+[
+100.0,
+-968
+]
+],
+"fills16h": 16
+},
+{
+"eid": "971",
+"label": "Dem New Jersey Senate",
+"party": "Democratic",
+"race": "New Jersey Senate",
+"best_bid": 0.955,
+"best_ask": 0.975,
+"fv": null,
+"ref": 0.976,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "972",
+"label": "Rep New Jersey Senate",
+"party": "Republican",
+"race": "New Jersey Senate",
+"best_bid": 0.02,
+"best_ask": 0.04,
+"fv": null,
+"ref": 0.0185,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "973",
+"label": "Dem New Mexico Senate",
+"party": "Democratic",
+"race": "New Mexico Senate",
+"best_bid": 0.955,
+"best_ask": 0.975,
+"fv": null,
+"ref": 0.9744999999999999,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "974",
+"label": "Rep New Mexico Senate",
+"party": "Republican",
+"race": "New Mexico Senate",
+"best_bid": 0.03,
+"best_ask": 0.055,
+"fv": null,
+"ref": 0.015000000000000001,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "975",
+"label": "Rep Oklahoma Senate",
+"party": "Republican",
+"race": "Oklahoma Senate",
+"best_bid": 0.915,
+"best_ask": 0.94,
+"fv": null,
+"ref": 0.9824999999999999,
+"pos": -97.0,
+"lots": [
+[
+-97.0,
+-1221
+]
+],
+"fills16h": 2
+},
+{
+"eid": "976",
+"label": "Dem Oregon Senate",
+"party": "Democratic",
+"race": "Oregon Senate",
+"best_bid": 0.935,
+"best_ask": 0.965,
+"fv": null,
+"ref": 0.977,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "977",
+"label": "Rep Oregon Senate",
+"party": "Republican",
+"race": "Oregon Senate",
+"best_bid": 0.03,
+"best_ask": 0.05,
+"fv": null,
+"ref": 0.0195,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "978",
+"label": "Dem South Carolina Senate",
+"party": "Democratic",
+"race": "South Carolina Senate",
+"best_bid": 0.135,
+"best_ask": 0.15,
+"fv": null,
+"ref": 0.11499999999999999,
+"pos": -100.0,
+"lots": [
+[
+-100.0,
+-30492
+]
+],
+"fills16h": 3
+},
+{
+"eid": "979",
+"label": "Rep South Carolina Senate",
+"party": "Republican",
+"race": "South Carolina Senate",
+"best_bid": 0.855,
+"best_ask": 0.86,
+"fv": null,
+"ref": 0.885,
+"pos": 420.0,
+"lots": [
+[
+220.0,
+-58355
+],
+[
+100.0,
+-30329
+],
+[
+100.0,
+-29929
+]
+],
+"fills16h": 7
+},
+{
+"eid": "980",
+"label": "Dem South Dakota Senate",
+"party": "Democratic",
+"race": "South Dakota Senate",
+"best_bid": 0.04,
+"best_ask": 0.085,
+"fv": null,
+"ref": 0.0015,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "981",
+"label": "Rep South Dakota Senate",
+"party": "Republican",
+"race": "South Dakota Senate",
+"best_bid": 0.895,
+"best_ask": 0.9,
+"fv": null,
+"ref": 0.92,
+"pos": 572.0,
+"lots": [
+[
+372.0,
+-54173
+],
+[
+5.0,
+-27016
+],
+[
+95.0,
+-27015
+],
+[
+100.0,
+-26748
+]
+],
+"fills16h": 13
+},
+{
+"eid": "982",
+"label": "Dem Texas Senate",
+"party": "Democratic",
+"race": "Texas Senate",
+"best_bid": 0.625,
+"best_ask": 0.635,
+"fv": null,
+"ref": 0.615,
+"pos": -395.0,
+"lots": [
+[
+-195.0,
+-39726
+],
+[
+-100.0,
+-23736
+],
+[
+-100.0,
+-22858
+]
+],
+"fills16h": 13
+},
+{
+"eid": "983",
+"label": "Rep Texas Senate",
+"party": "Republican",
+"race": "Texas Senate",
+"best_bid": 0.375,
+"best_ask": 0.39,
+"fv": null,
+"ref": 0.385,
+"pos": -357.0,
+"lots": [
+[
+-100.0,
+-22510
+],
+[
+-257.0,
+-930
+]
+],
+"fills16h": 23
+},
+{
+"eid": "984",
+"label": "Dem Virginia Senate",
+"party": "Democratic",
+"race": "Virginia Senate",
+"best_bid": 0.955,
+"best_ask": 0.96,
+"fv": null,
+"ref": 0.9824999999999999,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "985",
+"label": "Dem West Virginia Senate",
+"party": "Democratic",
+"race": "West Virginia Senate",
+"best_bid": 0.015,
+"best_ask": 0.05,
+"fv": null,
+"ref": 0.012,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "986",
+"label": "Rep West Virginia Senate",
+"party": "Republican",
+"race": "West Virginia Senate",
+"best_bid": 0.96,
+"best_ask": 0.985,
+"fv": null,
+"ref": 0.985,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "987",
+"label": "Dem Connecticut Governor",
+"party": "Democratic",
+"race": "Connecticut Governor",
+"best_bid": 0.93,
+"best_ask": 0.945,
+"fv": null,
+"ref": 0.9655,
+"pos": -150.0,
+"lots": [
+[
+-150.0,
+-27658
+]
+],
+"fills16h": 10
+},
+{
+"eid": "988",
+"label": "Dem Florida Governor",
+"party": "Democratic",
+"race": "Florida Governor",
+"best_bid": 0.255,
+"best_ask": 0.26,
+"fv": null,
+"ref": 0.215,
+"pos": -764.0,
+"lots": [
+[
+-764.0,
+-54483
+]
+],
+"fills16h": 21
+},
+{
+"eid": "989",
+"label": "Rep Florida Governor",
+"party": "Republican",
+"race": "Florida Governor",
+"best_bid": 0.75,
+"best_ask": 0.77,
+"fv": null,
+"ref": 0.785,
+"pos": -100.0,
+"lots": [
+[
+-100.0,
+-35995
+]
+],
+"fills16h": 4
+},
+{
+"eid": "990",
+"label": "Dem Hawaii Governor",
+"party": "Democratic",
+"race": "Hawaii Governor",
+"best_bid": 0.955,
+"best_ask": 0.96,
+"fv": null,
+"ref": 0.9795,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "991",
+"label": "Rep Hawaii Governor",
+"party": "Republican",
+"race": "Hawaii Governor",
+"best_bid": 0.045,
+"best_ask": 0.065,
+"fv": null,
+"ref": 0.016,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "992",
+"label": "Dem Kansas Governor",
+"party": "Democratic",
+"race": "Kansas Governor",
+"best_bid": 0.285,
+"best_ask": 0.29,
+"fv": null,
+"ref": 0.275,
+"pos": 65.0,
+"lots": [
+[
+65.0,
+-36103
+]
+],
+"fills16h": 8
+},
+{
+"eid": "993",
+"label": "Rep Kansas Governor",
+"party": "Republican",
+"race": "Kansas Governor",
+"best_bid": 0.72,
+"best_ask": 0.725,
+"fv": null,
+"ref": 0.735,
+"pos": 100.0,
+"lots": [
+[
+100.0,
+-58355
+]
+],
+"fills16h": 1
+},
+{
+"eid": "994",
+"label": "Dem Michigan Governor",
+"party": "Democratic",
+"race": "Michigan Governor",
+"best_bid": 0.885,
+"best_ask": 0.91,
+"fv": null,
+"ref": 0.915,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "995",
+"label": "Rep Michigan Governor",
+"party": "Republican",
+"race": "Michigan Governor",
+"best_bid": 0.105,
+"best_ask": 0.115,
+"fv": null,
+"ref": 0.08499999999999999,
+"pos": -19.0,
+"lots": [
+[
+-19.0,
+-36430
+]
+],
+"fills16h": 6
+},
+{
+"eid": "996",
+"label": "Dem Minnesota Governor",
+"party": "Democratic",
+"race": "Minnesota Governor",
+"best_bid": 0.94,
+"best_ask": 0.945,
+"fv": null,
+"ref": 0.955,
+"pos": 0.0,
+"lots": [],
+"fills16h": 2
+},
+{
+"eid": "997",
+"label": "Rep Minnesota Governor",
+"party": "Republican",
+"race": "Minnesota Governor",
+"best_bid": 0.065,
+"best_ask": 0.07,
+"fv": null,
+"ref": 0.0455,
+"pos": -182.0,
+"lots": [
+[
+-182.0,
+-58355
+]
+],
+"fills16h": 1
+},
+{
+"eid": "998",
+"label": "Rep South Dakota Governor",
+"party": "Republican",
+"race": "South Dakota Governor",
+"best_bid": 0.94,
+"best_ask": 0.95,
+"fv": null,
+"ref": 0.9655,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+},
+{
+"eid": "999",
+"label": "Dem Tennessee Governor",
+"party": "Democratic",
+"race": "Tennessee Governor",
+"best_bid": 0.065,
+"best_ask": 0.07,
+"fv": null,
+"ref": 0.051000000000000004,
+"pos": 0.0,
+"lots": [],
+"fills16h": 0
+}
+]
+}
