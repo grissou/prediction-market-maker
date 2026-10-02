@@ -1446,6 +1446,7 @@ class Ex:
     unconfirmed_hold: float = -1.0        # the pending_until set for orders whose batch outcome was unknown
     writes: int = 0                       # our writes (cancels / batches) touching it still in flight
     reprices: dict = field(default_factory=dict)   # side -> times we repriced it lately (churn control)
+    ref_moved_at: float = -1e9            # last time its Polymarket price moved >= urgent_ref_move
     cancelling: bool = False              # ...one of them is a cancel
     inv: float = 0.0                      # for logging / recording
     eff: float = 0.0                      # for logging
@@ -1878,6 +1879,8 @@ class Bot:
         self.ref_version_urgent = version
         moved = {k for k, m in getattr(self.refs, "last_moves", {}).items() if m >= self.cfg.urgent_ref_move}
         self.ref_moved = {e for e, ex in self.ex.items() if f"{ex.group}|{ex.party}" in moved}
+        for e in self.ref_moved:
+            self.ex[e].ref_moved_at = time.monotonic()
 
     def reference_jump_guard(self, now_m):
         """After each new Polymarket reading, pull quotes on any market whose Polymarket price moved
@@ -2255,14 +2258,21 @@ class Bot:
                 ex.reprices.setdefault(side, deque()).append(now_m)
 
         if self.burst and ex.eid not in self.burst_set and not critical:
-            # Burst mode, not a top market: keep what rests while it's still safe (price inside the limit, size not
-            # above what's wanted); pull what isn't; place nothing.
-            fix_bid = fix_bid and (q.bid is None or any(
+            # Burst mode, not a top market: no reprices. Keep what rests while it's still safe (price inside the
+            # limit, size not above what's wanted) and pull what isn't; an EMPTY side still gets a (smaller) quote,
+            # which costs only a share of one batch.
+            fix_bid = fix_bid and (q.bid is None or not bids or any(
                 o.price > (q.bid_limit if q.bid_limit is not None else q.bid) + 1e-9 or o.qty > q.bid_size + 1e-9 for o in bids))
-            fix_ask = fix_ask and (q.ask is None or any(
+            fix_ask = fix_ask and (q.ask is None or not asks or any(
                 o.price < (q.ask_limit if q.ask_limit is not None else q.ask) - 1e-9 or o.qty > q.ask_size + 1e-9 for o in asks))
             doomed = (bids if fix_bid else []) + (asks if fix_ask else [])
-            return Change(ex, doomed, False, [], self.change_key(ex, pull=True, reprice=True)) if doomed else None
+            k = self.cfg.burst_size_factor
+            new = [] if now_m < ex.pause_until else (
+                ([self.new_order(ex, True, q.bid, max(1, int(q.bid_size * k)), fv, now)] if fix_bid and q.bid is not None and not bids else [])
+                + ([self.new_order(ex, False, q.ask, max(1, int(q.ask_size * k)), fv, now)] if fix_ask and q.ask is not None and not asks else []))
+            if not doomed and not new:
+                return None
+            return Change(ex, doomed, False, new, self.change_key(ex, pull=bool(doomed) or not new, reprice=bool(doomed)))
         # Cancel the wrong side(s). Both wrong -> one cancel-all for the exchange; else per order.
         doomed = (bids if fix_bid else []) + (asks if fix_ask else [])
         new = []
@@ -2294,8 +2304,8 @@ class Bot:
             return False                                  # bigger than now allowed (limits tightened): must shrink
         if o.expires and (o.expires - now).total_seconds() < cfg.refresh_before_expiry:
             return False
-        if ex.eid in self.ref_moved:
-            return False                                  # Polymarket just moved here: follow it now
+        if ex.eid in self.ref_moved or now_m - ex.ref_moved_at < 15:
+            return False                                  # Polymarket moved here lately: follow it now
         young = o.order_id in self.recent_orders and now_m - self.recent_orders[o.order_id][1] < cfg.min_quote_life_seconds
         hist = ex.reprices.get("bid" if is_bid else "ask") or deque()
         while hist and now_m - hist[0] > cfg.churn_window_seconds:

@@ -1358,6 +1358,10 @@ new21 = [x for x in a.ours("21") if x not in before["21"]]
 check("...e.g. Utah: no new orders there", not new21, (before["21"], a.ours("21")))
 moved = [x for x in a.ours("11") if x not in before["11"]]
 check("burst: top markets repriced at half size", moved and all(n == 50 for _, _, n in moved), (before["11"], a.ours("11")))
+b.cancel("22", [o for o in b.my_orders.values() if o.eid == "22"], whole_exchange=True)
+b.feed.push(dirty={"22"}); b.cycle()
+check("burst: outside the top markets an EMPTY side still gets a quote, at reduced size",
+      len(a.ours("22")) == 2 and all(n == 50 for _, _, n in a.ours("22")), a.ours("22"))
 b.update_burst = real_ub
 b.write_log.clear(); b.burst_calm_since = time.monotonic() - 121
 b.update_burst(time.monotonic())
@@ -1427,6 +1431,7 @@ th = threading.Thread(target=lambda: wapi2.throttle(write=True)); th.start()   #
 time.sleep(0.05); t0 = time.monotonic(); wapi2.throttle(); waited = time.monotonic() - t0
 th.join()
 check("a write waiting on the write budget doesn't hold up reads", waited < 0.3, f"{waited:.2f}s")
+
 
 print("--- parallel requests")
 a, b = make_bot()
