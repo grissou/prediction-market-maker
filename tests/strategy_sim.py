@@ -414,13 +414,29 @@ def quote_to_want(q):
     return out
 
 
-def run_many(seeds, hours, regime, overrides=None, strategy=None):
-    rows = []
-    for s in range(1, seeds + 1):
-        cfg = Config()
-        for k, v in (overrides or {}).items():
-            setattr(cfg, k, type(getattr(cfg, k))(v) if not isinstance(getattr(cfg, k), bool) else v in (True, "1", "true", "True"))
-        rows.append(Sim(s, hours, regime, cfg, strategy).run())
+def make_cfg(overrides):
+    cfg = Config()
+    for k, v in (overrides or {}).items():
+        cur = getattr(cfg, k)
+        setattr(cfg, k, v in (True, "1", "true", "True") if isinstance(cur, bool) else
+                tuple(v) if isinstance(cur, tuple) else type(cur)(v))
+    return cfg
+
+
+def _one(args):
+    s, hours, regime, overrides, strategy = args
+    return Sim(s, hours, regime, make_cfg(overrides), strategy).run()
+
+
+def run_many(seeds, hours, regime, overrides=None, strategy=None, procs=None):
+    jobs = [(s, hours, regime, overrides, strategy) for s in range(1, seeds + 1)]
+    procs = procs or int(os.environ.get("SIM_PROCS", "4"))
+    if procs > 1 and seeds > 1:
+        import multiprocessing
+        with multiprocessing.Pool(min(procs, seeds)) as pool:
+            rows = pool.map(_one, jobs)
+    else:
+        rows = [_one(j) for j in jobs]
     agg = {}
     for k in rows[0]:
         vals = [r[k] for r in rows]
