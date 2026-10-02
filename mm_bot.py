@@ -706,7 +706,10 @@ class Config:
     ref_tilt_headline: bool = False       # False: headline markets keep the raw Polymarket price (staging gate)
     ref_tilt_min_markets: int = 50        # fewer usable markets than this: hold the last estimate
     ref_tilt_halflife_min: float = 30.0   # EMA half-life of the estimate, minutes
-    ref_tilt_max: float = 0.12            # estimate clipped to [0, this]
+    ref_tilt_max: float = 0.20            # estimate clipped to [0, this]. Live s was 6.3% on 2 Oct evening (2.4% a day
+                                          #   earlier); in a 15%-tilt simulated world a 0.12 clip left the bot buying 3
+                                          #   points of tilt for the same 3-h P&L (SIM_NOTES Round 5), so the cap is set
+                                          #   where it does not bind and the estimate stays readable; alarm above 0.12
     ref_tilt_winsor: float = 0.08         # each market's gap (Polymarket - book) clipped to +-this
     # --- Package 5: B kelly_edge_cap, A reduce_from_book ---
     # B: Kelly sizes on at most this much edge (0 = off; try 0.015 / 0.01): size on the spread, not on a persistent

@@ -35,7 +35,7 @@ print("--- settings")
 c = M.Config()
 check("defaults: off, headline gate off, 50 markets, 30 min half-life, max 12%, winsor 8c",
       (c.ref_tilt_enabled, c.ref_tilt_headline, c.ref_tilt_min_markets, c.ref_tilt_halflife_min, c.ref_tilt_max,
-       c.ref_tilt_winsor) == (False, False, 50, 30.0, 0.12, 0.08))
+       c.ref_tilt_winsor) == (False, False, 50, 30.0, 0.20, 0.08))
 names = ["ref_tilt_enabled", "ref_tilt_headline", "ref_tilt_min_markets", "ref_tilt_halflife_min", "ref_tilt_max",
          "ref_tilt_winsor"]
 _ov = list(M.OVERRIDABLE)
@@ -98,7 +98,8 @@ e_c = M.TiltEstimator(nw)
 e_c.update(base + [(0.95, 0.35, 2)], 0.0)
 check("winsorised: one 60c outlier moves s by < 1 point (clipped at 8c)", abs(e_b.s - e_a.s) < 0.01, (e_a.s, e_b.s))
 check("...without winsorising it would move s by > 2 points", e_c.s - e_a.s > 0.02, (e_a.s, e_c.s))
-e_m = M.TiltEstimator(M.Config())
+cm = M.Config(); cm.ref_tilt_max = 0.12
+e_m = M.TiltEstimator(cm)
 e_m.update(synth(200, 0.20, noise=0.0), 0.0)
 check("clipped at ref_tilt_max 0.12 (true 0.20, gaps under 8c)", e_m.s == 0.12, e_m.s)
 e_n = M.TiltEstimator(M.Config())
@@ -236,7 +237,7 @@ check("flag on: the sim calls mm_bot's own tilted_ref and TiltEstimator (one upd
       calls["ref"] > 0 and 0 < calls["upd"] <= int(0.05 * 3600 / 2) + 1, calls)
 sim = S.Sim(1, 0.05, "quiet", S.make_cfg({"ref_tilt_enabled": True, "ref_tilt_min_markets": 5}))
 sim.run()
-check("flag on: the sim's estimator ran on its markets", sim.tilt.n >= 5 and 0.0 <= sim.tilt.s <= 0.12, (sim.tilt.n, sim.tilt.s))
+check("flag on: the sim's estimator ran on its markets", sim.tilt.n >= 5 and 0.0 <= sim.tilt.s <= 0.20, (sim.tilt.n, sim.tilt.s))
 
 print(f"\n{sum(RESULTS)} of {len(RESULTS)} passed")
 sys.exit(0 if all(RESULTS) else 1)

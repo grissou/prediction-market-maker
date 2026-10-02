@@ -608,3 +608,17 @@ the 28/min budget; do it in a quiet hour. (A 20-min ramp is screened below for t
 Reading: in news T2.1 gains most (the base bot's quotes lean toward Polymarket moves the tournament follows only partly, and T2.1's lean
 is 6-7% smaller); with the tilt flat the gain shrinks to +100 ± 84 at liquidation and ~0 at the exchange-style mark (the growth is what
 T2.1 protects against); it never loses.
+
+## ref_tilt_max: does the cap bind, and does it matter? (owner's question; high-tilt pinned world)
+World: tilt world + `_world_tilt_add` 0.08 + growth 0.004/h + `_bg_wc` 38000: the real book's gaps plus 8 points of tilt (~15% total),
+pinned. Base is reduce-only 94% of cycles here (the extra tilt raises the worst case): writes 4.8/min, pnl_liq -61. 8 x 3 quiet, d vs BASE.
+| Variant | d pnl_lag | d pnl_liq | d pnl_mid | d pnl (Poly) | d exit_ratio | d cap_end | d wc_end | d writes_pm | d deferred_h | d mk15_mid | d pick_cost | d ro_frac | estimator s at the end |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| T2.1, `ref_tilt_max` 0.12 | +316 ± 78 | +299 ± 84 | +306 ± 73 | +469 ± 67 | -0.319 ± 0.209 | -0.008 ± 0.009 | +1,885 ± 493 | +5.80 ± 0.75 | +1,541 ± 274 | +0.130 ± 0.082 | +53 ± 10 | -0.297 ± 0.042 | 0.120 (clipped) |
+| T2.1, `ref_tilt_max` 0.20 | +351 ± 89 | +302 ± 54 | +315 ± 69 | +484 ± 83 | -0.259 ± 0.271 | -0.015 ± 0.016 | +1,378 ± 395 | +8.51 ± 1.19 | +2,080 ± 374 | +0.117 ± 0.086 | +65 ± 12 | -0.430 ± 0.068 | 0.151 (tracks) |
+Reading: at a 15% tilt the 0.12 clip binds (the estimate sits at 0.12 while the world is at 0.15) and the bot keeps buying 3 points of tilt;
+the 3-h P&L is the same either way (+302 vs +299 at liquidation, +351 vs +316 at the exchange-style mark, within noise), the 0.20 cap costs
++2.7 writes/min (more adding, less reduce-only) and keeps the estimate readable. The slow mark bleed of the untracked 3 points (-327 per
+point per day live) is outside a 3-h run. Default set to 0.20 (live s is 6.3%; alarm if `tilt_s` passes 0.12: re-measure with
+analysis/poly_bias/snapshot02b.py before trusting it). Earlier run in a "growth 0.004 only" world (no added level; 8 x 3, ramp 120):
+T2.1 +133 ± 75 pnl_lag / +151 ± 120 pnl_liq, cap 0.2 within noise of it (tests/live_sim_round5_hightilt_8x3.txt holds the final world only).
