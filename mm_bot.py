@@ -158,8 +158,8 @@ class Config:
                                           #   sized by capital_ceiling_adding_size_factor, the reducing side quotes as
                                           #   usual, until it is back below this - 0.05. 2 Oct: 90.5k of 101k sat in
                                           #   positions, 11k cash left to quote with. 0 = off
-    capital_ceiling_adding_size_factor: float = 0.25  # ...0 = adding side not quoted at all, 0.5 = half size
-    mark_frag_enabled: bool = False       # mark-fragility cap (sizing only): a position's mark noise = |position| x sd
+    capital_ceiling_adding_size_factor: float = 0.5   # ...0 = adding side not quoted at all, 0.5 = half size
+    mark_frag_enabled: bool = True        # mark-fragility cap (sizing only): a position's mark noise = |position| x sd
                                           #   of the 10-min change of the tournament mid (recorder snapshots). The
                                           #   ADDING side's position limit = max(one quote, mark_frag_max_step_cash / sd).
                                           #   1 Oct snapshot: 1,186 $ per 10-min step over 159 positions, RI Senate legs
@@ -568,7 +568,7 @@ class Config:
     # Rival-floor map (analysis/rival_floor.py writes market_edge.json from the recorder's books): a per-market
     # min_edge, max(min_edge, the market's entry capped at market_edge_max); markets without an entry keep
     # min_edge. Off until calibrated on the live recorder data.
-    market_edge_enabled: bool = False
+    market_edge_enabled: bool = True 
     market_edge_file: str = "market_edge.json"   # {"<exchange id>": {"min_edge": 0.015, ...}, ...}; "" = off
     market_edge_reload_seconds: float = 600.0    # re-read this often (when the file changed)
     market_edge_max: float = 0.02         # no market's own edge above this
@@ -610,7 +610,7 @@ class Config:
     # --- SAME-SIDE REFILL COOLDOWN ------------------------------------------------------------
     # Data (Analyst 10b): the 3rd and later fills of a same-side run within 60 s lost -1.15c a share (81k shares,
     # -936), within 10 s -1.68c: re-posting the same side straight after it was hit kept buying through fair value.
-    refill_cooldown_enabled: bool = True  # after a same-side run of fills that ADDED to the position, stop re-quoting
+    refill_cooldown_enabled: bool = False  # after a same-side run of fills that ADDED to the position, stop re-quoting
                                           #   that side for a while (a safe resting order there is left alone; an
                                           #   unsafe one is pulled as usual). A side that reduces the position is exempt
     refill_cooldown_fills: int = 2        # ...this many fills on one side of one market

@@ -41,7 +41,7 @@ print("--- settings")
 c = M.Config()
 check("defaults: off, 100 $/step, 24 h, 60 samples, 0.2c floor, 2,000 $ total",
       (c.mark_frag_enabled, c.mark_frag_max_step_cash, c.mark_frag_window_hours, c.mark_frag_min_samples,
-       c.mark_frag_floor_sd, c.mark_frag_total_max_cash) == (False, 100.0, 24.0, 60, 0.002, 0.0))   # total cap off (Reviewer M-7)
+       c.mark_frag_floor_sd, c.mark_frag_total_max_cash) == (True, 100.0, 24.0, 60, 0.002, 0.0))   # total cap off (Reviewer M-7)
 good, bad = M.validate_overrides({"mark_frag_enabled": True, "mark_frag_max_step_cash": 150.0,
                                   "mark_frag_window_hours": 12.0, "mark_frag_min_samples": 30,
                                   "mark_frag_floor_sd": 0.003, "mark_frag_total_max_cash": 0.0}, c)
@@ -144,11 +144,12 @@ def quote(bot, inv):
 
 a, b = make_bot()
 b.cfg.reduce_join_best = False
+b.cfg.mark_frag_enabled = False                           # ON by default since Package 3: test the off path explicitly
 b.ex["11"].book = a.books["11"]
 b.mark_sd = {"11": 0.10}
 b.cfg.mark_frag_max_step_cash = 95.0                      # -> limit 950 shares
 base = quote(b, 900)
-check("disabled (default): decide is today's (bid 100 at pos 900)", base.bid_size == 100, base)
+check("disabled: decide is today's (bid 100 at pos 900)", base.bid_size == 100, base)
 b.cfg.mark_frag_enabled = True
 q = quote(b, 900)
 check("enabled, sd 10c, 95 $/step -> limit 950: the adding bid shrinks to 50", q.bid_size == 50, q)

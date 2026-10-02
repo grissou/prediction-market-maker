@@ -2474,7 +2474,7 @@ try:
     # End to end: over the ceiling, adding sides go, reducing sides stay; status and summary show it.
     check("capital ceiling default: adding sides at a quarter size, not withdrawn (the account was 90% in positions on "
           "2 Oct, so the ceiling is on at deploy: factor 0 would have blacked out every flat market)",
-          Config().capital_ceiling_adding_size_factor == 0.25)
+          Config().capital_ceiling_adding_size_factor == 0.5)
     a, b = make_bot(); b.cfg.capital_ceiling_adding_size_factor = 0.0
     a.inv = {"11": 500}                                   # long 500 Rep Ohio -> race +500 Rep / -500 Dem
     b.cfg.capital_in_positions_max_frac = 0.0005          # 500 x ~0.14 = ~70 of 100,000 -> over
@@ -2503,7 +2503,7 @@ finally:
 
 print("--- rival-floor map (market_edge.json: a per-market min_edge, off by default)")
 check("market edge: off by default, 600 s reload, 2c cap, live-overridable",
-      _live.market_edge_enabled is False and _live.market_edge_file == "market_edge.json"
+      _live.market_edge_enabled is True and _live.market_edge_file == "market_edge.json"
       and _live.market_edge_reload_seconds == 600.0 and _live.market_edge_max == 0.02
       and "market_edge_enabled" in OVERRIDABLE and "market_edge_max" in OVERRIDABLE
       and "market_edge_file" not in OVERRIDABLE)
@@ -2569,6 +2569,7 @@ a, b = make_bot(books={"11": {"bids": [lvl(0.10, 1000)], "asks": [lvl(0.18, 1000
 b.cycle()
 ex21 = b.ex["21"]
 dq = lambda: b.decide(ex21, 0.52, {}, {}, False, 0, time.monotonic())
+b.cfg.market_edge_enabled = False                        # ON by default since Package 3: test both paths explicitly
 q_base = dq()
 b.market_edge = {"21": 0.015}
 q_off = dq()

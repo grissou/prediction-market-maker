@@ -41,7 +41,7 @@ print("--- settings")
 c = M.Config()
 check("defaults: recorder on, cooldown on (2 fills / 60 s / 200 sh -> 30 s)",
       (c.record_positions, c.refill_cooldown_enabled, c.refill_cooldown_fills, c.refill_cooldown_window_seconds,
-       c.refill_cooldown_min_shares, c.refill_cooldown_seconds) == (True, True, 2, 60.0, 200, 30.0))
+       c.refill_cooldown_min_shares, c.refill_cooldown_seconds) == (True, False, 2, 60.0, 200, 30.0))   # cooldown OFF by default (Package 3: simulator -120 +- 97)
 good, bad = M.validate_overrides({"refill_cooldown_seconds": 45.0, "refill_cooldown_enabled": False,
                                   "refill_cooldown_fills": 3, "refill_cooldown_min_shares": 100,
                                   "refill_cooldown_window_seconds": 30.0}, c)
@@ -232,6 +232,7 @@ print("--- same-side refill cooldown")
 def big_bot(**cfg):
     """Quotes of 100 shares (the test sizes); runs count from 100 shares unless a test says otherwise."""
     a, b = make_bot()
+    b.cfg.refill_cooldown_enabled = True            # OFF by default since Package 3; the tests exercise it on
     b.cfg.refill_cooldown_min_shares = 100
     for k, v in cfg.items():
         setattr(b.cfg, k, v)
