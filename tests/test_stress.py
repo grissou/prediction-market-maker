@@ -158,6 +158,7 @@ def build(seed):
     d = tempfile.mkdtemp()
     cfg.fills_csv, cfg.status_file, cfg.order_notes_file, cfg.kill_file = (
         os.path.join(d, n) for n in ("fills.csv", "status.json", "notes.json", "kill.tripped"))
+    cfg.position_lots_file = os.path.join(d, "lots.json")
     cfg.record_file, cfg.ref_map_file, cfg.summary_every_hours, cfg.realtime_enabled = "", "", -1, False
     cfg.slow_poll_seconds, cfg.reserved_cash_mode = 30.0, "ignore"
     cfg.parallel_requests = 1             # one request thread: the random faults then fire in a repeatable order

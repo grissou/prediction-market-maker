@@ -145,6 +145,19 @@ class Config:
                                           #   still quoting both sides (0 = off, hard cap only)
     max_position_frac: float = 0.03       # limit on |net YES shares| per exchange WITHOUT a liquid Polymarket
                                           #   price: 3,000 shares at 100k. With one, Kelly sizing sets the limit
+    limits_use_race_net: bool = True      # the position limits (max_position_frac, Kelly, headline_position_frac)
+                                          #   also apply to the RACE-NETTED position (effective_inventory), on the side
+                                          #   that grows it: a short Rep leg counts toward the Dem leg's limit and vice
+                                          #   versa. 2 Oct: long 10,834 Dem House AND short 9,396 Rep House = the same
+                                          #   ~20k bet twice under a 10k per-leg limit. The per-market limit still
+                                          #   applies; the side that shrinks the netted position is never limited by
+                                          #   this. False = per-market only (the old behaviour)
+    capital_in_positions_max_frac: float = 0.75  # capital ceiling: positions worth more than 75% of account value ->
+                                          #   every market's ADDING side (the one growing |race-netted position|) is
+                                          #   sized by capital_ceiling_adding_size_factor, the reducing side quotes as
+                                          #   usual, until it is back below this - 0.05. 2 Oct: 90.5k of 101k sat in
+                                          #   positions, 11k cash left to quote with. 0 = off
+    capital_ceiling_adding_size_factor: float = 0.0   # ...0 = adding side not quoted at all, 0.5 = half size
     max_order_cash_frac: float = 0.01     # max cash tied up in a single order: 1,000 at 100k
     tail_low: float = 0.05                # fair value below this: don't SELL YES (risks ~95c a share to earn ~1c)...
     tail_high: float = 0.95               # ...above this: don't BUY YES. Either side still allowed to shrink a position
@@ -182,6 +195,12 @@ class Config:
     max_skew_through: float = 0.0         # a skewed quote may sit at most this far THROUGH fair value (0 = at fair
                                           #   value at worst). Not applied in reduce-only/flatten, which must get out.
                                           #   1.0 = off (the old behaviour: up to max_half_spread through it)
+    skew_age_enabled: bool = True         # AGE SKEW: a position held longer than skew_age_after_hours (share-weighted,
+    skew_age_after_hours: float = 1.0     #   oldest shares first out) skews both quotes further toward unloading:
+    skew_age_per_hour: float = 0.0025     #   0.25c per hour beyond that...
+    skew_age_max: float = 0.02            #   ...at most 2c, added on top of the (separately capped) inventory skew.
+                                          #   Never through fair value (max_skew_through). 2 Oct: median held share
+                                          #   7.2 h old, 19% > 12 h. False = off (the old behaviour)
     improve_ticks: int = 1                # R4: quote this many ticks better than the best other trader (1 = penny,
                                           #   0 = join their price)
     undercut_step_back: float = 0.0       # R4: another trader already inside our min_edge band -> quote this far
@@ -450,6 +469,8 @@ class Config:
     log_backups: int = 5                  # ...keeping this many old ones (so the log can't fill the disk)
     status_file: str = "status.json"      # health snapshot rewritten after every cycle
     order_notes_file: str = "order_notes.json"  # survives restarts, so fills can still be attributed
+    position_lots_file: str = "position_lots.json"  # position ages (age skew) survive restarts; without it they are
+                                          #   rebuilt from fills.csv at start (latest fills = what FIFO leaves held)
     kill_file: str = "kill_switch.tripped"      # the kill switch creates it; delete it to allow trading again
     handover_file: str = "handover.json"        # written by a handover stop (SIGUSR1): the next start adopts the
     handover_max_age: float = 300.0             #   orders left resting instead of cancelling them, if within this
@@ -525,6 +546,13 @@ OVERRIDABLE = {
     "pair_unwind_min_profit": (0.0, 0.10),
     "pair_unwind_max_frac": (0.0, 0.10),
     "pair_unwind_cooldown_seconds": (0.0, 3600.0),
+    "limits_use_race_net": (False, True),
+    "skew_age_enabled": (False, True),
+    "skew_age_after_hours": (0.0, 48.0),
+    "skew_age_per_hour": (0.0, 0.02),
+    "skew_age_max": (0.0, 0.1),
+    "capital_in_positions_max_frac": (0.0, 1.0),
+    "capital_ceiling_adding_size_factor": (0.0, 1.0),
 }
 
 
@@ -1424,9 +1452,19 @@ def plan_sizes(activity, headline, bankroll, cfg=CFG, prev=None, lock=None, prev
     return out
 
 
+def age_skew(age_hours, eff_inv, cfg=CFG):
+    """Extra reservation-price shift for a position held long: skew_age_per_hour for every hour beyond
+    skew_age_after_hours, capped at skew_age_max, in the direction that unloads eff_inv (long -> lower)."""
+    if not cfg.skew_age_enabled or not eff_inv or not age_hours or age_hours <= cfg.skew_age_after_hours:
+        return 0.0
+    a = min(cfg.skew_age_max, cfg.skew_age_per_hour * (age_hours - cfg.skew_age_after_hours))
+    return a if eff_inv > 0 else -a
+
+
 def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=False, no_bid=False, no_ask=False,
                   bid_cap=None, ask_cap=None, kelly_p=None, bankroll=None, shift=0.0, order_size=None,
-                  position_limit=None, min_edge=None, reduce_size=None):
+                  position_limit=None, min_edge=None, reduce_size=None, net_inv=None, age_hours=0.0,
+                  adding_factor=1.0):
     """
     fv         fair YES probability
     inv        our net YES shares on THIS exchange (negative = net NO); drives the hard position limit
@@ -1445,6 +1483,10 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
     min_edge           overrides cfg.min_edge (e.g. wider in markets priced from Polymarket alone)
     reduce_size        bigger size allowed on the side that SHRINKS the position (up to the position itself),
                        e.g. a thin-book market quoting 100 shares that holds 7,585 from before
+    net_inv            the race-netted position (None = eff_inv): with limits_use_race_net the position limit also
+                       applies to it on the side that grows it; it also decides which side is "adding"
+    age_hours          share-weighted age of this market's position: adds the age skew (skew_age_*)
+    adding_factor      size factor for the side that grows |net_inv| (capital ceiling; 1 = no change)
     """
     bankroll = bankroll or DEFAULT_BANKROLL
     max_order_cash = cfg.max_order_cash_frac * bankroll
@@ -1459,6 +1501,7 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
     else:
         skew = cfg.skew_per_share * eff_inv
     skew = max(-cfg.skew_max, min(cfg.skew_max, skew))
+    skew += age_skew(age_hours, eff_inv, cfg)              # capped on its own, so skew_max stays the inventory cap
     r = fv - skew - shift
 
     # 2. Allowed band for each side: at least min_edge, at most max_half_spread away from r.
@@ -1509,6 +1552,12 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
             bid_size = max(bid_size, min(reduce_size, -inv))   # buying back a short
         elif inv > 0:
             ask_size = max(ask_size, min(reduce_size, inv))    # selling down a long
+    net = eff_inv if net_inv is None else net_inv
+    if cfg.limits_use_race_net:               # the race-netted position counts too, on the side that grows it
+        if net > 0:
+            bid_size = min(bid_size, long_limit - net)
+        elif net < 0:
+            ask_size = min(ask_size, short_limit + net)
     bid_size = min(bid_size, max_order_cash / bid)          # buying YES costs `bid` a share
     ask_size = min(ask_size, max_order_cash / (1 - ask))    # selling YES = buying NO at 1-ask
 
@@ -1524,6 +1573,11 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
         bid_size = min(bid_size, bid_cap)
     if ask_cap is not None:
         ask_size = min(ask_size, ask_cap)
+    if adding_factor < 1.0:                   # capital ceiling: the side growing |net| shrinks (0 = not quoted)
+        if net >= 0:
+            bid_size = min(bid_size, bid_size * adding_factor)
+        if net <= 0:
+            ask_size = min(ask_size, ask_size * adding_factor)
     bid_size, ask_size = max(0, int(bid_size)), max(0, int(ask_size))   # the API only takes whole shares
 
     if bid >= ask:
@@ -1705,6 +1759,12 @@ def build_summary(api, fills_path, initial_balance, value=None, value_prev=None,
         lines.append(f"Now: {health.get('orders_resting', '?')} orders resting, worst-case loss "
                      f"{health.get('worst_case_loss', 0):,.0f}, realtime {health.get('realtime', '?')}, "
                      f"rate limits {health.get('rate_limited_total', 0)}")
+        if health.get("portfolio_age_hours") is not None:
+            frac = health.get("capital_in_positions_frac")
+            lines.append(f"Positions: avg age {health['portfolio_age_hours']:.1f}h ({health.get('positions_over_3h', 0)} "
+                         f"> 3h, {health.get('positions_over_12h', 0)} > 12h), capital in positions "
+                         + (f"{100 * frac:.0f}%" if frac is not None else "?")
+                         + (" - CEILING: adding sides cut" if health.get("capital_ceiling_active") else ""))
     return title, "\n".join(lines)
 
 
@@ -1845,6 +1905,7 @@ class Ex:
     cancelling: bool = False              # ...one of them is a cancel
     inv: float = 0.0                      # for logging / recording
     eff: float = 0.0                      # for logging
+    age: float = 0.0                      # share-weighted age of the position, hours (age skew; logging)
     ref: float | None = None              # outside reference price, if any (for logging / recording)
     quote: Quote = NO_QUOTE               # what we decided this cycle (for recording)
     take_dir: int = 0                     # +1 = Polymarket above the best ask, -1 = below the best bid, 0 = neither
@@ -1900,6 +1961,10 @@ class Bot:
         self.sim = {}                     # DRY RUN ONLY: pretend resting orders, so dry runs behave like live
         self.next_sim_id = -1
         self.order_meta = self.load_order_notes()   # orderId -> what that order was for (attributes fills)
+        self.lots = self.load_lots()      # eid -> [[signed shares, epoch time bought], ...] oldest first (age skew)
+        self.lots_seeded = False          # first reconcile rebuilds missing ones from fills.csv
+        self.lots_dirty = False
+        self.capital_over = False         # capital ceiling active (capital_in_positions_max_frac)
         self.notes_dirty = False
         self.exit_code = 0                # what the process exits with (see EXIT_* codes)
         self.health = {}                  # latest cycle summary, written to status.json
@@ -2163,6 +2228,7 @@ class Bot:
         inv = {str(p["exchangeId"]): float(p.get("quantity") or 0)
                for p in pos.get("positions", []) if not p.get("settled")}
         reserved = reserved_cash(raw_orders)
+        self.update_lots(inv, time.time())
         if f_pnl is not None:
             self.last_equity = self.checked_account_value(self.account_value(pos, f_pnl), reserved, inv)
             if self.kill_switch(self.last_equity):
@@ -2242,6 +2308,10 @@ class Bot:
             log.warning("%s reduce-only: risk %.0f, worst case %.0f, account %s", "ENTERING" if global_reduce
                         else "leaving", risk, worst, f"{equity:.0f}" if equity is not None else "?")
         self.global_reduce = global_reduce
+        capital = self.capital_in_positions(pos, inv, fvs)
+        cap_frac = capital / equity if equity else None
+        self.update_capital_ceiling(cap_frac, cfg)
+        ages = self.portfolio_age(time.time())
         if full:                                  # summary line on full checks only (event cycles can be every 2 s)
             log.info("%s | account %s (locked in orders %.0f, %s) | worst-case loss %.0f (risk %.0f)%s | party delta %+.0f | "
                      "priced %d/%d | resting %d",
@@ -2271,6 +2341,11 @@ class Bot:
                        "quote_capital_planned": round(getattr(self, "plan_capital", 0.0)),
                        "biggest_quotes": {self.ex[e].label: s for e, s in sorted(self.size_plan.items(),
                                           key=lambda kv: -kv[1])[:6] if e in self.ex},
+                       "capital_in_positions": round(capital),
+                       "capital_in_positions_frac": round(cap_frac, 3) if cap_frac is not None else None,
+                       "capital_ceiling_active": self.capital_over,
+                       "portfolio_age_hours": round(ages[0], 2), "positions_over_3h": ages[1],
+                       "positions_over_12h": ages[2],
                        "positions": {self.ex[e].label: q for e, q in inv.items() if q and e in self.ex}}
 
         # 6b. Take tournament quotes that Polymarket says are clearly stale (confirmed over 2 readings) ---
@@ -2611,6 +2686,149 @@ class Bot:
                 eff[e] = inv.get(e, 0.0) - (sum(others) / len(others) if others else 0.0)
         return eff
 
+    # ------------------------------------------------------------------ position age (age skew)
+    def load_lots(self):
+        """Position lots saved by a previous run: {eid: [[signed shares, epoch time], ...]} ({} if none)."""
+        if not self.cfg.position_lots_file:
+            return {}
+        try:
+            with open(bot_path(self.cfg.position_lots_file)) as f:
+                raw = json.load(f)
+            return {str(e): [[float(q), float(t)] for q, t in v] for e, v in raw.items() if v}
+        except (OSError, ValueError, TypeError, AttributeError):
+            return {}
+
+    def seed_lots(self, inv, now):
+        """Lots for positions we have no record of, rebuilt from fills.csv: under FIFO what is still held is
+        the LATEST fills in the position's direction, so walk back from the newest until they add up to it.
+        Shares not covered (no fills logged) count as bought now."""
+        need = {e: q for e, q in inv.items() if round(q) and e not in self.lots}
+        if not need:
+            return
+        found = defaultdict(list)                       # eid -> [(shares, time)] newest first
+        try:
+            rows = read_fills(bot_path(self.cfg.fills_csv))
+        except (OSError, ValueError, csv.Error):
+            rows = []
+        for r in reversed(rows):
+            e, side = str(r.get("exchange_id")), r.get("our_side")
+            if e not in need or side not in ("bid", "ask") or (side == "bid") != (need[e] > 0):
+                continue
+            left = abs(need[e]) - sum(x for x, _ in found[e])
+            ts = parse_ts(r.get("filled_at"))
+            if left <= 0 or ts is None:
+                continue
+            try:
+                qty = abs(float(r.get("qty") or 0))
+            except ValueError:
+                continue
+            found[e].append((min(left, qty), ts.timestamp()))
+        for e, q in need.items():
+            sign = 1.0 if q > 0 else -1.0
+            got = [[sign * x, t] for x, t in reversed(found.get(e, [])) if x > 0]
+            rest = abs(q) - sum(abs(x) for x, _ in got)
+            if rest > 0.5:
+                got.append([sign * rest, now])
+            self.lots[e] = got
+
+    def update_lots(self, inv, now):
+        """Keep each market's FIFO lots in step with its position. The positions read is the truth (fills only
+        ever reach it), so a cycle's net change is that cycle's fills netted: growing -> a new lot stamped now;
+        shrinking -> the OLDEST lots go first; changing sign -> one fresh lot. Saved to position_lots_file (live)."""
+        if not self.lots_seeded:
+            self.lots_seeded, self.lots_dirty = True, True
+            self.seed_lots(inv, now)
+        changed = False
+        for e in set(self.lots) | {e for e, q in inv.items() if round(q)}:
+            q = round(inv.get(e, 0.0))
+            lots = self.lots.get(e, [])
+            held = round(sum(x for x, _ in lots))
+            if q == held:
+                continue
+            changed = True
+            if not q:
+                self.lots.pop(e, None)
+            elif not held or (q > 0) != (held > 0):
+                self.lots[e] = [[float(q), now]]
+            elif abs(q) > abs(held):
+                self.lots[e] = lots + [[float(q - held), now]]
+            else:
+                drop = abs(held) - abs(q)               # sold: oldest lots first
+                out = []
+                for x, t in lots:
+                    take = min(abs(x), drop)
+                    drop -= take
+                    if abs(x) - take > 1e-9:
+                        out.append([x - take if x > 0 else x + take, t])
+                self.lots[e] = out
+        if changed or self.lots_dirty:
+            self.lots_dirty = False
+            if self.api.live and self.cfg.position_lots_file:
+                try:
+                    write_json(bot_path(self.cfg.position_lots_file), self.lots)
+                except OSError as err:
+                    log.warning("could not save position lots: %s", err)
+
+    def age_hours(self, ex, now=None):
+        """Share-weighted age of this market's position in hours (0 = flat or unknown)."""
+        lots = self.lots.get(ex.eid)
+        total = sum(abs(x) for x, _ in lots) if lots else 0.0
+        if not total:
+            return 0.0
+        now = time.time() if now is None else now
+        return sum(abs(x) * (now - t) for x, t in lots) / total / 3600
+
+    def portfolio_age(self, now):
+        """(share-weighted age of every held share in hours, positions older than 3 h, older than 12 h);
+        a position's age is its own share-weighted age."""
+        shares = weighted = 0.0
+        over3 = over12 = 0
+        for lots in self.lots.values():
+            n = sum(abs(x) for x, _ in lots)
+            if not n:
+                continue
+            age = sum(abs(x) * (now - t) for x, t in lots) / n / 3600
+            shares, weighted = shares + n, weighted + n * age
+            over3, over12 = over3 + (age > 3), over12 + (age > 12)
+        return (weighted / shares if shares else 0.0), over3, over12
+
+    # ------------------------------------------------------------------ capital ceiling
+    def capital_in_positions(self, pos, inv, fvs):
+        """Cash tied up in positions: the positions read's totalMarketValue when it gives one (the exchange's
+        own valuation), else our sum of |shares| x price at fair value (a short YES = NO shares, 1 - price each)."""
+        try:
+            v = float(((pos or {}).get("summary") or {}).get("totalMarketValue") or 0)
+        except (TypeError, ValueError, AttributeError):
+            v = 0.0
+        if v > 0:
+            return v
+        total = 0.0
+        for e, q in inv.items():
+            if not q:
+                continue
+            ex = self.ex.get(e)
+            p = fvs.get(e) or (ex.last_fv if ex else None) or 0.5
+            total += abs(q) * (p if q > 0 else 1 - p)
+        return total
+
+    def update_capital_ceiling(self, frac, cfg):
+        """Capital ceiling on above capital_in_positions_max_frac, off again below it - 0.05; each change logged once.
+        An unknown account value keeps the current state."""
+        cap = cfg.capital_in_positions_max_frac
+        if cap <= 0:
+            on = False
+        elif frac is None:
+            on = self.capital_over
+        elif self.capital_over:
+            on = frac >= cap - 0.05
+        else:
+            on = frac > cap
+        if on != self.capital_over:
+            log.warning("%s capital ceiling: %s of account value in positions (ceiling %.0f%%) - adding sides %s",
+                        "ENTERING" if on else "leaving", f"{100 * frac:.0f}%" if frac is not None else "?",
+                        100 * cap, f"at x{cfg.capital_ceiling_adding_size_factor:g}" if on else "back to normal")
+        self.capital_over = on
+
     def settlement_risk(self, inv, fvs, party_delta):
         """R7: national swing shock (risk_swing_shock x |net Rep-minus-Dem YES shares|) plus risk_z standard
         deviations of the settlement value of every race, races independent once the swing is taken out.
@@ -2702,10 +2920,13 @@ class Bot:
             planned = min(full, max(1.0, cfg.ref_only_size_frac * self.bankroll()))
             if cfg.ref_only_reduce_full:          # ...but a held position leaves at the market's normal size
                 reduce_size = full
+        ex.age = self.age_hours(ex)
+        adding = cfg.capital_ceiling_adding_size_factor if self.capital_over else 1.0
         return compute_quote(fv, ex.inv, inv_for_quote, best_bid, best_ask, cfg, reduce_only, no_bid, no_ask,
                              bid_cap, ask_cap, kelly_p=kelly_p, bankroll=self.bankroll(),
                              shift=self.party_shift(ex, party_delta), order_size=planned, position_limit=headline_limit,
-                             min_edge=edge, reduce_size=reduce_size)
+                             min_edge=edge, reduce_size=reduce_size, net_inv=ex.eff, age_hours=ex.age,
+                             adding_factor=adding)
 
     def update_size_plan(self, now_m, fvs):
         """Every size_plan_seconds: work out how many shares to quote in each market (see plan_sizes).
@@ -2834,9 +3055,10 @@ class Bot:
                 new.append(self.new_order(ex, True, q.bid, q.bid_size, fv, now))
             if fix_ask and q.ask is not None:
                 new.append(self.new_order(ex, False, q.ask, q.ask_size, fv, now))
-        log.info("%s%-26.26s fv %s%s inv %+5.0f race %+5.0f | bid %s ask %s", "" if self.api.live else "[dry] ",
+        log.info("%s%-26.26s fv %s%s inv %+5.0f race %+5.0f%s | bid %s ask %s", "" if self.api.live else "[dry] ",
                  ex.label, f"{fv:.3f}" if fv is not None else "  -  ",
                  f" (ref {ex.ref:.3f})" if ex.ref is not None else "", ex.inv, ex.eff,
+                 f" age {ex.age:.0f}h" if ex.inv and ex.age > self.cfg.skew_age_after_hours else "",
                  fmt(q.bid, q.bid_size), fmt(q.ask, q.ask_size))
         if not doomed and not new:
             return None

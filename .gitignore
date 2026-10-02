@@ -8,6 +8,7 @@ fills.csv.old
 mm_bot.log*
 status.json
 order_notes.json
+position_lots.json
 kill_switch.tripped
 market_data.sqlite*
 *.tmp
