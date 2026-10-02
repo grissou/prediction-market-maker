@@ -41,6 +41,7 @@ class FakeApi(Api):
     def log(self, *a): self.calls.append(a)
     def sent(self, kind): return [c for c in self.calls if c[0] == kind]
     def budget_left(self): return 10 ** 6         # unlimited unless a test overrides it
+    def writes_left(self): return 10 ** 6
     def tournament(self): return {"id": "T", "initialBalance": 100000, "myBalance": self.equity, "status": "active",
                                   "endDate": "2026-11-04T17:00:00Z"}
     def markets(self): return self.markets_list
@@ -176,6 +177,14 @@ def lvl(price, qty):
     return {"price": price, "quantity": qty}
 
 
+def pin_test_sizes(cfg):
+    """The unit tests check exact sizes worked out with 100-share quotes, 1,000-share position limits and
+    a 2,000-share national-swing cap. Pin those, so changing the live defaults doesn't rewrite every
+    expected number (test_stress.py runs with the real defaults)."""
+    cfg.order_size_frac, cfg.max_position_frac, cfg.max_party_delta_frac = 0.001, 0.01, 0.02
+    cfg.size_by_activity = False                          # activity-based sizes have their own tests
+
+
 def make_bot(live=True, only="", books=None, extra_markets=()):
     """Two races (Ohio, Utah), each Republican + Democrat, house quotes 8c wide. All files in a temp dir."""
     api = FakeApi(live)
@@ -191,7 +200,14 @@ def make_bot(live=True, only="", books=None, extra_markets=()):
     d = tempfile.mkdtemp()
     cfg.fills_csv, cfg.status_file, cfg.order_notes_file, cfg.kill_file = (
         os.path.join(d, n) for n in ("fills.csv", "status.json", "notes.json", "kill.tripped"))
-    cfg.record_file, cfg.ref_map_file, cfg.daily_summary_hour_utc = "", "", -1   # opt-in per test
+    cfg.position_lots_file = os.path.join(d, "lots.json")
+    cfg.record_file, cfg.ref_map_file, cfg.summary_every_hours = "", "", 0
+    cfg.overrides_file = os.path.join(d, "overrides.json")
+    cfg.handover_file = os.path.join(d, "handover.json")
+    cfg.handover_exit_max_seconds = 0     # never os._exit the test process (the deadline has its own tests)
+    pin_test_sizes(cfg)   # opt-in per test
+    cfg.churn_control = False             # tests reprice straight after placing; churn control has its own tests
+    cfg.fl_bias_enabled = False           # exact prices and sizes below predate it; it has its own tests (test_strategy.py)
     cfg.slow_poll_seconds = 0             # read P&L and fills every cycle, so each test cycle sees them
     cfg.realtime_enabled = False          # no network in tests; realtime is tested with a FakeFeed
     return api, Bot(api, cfg)

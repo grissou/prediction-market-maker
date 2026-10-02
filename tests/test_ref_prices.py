@@ -34,7 +34,7 @@ seen = {}
 def fake_get(url, params=None):
     seen["url"], seen["params"] = url, params
     if "polymarket" in url or "gamma" in url:
-        return [{"id": "1", "bestBid": 0.40, "bestAsk": 0.42, "closed": False},
+        return [{"id": "1", "bestBid": 0.40, "bestAsk": 0.42, "closed": False, "volumeNum": 12345},
                 {"id": "2", "bestBid": 0.99, "bestAsk": 1.0, "closed": True}]        # resolved -> ignored
     return {"markets": [{"ticker": "K-R", "status": "active", "yes_bid_dollars": "0.3000", "yes_ask_dollars": "0.3200"},
                         {"ticker": "K-D", "status": "settled", "yes_bid_dollars": "0.9", "yes_ask_dollars": "1"}]}
@@ -43,6 +43,7 @@ pm = R.fetch_polymarket(["1", "2"])
 check("Polymarket: open market priced (price, spread), resolved one skipped",
       set(pm) == {"1"} and abs(pm["1"][0] - 0.41) < 1e-9 and abs(pm["1"][1] - 0.02) < 1e-9, pm)
 check("Polymarket: ids sent as repeated ?id= parameters", ("id", "1") in seen["params"] and ("id", "2") in seen["params"], seen)
+check("Polymarket: all-time volume comes along too (mm_bot sizes quotes by it)", len(pm["1"]) == 3 and pm["1"][2] == 12345.0, pm)
 ka = R.fetch_kalshi(["K-R", "K-D"])
 check("Kalshi: active market priced (price, spread), settled one skipped",
       set(ka) == {"K-R"} and abs(ka["K-R"][0] - 0.31) < 1e-9, ka)
@@ -98,6 +99,58 @@ check("on_refresh is called after every reading, with the moves (mm_bot wakes it
 refs.on_refresh = lambda moves: 1 / 0
 refs.refresh()
 check("a failing callback never breaks the price thread", refs.version == 3)
+R.FETCHERS.update(polymarket=lambda ids: {"1": (0.40, 0.01, 5e6)}, kalshi=lambda ids: {})
+refs.on_refresh = None
+refs.refresh()
+check("volumes() reports each market's volume by key", refs.volumes().get(key) == 5e6, refs.volumes())
+boom = R.ReferencePrices(path, R.RefConfig(refresh_seconds=0.05))
+calls2 = {"n": 0}
+def flaky_refresh():
+    calls2["n"] += 1
+    if calls2["n"] == 1:
+        raise RuntimeError("unexpected data")
+boom.refresh = flaky_refresh
+boom.start(); t_end = time.monotonic() + 2
+while calls2["n"] < 3 and time.monotonic() < t_end:
+    time.sleep(0.02)
+boom.stop()
+check("an error inside a refresh never kills the background thread (it keeps refreshing)", calls2["n"] >= 3, calls2)
+
+print("--- Polymarket downloads: one round trip, kept-open connections, partial failures")
+import threading as _th, time as _t
+calls, live, peak, lk = [], [0], [0], _th.Lock()
+def slow_get(url, params):
+    with lk:
+        live[0] += 1; peak[0] = max(peak[0], live[0])
+    _t.sleep(0.1)
+    ids = [v for k, v in params if k == "id"]
+    with lk:
+        live[0] -= 1; calls.append(ids)
+    if "bad" in ids:
+        raise RuntimeError("one batch failed")
+    return [{"id": i, "bestBid": "0.40", "bestAsk": "0.41"} for i in ids]
+real_get, R.http_get = R.http_get, slow_get
+t0 = _t.monotonic(); out = R.fetch_polymarket([str(i) for i in range(229)]); took = _t.monotonic() - t0
+check("229 ids = 5 requests sent side by side (one round trip, not five)", len(calls) == 5 and peak[0] >= 4 and took < 0.35,
+      (len(calls), peak[0], round(took, 2)))
+check("...every market priced", len(out) == 229)
+calls.clear()
+out = R.fetch_polymarket([str(i) for i in range(60)] + ["bad"])
+check("one failed batch: the other batches' prices still come through", len(out) == 50, len(out))
+try:
+    R.http_get = lambda url, params: (_ for _ in ()).throw(RuntimeError("all down"))
+    R.fetch_polymarket(["1", "2"]); raised = False
+except RuntimeError:
+    raised = True
+check("every batch failed: raises (the caller keeps the previous prices)", raised)
+R.http_get = real_get
+check("one shared session (connections kept open between refreshes)", R.session() is R.session())
+_rp = R.ReferencePrices.__new__(R.ReferencePrices)
+_rp.lock, _rp.prices = _th.Lock(), {"A|Republican": (0.5, time.monotonic() - 40)}
+check("ages(): seconds since each price was downloaded", 39 < _rp.ages()["A|Republican"] < 45, _rp.ages())
+_ad = R.session().get_adapter("https://gamma-api.polymarket.com")
+check("Polymarket session keeps a connection for every fetch thread plus the caller (no 'pool is full')",
+      _ad._pool_maxsize >= R.REF.parallel_fetches + 1 and not _ad._pool_block, _ad._pool_maxsize)
 R.FETCHERS.clear(); R.FETCHERS.update(real_fetchers)
 
 print("--- matching tournament races to Polymarket")

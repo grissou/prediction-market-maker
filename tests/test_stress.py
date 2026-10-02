@@ -147,7 +147,7 @@ class FlakyApi(FakeApi):
 def build(seed):
     rng = random.Random(seed)
     api = FlakyApi(rng)
-    races = [f"Race {i}" for i in range(8)]
+    races = ["U.S. House", "U.S. Senate"] + [f"Race {i}" for i in range(6)]   # incl. the 10,000-share markets
     truth = {r: rng.uniform(0.08, 0.92) for r in races}                  # Republican win probability
     mk = []
     for i, r in enumerate(races):
@@ -158,7 +158,8 @@ def build(seed):
     d = tempfile.mkdtemp()
     cfg.fills_csv, cfg.status_file, cfg.order_notes_file, cfg.kill_file = (
         os.path.join(d, n) for n in ("fills.csv", "status.json", "notes.json", "kill.tripped"))
-    cfg.record_file, cfg.ref_map_file, cfg.daily_summary_hour_utc, cfg.realtime_enabled = "", "", -1, False
+    cfg.position_lots_file = os.path.join(d, "lots.json")
+    cfg.record_file, cfg.ref_map_file, cfg.summary_every_hours, cfg.realtime_enabled = "", "", -1, False
     cfg.slow_poll_seconds, cfg.reserved_cash_mode = 30.0, "ignore"
     cfg.parallel_requests = 1             # one request thread: the random faults then fire in a repeatable order
     eids = {}
@@ -272,11 +273,15 @@ def run_seed(seed, steps):
         bank = bot.bankroll()
         fvs = {e: ex.last_fv for e, ex in bot.ex.items()}
         worst = bot.total_worst_case(api.inv, fvs)
-        slack = len(eids) * bot.cfg.max_order_cash_frac * bank * 2
+        size_of = {e: bot.size_plan.get(e, bot.cfg.order_size_frac * bank) for e in eids}   # each market's quote size
+        slack = sum(max(bot.cfg.max_order_cash_frac * bank, q) for q in size_of.values())  # fills in flight
+        for e in eids:                                  # party-control markets: flat position limit
+            if eids[e][0] in bot.cfg.headline_races and abs(api.inv.get(e, 0)) > bot.cfg.headline_position_frac * bank + size_of[e]:
+                problems.append(f"step {cycles}: {eids[e][0]} position {api.inv.get(e, 0):+.0f} ran past its limit")
         if worst > bot.cfg.max_worst_case_frac * bank + slack:
             problems.append(f"step {cycles}: worst-case loss {worst:.0f} ran away past the cap")
         delta = sum(PARTY_SIGN.get(eids[e][1], 0) * q for e, q in api.inv.items())
-        if abs(delta) > bot.cfg.max_party_delta_frac * bank + len(eids) * bot.cfg.order_size_frac * bank * 2:
+        if abs(delta) > bot.cfg.max_party_delta_frac * bank + sum(size_of.values()):
             problems.append(f"step {cycles}: national-swing exposure {delta:+.0f} ran away past the cap")
 
     # 1. A normal session with faults.
@@ -320,12 +325,15 @@ def run_seed(seed, steps):
     # Every exchange with a real two-sided book must be quoted. (Near 0 or 1 the house can't quote past
     # 0.5c / 99.5c, so a one-sided book has no fair value and is correctly left alone.)
     priceable = {e for e, ex in bot.ex.items() if M.fair_value(ex.book, bot.cfg) is not None}
-    unquoted = sorted(bot.ex[e].label for e in priceable - {o["exchangeId"] for o in api.orders.values()})
+    # ...unless the bot DECIDED not to quote it (risk limits blocking both sides, e.g. the national-swing cap on
+    # one side and a Kelly limit on the other): that's a choice, not a stuck exchange.
+    wanted = {e for e in priceable if bot.ex[e].quote.bid is not None or bot.ex[e].quote.ask is not None}
+    unquoted = sorted(bot.ex[e].label for e in wanted - {o["exchangeId"] for o in api.orders.values()})
     M.time, M.utcnow = real_time, real_utcnow
     return {"problems": problems, "record_ok": record == actual, "record": (record, actual), "stuck": stuck,
             "changes": changes, "unquoted": unquoted, "priceable": len(priceable), "cycles": cycles,
             "errors_handled": errors_handled, "faults": api.faults, "fills": len(api.fills),
-            "takes": bot.takes_today, "arbs": bot.arbs_today, "moves_off": moves_off}
+            "takes": bot.takes_total, "arbs": bot.arbs_total, "moves_off": moves_off}
 
 
 if __name__ == "__main__":

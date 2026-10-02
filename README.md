@@ -37,9 +37,10 @@ Each cycle the bot:
 | Control | What it does |
 |---|---|
 | Position sizing | **Quarter Kelly** per market and side, using Polymarket as the true probability, capped at 2% of the account per market. All other sizes are fractions of account value too, so the bot sizes up after gains and down after losses (in 5% steps, so small wobbles don't resize every order) |
+| Quote sizes by activity | Capital goes where the trades are: party control of the House and Senate get 10,000-share quotes and a flat 10,000-share position limit (10% of the account), busy races up to 2,000, quiet ones 100, ranked by Polymarket volume and then by the tournament's own trades (re-planned every 30 min). All resting quotes together lock at most 60% of the account, and every size scales with the account |
 | Kill switch | Stops and cancels everything if account value falls a set % below the starting balance. Needs 2 readings in a row, is corrected for cash locked in open orders, and leaves a marker file so nothing can auto-restart trading |
 | Worst-case loss cap | Reduce-only everywhere if the worst settlement outcome would cost more than 30% of the account |
-| National-swing cap | Net Republican-vs-Democrat exposure summed over all races: quotes are shaded against it (up to 1.5c), so it sheds while still quoting both sides; at 2% of the account the side that would add to it is blocked |
+| National-swing cap | Net Republican-vs-Democrat exposure summed over all races: quotes are shaded against it (up to 1.5c), so it sheds while still quoting both sides; at 5% of the account the side that would add to it is blocked |
 | Jump guard | Pauses a market after a sudden price move (likely news) |
 | Tail guard | Near 0% or 100%, never takes the side that risks ~$1 to earn ~1c (for quotes and for taking stale quotes) |
 | Wrong-match guard | Ignores a Polymarket price more than 25c from the tournament book (almost always a wrong match) and sends one alert |
@@ -73,7 +74,7 @@ source .venv/bin/activate
 ```
 
 Optional: `ALERT_URL=https://ntfy.sh/<long-random-name>` in `.env` sends phone alerts (kill switch,
-crashes) and a **daily summary** at 21:00 UTC (P&L, rank, Smart Score, fills, edge, bot health) via the
+crashes) and a **summary every 2 hours**, on the hour UTC (P&L, rank, Smart Score, fills, edge, bot health) via the
 free ntfy app: install it and subscribe to the same topic name.
 
 ## Commands
@@ -85,7 +86,7 @@ python mm_bot.py run           # dry run: live data, orders only simulated
 python mm_bot.py run --live    # trade
 python mm_bot.py cancel        # cancel every open order
 python mm_bot.py report        # edge and adverse selection from logged fills
-python mm_bot.py summary       # the daily phone summary, now (tests your ALERT_URL)
+python mm_bot.py summary       # the phone summary, now (tests your ALERT_URL)
 
 python ref_prices.py check     # tournament price vs outside price for every contract
 python ref_prices.py suggest   # match unmapped races to Polymarket (review the result)
