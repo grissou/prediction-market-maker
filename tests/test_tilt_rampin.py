@@ -33,7 +33,7 @@ def close(a, b, tol=1e-9):
 
 print("--- settings")
 c = M.Config()
-check("default 120 minutes", getattr(c, KEY, None) == 120.0)
+check("default 0 (no ramp; the setting stays available)", getattr(c, KEY, None) == 0.0)
 _ov, _f = list(M.OVERRIDABLE), list(M.Config.__dataclass_fields__)
 check("last in Config and in OVERRIDABLE", _f and _f[-1] == KEY and _ov and _ov[-1] == KEY, (_f[-1:], _ov[-1:]))
 check("range (0, 1440)", M.OVERRIDABLE.get(KEY) == (0.0, 1440.0))
@@ -67,6 +67,7 @@ check("starts None", getattr(b, "tilt_on_at", "missing") is None)
 b.cycle()
 check("flag off: stays None, applied s 0", b.tilt_on_at is None and getattr(b, "tilt_s_applied", None) == 0.0)
 b.cfg.ref_tilt_enabled = True
+b.cfg.ref_tilt_rampin_min = 120.0                      # (the default is 0: this block tests the ramp itself)
 b.cycle()
 t1 = b.tilt_on_at
 check("enabled: set to the cycle's monotonic time", t1 is not None and 0 <= M.time.monotonic() - t1 < 60, t1)

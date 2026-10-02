@@ -788,8 +788,11 @@ class Config:
     # --- Package 5: T2.1 ramp-in ---
     # With ref_tilt_enabled, the tilt s APPLIED (blend and takes, via Bot.tilted_ref_for) rises linearly from 0 to
     # the estimate over this many minutes after the flag is switched on (hot toggle, or at start with the flag on),
-    # so fair value does not jump in one step against inventory bought at tournament prices. 0 = no ramp.
-    ref_tilt_rampin_min: float = 120.0
+    # so fair value does not jump in one step against inventory bought at tournament prices. 0 = no ramp (the
+    # default: SIM_NOTES Round 5 measured the 120-min ramp at -70 +- 130 vs +163 +- 60 for the one-step switch-on
+    # over 3 h, with MORE re-prices (+0.8 writes/min) and the same cost at the Polymarket mark; the one-step
+    # switch-on re-prices ~157 markets once, ~10 min of the write budget: do it in a quiet hour).
+    ref_tilt_rampin_min: float = 0.0
 
 
 CFG = Config()
