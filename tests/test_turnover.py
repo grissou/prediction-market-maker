@@ -244,7 +244,10 @@ M.log.removeHandler(g)
 M.log.setLevel(old_level)
 M.log.propagate = old_prop
 bids = [o for o in a.ours("21") if o[0] == "bid"]
-check("cycle: the resting bid on the dead market is 25", bids and bids[0][2] == 25, a.ours("21"))
+check("cycle: the full-size bid already resting on the dead market STAYS (a size factor alone never makes a resting "
+      "order unsafe: hot-fix 2.2), and the adding size wanted for a new quote is 25",
+      bids and bids[0][2] == 100 and b.ex["21"].quote is not None and b.ex["21"].quote.bid_size == 25,
+      (a.ours("21"), b.ex["21"].quote))
 line = [m for m in g.msgs if "Utah" in m and "bid" in m and "fv" in m]
 check("quote log line ends ' dead'", line and line[-1].endswith(" dead"), line[-1:] if line else g.msgs[:3])
 other = [m for m in g.msgs if "fv" in m and "| bid" in m and "Utah" not in m]
