@@ -208,7 +208,7 @@ Watch in the first 10 minutes: as for 2.3, plus status.json `mark_frag_capped_ma
 (0 until the file exists); adding-side sizes at half under the ceiling (not a quarter).
 Round 3b (6 h quiet, 16 seeds, from the real book): ceiling factor 0.5 vs 0.25 +262 ± 100; arb_buy_min_ref_sum 0.99 vs 0.8: 0.8 would lose -898 ± 94
 buying 23.8k outsider shares; fast unload -165 ± 110; reduce-join -48 ± 81; behind-best -99 ± 83; mark cap -29 ± 52; ladder -5 ± 49 (idle at 10k cash);
-refill cooldown off -14 ± 94; turnover control untested. Unfinished at wrap-up (NOT merged): the ladder's Reviewer fixes L1-L4 (hair-trigger urgent pulls one tick
+refill cooldown off -14 ± 94; turnover control untested. Engineer 10's ladder Reviewer fixes L1-L4 are now MERGED (596 tests; ladder still OFF; `ladder_move` default 2c). Unfinished at wrap-up: nothing of the ladder's Reviewer fixes L1-L4 (hair-trigger urgent pulls one tick
 behind the touch -> stale not urgent; ladder-only pulls excluded from the cancel-all count; 1-tick tolerance, re-anchor hysteresis at 2c and
 min_quote_life for ladder orders; per-order cash cap in ladder_caps) and the Strategist's round-3b runs (new fast unload, new reduce-join, turnover,
 behind-best, mark cap, the real ladder at 10k free cash, refill cooldown off vs on, ceiling 0.25 vs 0.5 on `tests/live_sim.py`). Both are specified
