@@ -132,6 +132,82 @@ with open(b.cfg.status_file) as f:
 check("tilt_s_applied next to tilt_s (4 places)", st.get("tilt_s_applied") == 0.0123 and "tilt_s" in st,
       st.get("tilt_s_applied"))
 
+print("--- red team: a quick restart continues the ramp (wall-clock switch-on times in tilt_state)")
+b.cfg.ref_tilt_rampin_min = 120.0
+b.cfg.ref_tilt_enabled, b.cfg.ref_tilt_headline = True, False
+mono = M.time.monotonic()
+b.tilt_on_at, b.tilt_headline_on_at = mono - 1800.0, None    # 30 min into a 120-min ramp
+b.write_status(True)
+with open(b.cfg.status_file) as f:
+    ts_ = json.load(f).get("tilt_state", {})
+check("tilt_state carries on_wall = wall time at switch-on, headline_on_wall null",
+      close(ts_.get("on_wall"), M.time.time() - 1800.0, 5.0) and ts_.get("headline_on_wall", "x") is None, ts_)
+b2 = M.Bot(a, b.cfg)
+check("restart < 10 min later: tilt_on_at restored on the new monotonic clock",
+      b2.tilt_on_at is not None and close(M.time.monotonic() - b2.tilt_on_at, 1800.0, 5.0), b2.tilt_on_at)
+check("...headline clock stays None", b2.tilt_headline_on_at is None)
+b2.refs = FakeRefs(dict(REFS))
+b2.tilt.update = lambda samples, now_m: S
+b2.cycle()
+check("...first cycle: the ramp continues (applied s ~ 0.25 x S, not 0)",
+      close(b2.tilt_s_applied, 0.25 * S, 0.01 * S), b2.tilt_s_applied)
+b.tilt_headline_on_at = mono - 600.0
+b.cfg.ref_tilt_headline = True
+b.write_status(True)
+b3 = M.Bot(a, b.cfg)
+check("headline clock restored too", b3.tilt_headline_on_at is not None
+      and close(M.time.monotonic() - b3.tilt_headline_on_at, 600.0, 5.0), b3.tilt_headline_on_at)
+with open(b.cfg.status_file) as f:
+    st = json.load(f)
+st["tilt_state"]["saved_wall"] = M.time.time() - 700.0
+with open(b.cfg.status_file, "w") as f:
+    json.dump(st, f)
+b4 = M.Bot(a, b.cfg)
+check("status.json older than 10 min: both clocks None (the ramp restarts)",
+      b4.tilt_on_at is None and b4.tilt_headline_on_at is None, (b4.tilt_on_at, b4.tilt_headline_on_at))
+del st["tilt_state"]["saved_wall"]
+with open(b.cfg.status_file, "w") as f:
+    json.dump(st, f)
+b5 = M.Bot(a, b.cfg)
+check("no saved_wall: the file mtime decides (just written: resumed)", b5.tilt_on_at is not None)
+old = M.time.time() - 3600
+os.utime(b.cfg.status_file, (old, old))
+b6 = M.Bot(a, b.cfg)
+check("...an hour-old file: None", b6.tilt_on_at is None)
+b.tilt_on_at = b.tilt_headline_on_at = None
+b.write_status(True)
+with open(b.cfg.status_file) as f:
+    ts_ = json.load(f).get("tilt_state", {})
+check("flag off clocks: on_wall / headline_on_wall null", ts_.get("on_wall", "x") is None
+      and ts_.get("headline_on_wall", "x") is None, ts_)
+check("...and the restart starts with None", M.Bot(a, b.cfg).tilt_on_at is None)
+b.cfg.ref_tilt_headline = False
+
+print("--- red team: status.json tilt_s_applied_headline")
+b.tilt.update = lambda samples, now_m: S
+b.cfg.ref_tilt_enabled, b.cfg.ref_tilt_headline = True, False
+b.cycle()
+check("gate off: tilt_s_applied_headline 0", getattr(b, "tilt_s_applied_headline", None) == 0.0)
+b.cfg.ref_tilt_headline = True
+b.cycle()
+b.tilt_on_at = M.time.monotonic() - 7200.0                # the flag long on, the headline gate just opened
+b.cycle()
+check("gate just opened: ramped from the later (headline) clock, ~0",
+      0.0 <= b.tilt_s_applied_headline < 0.01 * S and close(b.tilt_s_applied, S), (b.tilt_s_applied_headline,
+                                                                                   b.tilt_s_applied))
+b.tilt_headline_on_at = M.time.monotonic() - 3600.0
+b.cycle()
+check("...an hour into its 120-min ramp: S/2", close(b.tilt_s_applied_headline, S / 2, 0.01 * S),
+      b.tilt_s_applied_headline)
+b.write_status(True)
+with open(b.cfg.status_file) as f:
+    st = json.load(f)
+check("status.json carries tilt_s_applied_headline (4 places)",
+      st.get("tilt_s_applied_headline") == round(b.tilt_s_applied_headline, 4), st.get("tilt_s_applied_headline"))
+b.cfg.ref_tilt_enabled, b.cfg.ref_tilt_headline = False, False
+b.cycle()
+check("flag off: both applied 0", b.tilt_s_applied == 0.0 and b.tilt_s_applied_headline == 0.0)
+
 print("--- strategy_sim mirror")
 import strategy_sim as SS                                 # noqa: E402
 

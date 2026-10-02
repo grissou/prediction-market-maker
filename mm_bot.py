@@ -1857,6 +1857,9 @@ def carry_ramp(s, hours_to_close, days):
     return s * max(0.0, min(1.0, hours_to_close / (24.0 * days)))
 
 
+TILT_RAMP_RESUME_SECONDS = 600.0   # T2.1: a restart within this of the last status write resumes the ramp-in
+
+
 def rampin_factor(now, on_at, minutes):
     """T2.1 ramp-in: the share of the tilt estimate applied `now`, min(1, (now - on_at) / (60 minutes)), rising
     linearly from 0 when ref_tilt_enabled was switched on (on_at, monotonic seconds). minutes <= 0 (no ramp) or
@@ -3146,13 +3149,18 @@ class Bot:
         self.lots_dirty = False
         self.capital_over = False         # capital ceiling active (capital_in_positions_max_frac)
         self.cur_refs, self.cur_liquid = {}, set()   # this cycle's Polymarket prices (for risk_fv)
-        self.tilt = TiltEstimator(cfg).from_dict(self.load_tilt())   # T2.1: tournament tilt s (see update_tilt)
+        _tilt_saved = self.load_tilt()
+        self.tilt = TiltEstimator(cfg).from_dict(_tilt_saved)   # T2.1: tournament tilt s (see update_tilt)
         self.tilt_s, self.tilt_exposure = self.tilt.s, 0.0
         # T2.1 ramp-in: monotonic time ref_tilt_enabled was (last) seen switched on, None while off; the s actually
-        # applied = tilt_s x rampin_factor. Not persisted: a restart with the flag on restarts the ramp from 0,
-        # the safe choice (fair value never jumps by the full tilt after a restart).
+        # applied = tilt_s x rampin_factor. Persisted as wall-clock times in status.json tilt_state (on_wall,
+        # headline_on_wall): a restart within TILT_RAMP_RESUME_SECONDS of the last status write continues the ramp
+        # where it was (restore_rampin); after a longer outage (or with no saved time) the ramp restarts from 0,
+        # the safe choice (fair value never jumps by the full tilt after a long outage).
         self.tilt_on_at, self.tilt_s_applied = None, 0.0
         self.tilt_headline_on_at = None   # the headline gate's own ramp-in clock (ref_tilt_headline switched on later)
+        self.tilt_s_applied_headline = 0.0   # the s applied in headline markets (status.json)
+        self.restore_rampin(_tilt_saved)
         self.pos_marks = {}               # {eid: the exchange's own valuation price of the position (currentPrice)}
         self.fv_fallback_logged = {}      # {eid: source} - which fallback risk_fv used for a held position (logged once)
         self.mark_sd = {}                 # eid -> sd of the 10-min mid change (mark_frag_*; from the recorder)
@@ -3239,6 +3247,7 @@ class Bot:
         self.takes_total = 0
         self.takes_skipped_budget = self.arbs_skipped_budget = 0   # not sent: write budget busy (status.json)
         self.take_version_seen = 0        # last Polymarket reading the take logic has counted
+        self.take_tilted_seen = bool(getattr(cfg, "take_tilted_ref", False))   # X12: a toggle resets take_since
         self.db = self.open_recorder()
         self.last_record = -1e9
         self.book_tops, self.book_rows = {}, []    # recorder: last top levels logged per eid, rows not yet written
@@ -3549,7 +3558,7 @@ class Bot:
         self.ref_only = self.thin_book_prices(fvs, refs, liquid, now_m) if cfg.ref_only_enabled else set()
         self.warn_unpriced_held(fvs, book_fvs, refs, liquid, now_m)
         self.update_tilt(book_fvs, refs, liquid, inv, now_m)      # T2.1: runs (read-only) with the flag off too
-        if cfg.ref_tilt_enabled:                                  # T2.1 ramp-in clock (not persisted: see __init__)
+        if cfg.ref_tilt_enabled:                                  # T2.1 ramp-in clock (persisted: see __init__)
             if self.tilt_on_at is None:
                 self.tilt_on_at = now_m
         else:
@@ -3561,6 +3570,10 @@ class Bot:
             self.tilt_headline_on_at = None
         self.tilt_s_applied = (self.tilt_s * rampin_factor(now_m, self.tilt_on_at, cfg.ref_tilt_rampin_min)
                                if cfg.ref_tilt_enabled else 0.0)
+        hl_on = [t for t in (self.tilt_on_at, self.tilt_headline_on_at) if t is not None]
+        self.tilt_s_applied_headline = (                          # headline legs: ramped from the later clock
+            self.tilt_s * rampin_factor(now_m, max(hl_on) if hl_on else None, cfg.ref_tilt_rampin_min)
+            if cfg.ref_tilt_enabled and cfg.ref_tilt_headline else 0.0)
         if cfg.ref_weight > 0 and refs:
             for eid, r in refs.items():
                 if fvs.get(eid) is not None and eid in liquid and eid not in self.ref_only:   # liquid only
@@ -3913,13 +3926,47 @@ class Bot:
         return max(1, len(self.groups.get(ex.group) or ()))
 
     def load_tilt(self):
-        """T2.1: the tilt estimate the previous run left in status.json ({} if none: the estimate starts at 0)."""
+        """T2.1: the tilt estimate the previous run left in status.json ({} if none: the estimate starts at 0).
+        The dict also carries "saved_wall": tilt_state's own save time, else the file's mtime (restore_rampin)."""
         try:
-            with open(bot_path(self.cfg.status_file)) as f:
+            path = bot_path(self.cfg.status_file)
+            with open(path) as f:
                 st = json.load(f)
-            return st.get("tilt_state") or ({"s": st["tilt_s"], "ready": True} if "tilt_s" in st else {})
+            d = st.get("tilt_state") or ({"s": st["tilt_s"], "ready": True} if "tilt_s" in st else {})
+            if d and not isinstance(d.get("saved_wall"), (int, float)):
+                d = dict(d, saved_wall=os.path.getmtime(path))
+            return d
         except (OSError, ValueError, TypeError, AttributeError, KeyError):
             return {}
+
+    def restore_rampin(self, d, now_m=None, now_w=None):
+        """T2.1 ramp-in across a restart: status.json saved less than TILT_RAMP_RESUME_SECONDS ago with a switch-on
+        wall time (on_wall / headline_on_wall) -> tilt_on_at / tilt_headline_on_at = now_m - (now_w - on_wall): the
+        ramp continues where it was. Otherwise None (the first cycle with the flag on starts the ramp from 0). The
+        cycle still clears a clock whose flag is off now."""
+        now_m = time.monotonic() if now_m is None else now_m
+        now_w = time.time() if now_w is None else now_w
+        d = d if isinstance(d, dict) else {}
+        saved = d.get("saved_wall")
+        fresh = (isinstance(saved, (int, float)) and not isinstance(saved, bool)
+                 and 0 <= now_w - saved < TILT_RAMP_RESUME_SECONDS)
+
+        def back(w):
+            if not fresh or not isinstance(w, (int, float)) or isinstance(w, bool) or w > now_w:
+                return None
+            return now_m - (now_w - w)
+        self.tilt_on_at = back(d.get("on_wall"))
+        self.tilt_headline_on_at = back(d.get("headline_on_wall"))
+
+    def tilt_state_dict(self):
+        """status.json tilt_state: the estimate plus the ramp-in switch-on times as wall-clock seconds (None = off)
+        and its own save time (saved_wall), so a quick restart resumes the ramp (restore_rampin)."""
+        now_m, now_w = time.monotonic(), time.time()
+
+        def wall(on_at):
+            return None if on_at is None else round(now_w - (now_m - on_at), 3)
+        return {**self.tilt.to_dict(), "on_wall": wall(self.tilt_on_at),
+                "headline_on_wall": wall(self.tilt_headline_on_at), "saved_wall": round(now_w, 3)}
 
     def update_tilt(self, book_fvs, refs, liquid, inv, now_m):
         """T2.1, every cycle and whatever ref_tilt_enabled says: feed the tilt estimator from the markets that are
@@ -6221,6 +6268,11 @@ class Bot:
         """
         cfg = self.cfg
         taken = set()
+        tilted = bool(getattr(cfg, "take_tilted_ref", False))
+        if tilted != getattr(self, "take_tilted_seen", tilted):   # X12 toggled: the price compared changed, so
+            for ex in self.ex.values():                         # every gap must be confirmed afresh on it
+                ex.take_dir, ex.take_since = 0, now_m
+        self.take_tilted_seen = tilted
         version = getattr(self.refs, "version", 0)
         if not cfg.take_enabled or not self.refs or version == self.take_version_seen:
             return taken
@@ -6450,7 +6502,8 @@ class Bot:
         """C take half, run beside take_stale_quotes: execute hold_take_plan's takes (immediate-or-cancel: our
         quotes there pulled first, the take, its leftover cancelled), recording each in the rolling budget.
         Live: write budget first (3 writes, as execute_take), then a fresh book and the plan re-checked on it.
-        execute(eid, buy, qty, price) -> shares done replaces the exchange (simulator; the plan is the same).
+        execute(eid, buy, qty, price) -> shares done replaces the exchange (simulator; the plan is the same);
+        None = refused (no writes): nothing counted and the rest waits for the next call, as the live path.
         Returns the exchanges traded (skipped by quoting this cycle)."""
         cfg, taken = self.cfg, set()
         if cfg.hold_target_hours <= 0:
@@ -6467,9 +6520,10 @@ class Bot:
                 break
             eid, ex = p["eid"], self.ex[p["eid"]]
             if execute is not None:
+                if execute(eid, p["buy"], p["qty"], p["price"]) is None:
+                    break                         # refused (no writes): not sent, not counted - as the live path
                 self.hold_takes.append((now_m, p["notional"]))
                 self.hold_takes_total += 1
-                execute(eid, p["buy"], p["qty"], p["price"])
                 taken.add(eid)
                 continue
             if self.api.live:
@@ -6932,13 +6986,19 @@ class Bot:
                 f.seek(c["off"])
                 data = f.read(st.st_size - c["off"])
             done = data.rfind(b"\n") + 1                # complete lines only: a half-written row waits
-            c["off"] += done
-            lines = data[:done].decode("utf-8", "replace").splitlines()
-            rows = list(csv.reader(lines))
-            if c["fields"] is None and rows:
-                c["fields"] = rows.pop(0)
-            for vals in rows:
-                self.ops_replay(c, dict(zip(c["fields"] or (), vals)))
+            self.ops_cache = c                          # progress kept even if a row raises something unexpected
+            for raw in data[:done].split(b"\n")[:-1]:  # the offset advances over each row once it is consumed
+                line = raw.decode("utf-8", "replace").rstrip("\r")
+                try:
+                    vals = next(csv.reader([line]), [])
+                    if c["fields"] is None:
+                        if vals:
+                            c["fields"] = vals
+                    elif vals:
+                        self.ops_replay(c, dict(zip(c["fields"], vals)))
+                except (ValueError, TypeError, KeyError, IndexError, OverflowError, csv.Error):
+                    pass                                # a malformed row: skipped, the rest still replayed
+                c["off"] += len(raw) + 1
         since = now - 24 * 3600
         ev = c["events"]
         while ev and ev[0][0] < since:
@@ -6961,7 +7021,8 @@ class Bot:
             return
         if qty <= 0 or not 0 < price < 1:
             return
-        ts = parse_ts(r.get("filled_at"))
+        ts = parse_ts(r.get("filled_at"))           # a bad timestamp raises here, before any state changes
+        ts = ts.timestamp() if ts is not None else None
         book, rem, red, add = c["book"][str(r.get("exchange_id"))], qty if side == "bid" else -qty, 0.0, 0.0
         while abs(rem) > 1e-9 and book and (book[0][0] > 0) != (rem > 0):
             lot = book[0]
@@ -6976,7 +7037,7 @@ class Bot:
             book.append([rem, price])
             add += abs(rem)
         if ts is not None:
-            c["events"].append((ts.timestamp(), red, add))
+            c["events"].append((ts, red, add))
 
     def ops_fields(self, now=None):
         """Read-only reporting for status.json, the recorder and the phone summary (no requests; None = unknown):
@@ -7073,8 +7134,9 @@ class Bot:
                 **(self.api.pause_state() if hasattr(self.api, "pause_state") else {}),
                 # T2.1: the tilt estimate (also restored from here at start) and the position's exposure to it
                 "tilt_s": round(self.tilt_s, 4), "tilt_s_applied": round(self.tilt_s_applied, 4),
+                "tilt_s_applied_headline": round(self.tilt_s_applied_headline, 4),
                 "tilt_exposure": round(self.tilt_exposure),
-                "tilt_state": self.tilt.to_dict(),
+                "tilt_state": self.tilt_state_dict(),
                 "seconds_since_cycle": round(time.monotonic() - self.last_cycle_done, 1)
                 if self.last_cycle_done is not None else None})
         except OSError as e:

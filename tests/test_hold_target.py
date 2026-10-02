@@ -258,6 +258,20 @@ n0 = len(done)
 b.take_aged({e: 3000.0 for e in books}, BF, {}, T0 + 3800, execute=lambda *a: done.append(a) or a[2])
 check("...back on: the 1-hour hold-off restarts (no take, opens at +1 h)", len(done) == n0
       and b.hold_open_at == T0 + 3800 + 3600, b.hold_open_at)
+api, b = make_bot(books=books)                           # red team: execute -> None (refused for writes)
+b.cycle()
+b.cfg.hold_target_hours = 2.0
+for e in books:
+    age(b, e, 3000, 9.0)
+b.hold_open_at = 0.0
+refused = []
+got = b.take_aged({e: 3000.0 for e in books}, BF, {}, NOW, execute=lambda *a: refused.append(a) or None)
+check("execute returns None: not counted in hold_takes / hold_takes_total, not in the returned set, stops",
+      got == set() and not b.hold_takes and b.hold_takes_total == 0 and len(refused) == 1,
+      (got, list(b.hold_takes), b.hold_takes_total, len(refused)))
+got = b.take_aged({e: 3000.0 for e in books}, BF, {}, NOW + 1, execute=lambda *a: a[2])
+check("...the next call (writes back) takes and counts as usual", len(got) == 2 and len(b.hold_takes) == 2
+      and b.hold_takes_total == 2, (got, list(b.hold_takes)))
 api, b = make_bot(books=books)
 b.cycle()
 b.cfg.hold_target_hours = 2.0
