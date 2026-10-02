@@ -148,6 +148,12 @@ class Config:
     exit_max_slippage: float = 0.03            # ...but never more than 3c worse than fair value
     stop_minutes_before_close: float = 15.0    # nothing at all (orders cancelled)
     max_failed_cycles: int = 3            # this many API-error cycles in a row -> cancel everything until healthy
+    positions_stale_max_cycles: int = 3   # positions answering 409 "holdings cannot be valued": the last read is
+    positions_stale_max_seconds: float = 120.0  # reused for at most this many cycles in a row OR this long, whichever
+                                          #   comes first; then the cycle fails (an API error: after max_failed_cycles
+                                          #   of those every quote is pulled until positions read again), because
+                                          #   fills keep landing while inventory, limits and reduce-only stay frozen.
+                                          #   0 = no limit on that count (both 0 = reuse forever, the old behaviour)
 
     # --- QUOTING -----------------------------------------------------------------------------
     min_edge: float = 0.01                # never quote closer than this to our reservation price
@@ -439,6 +445,8 @@ OVERRIDABLE = {
     "burst_size_factor": (0.05, 1.0), "burst_extra_edge": (0.0, 0.05),
     "slow_cycle_alert_seconds": (10.0, 3600.0), "summary_every_hours": (0, 24),
     "churn_count_sent": (False, True),
+    "positions_stale_max_cycles": (0, 100),
+    "positions_stale_max_seconds": (0.0, 3600.0),
 }
 
 
@@ -1788,6 +1796,9 @@ class Bot:
         self.calib_votes = []             # recent "add"/"ignore" verdicts while auto-detecting
         self.failed_cycles = 0
         self.pulled_after_errors = False
+        self.pos_fallbacks = 0            # cycles in a row on the last positions read (409, see cycle)
+        self.pos_fallback_since = None    # when that run of 409s started (monotonic)
+        self.pos_fallback_failing = False # ...and it went on too long: cycles fail until positions read again
         self.error_alerted = False        # one phone alert per outage, plus one when it ends
         self.last_reload = 0.0
         self.last_equity = None           # latest account value (read every slow_poll_seconds)
@@ -2016,11 +2027,16 @@ class Bot:
                 self.cached_pos = f_pos.result()
             except ApiError as e:
                 # ...except day one's 409 "holdings cannot be valued" (a market without a valuation price):
-                # positions only change through fills, so the last good read is fine for this cycle.
+                # positions only change through fills, so the last good read is fine for a cycle or two.
                 if e.status != 409 or self.cached_pos is None:
                     raise
-                log.warning("positions unavailable (%s) - using the last read for this cycle", e)
+                self.positions_fallback(e, now_m)     # raises once the last read is too old to trade on
                 pos_failed = True
+            else:
+                if self.pos_fallbacks:
+                    log.warning("positions readable again after %d cycles (%.0f s) on an old read",
+                                self.pos_fallbacks, now_m - self.pos_fallback_since)
+                self.pos_fallbacks, self.pos_fallback_since, self.pos_fallback_failing = 0, None, False
         if read_orders:
             self.cached_orders = f_orders.result()
             self.orders_stale = False
@@ -2201,6 +2217,27 @@ class Bot:
                 if s is not None and s <= self.cfg.ref_liquid_spread:
                     liquid.add(eid)
         return refs, liquid
+
+    def positions_fallback(self, e, now_m):
+        """Positions answered 409: reuse the last read, but only for positions_stale_max_cycles cycles in a row or
+        positions_stale_max_seconds, whichever first. Fills keep landing meanwhile, so inventory, position limits,
+        skew, reduce-only and the risk model would all run on a frozen inventory; past the limit this re-raises,
+        the cycle fails and on_cycle_error pulls every quote (after max_failed_cycles) until positions read again.
+        Logged when the run of 409s starts and when it ends (not every cycle)."""
+        cfg = self.cfg
+        if not self.pos_fallbacks:
+            self.pos_fallback_since = now_m
+            log.warning("positions unavailable (%s) - using the last read (at most %d cycles / %.0f s)",
+                        e, cfg.positions_stale_max_cycles, cfg.positions_stale_max_seconds)
+        self.pos_fallbacks += 1
+        age = now_m - self.pos_fallback_since
+        if ((cfg.positions_stale_max_cycles and self.pos_fallbacks > cfg.positions_stale_max_cycles)
+                or (cfg.positions_stale_max_seconds and age >= cfg.positions_stale_max_seconds)):
+            if not self.pos_fallback_failing:
+                self.pos_fallback_failing = True
+                log.error("positions still unavailable after %d cycles (%.0f s) - failing cycles (quotes are "
+                          "pulled) until they read again", self.pos_fallbacks - 1, age)
+            raise e
 
     def thin_book_prices(self, fvs, refs, liquid, now_m):
         """R5: markets whose book is too thin for a depth-checked price (fair_value None) but that have a

@@ -1612,6 +1612,60 @@ logging.disable(logging.NOTSET)
 a.positions = real_pos
 check("positions 409 'holdings cannot be valued' (day one 16:30): the cycle goes on with the last read", ok and b.orders_stale)
 
+# F2: the 409 fallback is bounded: positions_stale_max_cycles cycles in a row (or positions_stale_max_seconds), then
+# the cycle fails (on_cycle_error then pulls quotes after max_failed_cycles); logged once at the start and the end.
+class _Grab(logging.Handler):
+    def __init__(s): super().__init__(); s.msgs = []
+    def emit(s, r): s.msgs.append(r.getMessage())
+def pos_409_run(b, n):
+    """n cycles with positions answering 409 -> list of True (cycle went on) / False (cycle failed)."""
+    out = []
+    for _ in range(n):
+        b.orders_stale = True
+        try:
+            b.cycle(); out.append(True)
+        except ApiError as e:
+            out.append(False if e.status == 409 else "other")
+    return out
+grab = _Grab()
+real_level, real_prop = M.log.level, M.log.propagate
+M.log.addHandler(grab); M.log.setLevel(logging.INFO); M.log.propagate = False
+try:
+    a, b = make_bot(); b.cycle()
+    real_pos = a.positions
+    a.positions = lambda: (_ for _ in ()).throw(ApiError(409, "CONFLICT", "Tournament holdings cannot be valued"))
+    seq = pos_409_run(b, 6)
+    check("F2: positions 409 -> the last read is reused 3 cycles in a row, then every cycle fails",
+          seq == [True, True, True, False, False, False], seq)
+    started = [m for m in grab.msgs if m.startswith("positions unavailable")]
+    failing = [m for m in grab.msgs if m.startswith("positions still unavailable")]
+    check("F2: logged once when the fallback starts and once when it starts failing (not every cycle)",
+          len(started) == 1 and len(failing) == 1, grab.msgs)
+    for _ in range(b.cfg.max_failed_cycles):
+        b.on_cycle_error("failed cycles", pull_now=False)
+    check("F2: ...and those failed cycles pull every quote (on_cycle_error)", not a.orders and b.pulled_after_errors,
+          a.orders)
+    a.positions = real_pos
+    grab.msgs.clear()
+    b.orders_stale = True; b.cycle()
+    check("F2: positions readable again: the run resets and its end is logged once",
+          b.pos_fallbacks == 0 and not b.pos_fallback_failing
+          and len([m for m in grab.msgs if m.startswith("positions readable again")]) == 1, grab.msgs)
+    a.positions = lambda: (_ for _ in ()).throw(ApiError(409, "CONFLICT", "Tournament holdings cannot be valued"))
+    b.cfg.positions_stale_max_cycles = 100
+    seq = pos_409_run(b, 1)
+    b.pos_fallback_since -= 121                       # the run of 409s started 2 minutes ago
+    seq += pos_409_run(b, 1)
+    check("F2: ...or after positions_stale_max_seconds, whichever comes first", seq == [True, False], seq)
+    a.positions = real_pos; b.orders_stale = True; b.cycle()
+    a.positions = lambda: (_ for _ in ()).throw(ApiError(409, "CONFLICT", "Tournament holdings cannot be valued"))
+    b.cfg.positions_stale_max_cycles, b.cfg.positions_stale_max_seconds = 0, 0
+    seq = pos_409_run(b, 6)
+    check("F2: both limits 0 = the old unbounded reuse", seq == [True] * 6, seq)
+    a.positions = real_pos
+finally:
+    M.log.removeHandler(grab); M.log.setLevel(real_level); M.log.propagate = real_prop
+
 print("--- parallel requests")
 a, b = make_bot()
 res = b.in_parallel(lambda x: 1 / x, [1, 0, 2])
