@@ -2868,7 +2868,7 @@ try:
           a.sent("batch") == [("batch", 1)] and placed == [0.06], (a.calls, placed))
     a.writes_left = lambda: 10 ** 6
 
-    # Anchor: re-priced only when fair value moves >= ladder_move.
+    # Anchor: re-priced only when fair value moves >= ladder_move (2c); a 1-tick difference is kept (tolerance).
     a, b = ladder_bot(ladder_offsets=(0.02, 0.03, 0.04))
     b.cycle(); b.cycle()
     ids = lad_ids(a, b)
@@ -2878,12 +2878,21 @@ try:
     b.cycle(); b.cycle()
     check("anchor: a 0.25c fair-value move leaves the ladder where it is",
           len(ids) == 16 and lad_ids(a, b) == ids and abs(b.ex["21"].lad_fv - 0.52) < 1e-9, (b.ex["21"].lad_fv, lad(a, b, "21")))
-    a.books["21"] = {"bids": [lvl(0.52, 1000)], "asks": [lvl(0.54, 1000)]}      # fair value +1c
-    a.books["22"] = {"bids": [lvl(0.46, 1000)], "asks": [lvl(0.48, 1000)]}
-    b.cycle(); b.cycle()
-    check("anchor: a 1c move re-prices every level around the new anchor (0.53)",
-          abs(b.ex["21"].lad_fv - 0.53) < 1e-9 and [x[1] for x in lad(a, b, "21")] == [0.55, 0.56, 0.57, 0.49, 0.5, 0.51]
+    a.books["21"] = {"bids": [lvl(0.53, 1000)], "asks": [lvl(0.55, 1000)]}      # fair value +2c
+    a.books["22"] = {"bids": [lvl(0.45, 1000)], "asks": [lvl(0.47, 1000)]}
+    b.cycle(); b.cycle(); b.cycle()
+    check("anchor: a 2c move re-prices every level around the new anchor (0.54)",
+          abs(b.ex["21"].lad_fv - 0.54) < 1e-9 and [x[1] for x in lad(a, b, "21")] == [0.56, 0.57, 0.58, 0.5, 0.51, 0.52]
           and not (lad_ids(a, b) & ids21), lad(a, b, "21"))
+    a, b = ladder_bot()
+    ex21, q21 = b.ex["21"], Quote(0.50, 100, 0.53, 100)
+    b.lad_cash_left = 10 ** 9
+    anchors = []
+    for k in range(20):                                  # fair value wobbling 0.50 / 0.51 / 0.515
+        b.ladder_targets(ex21, q21, (0.50, 0.51, 0.515)[k % 3], 1000.0 + k)
+        anchors.append(ex21.lad_fv)
+    check("anchor: fair value oscillating within 1.5c never re-anchors (at most once per 2c)",
+          len(set(anchors)) == 1, sorted(set(anchors)))
 
     # Pull on a Polymarket jump, back after ladder_pull_seconds.
     a, b = ladder_bot()
@@ -3034,6 +3043,58 @@ try:
     check("a tighter limit: the ladder level now too big is pulled at once, the one within it stays",
           ("bid", 0.495, 200, 2) not in l21 and ("bid", 0.505, 100, 1) in l21 and ("bid", 0.485, 300, 3) not in l21,
           l21)
+
+    # Review fixes (L1-L4).
+    want, _ = ladder_levels(0.52, Quote(0.51, 1000, 0.53, 1000), 0.51, 0.53, L3, (1, 2, 3), 1000, _big, max_cash=1000)
+    check("ladder: per-order cash cap (3,000 sh at 0.485 = 1,455 > 1,000 -> 2,061 sh)",
+          want[(True, 3)] == (0.485, int(1000 / 0.485)) and want[(True, 1)] == (0.505, 1000)
+          and want[(False, 3)][1] == int(1000 / (1 - 0.555)), want)
+    a, b = ladder_bot()
+    b.cycle(); b.cycle()
+    ex21 = b.ex["21"]
+    rest21 = b.orders_by_eid(utcnow())["21"]
+    q_dip = replace(ex21.quote, bid=0.505)               # wanted level 0 one tick lower; the resting 0.51 is kept
+    a.calls.clear()
+    ch = b.plan_exchange(ex21, q_dip, rest21, 0.515, utcnow(), time.monotonic())
+    check("hair trigger: level 1 == the wanted level 0 but behind the RESTING touch -> no urgent pull",
+          ch is None or (ch.key[0] == LADDER_TIER), ch and (ch.key, [(o.is_bid, o.price) for o in ch.doomed]))
+    b.lad_cash_left = 10 ** 9
+    _w, _, _ = b.ladder_targets(ex21, Quote(0.505, 100, 0.53, 100), 0.52, time.monotonic(), {True: 0.51, False: 0.535})
+    check("...and no level is placed at a resting touch kept a tick off its target either (it'd be pulled next cycle)",
+          (True, 1) not in _w and _w[(True, 2)][0] == 0.495 and (False, 1) not in _w and _w[(False, 2)][0] == 0.545, _w)
+    b.cfg.reprice_tolerance_ticks = 0
+    ch = b.plan_exchange(ex21, replace(ex21.quote, bid=0.50, bid_limit=0.50), rest21, 0.515, utcnow(), time.monotonic())
+    check("...but a ladder order beyond level 0's limit price IS urgent (rides with the level-0 change)",
+          ch is not None and ch.key[0] < LADDER_TIER and any(o.price == 0.505 and b.order_level(o) == 1 for o in ch.doomed),
+          ch and ch.key)
+    b.cfg.reprice_tolerance_ticks = 1
+    _lad_pulls = []
+    for k in range(9):                                   # 9 markets x 3 ladder levels = 27 ladder-only pulls
+        _os = [Resting(9000 + 3 * k + j, "21", True, 0.4 - 0.01 * j, 100, None) for j in range(3)]
+        _lad_pulls.append(Change(ex21, _os, False, [], b.change_key(ex21, pull=True), count=False, unsafe=True,
+                                 ladder={o.order_id for o in _os}))
+    a.calls.clear()
+    check("pull storm: 27 ladder-only pulls never become a tournament-wide cancel-all",
+          b.pull_storm(_lad_pulls) is False and not a.sent("cancel_all"), a.calls)
+    # min_quote_life: a stale, safe ladder order younger than it stays.
+    a, b = ladder_bot(churn_control=True, min_quote_life_seconds=1e9)
+    b.cycle(); b.cycle()
+    oid2 = next(oid for oid, o in a.orders.items() if o["exchangeId"] == "21" and b.order_meta[oid].get("level") == 2
+                and a.yes_view(o)[0])
+    a.orders[oid2]["quantity"] = 50
+    a.calls.clear()
+    b.cycle()
+    check("churn control: a young ladder order isn't re-priced (min_quote_life_seconds)",
+          oid2 in a.orders and not a.sent("cancel_order") and not a.sent("batch"), a.calls)
+    # The writes gate counts the ladder's own writes: 12 writes left, a 6-order ladder (1 batch) -> 11 >= 10 goes;
+    # with a 1-order batch size it costs 6 -> 6 < 10 left after it -> deferred.
+    a, b = ladder_bot(batch_size=1)
+    b.cycle()
+    a.writes_left = lambda: 12
+    b.cycle()
+    check("writes gate: ladder_min_writes stay free AFTER the ladder's own writes",
+          not {oid for oid in lad_ids(a, b) if a.orders[oid]["exchangeId"] == "21"}, lad(a, b, "21"))
+    a.writes_left = lambda: 10 ** 6
 
     # Turning the ladder off pulls it; level 0 stays.
     a, b = ladder_bot()
