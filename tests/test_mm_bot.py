@@ -2737,6 +2737,17 @@ b.send_changes(reprices + pulls)
 sent = [c[1] for c in a.sent("cancel_order")[n0:]]
 check("urgent_writes_per_cycle 2: only 2 urgent cancels this cycle, the unsafe pulls first",
       len(sent) == 2 and set(sent) == pulled, sent)
+# Reviewer HIGH-2 (2.3): the cap skips further URGENT changes; ordinary changes behind them still go.
+a, b = make_bot(); b.cycle()
+b.cfg.urgent_writes_per_cycle = 1
+urgent = [Change(b.ex[e], rest(e)[:1], False, [], (0, 1, 1, 0), unsafe=True) for e in ("21", "22")]
+normal = [Change(b.ex["11"], rest("11")[:1], False, [], (1, 1, 1, 0), unsafe=False)]
+normal_id = rest("11")[0].order_id
+n0 = len(a.sent("cancel_order"))
+b.send_changes(urgent + normal)
+sent = [c[1] for c in a.sent("cancel_order")[n0:]]
+check("urgent cap reached: the ordinary reprice behind the capped urgent changes is still sent (no book starvation)",
+      len(sent) == 2 and normal_id in sent, sent)
 b.cfg.urgent_writes_per_cycle = 0
 n0 = len(a.sent("cancel_order"))
 b.send_changes([Change(b.ex[e], rest(e)[:1], False, [], (0, 1, 1, 0), unsafe=True) for e in ("11", "12")])
@@ -2871,6 +2882,12 @@ M.alert = lambda msg: alerts.append(msg)
 b.hard_exit = lambda code: exits.append(code)
 b.cfg.watchdog_alert_seconds, b.cfg.watchdog_exit_seconds = 180, 600
 t = b.last_cycle_done
+# Reviewer HIGH-1 (2.3): a cycle skipped during a 429 pause does NOT reset the watchdog's clock.
+b.api.pause_left = lambda: 30.0
+b.cycle()
+check("a cycle skipped during a rate-limit pause leaves last_cycle_done alone (a pause chain still reaches the watchdog)",
+      b.last_cycle_done == t, (b.last_cycle_done, t))
+del b.api.pause_left
 check("watchdog: quiet while cycles complete", b.watchdog_check(t + 10) is None and not alerts)
 check("...alerts once at 180 s without a completed cycle", b.watchdog_check(t + 181) == "alert"
       and b.watchdog_check(t + 200) is None and len(alerts) == 1, alerts)

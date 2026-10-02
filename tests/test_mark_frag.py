@@ -41,7 +41,7 @@ print("--- settings")
 c = M.Config()
 check("defaults: off, 100 $/step, 24 h, 60 samples, 0.2c floor, 2,000 $ total",
       (c.mark_frag_enabled, c.mark_frag_max_step_cash, c.mark_frag_window_hours, c.mark_frag_min_samples,
-       c.mark_frag_floor_sd, c.mark_frag_total_max_cash) == (False, 100.0, 24.0, 60, 0.002, 2000.0))
+       c.mark_frag_floor_sd, c.mark_frag_total_max_cash) == (False, 100.0, 24.0, 60, 0.002, 0.0))   # total cap off (Reviewer M-7)
 good, bad = M.validate_overrides({"mark_frag_enabled": True, "mark_frag_max_step_cash": 150.0,
                                   "mark_frag_window_hours": 12.0, "mark_frag_min_samples": 30,
                                   "mark_frag_floor_sd": 0.003, "mark_frag_total_max_cash": 0.0}, c)

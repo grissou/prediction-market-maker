@@ -169,7 +169,7 @@ class Config:
     mark_frag_window_hours: float = 24.0  # ...sd over the last this many hours of snapshots (refreshed every 30 min)
     mark_frag_min_samples: int = 60       # ...fewer 10-min changes than this in the window -> no estimate, no cap
     mark_frag_floor_sd: float = 0.002     # ...an sd below 0.2c counts as 0.2c, so the limit never explodes
-    mark_frag_total_max_cash: float = 2000.0  # ...sum over positions of |pos| x sd above this -> every adding side
+    mark_frag_total_max_cash: float = 0.0     # ...sum over positions of |pos| x sd above this -> every adding side
                                           #   withdrawn (like the capital ceiling at factor 0) until below 80% of it.
                                           #   Only with mark_frag_enabled. 0 = no total cap
     max_order_cash_frac: float = 0.01     # max cash tied up in a single order: 1,000 at 100k
@@ -2780,8 +2780,8 @@ class Bot:
             if not self.pause_logged:
                 self.pause_logged = True
                 log.warning("exchange rate-limit pause: %.0f s left - cycles skipped until it ends", left)
-            self.last_cycle_done, self.cycle_started = time.monotonic(), None
-            self.wake.wait(timeout=min(left, 1.0))
+            self.cycle_started = None             # (last_cycle_done is NOT touched: a chain of pauses must still
+            self.wake.wait(timeout=min(left, 1.0))    #  reach the watchdog's alert and exit: that is its purpose)
             return
         self.pause_logged = False
         tl = getattr(self.api, "tl", None)
@@ -4290,8 +4290,8 @@ class Bot:
             c = (0 if not ch.doomed else 1 if ch.whole else len(ch.doomed)) + (
                 math.ceil(n / cfg.batch_size) - math.ceil(orders / cfg.batch_size))
             if ch.key[0] == 0 and cap > 0 and urgent_cost + c > cap and urgent_cost > 0:
-                capped = True                 # urgent writes capped: the rest (and everything after) next cycle
-                break
+                capped = True                 # urgent writes capped: further URGENT changes wait for the next cycle,
+                continue                      #   the ordinary reprices and new quotes behind them still go
             if cost + c > spare and ch.key[0] != 0:
                 break                         # pulls always go; everything after the first misfit waits
             kept.append(ch)
