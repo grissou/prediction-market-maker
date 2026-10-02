@@ -403,7 +403,10 @@ of arbitrage (+314). 0 outsider fills.
 | (9) ceiling adding factor 0.5 (vs 0.25) | **+262 ± 100** | **+200 ± 100** | -1.5k | +1.5 / +0.05 | +0.1 h | +1.3k | +1.3 | **real gain** (2.6 se) for 1.5 points of capital |
 | (10) arb_buy_min_ref_sum 0.8 (guard loosened) | **-898 ± 94** | **-777 ± 100** | **-8.2k** | **+8.1 / +5.9** | 0 | -1.2k | +0.1 | 23.8k outsider shares bought. The 0.99 guard (default) is worth +900 per 6 h; with it, 0 outsider fills |
 
-NEWS_PLACEHOLDER
+## Not run (stopped to save credits)
+- 6 h news: only the base finished (16 seeds). P&L +2,500, lagged mark +889, cash freed 7.6k, capital 0.90 -> 0.826 (peak
+  0.925), age 4.0 h, 21.1 writes/min, 1,890 deferred changes per hour. No variant deltas.
+- 12 h runs of the winners: not run.
 
 ## Recommended Package 3 defaults
 - **capital_ceiling_adding_size_factor 0.5** (medium: +262 ± 100 for +1.5 points of capital; round 2 said the same).
