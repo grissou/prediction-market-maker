@@ -3776,6 +3776,9 @@ class Bot:
                 self.cfg.order_ttl, self.cfg.refresh_before_expiry = ttl, ttl / 5
             log.info("self-test passed: orders, sell->NO conversion, expiry and cancel all behave as expected")
             self.selftest_passed = True
+            # No test runs there any more: that exchange is an ordinary one again (lost-order recovery may lift
+            # its hold early; a whole-exchange cancel there no longer bumps cancel_gen).
+            self.selftest_eid = None
             return True
         if verdict == "busy":
             waited = time.monotonic() - (self.selftest_started or time.monotonic())

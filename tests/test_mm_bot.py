@@ -631,6 +631,14 @@ b.run()
 M.alert = real_alert
 check("...and its result is picked up once it's in: passed, test orders gone", b.selftest_passed and
       not [o for o in a.orders.values() if o["quantity"] == 1], cycles)
+check("F8: a passed self-test clears selftest_eid (that exchange is ordinary again)", b.selftest_eid is None)
+a, b = make_bot()
+b.selftest_eid = test_eid = b.selftest_start()
+b.selftest_finish(test_eid, ("passed", [], b.cfg.order_ttl))
+gen = b.cancel_gen
+b.cancel(test_eid, [], True)
+check("F8: after a pass, a whole-exchange cancel on the old test exchange does not bump cancel_gen",
+      b.selftest_eid is None and b.cancel_gen == gen, (b.selftest_eid, gen, b.cancel_gen))
 
 a, b = make_bot()
 a.batch_error = ApiError(409, "REQUEST_IN_FLIGHT", "in flight")
