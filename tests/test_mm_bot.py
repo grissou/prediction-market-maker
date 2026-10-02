@@ -2118,6 +2118,151 @@ finally:
 check("F11: a cancel-all that left orders resting is retried each failed cycle until it reports none left",
       first is False and len(calls) == 3 and b.pulled_after_errors and not answers, (first, calls))
 
+# ---------------------------------------------------------------------------------------------
+# Inventory turnover (2 Oct): race-netted limits, age skew, capital ceiling
+# ---------------------------------------------------------------------------------------------
+print("--- inventory turnover: race-netted limits, age skew, capital ceiling")
+_c = Config(); pin_test_sizes(_c)
+# House on 2 Oct: long 10,834 Dem, short 9,396 Rep -> race-netted +20,230 Dem / -20,230 Rep; 10k per-leg limit.
+_dem = compute_quote(0.55, 10834, 20230, None, None, _c, order_size=5000, position_limit=10000, net_inv=20230)
+_rep = compute_quote(0.45, -9396, -20230, None, None, _c, order_size=5000, position_limit=10000, net_inv=-20230)
+check("netting: House Dem leg (+10,834, race +20,230): no bid, the ask (reducing) still quotes",
+      _dem.bid is None and _dem.ask_size > 0, _dem)
+check("netting: House Rep leg (-9,396, race -20,230): no ask (was 604 shares per-leg), the bid still quotes",
+      _rep.ask is None and _rep.bid_size > 0, _rep)
+_c.limits_use_race_net = False
+_old = compute_quote(0.45, -9396, -20230, None, None, _c, order_size=5000, position_limit=10000, net_inv=-20230)
+check("netting off: the per-leg limit alone let the Rep ask add 604 more shares of the same bet",
+      _old.ask_size == 604, _old)
+_c.limits_use_race_net = True
+_d2 = compute_quote(0.55, 8000, 17396, None, None, _c, order_size=5000, position_limit=10000, net_inv=17396)
+check("netting: Dem +8,000 under its own 10k limit but race +17,396 -> no bid", _d2.bid is None and _d2.ask_size > 0, _d2)
+_h = compute_quote(0.55, 2000, -6000, None, None, _c, order_size=5000, position_limit=10000, net_inv=-6000)
+check("netting: a leg that hedges the race (+2,000, race -6,000) keeps buying; its ask (growing the race short) "
+      "is capped at 4,000", _h.bid_size == 5000 and _h.ask_size == 4000, _h)
+_k = compute_quote(0.50, 100, 5000, None, None, _c, order_size=500, kelly_p=0.52, net_inv=5000)
+_k0 = compute_quote(0.50, 100, 100, None, None, _c, order_size=500, kelly_p=0.52, net_inv=100)
+check("netting: the Kelly limit applies to the race-netted position too", _k.bid is None and _k0.bid_size > 0, (_k, _k0))
+
+# Age skew: 0.25c per hour beyond 1 h, capped at 2c, toward unloading; never through fair value.
+check("age skew: none up to skew_age_after_hours", age_skew(1.0, 500, _c) == 0.0 and age_skew(0.5, 500, _c) == 0.0)
+check("age skew: 3 h long -> 0.5c lower; short -> 0.5c higher",
+      abs(age_skew(3.0, 500, _c) - 0.005) < 1e-12 and abs(age_skew(3.0, -500, _c) + 0.005) < 1e-12)
+check("age skew: capped at skew_age_max (2c) from 9 h", age_skew(9.0, 1, _c) == 0.02 and age_skew(40.0, 1, _c) == 0.02)
+check("age skew: flat position -> none", age_skew(10.0, 0, _c) == 0.0)
+_q0 = compute_quote(0.50, 50, 50, None, None, _c, order_size=100)
+_q8 = compute_quote(0.50, 50, 50, None, None, _c, order_size=100, age_hours=5.0)
+check("age skew: a 5 h-old long quotes 1c lower on both sides", (round(_q0.bid - _q8.bid, 6), round(_q0.ask - _q8.ask, 6)) == (0.01, 0.01),
+      (_q0, _q8))
+_qb = compute_quote(0.50, 400, 400, None, None, _c, order_size=100, age_hours=30.0)
+check("age skew: added after the inventory cap (2c + 2c = 4c lower bid), ask never below fair value",
+      _qb.bid == 0.42 and _qb.ask == 0.50, _qb)
+_qs = compute_quote(0.50, -400, -400, 0.52, None, _c, order_size=100, age_hours=30.0)
+check("age skew: an old short bids at most fair value (would penny 0.525)", _qs.bid == 0.50, _qs)
+_c.skew_age_enabled = False
+check("age skew disabled = today's quote", compute_quote(0.50, 50, 50, None, None, _c, order_size=100, age_hours=30.0) == _q0)
+_c.skew_age_enabled = True
+
+# Capital ceiling in compute_quote: the side growing |race-netted| shrinks by the factor; reduce-only stays stricter.
+_l = compute_quote(0.50, 300, 300, None, None, _c, order_size=100, adding_factor=0.0)
+check("ceiling x0: long -> adding bid withdrawn, reducing ask kept", _l.bid is None and _l.ask_size == 100, _l)
+_s = compute_quote(0.50, -300, -300, None, None, _c, order_size=100, adding_factor=0.5)
+check("ceiling x0.5: short -> adding ask halved, reducing bid full", _s.ask_size == 50 and _s.bid_size == 100, _s)
+_f = compute_quote(0.50, 0, 0, None, None, _c, order_size=100, adding_factor=0.0)
+check("ceiling x0: a flat market quotes neither side (both would add)", _f == NO_QUOTE or (_f.bid is None and _f.ask is None), _f)
+_r = compute_quote(0.50, 300, 300, None, None, _c, order_size=100, adding_factor=0.5, reduce_only=True)
+check("ceiling with reduce-only: reduce-only stays stricter (no bid)", _r.bid is None and _r.ask_size == 100, _r)
+
+# FIFO lots on a bot: buys stack, sells take the oldest first, a sign change starts afresh.
+logging.disable(logging.CRITICAL)
+try:
+    a, b = make_bot()
+    t0 = 1_700_000_000.0
+    b.lots_seeded = True
+    b.update_lots({"11": 100}, t0)
+    b.update_lots({"11": 300}, t0 + 3600)
+    check("lots: two buys -> two lots", b.lots["11"] == [[100.0, t0], [200.0, t0 + 3600]], b.lots)
+    check("lots: share-weighted age (100 @ 2 h + 200 @ 1 h = 1.33 h)",
+          abs(b.age_hours(b.ex["11"], t0 + 7200) - 4 / 3) < 1e-9, b.age_hours(b.ex["11"], t0 + 7200))
+    b.update_lots({"11": 250}, t0 + 7200)
+    check("lots: a partial sell takes the oldest lot first", b.lots["11"] == [[50.0, t0], [200.0, t0 + 3600]], b.lots)
+    b.update_lots({"11": 150}, t0 + 7200)
+    check("lots: ...then the next one", b.lots["11"] == [[150.0, t0 + 3600]], b.lots)
+    b.update_lots({"11": -50}, t0 + 9000)
+    check("lots: crossing to short starts one fresh lot", b.lots["11"] == [[-50.0, t0 + 9000]], b.lots)
+    b.update_lots({"11": -80}, t0 + 9900)
+    b.update_lots({"11": -60}, t0 + 9900)
+    check("lots: shorts work the same way", b.lots["11"] == [[-30.0, t0 + 9000], [-30.0, t0 + 9900]], b.lots)
+    b.update_lots({"11": 0}, t0 + 9999)
+    check("lots: flat -> forgotten, age 0", "11" not in b.lots and b.age_hours(b.ex["11"]) == 0.0, b.lots)
+    b.update_lots({"11": 400, "21": -200}, t0)
+    b.update_lots({"11": 400, "21": -200}, t0)   # unchanged position: nothing new
+    age, n3, n12 = b.portfolio_age(t0 + 5 * 3600)
+    check("portfolio age: share-weighted 5 h, 2 positions over 3 h, none over 12 h",
+          abs(age - 5) < 1e-9 and (n3, n12) == (2, 0), (age, n3, n12))
+    b2 = Bot(a, b.cfg)
+    check("lots persist across a restart (position_lots_file)", b2.lots == b.lots, (b2.lots, b.lots))
+    b2.update_lots({"11": 400, "21": -200}, t0 + 60)
+    check("...and a restart with unchanged positions keeps their ages", b2.lots["11"] == [[400.0, t0]], b2.lots)
+
+    # No lots file (first deploy): rebuilt from fills.csv, latest fills in the position's direction first.
+    a, b = make_bot()
+    with open(b.cfg.fills_csv, "a", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow([1, "2026-10-02T00:00:00Z", "11", 9, "bid", 300, 0.1, 0.1, 0.12, ""])
+        w.writerow([2, "2026-10-02T02:00:00Z", "11", 9, "ask", 100, 0.2, 0.2, 0.12, ""])
+        w.writerow([3, "2026-10-02T04:00:00Z", "11", 9, "bid", 200, 0.1, 0.1, 0.12, ""])
+        w.writerow([4, "2026-10-02T05:00:00Z", "21", 9, "bid", 100, 0.5, 0.5, 0.5, ""])
+    tnow = M.parse_ts("2026-10-02T06:00:00Z").timestamp()
+    b.update_lots({"11": 350, "21": -40, "22": 70}, tnow)
+    t4 = M.parse_ts("2026-10-02T04:00:00Z").timestamp(); t00 = M.parse_ts("2026-10-02T00:00:00Z").timestamp()
+    check("seeding from fills.csv: 350 long = the latest 200 (04:00) + 150 of the 00:00 buy",
+          b.lots["11"] == [[150.0, t00], [200.0, t4]], b.lots.get("11"))
+    check("seeding: a position with no fills in its direction counts as bought now",
+          b.lots["21"] == [[-40.0, tnow]] and b.lots["22"] == [[70.0, tnow]], (b.lots.get("21"), b.lots.get("22")))
+
+    # Capital ceiling on/off with hysteresis (75% in, below 70% out), logged once each way.
+    a, b = make_bot()
+    seq = []
+    for frac in (0.70, 0.76, 0.72, 0.705, 0.69, 0.751, None):
+        b.update_capital_ceiling(frac, b.cfg); seq.append(b.capital_over)
+    check("capital ceiling: on above 75%, off only below 70%, unknown keeps the state",
+          seq == [False, True, True, True, False, True, True], seq)
+    b.cfg.capital_in_positions_max_frac = 0.0
+    b.update_capital_ceiling(0.99, b.cfg)
+    check("capital ceiling: 0 = off", b.capital_over is False)
+    check("capital in positions: our own valuation without the API's (long 1,000 @0.3 + short 1,000 @0.3 = 1,000)",
+          abs(b.capital_in_positions({"summary": {}}, {"11": 1000, "21": -1000}, {"11": 0.3, "21": 0.3}) - 1000) < 1e-6)
+    check("capital in positions: the positions read's totalMarketValue when given",
+          b.capital_in_positions({"summary": {"totalMarketValue": 90500}}, {"11": 1}, {}) == 90500)
+
+    # End to end: over the ceiling, adding sides go, reducing sides stay; status and summary show it.
+    a, b = make_bot()
+    a.inv = {"11": 500}                                   # long 500 Rep Ohio -> race +500 Rep / -500 Dem
+    b.cfg.capital_in_positions_max_frac = 0.0005          # 500 x ~0.14 = ~70 of 100,000 -> over
+    b.cycle()
+    q11, q12, q21 = b.ex["11"].quote, b.ex["12"].quote, b.ex["21"].quote
+    check("ceiling live: Rep Ohio (long) keeps its ask, loses its bid", q11.bid is None and q11.ask is not None, q11)
+    check("ceiling live: Dem Ohio (race-short) keeps its bid (the hedge), loses its ask", q12.ask is None and q12.bid is not None, q12)
+    check("ceiling live: a flat market quotes nothing at factor 0", q21.bid is None and q21.ask is None, q21)
+    b.write_status(True)
+    st = json.load(open(b.cfg.status_file))
+    check("status.json: capital in positions, ceiling flag, portfolio age and old-position counts",
+          st.get("capital_ceiling_active") is True and st.get("capital_in_positions_frac", 0) > 0.0005
+          and "portfolio_age_hours" in st and st.get("positions_over_3h") == 0 and "positions_over_12h" in st, st)
+    _t, _m = build_summary(FakeApi(), "/nonexistent/fills.csv", 100_000, value=100_000, health=b.health)
+    check("summary: a positions line with age, old counts and the ceiling",
+          "Positions: avg age" in _m and "CEILING" in _m and all(len(x) < 160 for x in _m.split("\n")), _m)
+    b.cfg.capital_ceiling_adding_size_factor = 0.5
+    b.cycle()
+    check("ceiling live x0.5: the flat market quotes both sides at half size",
+          b.ex["21"].quote.bid_size == 50 and b.ex["21"].quote.ask_size == 50, b.ex["21"].quote)
+    b.cfg.capital_in_positions_max_frac = 0.75
+    b.cycle()
+    check("ceiling left: full sizes again", b.ex["21"].quote.bid_size == 100 and not b.capital_over, b.ex["21"].quote)
+finally:
+    logging.disable(logging.NOTSET)
+
 # F7: a method defined twice in a class silently shadows the first (thin_book_prices was): none may be.
 import ast
 _dups = []

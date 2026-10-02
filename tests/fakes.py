@@ -200,6 +200,7 @@ def make_bot(live=True, only="", books=None, extra_markets=()):
     d = tempfile.mkdtemp()
     cfg.fills_csv, cfg.status_file, cfg.order_notes_file, cfg.kill_file = (
         os.path.join(d, n) for n in ("fills.csv", "status.json", "notes.json", "kill.tripped"))
+    cfg.position_lots_file = os.path.join(d, "lots.json")
     cfg.record_file, cfg.ref_map_file, cfg.summary_every_hours = "", "", 0
     cfg.overrides_file = os.path.join(d, "overrides.json")
     cfg.handover_file = os.path.join(d, "handover.json")

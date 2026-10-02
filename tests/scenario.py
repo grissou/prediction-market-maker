@@ -228,6 +228,7 @@ class World:
         d = tempfile.mkdtemp()
         cfg.fills_csv, cfg.status_file, cfg.order_notes_file, cfg.kill_file = (
             os.path.join(d, n) for n in ("fills.csv", "status.json", "notes.json", "kill.tripped"))
+        cfg.position_lots_file = os.path.join(d, "lots.json")
         cfg.record_file, cfg.ref_map_file, cfg.summary_every_hours, cfg.log_file = "", "", 0, ""
         cfg.realtime_enabled, cfg.selftest_enabled = False, selftest
         cfg.api_key, cfg.slug = "test-key", "test"
