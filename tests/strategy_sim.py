@@ -47,22 +47,42 @@ from mm_bot import TICK, Config, Resting, compute_quote, fair_value, floor_tick,
 
 M.notify = lambda *a, **k: False
 
-# Market kinds: (count per run, noise trades per hour, rival count, our size frac, headline?)
+# Calibration (DATA_REPORT_2.md section 9, 16 h of day one and the night; SIM_NOTES.md). "day1" = the Builder's.
+CAL = dict(
+    jumps=0.04,                   # Polymarket moves >= 1c per market-hour (quiet)
+    lat=(0.2, 0.6), slow_share=0.1,   # write latency median 0.4 s; slow (15-30 s) share
+    bias_sd=0.016, tr_sd=0.0095, tr_hl=810,   # tournament - Polymarket: bias sd 1.75c with the favourite-longshot
+                                              #   pattern; transient sd 0.95c, half-life 13.5 min
+    rate_head=38, rate_busy=26, rate_quiet=4,   # market orders per hour (fills per market-hour 8 / 6.6 / 1.2)
+    sweep_share=0.0,              # day one's extra 8% of 1,000-8,000-share sweeps (folded into the size tail)
+    riv_off=0.024,                # rival fair-value error sd vs Polymarket
+    riv_half=(0.0025, 0.0125),    # rival half-spread (rival-only half-spreads: median 0.75c, p10 0.5c, p90 1c)
+    riv_penny=0.3,                # share of rivals that penny the best other quote (the rest sit at their own price)
+    riv_every=((20, 120), (120, 600)),   # rival re-quote interval, fast / slow (undercut median 151 s); fast ones
+                                         #   still react to a Polymarket move after their lag (1-3 s)
+)
+CAL_DAY1 = dict(jumps=0.05, lat=(0.5, 2.0), slow_share=0.05, bias_sd=0.009, tr_sd=0.0058, tr_hl=300,
+                rate_head=60, rate_busy=14, rate_quiet=4, sweep_share=0.08, riv_off=0.005, riv_half=None,
+                riv_penny=1.0, riv_every=((2, 10), (30, 120)))
+if os.environ.get("SIM_CAL") == "day1":
+    CAL.update(CAL_DAY1)
+
+# Market kinds: count per run, market orders per hour, their size (lognormal median, sigma), rivals (fast ones)
 KINDS = {
-    "headline": dict(n=2, rate=60, rivals=4, fast=3, headline=True),
-    "busy": dict(n=4, rate=14, rivals=3, fast=2, headline=False),
-    "quiet": dict(n=6, rate=4, rivals=2, fast=1, headline=False),
+    "headline": dict(n=2, rate=CAL["rate_head"], size=(300, 1.6), rivals=4, fast=3, headline=True),
+    "busy": dict(n=4, rate=CAL["rate_busy"], size=(100, 1.3), rivals=3, fast=2, headline=False),
+    "quiet": dict(n=6, rate=CAL["rate_quiet"], size=(100, 1.3), rivals=2, fast=1, headline=False),
 }
 REGIMES = {
     # Polymarket jumps (>=1c) per market-hour; write latency (s) normal and slow share
-    "quiet": dict(jumps=0.05, lat=(0.5, 2.0), slow_share=0.05),
-    "news": dict(jumps=0.6, lat=(0.5, 2.0), slow_share=0.05, common=0.7, common_q=0.5),
-    "slow": dict(jumps=0.05, lat=(0.5, 2.0), slow_share=0.7),
+    "quiet": dict(jumps=CAL["jumps"], lat=CAL["lat"], slow_share=CAL["slow_share"]),
+    "news": dict(jumps=0.6, lat=CAL["lat"], slow_share=CAL["slow_share"], common=0.7, common_q=0.5),
+    "slow": dict(jumps=CAL["jumps"], lat=CAL["lat"], slow_share=0.7),
 }
 # Share of the bot's writes_per_minute these 12 markets get (the other ~225 markets use the rest). Writes are
 # costed as live: one cancel request per market (both sides at once) or per order, new orders in batches of
 # batch_size per cycle; pulls always go, the rest in the bot's priority order (see Bot.change_key).
-WRITE_SHARE = 0.1
+WRITE_SHARE = 0.24
 
 
 @dataclass
@@ -85,6 +105,7 @@ class Rival:
     size: float
     offset: float       # its fair-value error
     take_edge: float = 0.015
+    penny: bool = True  # penny the best other quote (down to the floor), or sit at its own price
     next_t: float = 0.0
     inv: float = 0.0
     cap: float = 1e9    # most shares it will hold either way (then it quotes/takes only the reducing side)
@@ -131,6 +152,8 @@ class Sim:
         self.bias_hl = 0.0
         self.fills, self.writes, self.dups, self.quoted_s, self.alive_s = [], 0, 0, 0, 0
         self.side_s, self.best_s = 0, 0          # our quoted side-seconds, and those at/inside the best other price
+        self.locked_s = 0.0                      # cash locked in our resting orders, summed over seconds
+        self.ladder, self.rival_aware = None, 0.0    # R3 / rival-aware prototypes (see ladder_want)
         self.pnl_curve, self.worst_peak = [], 0.0
         self.mkts, self.paths = [], []
         for kind, k in KINDS.items():
@@ -142,14 +165,17 @@ class Sim:
         r = self.rng
         p0 = r.uniform(0.35, 0.65) if k["headline"] else r.choice([r.uniform(0.05, 0.3), r.uniform(0.3, 0.7), r.uniform(0.7, 0.95)])
         fl = 0.011 if p0 < 0.1 else 0.009 if p0 < 0.3 else -0.006 if p0 > 0.7 else 0.0025
-        bias = fl + r.gauss(0, 0.009)
+        bias = fl + r.gauss(0, CAL["bias_sd"])
         rivals = []
         for i in range(k["rivals"]):
             fast = i < k["fast"]
             rivals.append(Rival(f"r{i}", lag=r.uniform(1, 3) if fast else r.uniform(5, 30),
-                                every=r.uniform(2, 10) if fast else r.uniform(30, 120),
+                                every=r.uniform(*CAL["riv_every"][0 if fast else 1]),
                                 floor=TICK * r.randint(0, 3), size=r.choice([100, 200, 500, 1000]) * (5 if k["headline"] else 1),
-                                offset=r.gauss(0, 0.005)))
+                                offset=r.gauss(0, CAL["riv_off"])))
+            if CAL["riv_half"]:
+                rivals[-1].floor = self.nrng.uniform(*CAL["riv_half"])
+                rivals[-1].penny = self.nrng.random() < CAL["riv_penny"]
             if rival_inv_on:
                 rivals[-1].cap = rivals[-1].size * self.nrng.uniform(2, 6)
                 rivals[-1].skew = self.nrng.uniform(0.0025, 0.01)
@@ -159,8 +185,8 @@ class Sim:
         """Polymarket path p[t] and consensus path c[t] for one market."""
         r, T = self.rng, self.T
         p, c = [0.0] * (T + 1), [0.0] * (T + 1)
-        x, phi = 0.0, 0.5 ** (1 / 300.0)
-        sd_x = 0.0058 * math.sqrt(1 - phi * phi)
+        x, phi = 0.0, 0.5 ** (1 / CAL["tr_hl"])
+        sd_x = CAL["tr_sd"] * math.sqrt(1 - phi * phi)
         cur = m.p0
         jump_p = self.reg["jumps"] * (1 - self.reg.get("common", 0)) / 3600.0
         orient, q = self.nrng.choice((-1, 1)), self.reg.get("common_q", 0)
@@ -252,8 +278,11 @@ class Sim:
         mine = [o for o in m.orders if o.owner == rv.name]
         oth = self.others(m, rv.name)
         bb, ba = self.best(oth, True), self.best(oth, False)
-        bid = min(floor_tick(f - rv.floor - TICK), floor_tick(bb + TICK) if bb is not None else floor_tick(f - 0.02))
-        ask = max(ceil_tick(f + rv.floor + TICK), ceil_tick(ba - TICK) if ba is not None else ceil_tick(f + 0.02))
+        if rv.penny:
+            bid = min(floor_tick(f - rv.floor - TICK), floor_tick(bb + TICK) if bb is not None else floor_tick(f - 0.02))
+            ask = max(ceil_tick(f + rv.floor + TICK), ceil_tick(ba - TICK) if ba is not None else ceil_tick(f + 0.02))
+        else:
+            bid, ask = floor_tick(f - rv.floor), ceil_tick(f + rv.floor)
         if ba is not None:
             bid = min(bid, floor_tick(ba - TICK))
         if bb is not None:
@@ -276,8 +305,11 @@ class Sim:
         bb, ba = self.best(oth, True), self.best(oth, False)
         mid = (bb + ba) / 2 if bb is not None and ba is not None else c
         is_buy = self.rng.random() < 0.5 + max(-0.3, min(0.3, 8 * (c - mid)))
-        if self.rng.random() < 0.08:
+        k = KINDS[m.kind]["size"]
+        if self.rng.random() < CAL["sweep_share"]:
             q = math.exp(self.rng.gauss(math.log(2000), 0.6)) * (3 if m.headline else 1)
+        elif CAL["riv_half"]:
+            q = math.exp(self.rng.gauss(math.log(k[0]), k[1]))
         else:
             q = math.exp(self.rng.gauss(math.log(100), 1.0)) * (3 if m.headline else 1)
         self.trade(m, t, is_buy, round(q), mid + 0.10 if is_buy else mid - 0.10, "noise")
@@ -303,6 +335,7 @@ class Sim:
         bfv = fair_value(book, cfg)
         ref = m.ref_seen
         fv = (1 - cfg.ref_weight) * bfv + cfg.ref_weight * ref if bfv is not None else None
+        m.state["fv"] = fv
         if self.bias_hl and bfv is not None:
             # T1 prototype: Polymarket + exponentially weighted average of (book price - Polymarket)
             k = 1 - 0.5 ** (self.cycle / self.bias_hl)
@@ -328,7 +361,7 @@ class Sim:
         bs, n, used = self.cfg.batch_size, 0, 0.0
         for i, (key, m, cancels, places, fv, whole) in enumerate(plans):
             c = (1 if whole else len(cancels)) if cancels else 0
-            c += math.ceil((n + len(places)) / bs) - math.ceil(n / bs)
+            c += len(places) / bs                    # batches are shared with ~225 other markets: amortised
             if used + c > spare and key[0] != 0:
                 self.deferred += len(plans) - i          # everything after the first misfit waits
                 break
@@ -392,6 +425,8 @@ class Sim:
                 jump_due = due[id(m)]
                 if t > 0 and abs(p[t] - p[t - 1]) >= 0.009:
                     jump_due.append((t + self.rng.uniform(5, 60), p[t] > p[t - 1], p[t]))
+                    for rv in m.rivals:                  # rivals react to a Polymarket move after their lag
+                        rv.next_t = min(rv.next_t, t + rv.lag + 1)
                 self.humans(m, t, c[t])
                 for rv in m.rivals:
                     if t >= rv.next_t:
@@ -409,6 +444,8 @@ class Sim:
                 if any(o.owner == "us" for o in m.orders):
                     self.quoted_s += 1
                     self.at_best(m)
+                    self.locked_s += sum(o.qty * (o.price if o.is_bid else 1 - o.price)
+                                         for o in m.orders if o.owner == "us")
                 self.alive_s += 1
                 if t % 60 == 0:
                     marked[t] += m.cash + m.inv * p[t]
@@ -437,6 +474,9 @@ class Sim:
         big = [i for i, f in enumerate(self.fills) if f[2] * (f[5] - f[4]) > 0.03]
         big_sh = sum(self.fills[i][3] for i in big)
         tot = sum(fpnl)
+        lvl = [i for i, f in enumerate(self.fills) if f[6] > 0]
+        pick_cost = -sum(f[2] * f[3] * (pathp[id(f[1])][min(T, int(f[0]) + 900)] - f[4]) for f in self.fills
+                         if f[7].startswith("r") or f[7] == "informed")
         picked = sum(f[3] for f in self.fills if f[7].startswith("r") or f[7] == "informed")
         hours = T / 3600.0
         return dict(fills=len(self.fills), shares=round(sh), edge_c=round(100 * edge / sh, 2) if sh else 0.0,
@@ -447,7 +487,9 @@ class Sim:
                     deferred=round(self.deferred / hours),
                     picked_sh=round(picked), at_best=round(self.best_s / max(1, self.side_s), 3),
                     big_vol=round(big_sh / sh, 3) if sh else 0.0,
-                    big_pnl=round(sum(fpnl[i] for i in big) / tot, 2) if tot > 0 else 0.0)
+                    big_pnl=round(sum(fpnl[i] for i in big) / tot, 2) if tot > 0 else 0.0,
+                    locked=round(self.locked_s / (T + 1)), lvl_sh=round(sum(self.fills[i][3] for i in lvl)),
+                    lvl_pnl=round(sum(fpnl[i] for i in lvl)), pick_cost=round(pick_cost))
 
 
 def hold(cfg, m, cur, w, t):
@@ -505,7 +547,57 @@ def baseline_strategy(sim, m, t, fv, bfv, ref, book):
     no_bid = bfv - ref > cfg.ref_guard_gap
     q = M.compute_quote(fv, m.inv, m.inv, bb, ba, cfg, no_bid=no_bid, no_ask=no_ask,
                         kelly_p=None if m.headline else ref, order_size=size, position_limit=plimit)
-    return quote_to_want(q)
+    want = quote_to_want(q)
+    if sim.ladder or sim.rival_aware:
+        want = ladder_want(sim, m, t, fv, ref, q, want, bb, ba, size, plimit)
+    return want
+
+
+LADDER = dict(offs=(0.02, 0.035, 0.05), mults=(1, 2, 3), head_offs=(0.02, 0.04, 0.06, 0.08),
+              head_mults=(0.25, 0.25, 0.5, 0.5), move=0.01, pull=0.015, cool=30)
+
+
+def ladder_want(sim, m, t, fv, ref, q, want, bb, ba, size, plimit):
+    """R3 prototype: extra resting levels at anchor -/+ offs (sizes mults x the quote size), the anchor being our
+    fair value when last set; held until fair value moves `move` from it; all pulled for `cool` s when
+    Polymarket jumps `pull` from where it was at the anchor. Never at or inside level 0, never crossing.
+    Rival-aware (sim.rival_aware = step): a side where another trader sits inside our floor drops level 0;
+    without a ladder it rests one held order at anchor -/+ step instead."""
+    L, st, cfg = sim.ladder or {}, m.state, sim.cfg
+    if st.get("lad_ref") is not None and abs(ref - st["lad_ref"]) >= L.get("pull", 0.015):
+        st["lad_cool"], st["lad_fv"] = t + L.get("cool", 30), None
+    if t < st.get("lad_cool", -1):
+        return want
+    if st.get("lad_fv") is None or abs(fv - st["lad_fv"]) >= L.get("move", 0.01):
+        st["lad_fv"], st["lad_ref"] = fv, ref
+    a = st["lad_fv"]
+    if sim.rival_aware:
+        inside = {True: q.bid_limit is not None and bb is not None and bb > q.bid_limit + 1e-9,
+                  False: q.ask_limit is not None and ba is not None and ba < q.ask_limit - 1e-9}
+        keep = [w for w in want if not inside[w[0]]]
+        if not sim.ladder:
+            keep += [(w[0], floor_tick(a - sim.rival_aware) if w[0] else ceil_tick(a + sim.rival_aware), w[2], 1, None)
+                     for w in want if inside[w[0]]]
+        want = keep
+    if not sim.ladder:
+        return want
+    offs, mults = (L["head_offs"], L["head_mults"]) if m.headline else (L["offs"], L["mults"])
+    bank = 100_000.0
+    cum = {True: m.inv + (q.bid_size if q.bid is not None else 0), False: -m.inv + (q.ask_size if q.ask is not None else 0)}
+    for i, (d, k) in enumerate(zip(offs, mults), start=1):
+        for is_bid in (True, False):
+            px = floor_tick(a - d) if is_bid else ceil_tick(a + d)
+            l0 = q.bid if is_bid else q.ask
+            if px < 0.01 or px > 0.99 or (l0 is not None and (px >= l0 - 1e-9 if is_bid else px <= l0 + 1e-9)):
+                continue
+            if (is_bid and ba is not None and px >= ba - 1e-9) or (not is_bid and bb is not None and px <= bb + 1e-9):
+                continue
+            lim = plimit if plimit is not None else M.kelly_position(ref, px, bank, cfg, yes=is_bid)
+            qty = int(min(k * size, lim - cum[is_bid]))
+            if qty >= 1:
+                cum[is_bid] += qty
+                want.append((is_bid, px, qty, i, None))
+    return want
 
 
 def quote_to_want(q):
@@ -532,8 +624,12 @@ def _one(args):
     share = float(ov.pop("_share", WRITE_SHARE))                # share of writes_per_minute for these markets
     rival_inv = bool(ov.pop("_rival_inv", True))               # rivals with inventory caps and skew
     bias_hl = float(ov.pop("_bias_hl", 0))                     # T1 prototype: fair value = Polymarket + EMA gap
+    ladder = ov.pop("_ladder", None)                           # R3 prototype: 1 = LADDER, or a dict of changes
+    rival_aware = float(ov.pop("_rival_aware", 0))             # rival-aware: step behind (price units) or 0
     sim = Sim(s, hours, regime, make_cfg(ov), strategy, share=share, rival_inv=rival_inv)
-    sim.bias_hl = bias_hl
+    sim.bias_hl, sim.rival_aware = bias_hl, rival_aware
+    if ladder:
+        sim.ladder = {**LADDER, **(ladder if isinstance(ladder, dict) else {})}
     return sim.run()
 
 
