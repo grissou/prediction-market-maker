@@ -199,7 +199,9 @@ class Config:
                                           #   and the tournament's own (raw) mid is within ref_only_max_gap of it
     ref_only_max_gap: float = 0.03        #   (guards against a wrong match: there is no depth-checked book price)
     ref_only_min_edge: float = 0.015      # ...quoting wider than usual there...
-    ref_only_size_frac: float = 0.001     # ...and small: 100 shares at 100k (a position still sheds through skew)
+    ref_only_size_frac: float = 0.001     # ...and small: 100 shares at 100k on the side that adds to a position...
+    ref_only_reduce_full: bool = True     # ...while the side that shrinks one quotes the market's normal size (day one:
+                                          #   Rep U.S. Senate +7,585 would otherwise leave 100 shares at a time)
 
     # --- REFERENCE PRICES (Polymarket via ref_prices.py; only active if ref_map_file exists) ---
     # Polymarket is treated as the better estimate of the true price: the tournament book is seeded
@@ -1214,7 +1216,7 @@ def plan_sizes(activity, headline, bankroll, cfg=CFG, prev=None, lock=None, prev
 
 def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=False, no_bid=False, no_ask=False,
                   bid_cap=None, ask_cap=None, kelly_p=None, bankroll=None, shift=0.0, order_size=None,
-                  position_limit=None, min_edge=None):
+                  position_limit=None, min_edge=None, reduce_size=None):
     """
     fv         fair YES probability
     inv        our net YES shares on THIS exchange (negative = net NO); drives the hard position limit
@@ -1231,6 +1233,8 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
     order_size         shares per quote for this market (from the activity-based size plan); None = order_size_frac
     position_limit     flat limit on |net shares| here instead of Kelly / max_position_frac (party-control markets)
     min_edge           overrides cfg.min_edge (e.g. wider in markets priced from Polymarket alone)
+    reduce_size        bigger size allowed on the side that SHRINKS the position (up to the position itself),
+                       e.g. a thin-book market quoting 100 shares that holds 7,585 from before
     """
     bankroll = bankroll or DEFAULT_BANKROLL
     max_order_cash = cfg.max_order_cash_frac * bankroll
@@ -1282,6 +1286,11 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
         short_limit = kelly_position(kelly_p, ask, bankroll, cfg, yes=False)   # most NO we'd hold
     bid_size = min(order_size, long_limit - inv)
     ask_size = min(order_size, short_limit + inv)
+    if reduce_size is not None and reduce_size > order_size:
+        if inv < 0:
+            bid_size = max(bid_size, min(reduce_size, -inv))   # buying back a short
+        elif inv > 0:
+            ask_size = max(ask_size, min(reduce_size, inv))    # selling down a long
     bid_size = min(bid_size, max_order_cash / bid)          # buying YES costs `bid` a share
     ask_size = min(ask_size, max_order_cash / (1 - ask))    # selling YES = buying NO at 1-ask
 
@@ -2270,15 +2279,17 @@ class Bot:
         planned = self.size_plan.get(ex.eid, cfg.size_min_frac * self.bankroll()) if cfg.size_by_activity else None
         headline_limit = (cfg.headline_position_frac * self.bankroll()
                           if cfg.size_by_activity and ex.group in cfg.headline_races else None)
-        edge = None
+        edge = reduce_size = None
         if ex.eid in self.ref_only:               # R5: priced from Polymarket alone -> wider and small
             edge = max(cfg.min_edge, cfg.ref_only_min_edge)
-            planned = min(planned if planned is not None else cfg.order_size_frac * self.bankroll(),
-                          max(1.0, cfg.ref_only_size_frac * self.bankroll()))
+            full = planned if planned is not None else cfg.order_size_frac * self.bankroll()
+            planned = min(full, max(1.0, cfg.ref_only_size_frac * self.bankroll()))
+            if cfg.ref_only_reduce_full:          # ...but a held position leaves at the market's normal size
+                reduce_size = full
         return compute_quote(fv, ex.inv, inv_for_quote, best_bid, best_ask, cfg, reduce_only, no_bid, no_ask,
                              bid_cap, ask_cap, kelly_p=kelly_p, bankroll=self.bankroll(),
                              shift=self.party_shift(ex, party_delta), order_size=planned, position_limit=headline_limit,
-                             min_edge=edge)
+                             min_edge=edge, reduce_size=reduce_size)
 
     def update_size_plan(self, now_m, fvs):
         """Every size_plan_seconds: work out how many shares to quote in each market (see plan_sizes).

@@ -82,6 +82,24 @@ b.refs = FakeRefs({"Ohio Senate|Republican": 0.30, "Ohio Senate|Democratic": 0.7
 b.cycle()
 check("R5: switched off -> old behaviour (thin book unpriced)", not any(o["exchangeId"] == "11" for o in a.orders.values()))
 
+q = compute_quote(0.30, 2000, 2000, 0.25, 0.35, Config(), order_size=100, reduce_size=1500)
+check("R5b: reduce_size: long 2,000 -> sell side 1,470 (1,500 within the 1,000 cash cap), buy side stays 100",
+      q.ask_size == 1470 and q.bid_size <= 100, q)
+q = compute_quote(0.30, -300, -300, 0.25, 0.35, Config(), order_size=100, reduce_size=1500)
+check("R5b: reduce_size never more than the position itself (short 300 -> bid 300)", q.bid_size == 300, q)
+for on in (True, False):
+    a, b = make_bot(books=thin)
+    b.cfg.ref_only_reduce_full, b.cfg.order_size_frac = on, 0.01    # this market's normal size: 1,000
+    b.refs = FakeRefs({"Ohio Senate|Republican": 0.30, "Ohio Senate|Democratic": 0.70})
+    a.positions = lambda: {"positions": [{"exchangeId": "11", "quantity": 2000}]}
+    b.cycle()
+    sells = [o for o in a.orders.values() if o["exchangeId"] == "11" and yes_side(o) == "sell"]
+    buys = [o for o in a.orders.values() if o["exchangeId"] == "11" and yes_side(o) == "buy"]
+    size = sells[0]["quantity"] if sells else 0
+    check(f"R5b: thin book holding 2,000 Rep Ohio, reduce_full={on} -> sell size {'> 100' if on else '<= 100'}",
+          bool(sells) and ((size > 100) if on else (size <= 100)) and all(o["quantity"] <= 100 for o in buys),
+          (size, [o["quantity"] for o in buys]))
+
 # =============================================================================================
 # R7 CORRELATED SETTLEMENT RISK
 
