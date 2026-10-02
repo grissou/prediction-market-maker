@@ -36,6 +36,7 @@ from strategy_sim import KINDS, M, Order, Sim, fair_value, floor_tick, ceil_tick
 logging.disable(logging.CRITICAL)
 START = os.path.join(HERE, "live_start.json")
 ACCOUNT = 101_498.0
+SHARE = float(os.environ.get("SIM_LIVE_SHARE", "1.0"))   # share of writes_per_minute these 74 markets get (the biggest: all 30)
 RHO = float(os.environ.get("SIM_RACE_RHO", "0.95"))   # anti-correlation of a race's two legs' tournament noise
 BIAS_SUM = float(os.environ.get("SIM_BIAS_SUM", "0.25"))   # share of the legs' summed starting gap kept
 LIFT = float(os.environ.get("SIM_LIFT", "0.003"))   # rivals price each race leg this much over Polymarket
@@ -60,7 +61,7 @@ def all_off():
 
 class LiveSim(Sim):
     def __init__(self, seed, hours, regime, cfg, n=40, start_cap=0.90, house="0945", outsiders=3):
-        super().__init__(seed, hours, regime, cfg)
+        super().__init__(seed, hours, regime, cfg, share=SHARE)
         data = json.load(open(START))
         rows = [r for r in data["markets"] if r["ref"] is not None]
         if house == "0945":
@@ -160,6 +161,18 @@ class LiveSim(Sim):
                 if m.state["lots"]:
                     bot.lots[m.eid] = [[x, self.epoch0 + t] for x, t in m.state["lots"]]
         self.t_now = 0
+        M.time = _Clock(self)                     # the bot's time.time() = simulated wall clock (turnover, ages)
+        bot.cur_refs, bot.cur_liquid = {}, set()
+        bot.mark_sd = {m.eid: m.row["mark_sd"] for m in self.mkts if m.row.get("mark_sd")}
+        bot.turnover = M.TurnoverTracker(start=self.epoch0)
+        pts = [self.epoch0 - 6 * 3600 + 300 * k for k in range(72)]
+        for m in self.mkts:                       # our real fills of the last 6 h (no tape history)
+            for t, q in m.row.get("recent_fills", []):
+                bot.turnover.add(m.eid, self.epoch0 + t, q)
+        bot.turnover._cover(pts)
+        self.np, self.lad_gate_hits, self.lad_cycles, self.lad_writes_ok = {}, 0, 0, True
+        if self.cfg.ladder_enabled:
+            self.ladder = {"real": True}      # strategy_sim: mm_bot.plan_exchange ordering of ladder writes
         bot.age_hours = lambda ex, now=None, b=bot: M.Bot.age_hours(b, ex, self.epoch0 + self.t_now)
         bot.hours_to_close = lambda ex: 800.0
         return bot
@@ -204,6 +217,15 @@ class LiveSim(Sim):
         inv = {m.eid: m.inv for m in self.mkts}
         pnow = {m.eid: p[t] for m, p, c in paths}
         self.route_fills(inv, t)
+        for m, p, c in paths:                     # every trade in the market -> the turnover tape
+            pr = m.state.get("prints", [])
+            for tt, px, q in pr[self.np.get(m.eid, 0):]:
+                bot.turnover.add(m.eid, self.epoch0 + tt, q, tape=True)
+            self.np[m.eid] = len(pr)
+        bot.refresh_turnover(t)
+        bot.cur_refs = {m.eid: m.ref_seen for m in self.mkts if m.ref_seen is not None}
+        bot.cur_liquid = set(bot.cur_refs)
+        bot.update_mark_frag(inv, cfg)
         bot.update_lots(inv, self.epoch0 + t)
         fvs = {m.eid: m.state.get("fv") or pnow[m.eid] for m in self.mkts}
         capital = self.bg_cap + sum(abs(q) * (pnow[e] if q > 0 else 1 - pnow[e]) for e, q in inv.items())
@@ -217,6 +239,16 @@ class LiveSim(Sim):
         bot.update_capital_ceiling(self.cap_frac, cfg)
         self.party_delta = self.bg_party + sum(M.PARTY_SIGN.get(bot.ex[e].party, 0) * q for e, q in inv.items())
         self.eff = bot.effective_inventory(inv)
+        if cfg.ladder_enabled:                    # Bot.ladder_setup: what the ladder may lock this cycle
+            other = sum(order_lock(o, m.inv) for m in self.mkts for o in m.orders if o.owner == "us" and o.level == 0)
+            eq = equity
+            bot.lad_liquid, bot.lad_party_delta = set(bot.cur_refs), self.party_delta
+            bot.lad_cash_left = max(0.0, min(eq - capital - other - cfg.ladder_min_cash_frac * eq,
+                                             cfg.quote_capital_frac * eq - other))
+            self.lad_writes_ok = (self.wcap - sum(c for _, c in self.wlog if t - _ < 60)
+                                  >= cfg.ladder_min_writes * SHARE)
+            self.lad_cycles += 1
+            self.lad_gate_hits += not self.lad_writes_ok
         if t % 10 == 0:
             self.arbitrage(t, inv, fvs)
         if t % 600 == 0:
@@ -352,7 +384,10 @@ class LiveSim(Sim):
                    outsider_asksum_le0985=round(self.bidsum.get("out_lo", 0) / max(1, self.bidsum.get("out_n", 0)), 3),
                    asksum_lt098=round(self.bidsum["asksum_lo"] / max(1, self.bidsum["race_min"]), 3),
                    gross_sh=round(sum(abs(m.inv) for m in self.mkts)), n_mkts=len(self.mkts),
-                   free_min=round(getattr(self, "free_min", 0)), clipped=getattr(self, "clipped", 0))
+                   free_min=round(getattr(self, "free_min", 0)), clipped=getattr(self, "clipped", 0),
+                   writes_pm=round(self.writes / (T / 60), 2), deferred_h=round(self.deferred / (T / 3600)),
+                   lad_gate=round(self.lad_gate_hits / max(1, self.lad_cycles), 3),
+                   dead=sum(1 for e in self.bot.ex.values() if e.turnover_dead))
         return out
 
 
@@ -365,7 +400,14 @@ def bot_strategy(sim, m, t, fv, bfv, ref, book):
     ex.book = book
     inv = {x.eid: x.inv for x in sim.mkts}
     q = bot.decide(ex, fv, inv, sim.eff, False, sim.party_delta, t, ref=ref, book_fv=bfv, ref_liquid=True)
-    want = cash_clip(sim, m, S.quote_to_want(q))
+    want = S.quote_to_want(q)
+    if sim.cfg.ladder_enabled:                     # R3: mm_bot's ladder_targets (anchor, pulls, caps, cash)
+        if sim.lad_writes_ok:
+            lw, _, _ = bot.ladder_targets(ex, q, fv, t)
+            want += [(k[0], px, sz, k[1], None) for k, (px, sz) in sorted(lw.items(), key=lambda kv: kv[0][1])]
+        else:                                      # write gate: what rests stays, nothing new
+            want += [(o.is_bid, o.price, o.qty, o.level, None) for o in m.orders if o.owner == "us" and o.level > 0]
+    want = cash_clip(sim, m, want)
     out = []
     for w in want:
         if bot.refill_cooling(ex, w[0], t):        # withheld: what rests there stays (if any), nothing new
@@ -374,6 +416,18 @@ def bot_strategy(sim, m, t, fv, bfv, ref, book):
         else:
             out.append(w)
     return out
+
+
+class _Clock:
+    """Stands in for mm_bot's `time` module: time() is the simulated wall clock, everything else is real."""
+    def __init__(self, sim):
+        self._sim = sim
+
+    def time(self):
+        return self._sim.epoch0 + self._sim.t_now
+
+    def __getattr__(self, k):
+        return getattr(time, k)
 
 
 def order_lock(o, inv):
@@ -422,7 +476,7 @@ def run_many(seeds, hours, regime, ov):
     return [_one(j) for j in jobs]
 
 
-KEYS = ("pnl", "pnl_lag", "free_min", "clipped", "cap_end", "cap_peak", "freed", "age_end", "unwind_sh", "arb_sh", "outsider_arb_sh",
+KEYS = ("pnl", "pnl_lag", "writes_pm", "deferred_h", "lvl_sh", "lvl_pnl", "lad_gate", "dead", "free_min", "clipped", "cap_end", "cap_peak", "freed", "age_end", "unwind_sh", "arb_sh", "outsider_arb_sh",
         "arb_pnl", "wc_peak", "shares")
 
 

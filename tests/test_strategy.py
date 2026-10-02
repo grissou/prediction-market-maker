@@ -274,6 +274,92 @@ a, b = make_bot(); b.cfg.selftest_enabled = False
 run_cycles(b, 1)
 check("priming: the trading loop sets trading_since (fresh start and handover alike: both go through run())",
       b.trading_since is not None)
+
+# --- Held markets' books first (live 11:29 UTC: Rep U.S. House, short 9,396, unpriced after a handover restart:
+# its book not downloaded, our adopted reducing bid at the best blanks the bulk bid, so R5 refuses it).
+def handover_bot(n_extra=70, held=-2000):
+    extra = [market(str(100 + i), str(1000 + i), "Republican", f"Race {i:03d}") for i in range(n_extra)]
+    books = dict(thin)
+    books.update({str(1000 + i): {"bids": [lvl(0.40, 1000)], "asks": [lvl(0.48, 1000)]} for i in range(n_extra)})
+    a, b = make_bot(books=books, extra_markets=extra)
+    b.refs = FakeRefs({"Ohio Senate|Republican": 0.30, "Ohio Senate|Democratic": 0.70})
+    a.inv = {"11": held}
+    a.orders[1] = {"id": 1, "exchangeId": "11", "quantity": 500, "open": True, "side": "yes", "action": "buy",
+                   "priceLimit": 0.295}                          # adopted reducing bid, above the others' 0.29
+    for i in range(n_extra):                                     # adopted orders everywhere (sort before "11")
+        a.orders[2 + i] = {"id": 2 + i, "exchangeId": str(1000 + i), "quantity": 100, "open": True,
+                           "side": "yes", "action": "buy", "priceLimit": 0.39}
+    b.cfg.startup_books_first, b.cfg.max_books_per_cycle = False, 5
+    return a, b
+
+a, b = handover_bot()
+b.cycle()
+check("held first: handover start, short 2,000 Rep Ohio with our bid at the best, 5 books a cycle -> its book is "
+      "downloaded in the first cycle and it is priced (R5 from the book)",
+      b.ex["11"].book is not None and "11" in b.ref_only and b.ex["11"].last_fv is not None,
+      (b.ex["11"].book, b.ref_only))
+b.ex["11"].book = None
+b.ex["11"].verified = 0.0
+check("held first: ...without the book, the bulk bid is our own (blanked) -> R5 cannot price it (the live bug)",
+      b.r5_top(b.ex["11"], M.time.monotonic()) is None and b.other_tops["11"][0] is None, b.other_tops.get("11"))
+
+a, b = make_bot(extra_markets=many)
+b.held = {"1069": -500.0, "1050": 100.0, "1060": 2000.0}
+b.ex["1060"].book = {"bids": [], "asks": []}
+b.ex["1069"].last_fv = 0.10                                     # short 500 NO at 0.90 = 450
+b.ex["1050"].last_fv = 0.80                                     # long 100 YES at 0.80 = 80
+b.my_orders[9] = Resting(9, "1001", True, 0.1, 10, None)
+b.pending_dirty = {"1060"}
+order = b.books_to_fetch([])[:4]
+check("held first: missing held books before feed-reported ones and before markets with orders, biggest "
+      "|position| x price of the shares held first", order == ["1069", "1050", "1060", "1001"], order)
+check("held first: held_missing lists only held markets without a book, biggest first", b.held_missing() == ["1069", "1050"])
+
+for ex in b.ex.values():
+    ex.book = {"bids": [], "asks": []}
+b.ex["1069"].book = None
+b.trading_since = M.time.monotonic() - 300
+check("held priming: past startup_prime_seconds and 1 of 74 missing, but it is held -> still priming",
+      b.priming() and b.prime_need() == 1, (b.priming(), b.prime_need()))
+check("held priming: ...the order writes give up only that one book's request (write_reserve)",
+      b.write_reserve() == b.cfg.write_read_reserve + 1, b.write_reserve())
+b.trading_since = M.time.monotonic() - 60
+check("held priming: within startup_prime_seconds, below the missing share, a held book missing -> priming", b.priming())
+b.held = {"1050": 100.0}
+check("held priming: ...not when the missing book is not held", not b.priming())
+b.held = {"1069": -500.0}
+b.trading_since = M.time.monotonic() - 901
+check("held priming: hard cap startup_prime_held_max_seconds (900 s) ends it anyway", not b.priming())
+b.trading_since = M.time.monotonic() - 300
+g = Grab()
+M.log.addHandler(g); M.log.propagate = False; M.log.setLevel(logging.INFO)
+b.log_priming()
+b.trading_since = M.time.monotonic() - 901
+b.log_priming()
+M.log.removeHandler(g); M.log.setLevel(old_level); M.log.propagate = True
+check("held priming: the extended priming line names the held markets still missing, then one 'done' line",
+      len(g.lines) == 2 and "extended" in g.lines[0] and "Race 069" in g.lines[0] and g.lines[1].startswith("priming books done"),
+      g.lines)
+
+a, b = handover_bot(n_extra=0)
+a.fail_book = {"11"}                                            # its book never arrives
+adopted = dict(a.orders[1])
+g = Grab()
+M.log.addHandler(g); M.log.propagate = False; M.log.setLevel(logging.INFO)
+for k in range(7):
+    a.orders.pop(1, None); a.orders.pop(500 + k - 1, None)
+    a.orders[500 + k] = dict(adopted, id=500 + k)              # our bid stays the best (e.g. its cancel not sent yet)
+    b.cycle()
+M.log.removeHandler(g); M.log.setLevel(old_level); M.log.propagate = True
+warns = [l for l in g.lines if l.startswith("UNPRICED")]
+check("unpriced warning: a held market unpriced for unpriced_held_warn_cycles (5) cycles -> ONE warning with the "
+      "reason (no book, bulk bid blanked by our own order)",
+      len(warns) == 1 and "inv -2000" in warns[0] and "no book downloaded" in warns[0], warns)
+check("unpriced warning: ...the reason names the blanked side", len(warns) == 1 and "bid blanked" in warns[0], warns)
+a.fail_book = set()
+b.cycle()
+check("unpriced warning: ...cleared once the market is priced again", "11" not in b.unpriced_held and not b.unpriced_warned,
+      (b.unpriced_held, b.unpriced_warned))
 # =============================================================================================
 # FAVOURITE-LONGSHOT SIDE BIAS (fl_*): below 20c the bid is the bad side, above 80c the ask
 

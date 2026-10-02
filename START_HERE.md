@@ -1,6 +1,6 @@
 # START HERE (Team run, branch `claude/run-c-tournament-improvements-pycdet`)
 
-Status: **in progress** (started 2026-10-02 08:50 UTC). **Package 1 READY at 10:10 UTC, Package 2 READY at 11:05 UTC** (deploy-ready, cumulative). Base: `claude/live-2026-10-02b` (5c0463a), the code live since 08:34.
+Status: **in progress** (started 2026-10-02 08:50 UTC). **Package 1 READY at 10:10 UTC, Package 2 READY at 11:05 UTC, hot-fix Package 2.1 READY at 12:05 UTC, hot-fix Package 2.2 READY at 12:40 UTC, Package 2.3 READY at 13:10 UTC (deploy this one)** (deploy-ready, cumulative). Package 2 is LIVE since 11:21:57. Base: `claude/live-2026-10-02b` (5c0463a), the code live since 08:34.
 The Builder's previous START_HERE is kept as `START_HERE_BUILDER.md`; Run A's notes are `ENGINEERING_NOTES.md`.
 Plan: `PLAN.md`. Packages appear below as they become READY (commit messages start "READY: Package N").
 Deploy only commits whose message starts "READY"; the branch is cumulative.
@@ -72,6 +72,90 @@ opposite sign; (5) `position_lots.json` written, `portfolio_age_hours` plausible
 Owner flags: pair unwinder, buy-side arbitrage and the capital ceiling are new behaviour ON by default (data evidence, riskless or strictly
 risk-reducing by construction); ref_weight 0.8 is a parameter step on simulator evidence only.
 
+### Package 2.1 (READY 12:05 UTC): HOT-FIX for the 11:22 reduce-only episode. Code deploy (handover restart). Commit "READY: Package 2.1".
+Behaviour-identical to the live Package 2 except the two fixes below (the not-yet-reviewed fast unload and reduce-join features are
+in the code but OFF: `fast_unload_enabled` False, `reduce_join_best` False; the per-market edge `market_edge_enabled` is OFF too).
+Suites: test_mm_bot 503, test_strategy 114, test_ref_prices 37, test_recorder_refill 37, test_fast_unload 58, test_stress 20; Python 3.11 and 3.10.
+Files that change: `mm_bot.py`, `tests/`, `analysis/` (rival_floor.py, new), `deploy/RUNBOOK.md`.
+
+| Fix | What happened live | Change |
+|---|---|---|
+| Risk fair-value fallback (`Bot.risk_fv`) | Rep U.S. House (short 9,396) unpriced after the restart: `or 0.5` made it a coin flip, risk 20.6k -> 31k, reduce-only 11:22-11:31, Dem House sold at 0.915 vs 0.92 fair | a HELD market with no fair value uses, in order: the liquid Polymarket reference; 1 - the other leg's fair value (two-leg race); the exchange's own mark (currentPrice from the positions read); the last fair value; only then 0.5. Logged once per market and source. Used by settlement_risk, total_worst_case, the capital-in-positions valuation and the unwind safety check |
+| Priming held markets first (Engineer 13) | priming ended at 192 s with 128/237 books; Rep House's adopted bid sat at the best, so the bulk top was blanked and R5 could not price it until its book arrived, behind ~100 others | missing books of HELD markets download first (biggest |position| x price), then markets with resting orders, then tops-priced, then by volume; priming never ends while a held market lacks a book (hard cap `startup_prime_held_max_seconds` 900); a held market unpriced for `unpriced_held_warn_cycles` (5) logs one "UNPRICED held market" WARNING with the reason |
+
+**Stop-gap settings for the 11:31-11:50 slow cycles (2-5 min; 20 silent 429s)**, via settings_override.json, until Package 2.2 ships
+(Engineer 14 is reproducing it; the lead's reading: the capital ceiling x0.25 and burst x0.5 shrank every adding quote, so every resting
+adding order counted as "oversized" = unsafe, `never_defer_unsafe` gave all those reprices pull priority past the request budget, the
+flood hit the exchange's real write limit, each 429 (Retry-After 60 s) paused EVERY request, and the 429 is only logged when no pause
+was already in force):
+`{"arb_two_sided": false, "never_defer_unsafe": false, "capital_ceiling_adding_size_factor": 0.5, "burst_protection": false, "writes_per_minute": 30, "writes_per_minute_max": 30}`
+Watch: summary-line interval back to ~30 s; "request budget: N deferred" shrinking; orders_resting steady (not 70 -> 281 -> 84); status rate_limited_total not rising.
+Re-enable `burst_protection` once cycles are back to ~30 s. `capital_ceiling_adding_size_factor` 0.5 is also the Strategist's recommendation
+(factor 0 was a cliff: -131/h once the ceiling binds; 0.5 recovers ~70%); Package 3 makes 0.5 the default.
+
+**Backstop recommendation** (`worst_case_backstop_frac`, owner set 0.8 at 11:46): keep 0.8 for now. The sum-of-maxima (69k) is dominated by the
+doubled House legs and many small races and ignores the hedged sets; R7's correlated risk (20.6k vs the 30.5k cap) is the operative limit. The
+pair unwinder and the capital ceiling should bring the sum down over the next days; revisit to 0.69 when it is below 60k. This loosens a safety
+limit: the owner's call, flagged.
+
+**ref_weight 0.8: withdrawn.** The Strategist's 3-hour runs reverse the 1-hour gain (ref_weight 0.85: -23 ± 24 / -46 ± 28 per 3 h at the lagged mark).
+Keep 0.7.
+
+### Package 2.2 (READY 12:40 UTC): HOT-FIX for the 2-5 minute cycles. Code deploy (handover restart). Commit "READY: Package 2.2".
+Includes 2.1. Behaviour against the live Package 2 changes only by the fixes below; the Package 3 features present in the code stay OFF
+(`fast_unload_enabled`, `reduce_join_best`, `turnover_control_enabled`, `mark_frag_enabled`, `market_edge_enabled` all False; the R3 ladder is not in 2.2's code).
+Suites: test_mm_bot 536, test_strategy 114, test_ref_prices 37, test_recorder_refill 37, test_fast_unload 58, test_turnover 72, test_mark_frag 52,
+test_stress 20; green on Python 3.11 and 3.10. Reviewer red-team in progress; anything it finds ships as 2.3.
+Files that change: `mm_bot.py`, `tests/`, `analysis/` (new scripts), `deploy/RUNBOOK.md`.
+
+Root cause (Engineer 14, reproduced in `tests/scenario.py ceiling`: 236 markets, full-size orders resting, the capital ceiling switching on, 45 writes/min,
+an exchange that answers 429 past 30 writes/min): (1) the ceiling's x0.25 (and burst's x0.5) shrank the WANTED size, so every resting full-size order
+counted as "bigger than allowed" = unsafe; `never_defer_unsafe` gave those ~100-280 reprices per cycle pull priority past the request budget; (2) the
+flood exceeded the exchange's real write limit; each 429 (Retry-After 60) paused EVERY request for 60 s, and the 429 was logged only when no pause was
+already in force (20 silent 429s live); the main thread waited on the positions/book reads (0% CPU, futex_wait). Before the fix: 4 cycles in 6.5 min,
+median 139 s, max 278 s. After: median 5.2 s, every 429 logged, the write budget settles at 26/min.
+
+| Fix | Setting (default) |
+|---|---|
+| A resting order is never unsafe only because a size FACTOR (ceiling, fl bias, turnover) shrank the wanted size: `Quote.bid_max/ask_max` (the size before factors, within position/cash/risk limits) is the ceiling in plan_change; orders beyond the limit price, on unwanted sides or above a LIMIT stay urgent | - |
+| Urgent writes capped per cycle, price-unsafe orders and pulls first | `urgent_writes_per_cycle` 20 |
+| A main-thread write (take, arbitrage) that would wait longer than write_wait_seconds + margin is not sent ("429 WRITE_BUDGET_WAIT"); takes/arbitrage skipped while the budget is busy; cycles skipped during a 429 pause | `main_write_wait_margin` 2, `pause_skip_cycles` True |
+| Every 429 logged (method, path, Retry-After, pause already on); a 429 during a pause moves its end to Retry-After from now (not additive); budgets cut once per pause; status.json `paused_until`, `pause_seconds_left`, `pauses_total`, `seconds_since_cycle`, `last_cycle_phases`; the summary line ends with the last cycle's phase times (reads, fair values, fills/risk/takes, decide, send, wait) | - |
+| Watchdog thread: alert after 180 s without a completed cycle; at 600 s dump every thread's stack, cancel-all (at most 20 s), exit 5 (systemd restarts) | `watchdog_alert_seconds` 180, `watchdog_exit_seconds` 600 (0 = off), `watchdog_cancel_seconds` 20 |
+| Buy-side arbitrage guard: every leg needs a LIQUID Polymarket price and the raw prices must add up to >= 0.99 (book fair values are normalised to 1 and cannot see an outsider). `analysis/outsider_races.py` lists the races: South Dakota Senate 0.917, Idaho Senate 0.945, Maryland Governor 0.979, a dozen House races 0.980-0.988, three 3-leg races (RI Gov, NE Sen, MT Sen), four with no complete reading (Alaska Sen/Gov, CA-22, CA Gov) | `arb_buy_min_ref_sum` 0.99. The owner may now set `arb_two_sided` true via settings_override |
+
+After deploying 2.2 the stop-gap overrides can go back to defaults one at a time: `never_defer_unsafe` true (now safe), `burst_protection` true, `writes_per_minute`
+45 / `writes_per_minute_max` 50 only if `rate_limited_total` stays 0 for an hour at 30 (the 429s were real: the exchange's write limit looks like ~30/min).
+Keep `capital_ceiling_adding_size_factor` 0.5. Watch: summary-line gaps ~30 s; "request budget: N deferred" < 30; `rate_limited_total` flat; `orders_resting` steady;
+"RATE LIMITED (429)" lines (now one per 429) absent; the watchdog never alerts.
+
+### Package 2.3 (READY 13:10 UTC): Reviewer fixes on 2.2. Code deploy (handover restart). Commit "READY: Package 2.3". Supersedes 2.2.
+Includes 2.1 and 2.2. Reviewer verdict on 2.2 was "ship with fixes"; the fixes:
+| Fix | Why |
+|---|---|
+| The watchdog clock is NOT reset by a cycle skipped during a 429 pause | a chain of pauses (the incident's shape) never reached the 180 s alert / 600 s restart |
+| The urgent-write cap skips further URGENT changes instead of deferring everything behind them | with `break`, a news move making > 20 orders price-unsafe stopped re-quoting the whole book for several cycles |
+| A "WRITE_BUDGET_WAIT" on an arbitrage/unwind batch or a take is treated as "not sent": no 90 s pending hold, no "check positions" alert; takes check the budget BEFORE cancelling our own quote; arbitrage needs 2n+1 writes | silent loss of takes/arbs and a false alert |
+| `mark_frag_total_max_cash` 2,000 -> 0 (per-position cap only, still OFF) | the total cap would withdraw every adding side at once when noise crossed 2,000 (1,186 today) |
+| Package 3 features (still OFF) corrected per review: reduce-join joins only a rival INSIDE our normal quote, floor 1c; fast unload at fair ± 1c for 180 s, only the first placement urgent; turnover control cuts the wanted size only (resting orders within the normal limit stay), hysteresis 50/75 sh/h with a 30-min state life, outage gaps unobserved; behind-the-best sizing added (OFF) | so they can be switched on in Package 3 |
+Suites: test_mm_bot 543, test_strategy 114, test_ref_prices 37, test_recorder_refill 37, test_fast_unload 61, test_turnover 94, test_mark_frag 52,
+test_behind_best 36, test_stress 20; Python 3.11 and 3.10. Watch after deploy (Reviewer): `rate_limited_total` / `pauses_total` flat at writes 30;
+`last_cycle_seconds` median < 20 s; no run of "urgent writes capped" lines; `write_budget_wait_total` / `takes_skipped_budget` small; `orders_resting`
+and `locked_in_orders` steady under the ceiling; no WATCHDOG alert.
+
+### Package 3 (in preparation; merged on the branch, every feature OFF): inventory turnover and sweep capture
+Candidates (all live-overridable): `fast_unload_enabled` (after a quote fill with >= 2c edge, the reducing side quotes at fair ± 1c for 180 s at the
+filled size); `reduce_join_best` (the reducing side joins a rival resting inside our normal quote, never closer than 1c to fair);
+`turnover_control_enabled` (a market with < 50 sh/h of flow over 6 h where we hold >= 100 shares: adding side x0.25 and half its position limit,
+hysteresis 50/75, 30-min state life); `behind_best_size_enabled` (an adding quote 2+ ticks behind the best other price at half size: cuts cash
+locked in orders ~14% in the simulator, P&L neutral-to-slightly-negative); `mark_frag_enabled` (per-position cap = 100 cash / sd of the 10-min
+mid step; on the snapshot 3 positions would be capped: both RI Senate legs and Dem U.S. Senate; total noise 1,186 per step);
+`market_edge_enabled` (per-market min_edge from `analysis/rival_floor.py --mode sweep_only`, needs live recorder data); `ladder_enabled`
+(R3 resting depth ladder at 1.5/2.5/3.5c, sizes 1/2/3x, headline 2/4/6/8c; cash-gated at 10% free cash; writes gate 10; simulator +17 ± 15 quiet /
++37 ± 18 news per hour at 24 seeds, +46-51 ± 10 at 128 seeds in the prototype; writes 12 -> 27 per market-hour, so it needs the write budget
+headroom the exchange may not have). Defaults are decided after the Strategist's real-inventory runs and the Reviewer's second pass.
+Capital ceiling factor 0.25 -> 0.5 will be Package 3's default (Strategist: factor 0 was a cliff, 0.5 recovers ~70% of the lost P&L).
+
 ## Parameter changes (cumulative against live)
 | Setting | Live | New | Evidence | Expected effect |
 |---|---|---|---|---|
@@ -84,7 +168,7 @@ risk-reducing by construction); ref_weight 0.8 is a parameter step on simulator 
 | burst_startup_grace_seconds (new) | - | 90 | 08:08 restart tripped burst | normal sizes after a restart |
 | take_ref_max_age_seconds (new) | - | 30 | Engineer 1 task 4 | no takes on a stale Polymarket price |
 | handover_exit_max_seconds (new) | - | 150 | audit #6 | a handover never hangs |
-| ref_weight | 0.7 | 0.8 (override snippet) | Strategist sweep, 128 seeds: 0.85 +17 ± 6 / +20 ± 8 per h; upper bound | slightly more edge, +0.35k peak worst case |
+| ref_weight | 0.7 | 0.7 (0.8 withdrawn) | 1 h: +17 ± 6; 3 h at the lagged mark: -23 ± 24 / -46 ± 28 | none |
 | capital_in_positions_max_frac (new) | - | 0.75 (factor 0.25) | owner: 90% in positions | adding sides at quarter size until positions turn over |
 | skew_age_* (new) | - | 0.25c/h after 1 h, max 2c | median age 7.2 h | faster unloading of old positions |
 | pair_unwind_* / arb_two_sided (new) | - | on | 17.7k paired capital; ask-sum < 0.98 in 2.5% of race-minutes | capital freed; small riskless gains |
