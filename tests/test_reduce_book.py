@@ -40,9 +40,10 @@ check("existing B limits unchanged in code: kelly_max_market_frac 0.02, headline
 good, bad = M.validate_overrides({"kelly_edge_cap": 0.015, "reduce_from_book": True, "reduce_from_book_pause_s": 60.0,
                                   "reduce_from_book_headline": True}, c)
 check("all four settings are live-overridable", len(good) == 4 and not bad, bad)
-check("...and the last four OVERRIDABLE entries", list(M.OVERRIDABLE)[-4:] == ["kelly_edge_cap", "reduce_from_book",
-                                                                               "reduce_from_book_pause_s",
-                                                                               "reduce_from_book_headline"])
+_ovk, _rb = list(M.OVERRIDABLE), ["kelly_edge_cap", "reduce_from_book", "reduce_from_book_pause_s",
+                                    "reduce_from_book_headline"]
+_k = _ovk.index("kelly_edge_cap")            # later Package 5 blocks may follow: one contiguous block, in order
+check("...and one contiguous OVERRIDABLE block, in order", _ovk[_k:_k + 4] == _rb)
 
 print("--- B: kelly_edge_cap")
 BANK = 100_000.0

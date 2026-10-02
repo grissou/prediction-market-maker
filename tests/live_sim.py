@@ -130,6 +130,7 @@ class LiveSim(Sim):
         self.bot = self.make_bot()
         self.strategy = bot_strategy
         self.unwinds = self.arbs = self.unwind_sh = self.arb_sh = self.outsider_arb_sh = 0
+        self.tx_bind = self.tx_quoted = 0                 # Package 5 T2.4: binding / quoted market-cycles
         self.arb_pnl = 0.0
         self.curve, self.wc_peak, self.nf = [], 0.0, 0
         self.bidsum = {"senate": [], "asksum_lo": 0, "race_min": 0}
@@ -292,6 +293,8 @@ class LiveSim(Sim):
         bot.update_capital_ceiling(self.cap_frac, cfg)
         self.party_delta = self.bg_party + sum(M.PARTY_SIGN.get(bot.ex[e].party, 0) * q for e, q in inv.items())
         self.eff = bot.effective_inventory(inv)
+        if cfg.tilt_exposure_max_frac > 0:        # Package 5 T2.4 feed (Bot.update_tilt's exposure, sim markets, legs 2)
+            bot.tilt_exposure = sum(m.inv * (m.ref_seen - 0.5) for m in self.mkts if m.inv and m.ref_seen is not None)
         if cfg.ladder_enabled:                    # Bot.ladder_setup: what the ladder may lock this cycle
             other = sum(order_lock(o, m.inv) for m in self.mkts for o in m.orders if o.owner == "us" and o.level == 0)
             eq = equity
@@ -555,7 +558,8 @@ class LiveSim(Sim):
                    **{f"lg_{k}": (round(v / max(1, self.lad_cycles)) if k.endswith("_avg")
                                          else round(v / max(1, self.lg["cash"])) if k == "lv_cash" else round(v))
                       for k, v in self.lg.items()},
-                   dead=sum(1 for e in self.bot.ex.values() if e.turnover_dead))
+                   dead=sum(1 for e in self.bot.ex.values() if e.turnover_dead),
+                   tx_bind_frac=round(self.tx_bind / max(1, self.tx_quoted), 3))   # Package 5 T2.4
         return out
 
 
@@ -571,6 +575,9 @@ def bot_strategy(sim, m, t, fv, bfv, ref, book):
         ex.ref_jump_at = max(ex.ref_jump_at, m.cooldown_until - sim.cfg.ref_jump_cooldown_seconds)
     inv = {x.eid: x.inv for x in sim.mkts}
     q = bot.decide(ex, fv, inv, sim.eff, False, sim.party_delta, t, ref=ref, book_fv=bfv, ref_liquid=True)
+    if sim.cfg.tilt_exposure_max_frac > 0:         # Package 5 T2.4: market-cycles where the tilt limit binds
+        sim.tx_quoted += 1
+        sim.tx_bind += any(bot.tilt_blocks(ex, ref))
     want = S.quote_to_want(q)
     if sim.cfg.ladder_enabled:                     # R3: mm_bot's ladder_targets (anchor, pulls, caps, cash)
         lg, quoted = sim.lg, q.bid is not None or q.ask is not None

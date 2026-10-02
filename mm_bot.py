@@ -731,6 +731,14 @@ class Config:
     # Short sets mirror it (rest a BID, take the other leg's ask). Selling both legs to others is not a self-trade.
     pair_unwind_passive: bool = False
     pair_unwind_max_cost: float = 0.003   # at most 0.3c per set below 1 (22 on 7,335 sets)
+    # --- Package 5: T2.4 tilt exposure limit ---
+    # tilt_exposure (T2.1) = sum over held markets of position x (Polymarket - c): what one point of tournament
+    # tilt marks the book by (x -0.01). Above tilt_exposure_max_frac of the account (0 = off; try 0.10), the side
+    # that would grow |tilt_exposure| in a market (contribution sign = sign(Polymarket - c)) is switched off, like
+    # the party-delta cap. Never forces an exit: the side that shrinks it always stays. No Polymarket or r == c:
+    # unaffected. tilt_exposure_headline False = the limit is not applied in headline_races markets (staging gate).
+    tilt_exposure_max_frac: float = 0.0
+    tilt_exposure_headline: bool = False
 
 
 CFG = Config()
@@ -873,6 +881,9 @@ OVERRIDABLE = {
     "reduce_from_book_headline": (False, True),
     "pair_unwind_passive": (False, True),
     "pair_unwind_max_cost": (0.0, 0.02),
+    # --- Package 5: T2.4 tilt exposure limit ---
+    "tilt_exposure_max_frac": (0.0, 1.0),
+    "tilt_exposure_headline": (False, True),
 }
 MAX_ORDER_TTL = 7200.0    # no order of ours lives longer than this (dead-man's switch), whatever the TTL settings
 LADDER_MAX_LEVELS = 8
@@ -4485,6 +4496,8 @@ class Bot:
             return NO_QUOTE
 
         no_bid, no_ask = self.party_blocks(ex, party_delta)
+        tb, ta = self.tilt_blocks(ex, ref)                    # T2.4 (off by default)
+        no_bid, no_ask = no_bid or tb, no_ask or ta
 
         # Reference-price guard: if Polymarket says this contract is worth clearly MORE than the
         # tournament book does, don't sell it to anyone here (they probably know); clearly LESS -> don't
@@ -4616,6 +4629,22 @@ class Bot:
         party_cap = self.cfg.max_party_delta_frac * self.bankroll()
         too_red, too_blue = party_delta > party_cap, party_delta < -party_cap
         return (sign > 0 and too_red) or (sign < 0 and too_blue), (sign > 0 and too_blue) or (sign < 0 and too_red)
+
+    def tilt_blocks(self, ex, ref):
+        """T2.4 tilt-exposure cap -> (no_bid, no_ask). A market's contribution to tilt_exposure is position x
+        (r - c): buying where r > c (or selling where r < c) grows it, the other side shrinks it. Beyond
+        tilt_exposure_max_frac x account, block whichever side would make |tilt_exposure| worse. Off (0), no
+        Polymarket price, r == c, or a headline market without tilt_exposure_headline: nothing blocked."""
+        cfg = self.cfg
+        if cfg.tilt_exposure_max_frac <= 0 or ref is None or (ex.group in cfg.headline_races
+                                                              and not cfg.tilt_exposure_headline):
+            return False, False
+        d = ref - tilted_ref(ref, 1.0, self.legs(ex))        # tilted_ref(r, 1, legs) = c
+        cap, x = cfg.tilt_exposure_max_frac * self.bankroll(), getattr(self, "tilt_exposure", 0.0) or 0.0
+        if d == 0 or abs(x) <= cap:
+            return False, False
+        grow_by_buying = (d > 0) == (x > 0)
+        return grow_by_buying, not grow_by_buying
 
     def bankroll(self):
         """Account value that every size is a fraction of. It follows the real value in steps: only once
@@ -6043,7 +6072,8 @@ class Bot:
             if not self.writes_ready(3):          # cancel + take + leftover cancel, on the main thread
                 continue                          # (the direction stays confirmed: taken once the budget frees)
             no_bid, no_ask = self.party_blocks(ex, party_delta)
-            if (ex.take_dir > 0 and no_bid) or (ex.take_dir < 0 and no_ask):
+            tb, ta = self.tilt_blocks(ex, refs.get(eid))  # T2.4: no take that grows |tilt_exposure| past the cap
+            if (ex.take_dir > 0 and (no_bid or tb)) or (ex.take_dir < 0 and (no_ask or ta)):
                 continue
             try:                                          # the cached book may be old: check it's still there
                 ex.book = strip_own(self.api.book(eid, self.tid), mine_real.get(eid, []))
