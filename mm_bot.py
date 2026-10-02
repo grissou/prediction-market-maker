@@ -164,6 +164,10 @@ class Config:
     max_skew_through: float = 0.0         # a skewed quote may sit at most this far THROUGH fair value (0 = at fair
                                           #   value at worst). Not applied in reduce-only/flatten, which must get out.
                                           #   1.0 = off (the old behaviour: up to max_half_spread through it)
+    improve_ticks: int = 1                # R4: quote this many ticks better than the best other trader (1 = penny,
+                                          #   0 = join their price)
+    undercut_step_back: float = 0.0       # R4: another trader already inside our min_edge band -> quote this far
+                                          #   from the reservation price instead of at min_edge (0 = off)
     keep_fraction: float = 0.5            # keep a partly-filled order (and its queue spot) while >= 50% remains
     reprice_tolerance_ticks: int = 1      # leave an order alone if its target price moved by at most this many
                                           #   ticks (0.5c each) and it still keeps min_edge without crossing anyone:
@@ -1259,8 +1263,16 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
     # 3. Penny: one tick better than the best other trader, so we're first in the queue while
     #    keeping the widest spread possible. Then clamp into the band. That clamp is what stops a
     #    penny war with another bot from pushing us below min_edge. No other quote -> band edge.
-    bid = floor_tick(best_bid + TICK) if best_bid is not None else bid_lo
-    ask = ceil_tick(best_ask - TICK) if best_ask is not None else ask_hi
+    #    R4: improve_ticks = 0 joins the best price instead; undercut_step_back > 0 quotes that far from r
+    #    (not at min_edge) when another trader already sits inside our min_edge band.
+    imp = cfg.improve_ticks * TICK
+    bid = floor_tick(best_bid + imp) if best_bid is not None else bid_lo
+    ask = ceil_tick(best_ask - imp) if best_ask is not None else ask_hi
+    if cfg.undercut_step_back > 0:
+        if best_bid is not None and best_bid > bid_hi + 1e-9:
+            bid = floor_tick(r - max(edge, cfg.undercut_step_back))
+        if best_ask is not None and best_ask < ask_lo - 1e-9:
+            ask = ceil_tick(r + max(edge, cfg.undercut_step_back))
     bid = min(max(bid, bid_lo), bid_hi)
     ask = max(min(ask, ask_hi), ask_lo)
     if not reduce_only and cfg.max_skew_through < 1.0:

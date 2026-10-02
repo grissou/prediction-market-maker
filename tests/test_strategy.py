@@ -54,6 +54,18 @@ q_red = compute_quote(0.50, 8000, 8000, 0.40, 0.60, Config(skew_mode="share", sk
 check("R2: reduce-only may still go through fair value to get out", q_red.ask is not None and q_red.ask < 0.50, q_red)
 
 # =============================================================================================
+# R4 JOIN OR STEP BACK (settings; defaults keep pennying)
+
+q = compute_quote(0.50, 0, 0, 0.47, 0.53, Config())
+check("R4: default pennies the best other price (0.475 / 0.525)", (q.bid, q.ask) == (0.475, 0.525), q)
+q = compute_quote(0.50, 0, 0, 0.47, 0.53, Config(improve_ticks=0))
+check("R4: improve_ticks=0 joins it (0.47 / 0.53)", (q.bid, q.ask) == (0.47, 0.53), q)
+q = compute_quote(0.50, 0, 0, 0.495, 0.505, Config(undercut_step_back=0.02))
+check("R4: a rival inside our 1c band -> step back to 2c (0.48 / 0.52)", (q.bid, q.ask) == (0.48, 0.52), q)
+q = compute_quote(0.50, 0, 0, 0.495, 0.505, Config())
+check("R4: default with a rival inside the band -> our 1c floor (0.49 / 0.51)", (q.bid, q.ask) == (0.49, 0.51), q)
+
+# =============================================================================================
 # R5 THIN BOOKS PRICED FROM POLYMARKET
 
 thin = {"11": {"bids": [lvl(0.29, 50)], "asks": [lvl(0.31, 50)]}, "12": {"bids": [lvl(0.69, 50)], "asks": [lvl(0.71, 50)]},

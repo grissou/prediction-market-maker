@@ -25,6 +25,8 @@ worst-case loss (peak), share of time quoted, writes per market-hour, duplicate 
 
 Run:  python tests/strategy_sim.py [seeds] [hours] [regime] [key=value ...]
       regime: quiet (day one) | news (a debate/poll day) | slow (day-one writes) ; key=value overrides Config.
+      python tests/strategy_sim.py sweep SEEDS HOURS REGIME '{base overrides}' '{variant}' ...   (same seeds;
+      "_budget" = our writes per market-minute, default 0.5; 30 writes/min over ~150 markets is 0.2)
 """
 import math
 import os
@@ -425,7 +427,9 @@ def make_cfg(overrides):
 
 def _one(args):
     s, hours, regime, overrides, strategy = args
-    return Sim(s, hours, regime, make_cfg(overrides), strategy).run()
+    ov = dict(overrides or {})
+    budget = float(ov.pop("_budget", BUDGET_PER_MARKET_MIN))   # writes per market-minute (not a Config setting)
+    return Sim(s, hours, regime, make_cfg(ov), strategy, budget=budget).run()
 
 
 def run_many(seeds, hours, regime, overrides=None, strategy=None, procs=None):
@@ -462,8 +466,25 @@ def fmt_row(name, a):
             f"quoted {a['quoted']:.2f} w/mh {a['writes_mh']:5.1f} picked {a['picked_sh']:6.0f} dups {a['dups_max']}")
 
 
+def sweep(seeds, hours, regime, base, variants):
+    """Each variant (dict of overrides on top of base) against base, same seeds. Prints one line each."""
+    a, ra = run_many(seeds, hours, regime, base)
+    print(fmt_row("BASE " + str(base)[:23], a))
+    for v in variants:
+        b, rb = run_many(seeds, hours, regime, {**base, **v})
+        d = [y["pnl"] - x["pnl"] for x, y in zip(ra, rb)]
+        mean = sum(d) / len(d)
+        se = (sum((x - mean) ** 2 for x in d) / max(1, len(d) - 1)) ** 0.5 / len(d) ** 0.5
+        print(fmt_row(str(v)[:28], b), f"| dPnL {mean:+.0f} +- {se:.0f}", flush=True)
+
+
 if __name__ == "__main__":
     args = sys.argv[1:]
+    if args and args[0] == "sweep":
+        # python tests/strategy_sim.py sweep SEEDS HOURS REGIME '{"base": 1}' '{"variant": 2}' ...
+        import json
+        sweep(int(args[1]), float(args[2]), args[3], json.loads(args[4]), [json.loads(v) for v in args[5:]])
+        sys.exit(0)
     seeds = int(args[0]) if args else 5
     hours = float(args[1]) if len(args) > 1 else 2.0
     regime = args[2] if len(args) > 2 else "quiet"
