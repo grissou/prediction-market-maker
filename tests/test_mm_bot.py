@@ -2912,5 +2912,59 @@ check("new settings are live-overridable", all(k in M.OVERRIDABLE for k in (
     "pause_skip_cycles")))
 
 
+
+# LOW-8: a main-thread write refused for the budget (429 WRITE_BUDGET_WAIT) was never sent: no pending hold, no alert.
+print("--- WRITE_BUDGET_WAIT = not sent (takes, arbitrage)")
+_alerts = []
+_real_alert2 = M.alert
+M.alert = lambda msg: _alerts.append(msg)
+a, b = take_setup(); b.cycle()
+ex = b.ex["11"]
+ex.book = {"bids": [lvl(0.10, 1000)], "asks": [lvl(0.18, 1000)]}
+ex.take_dir, now_m = 1, time.monotonic()
+a.writes_left = lambda: 2
+n_cancel = len(a.sent("cancel_all"))
+r = b.execute_take(ex, 0.30, 0.0, 0.14, now_m)
+check("take with < 3 writes left: skipped BEFORE pulling our own quote (no cancel), direction kept, counted",
+      r is False and len(a.sent("cancel_all")) == n_cancel and ex.take_dir == 1 and b.takes_skipped_budget == 1
+      and b.takes_total == 0, (r, a.sent("cancel_all")[n_cancel:], ex.take_dir))
+del a.writes_left
+def _bw(*x, **k):
+    raise ApiError(429, "WRITE_BUDGET_WAIT", "would wait")
+a.place_batch = _bw
+r = b.execute_take(ex, 0.30, 0.0, 0.14, now_m)
+check("take whose order is refused WRITE_BUDGET_WAIT: no 90 s pending hold, no 'check positions' alert, counted",
+      r is True and ex.pending_until <= now_m and not _alerts and b.takes_skipped_budget == 2 and b.takes_total == 0,
+      (ex.pending_until - now_m, _alerts, b.takes_total))
+a, b = make_bot(); b.cycle()
+levels = {"11": (0.50, 100), "12": (0.60, 100)}
+a.writes_left = lambda: 4
+n_cancel = len(a.sent("cancel_all"))
+b.execute_arbitrage("Ohio Senate", ["11", "12"], levels, 10, {}, time.monotonic())
+check("arbitrage over 2 legs needs 2n+1 = 5 writes: with 4 left it's skipped before any cancel, counted",
+      len(a.sent("cancel_all")) == n_cancel and b.arbs_skipped_budget == 1 and b.arbs_total == 0)
+a.writes_left = lambda: 5
+a.place_batch = _bw
+now_m = time.monotonic()
+b.execute_arbitrage("Ohio Senate", ["11", "12"], levels, 10, {}, now_m)
+check("...with 5 left it runs; a batch refused WRITE_BUDGET_WAIT sets no pending hold and no alert",
+      all(b.ex[e].pending_until <= now_m for e in ("11", "12")) and not _alerts and b.arbs_skipped_budget == 2,
+      _alerts)
+del a.writes_left
+M.alert = _real_alert2
+cap2 = _Api(M.CFG, False)
+cap2.gap, cap2.wbudget, cap2.BUDGET_WINDOW = 0.0, 1, 30.0
+cap2.throttle(write=True); cap2.tl.max_write_wait = 0.1
+try:
+    cap2.throttle(write=True)
+except ApiError:
+    pass
+b.cycle(); b.write_status(ok=True)
+with open(b.cfg.status_file) as f:
+    stj = json.load(f)
+check("WRITE_BUDGET_WAIT counted (write_budget_wait_total); status.json: it plus takes/arbs skipped for budget",
+      cap2.write_budget_wait_total == 1 and stj.get("arbs_skipped_budget") == 2 and "takes_skipped_budget" in stj
+      and "write_budget_wait_total" in stj, (cap2.write_budget_wait_total, stj.get("arbs_skipped_budget")))
+
 print(f"\n{sum(RESULTS)}/{len(RESULTS)} passed")
 sys.exit(0 if all(RESULTS) else 1)
