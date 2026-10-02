@@ -1,6 +1,6 @@
 # START HERE (Team run, branch `claude/run-c-tournament-improvements-pycdet`)
 
-Status: **in progress** (started 2026-10-02 08:50 UTC). **Package 1 READY at 10:10 UTC, Package 2 READY at 11:05 UTC, hot-fix Package 2.1 READY at 12:05 UTC, hot-fix Package 2.2 READY at 12:40 UTC** (deploy-ready, cumulative). Package 2 is LIVE since 11:21:57. Base: `claude/live-2026-10-02b` (5c0463a), the code live since 08:34.
+Status: **in progress** (started 2026-10-02 08:50 UTC). **Package 1 READY at 10:10 UTC, Package 2 READY at 11:05 UTC, hot-fix Package 2.1 READY at 12:05 UTC, hot-fix Package 2.2 READY at 12:40 UTC, Package 2.3 READY at 13:10 UTC (deploy this one)** (deploy-ready, cumulative). Package 2 is LIVE since 11:21:57. Base: `claude/live-2026-10-02b` (5c0463a), the code live since 08:34.
 The Builder's previous START_HERE is kept as `START_HERE_BUILDER.md`; Run A's notes are `ENGINEERING_NOTES.md`.
 Plan: `PLAN.md`. Packages appear below as they become READY (commit messages start "READY: Package N").
 Deploy only commits whose message starts "READY"; the branch is cumulative.
@@ -103,7 +103,7 @@ Keep 0.7.
 
 ### Package 2.2 (READY 12:40 UTC): HOT-FIX for the 2-5 minute cycles. Code deploy (handover restart). Commit "READY: Package 2.2".
 Includes 2.1. Behaviour against the live Package 2 changes only by the fixes below; the Package 3 features present in the code stay OFF
-(`fast_unload_enabled`, `reduce_join_best`, `turnover_control_enabled`, `ladder_enabled`, `mark_frag_enabled`, `market_edge_enabled` all False).
+(`fast_unload_enabled`, `reduce_join_best`, `turnover_control_enabled`, `mark_frag_enabled`, `market_edge_enabled` all False; the R3 ladder is not in 2.2's code).
 Suites: test_mm_bot 536, test_strategy 114, test_ref_prices 37, test_recorder_refill 37, test_fast_unload 58, test_turnover 72, test_mark_frag 52,
 test_stress 20; green on Python 3.11 and 3.10. Reviewer red-team in progress; anything it finds ships as 2.3.
 Files that change: `mm_bot.py`, `tests/`, `analysis/` (new scripts), `deploy/RUNBOOK.md`.
@@ -128,6 +128,20 @@ After deploying 2.2 the stop-gap overrides can go back to defaults one at a time
 45 / `writes_per_minute_max` 50 only if `rate_limited_total` stays 0 for an hour at 30 (the 429s were real: the exchange's write limit looks like ~30/min).
 Keep `capital_ceiling_adding_size_factor` 0.5. Watch: summary-line gaps ~30 s; "request budget: N deferred" < 30; `rate_limited_total` flat; `orders_resting` steady;
 "RATE LIMITED (429)" lines (now one per 429) absent; the watchdog never alerts.
+
+### Package 2.3 (READY 13:10 UTC): Reviewer fixes on 2.2. Code deploy (handover restart). Commit "READY: Package 2.3". Supersedes 2.2.
+Includes 2.1 and 2.2. Reviewer verdict on 2.2 was "ship with fixes"; the fixes:
+| Fix | Why |
+|---|---|
+| The watchdog clock is NOT reset by a cycle skipped during a 429 pause | a chain of pauses (the incident's shape) never reached the 180 s alert / 600 s restart |
+| The urgent-write cap skips further URGENT changes instead of deferring everything behind them | with `break`, a news move making > 20 orders price-unsafe stopped re-quoting the whole book for several cycles |
+| A "WRITE_BUDGET_WAIT" on an arbitrage/unwind batch or a take is treated as "not sent": no 90 s pending hold, no "check positions" alert; takes check the budget BEFORE cancelling our own quote; arbitrage needs 2n+1 writes | silent loss of takes/arbs and a false alert |
+| `mark_frag_total_max_cash` 2,000 -> 0 (per-position cap only, still OFF) | the total cap would withdraw every adding side at once when noise crossed 2,000 (1,186 today) |
+| Package 3 features (still OFF) corrected per review: reduce-join joins only a rival INSIDE our normal quote, floor 1c; fast unload at fair ± 1c for 180 s, only the first placement urgent; turnover control cuts the wanted size only (resting orders within the normal limit stay), hysteresis 50/75 sh/h with a 30-min state life, outage gaps unobserved; behind-the-best sizing added (OFF) | so they can be switched on in Package 3 |
+Suites: test_mm_bot 543, test_strategy 114, test_ref_prices 37, test_recorder_refill 37, test_fast_unload 61, test_turnover 94, test_mark_frag 52,
+test_behind_best 36, test_stress 20; Python 3.11 and 3.10. Watch after deploy (Reviewer): `rate_limited_total` / `pauses_total` flat at writes 30;
+`last_cycle_seconds` median < 20 s; no run of "urgent writes capped" lines; `write_budget_wait_total` / `takes_skipped_budget` small; `orders_resting`
+and `locked_in_orders` steady under the ceiling; no WATCHDOG alert.
 
 ## Parameter changes (cumulative against live)
 | Setting | Live | New | Evidence | Expected effect |
