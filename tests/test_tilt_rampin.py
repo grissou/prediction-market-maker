@@ -101,6 +101,29 @@ b.cfg.ref_tilt_rampin_min = 10.0
 b.tilt_on_at = M.time.monotonic()
 check("now_m omitted: the monotonic clock (just switched on: ~raw r)", abs(b.tilted_ref_for(ex11, 0.05) - 0.05) < 1e-3)
 
+print("--- headline gate: its own ramp from ref_tilt_headline's switch-on")
+b.cfg.ref_tilt_rampin_min = 10.0
+hl = next(e for e in b.ex.values() if e.group in b.cfg.headline_races) if any(
+    e.group in b.cfg.headline_races for e in b.ex.values()) else None
+if hl is None:                                   # make Ohio Senate a headline race for this block
+    b.cfg.headline_races = ("Ohio Senate",)
+    hl = b.ex["11"]
+b.tilt_on_at, b.tilt_headline_on_at = now, None
+check("headline, gate off: raw r", b.tilted_ref_for(hl, 0.05, now + 6000) == 0.05)
+b.cfg.ref_tilt_headline = True
+b.tilt_headline_on_at = now + 6000               # the gate opened long after the flag
+check("headline, gate just opened: raw r (its own ramp starts)", b.tilted_ref_for(hl, 0.05, now + 6000) == 0.05)
+check("...halfway through its ramp: s/2", close(b.tilted_ref_for(hl, 0.05, now + 6300), M.tilted_ref(0.05, S / 2, 2)))
+check("...after it: full s", close(b.tilted_ref_for(hl, 0.05, now + 6600), full))
+check("a non-headline market is unaffected by the headline clock", close(b.tilted_ref_for(b.ex["21"], 0.50, now + 6000), M.tilted_ref(0.50, S, 2)))
+b.cfg.ref_tilt_enabled = True
+b.cycle()
+check("cycle sets tilt_headline_on_at with both flags on", b.tilt_headline_on_at is not None)
+b.cfg.ref_tilt_headline = False
+b.cycle()
+check("...and clears it when the gate closes", b.tilt_headline_on_at is None)
+b.cfg.headline_races = M.Config().headline_races
+
 print("--- status.json")
 b.tilt_s_applied = 0.01234567
 b.write_status(True)

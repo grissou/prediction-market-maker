@@ -3152,6 +3152,7 @@ class Bot:
         # applied = tilt_s x rampin_factor. Not persisted: a restart with the flag on restarts the ramp from 0,
         # the safe choice (fair value never jumps by the full tilt after a restart).
         self.tilt_on_at, self.tilt_s_applied = None, 0.0
+        self.tilt_headline_on_at = None   # the headline gate's own ramp-in clock (ref_tilt_headline switched on later)
         self.pos_marks = {}               # {eid: the exchange's own valuation price of the position (currentPrice)}
         self.fv_fallback_logged = {}      # {eid: source} - which fallback risk_fv used for a held position (logged once)
         self.mark_sd = {}                 # eid -> sd of the 10-min mid change (mark_frag_*; from the recorder)
@@ -3553,6 +3554,11 @@ class Bot:
                 self.tilt_on_at = now_m
         else:
             self.tilt_on_at = None                                # re-enabling restarts the ramp
+        if cfg.ref_tilt_enabled and cfg.ref_tilt_headline:        # the headline legs ramp from THEIR switch-on
+            if self.tilt_headline_on_at is None:
+                self.tilt_headline_on_at = now_m
+        else:
+            self.tilt_headline_on_at = None
         self.tilt_s_applied = (self.tilt_s * rampin_factor(now_m, self.tilt_on_at, cfg.ref_tilt_rampin_min)
                                if cfg.ref_tilt_enabled else 0.0)
         if cfg.ref_weight > 0 and refs:
@@ -3890,7 +3896,10 @@ class Bot:
         if r is None or not cfg.ref_tilt_enabled or (ex.group in cfg.headline_races and not cfg.ref_tilt_headline):
             return r
         now_m = time.monotonic() if now_m is None else now_m
-        s = self.tilt_s * rampin_factor(now_m, self.tilt_on_at, getattr(cfg, "ref_tilt_rampin_min", 0.0))
+        on_at = self.tilt_on_at
+        if ex.group in cfg.headline_races and self.tilt_headline_on_at is not None:
+            on_at = max(on_at or -1e18, self.tilt_headline_on_at)   # headline legs: the later of the two switch-ons
+        s = self.tilt_s * rampin_factor(now_m, on_at, getattr(cfg, "ref_tilt_rampin_min", 0.0))
         s = carry_ramp(s, self.hours_to_close(ex), getattr(cfg, "ref_tilt_carry_days", 0.0))
         return tilted_ref(r, s, self.legs(ex)) if s else r
 
