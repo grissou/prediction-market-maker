@@ -295,3 +295,65 @@ Writes are estimated from the journal quote lines: one cancel per changed market
 | Lost orders | old code: 18% of fills unrecorded (21/112 in 07h); new code 0/17 with recovery | 42% of shares |
 | Outages | degraded 2 h/night (timeouts, 500/503) + 4-min hard outage with non-JSON 500 bodies | |
 | Valuation (scoring) | marks follow tournament mid at only about 0.17× on fill-free intervals; model the score as cash + positions at the last trade price | |
+
+
+## 10. Follow-ups (`analysis/followups.py`)
+
+**Definitions.**
+- Markout = side × (mid at +60 min − YES price), falling back to +15 min, because the data end at 08:14.
+- Edge = side × (fair value at quote − YES price).
+- Both are in c per share, weighted by shares.
+
+**(a) Slow-exchange minutes (Explorer #10): no-go.**
+- A minute counts as slow if it had at least two 409 batch failures, or any batch failure with a network error or timeout. There were 97 slow minutes out of 973 trading minutes: 94 by the 409 rule and 3 by the network rule.
+
+| Minutes | Fills | Shares | Edge | Markout | P&L |
+|---|---|---|---|---|---|
+| Slow | 239 | 61.0k | +0.93 | +0.80 | +477 |
+| Calm | 1,574 | 526.5k | +0.55 | +0.31 | +1,622 |
+| Calm, but within 2 min of a slow minute | 669 | 248.9k | +0.55 | +0.19 | +483 |
+
+- Slow minutes carry 10% of our shares, at somewhat better edge and markout.
+- Their edge exceeds calm minutes' by only +0.38c, short of the 1c bar.
+- Nothing says to shrink during slow minutes either. A neutral setting (burst size factor about 1.0) is defensible; a 1c extra edge is not supported.
+
+**(b) Same-side refill runs (Explorer #4): go, with a caveat.**
+- A run is at least 3 fills on the same side of one market, each within W seconds of the run's first fill.
+- "Sweep" means the whole run happened within 2 s (one taker). "Walk" means it was spread over more than 2 s (repeated refills).
+
+| W | Run type | Runs | 1st fill: shares / edge / markout | 2nd fill: shares / edge / markout | 3rd and later: shares / edge / markout / P&L |
+|---|---|---|---|---|---|
+| 10 s | walk | 35 | 13.5k / −0.87 / −0.97 | 10.3k / −1.42 / −0.77 | **30.6k / −1.50 / −1.68 / −512** |
+| 10 s | sweep | 4 | 3.8k / −0.23 / −0.50 | 0.4k / −1.50 / −1.11 | 5.3k / −1.56 / −1.44 / −76 |
+| 60 s | walk | 73 | 23.4k / −0.29 / −0.36 | 15.4k / −0.33 / −0.14 | **81.2k / −1.29 / −1.15 / −936** |
+| 60 s | sweep | 2 | almost no shares | | |
+
+- The 3rd and later fills have a markout below −0.5c on 30-81k shares, which passes the go rule.
+- **Caveat:** the loss is already in the *edge at quote* (about −1.3 to −1.5c), not in what happens after the fill.
+  - These are runs into our own fair-value-crossing quotes: the old per-share skew re-posting through fair value after each fill.
+  - R2 (the new skew) may remove most of the effect.
+- A cooldown that blocks re-posting the same side for 10-60 s after 2 fills is cheap insurance. Remeasure it on the new code.
+
+**(c) Markout persistence (Explorer #21): no-go for sizing by past markout.**
+- 25 markets had at least 500 shares in both halves (16:00-00:00 and 00:00-08:14).
+- The Spearman rank correlation between the halves is **0.18**.
+
+| First half | Second half positive | Second half negative |
+|---|---|---|
+| Positive | 13 | 5 |
+| Negative | 4 | 3 |
+
+- Markets that were negative in the first half were positive in the second half 4 times out of 7.
+
+Favourite-longshot cells (edge / markout in c, shares):
+
+| Cell | Day 16-22 | Night 22-02 | Night 02-08:14 |
+|---|---|---|---|
+| Bids, fair value < 0.20 | +0.13 / +2.51 (18.2k) | −0.99 / +0.10 (10.7k) | −1.87 / +0.51 (5.1k) |
+| Asks, fair value > 0.80 | −0.15 / +0.62 (38.9k) | −1.13 / +0.10 (18.5k) | −1.04 / +0.27 (3.6k) |
+| Asks, fair value < 0.20 | +1.84 / −0.08 | +2.26 / +0.03 | +2.74 / −0.20 |
+| Bids, fair value > 0.80 | +2.13 / +1.44 | +2.74 / +0.99 | +2.73 / −0.18 |
+
+- Engineer 3's "−1.88c at night" for longshot bids matches the **edge at quote** in 02-08 (−1.87c). It is not an adverse markout: the mid-based markout is +0.10 to +0.51c at night.
+- Within the night, the edge gets worse from 22-02 to 02-08 (−0.99 → −1.87c) but on few shares (5k).
+- Treat it as a quoting-through-fair-value effect (reduce-only and skew exits), not as toxic flow in longshot bids.
