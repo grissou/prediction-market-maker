@@ -17,7 +17,10 @@ World, one market at a time, 1-second steps:
   Us           every `cycle` seconds: fair value = 70% Polymarket (refreshed every 5 s) + 30% depth-filtered
                book (real fair_value), quotes from `strategy` (default: the real compute_quote), reconciled
                with the real side_needs_change; cancels confirm after a write latency, then new orders go out
-               and rest after another. A per-market write budget (orders + cancels) rations changes.
+               and rest after another. One write budget for all markets (a share of writes_per_minute, costed
+               as live: a cancel request per market, new orders in batches) in the bot's priority order;
+               churn control as Bot.hold_side. News days: most jumps hit many markets at once.
+  Rival inventory  each rival holds 2-6 quote sizes at most and skews 0.25-1c per size held.
 
 Metrics per run (summed over markets): fills, shares, edge (c/share vs our fair value at quote), markout
 (c/share vs p 15 min later), P&L marked at Polymarket and at the tournament mid, max drawdown of that P&L,
@@ -26,7 +29,8 @@ worst-case loss (peak), share of time quoted, writes per market-hour, duplicate 
 Run:  python tests/strategy_sim.py [seeds] [hours] [regime] [key=value ...]
       regime: quiet (day one) | news (a debate/poll day) | slow (day-one writes) ; key=value overrides Config.
       python tests/strategy_sim.py sweep SEEDS HOURS REGIME '{base overrides}' '{variant}' ...   (same seeds;
-      "_budget" = our writes per market-minute, default 0.5; 30 writes/min over ~150 markets is 0.2)
+      "_share" = share of writes_per_minute these 12 markets get (default WRITE_SHARE); "_rival_inv": 0 = rivals
+      without inventory limits (the Builder's world). See SIM_NOTES.md.)
 """
 import math
 import os
@@ -52,10 +56,13 @@ KINDS = {
 REGIMES = {
     # Polymarket jumps (>=1c) per market-hour; write latency (s) normal and slow share
     "quiet": dict(jumps=0.05, lat=(0.5, 2.0), slow_share=0.05),
-    "news": dict(jumps=0.6, lat=(0.5, 2.0), slow_share=0.05),
+    "news": dict(jumps=0.6, lat=(0.5, 2.0), slow_share=0.05, common=0.7, common_q=0.5),
     "slow": dict(jumps=0.05, lat=(0.5, 2.0), slow_share=0.7),
 }
-BUDGET_PER_MARKET_MIN = 0.5      # our writes per market-minute (about 80 budget / 150 markets); pessimistic: 0.2
+# Share of the bot's writes_per_minute these 12 markets get (the other ~225 markets use the rest). Writes are
+# costed as live: one cancel request per market (both sides at once) or per order, new orders in batches of
+# batch_size per cycle; pulls always go, the rest in the bot's priority order (see Bot.change_key).
+WRITE_SHARE = 0.1
 
 
 @dataclass
@@ -79,6 +86,9 @@ class Rival:
     offset: float       # its fair-value error
     take_edge: float = 0.015
     next_t: float = 0.0
+    inv: float = 0.0
+    cap: float = 1e9    # most shares it will hold either way (then it quotes/takes only the reducing side)
+    skew: float = 0.0   # reservation-price shift per `size` shares held
 
 
 @dataclass
@@ -94,7 +104,6 @@ class Mkt:
     cash: float = 0.0
     # our in-flight writes: list of (time it lands, action, payload)
     inflight: list = field(default_factory=list)
-    budget: float = 3.0
     last_ref: float | None = None
     ref_seen: float | None = None
     cooldown_until: float = -1.0
@@ -103,7 +112,7 @@ class Mkt:
 
 class Sim:
     def __init__(self, seed, hours=2.0, regime="quiet", cfg=None, strategy=None, cycle=2.0,
-                 budget=BUDGET_PER_MARKET_MIN):
+                 share=WRITE_SHARE, rival_inv=True):
         # separate streams, so a change in OUR behaviour leaves the world (prices, flow) identical: paired seeds
         self.rng, self.hrng = random.Random(seed), random.Random(seed * 7919 + 1)
         self.rrng, self.lrng = random.Random(seed * 104729 + 2), random.Random(seed * 1299709 + 3)
@@ -111,17 +120,25 @@ class Sim:
         self.reg = REGIMES[regime]
         self.cfg = cfg or Config()
         self.strategy = strategy or baseline_strategy
-        self.cycle, self.budget_rate = cycle, budget / 60.0
+        self.nrng = random.Random(seed * 15485863 + 4)
+        self.cycle, self.wcap, self.wlog = cycle, self.cfg.writes_per_minute * share, []
+        self.deferred = 0
+        self.news = {}                              # common news: second -> direction
+        reg = self.reg
+        for t in range(self.T + 1):
+            if self.nrng.random() < reg["jumps"] * reg.get("common", 0) / reg.get("common_q", 1) / 3600.0:
+                self.news[t] = self.nrng.choice((-1, 1))
         self.bias_hl = 0.0
         self.fills, self.writes, self.dups, self.quoted_s, self.alive_s = [], 0, 0, 0, 0
+        self.side_s, self.best_s = 0, 0          # our quoted side-seconds, and those at/inside the best other price
         self.pnl_curve, self.worst_peak = [], 0.0
         self.mkts, self.paths = [], []
         for kind, k in KINDS.items():
             for _ in range(k["n"]):
-                self.mkts.append(self.new_market(kind, k))
+                self.mkts.append(self.new_market(kind, k, rival_inv))
 
     # ---------------------------------------------------------------- world
-    def new_market(self, kind, k):
+    def new_market(self, kind, k, rival_inv_on=True):
         r = self.rng
         p0 = r.uniform(0.35, 0.65) if k["headline"] else r.choice([r.uniform(0.05, 0.3), r.uniform(0.3, 0.7), r.uniform(0.7, 0.95)])
         fl = 0.011 if p0 < 0.1 else 0.009 if p0 < 0.3 else -0.006 if p0 > 0.7 else 0.0025
@@ -133,6 +150,9 @@ class Sim:
                                 every=r.uniform(2, 10) if fast else r.uniform(30, 120),
                                 floor=TICK * r.randint(0, 3), size=r.choice([100, 200, 500, 1000]) * (5 if k["headline"] else 1),
                                 offset=r.gauss(0, 0.005)))
+            if rival_inv_on:
+                rivals[-1].cap = rivals[-1].size * self.nrng.uniform(2, 6)
+                rivals[-1].skew = self.nrng.uniform(0.0025, 0.01)
         return Mkt(kind, p0, bias, k["rate"], k["headline"], rivals)
 
     def make_paths(self, m):
@@ -142,10 +162,13 @@ class Sim:
         x, phi = 0.0, 0.5 ** (1 / 300.0)
         sd_x = 0.0058 * math.sqrt(1 - phi * phi)
         cur = m.p0
-        jump_p = self.reg["jumps"] / 3600.0
+        jump_p = self.reg["jumps"] * (1 - self.reg.get("common", 0)) / 3600.0
+        orient, q = self.nrng.choice((-1, 1)), self.reg.get("common_q", 0)
         for t in range(T + 1):
             if r.random() < jump_p:
                 cur += r.choice((-1, 1)) * (0.01 + r.expovariate(1 / 0.012))
+            if t in self.news and self.nrng.random() < q:
+                cur += self.news[t] * orient * (0.01 + self.nrng.expovariate(1 / 0.012))
             cur += r.gauss(0, 0.00007)
             cur = min(0.98, max(0.02, cur))
             x = phi * x + r.gauss(0, sd_x)
@@ -189,13 +212,21 @@ class Sim:
             q = min(o.qty, qty - done)
             o.qty -= q
             done += q
+            if o.owner.startswith("r"):
+                self.rival(m, o.owner).inv += q if o.is_bid else -q
             if o.owner == "us":
                 side = 1 if o.is_bid else -1
                 m.inv += side * q
                 m.cash -= side * q * o.price
                 self.fills.append((t, m, side, q, o.price, o.fv, o.level, taker))
         m.orders = [o for o in m.orders if o.qty > 1e-9]
+        if taker.startswith("r"):
+            self.rival(m, taker).inv += done if is_buy else -done
         return done
+
+    @staticmethod
+    def rival(m, name):
+        return m.rivals[int(name[1:])]
 
     # ---------------------------------------------------------------- agents
     def humans(self, m, t, c):
@@ -210,11 +241,13 @@ class Sim:
 
     def rival_step(self, m, rv, t, p):
         seen = p[max(0, int(t - rv.lag))]
-        f = seen + rv.offset
-        # 1. take anything clearly through our fair value (bots are takers too)
+        f = seen + rv.offset - rv.skew * rv.inv / rv.size
+        # 1. take anything clearly through our fair value (bots are takers too), within its inventory cap
         for is_buy in (True, False):
             lim = f - rv.take_edge if is_buy else f + rv.take_edge
-            self.trade(m, t, is_buy, rv.size * 2, lim, rv.name)
+            room = rv.cap - rv.inv if is_buy else rv.cap + rv.inv
+            if room >= 1:
+                self.trade(m, t, is_buy, min(rv.size * 2, room), lim, rv.name)
         # 2. penny one tick inside the best OTHER quote, down to the floor
         mine = [o for o in m.orders if o.owner == rv.name]
         oth = self.others(m, rv.name)
@@ -227,6 +260,9 @@ class Sim:
             ask = max(ask, ceil_tick(bb + TICK))
         for is_bid, px in ((True, bid), (False, ask)):
             cur = [o for o in mine if o.is_bid == is_bid]
+            if (rv.inv if is_bid else -rv.inv) >= rv.cap:
+                m.orders = [o for o in m.orders if not (o.owner == rv.name and o.is_bid == is_bid)]
+                continue                                 # full on this side: no more
             if cur and abs(cur[0].price - px) < 1e-9:
                 continue
             m.orders = [o for o in m.orders if not (o.owner == rv.name and o.is_bid == is_bid)]
@@ -247,16 +283,22 @@ class Sim:
         self.trade(m, t, is_buy, round(q), mid + 0.10 if is_buy else mid - 0.10, "noise")
 
     # ---------------------------------------------------------------- us
-    def our_step(self, m, t, p):
+    def see_ref(self, m, t, p):
+        """Polymarket as we see it: refreshed every ref_refresh_seconds (checked every second; it used to be
+        checked only on cycle seconds, so with a 2 s cycle and 5 s refresh we saw Polymarket every 10 s)."""
         cfg = self.cfg
-        # Polymarket as we see it: refreshed every ref_refresh_seconds
         if m.ref_seen is None or t % int(max(1, cfg.ref_refresh_seconds)) == 0:
             new = round(p[t], 3)
             if m.ref_seen is not None and abs(new - m.ref_seen) >= cfg.ref_jump_threshold:
                 m.cooldown_until = t + cfg.ref_jump_cooldown_seconds
+            if m.ref_seen is not None and abs(new - m.ref_seen) >= cfg.urgent_ref_move - 1e-9:
+                m.state["ref_moved_at"] = t
             m.last_ref, m.ref_seen = m.ref_seen, new
+
+    def our_step(self, m, t, p):
+        cfg = self.cfg
         if m.inflight:
-            return                                   # a write for this market is still in flight
+            return None                              # a write for this market is still in flight
         book = self.book_dict(m)
         bfv = fair_value(book, cfg)
         ref = m.ref_seen
@@ -269,23 +311,39 @@ class Sim:
             fv = ref + max(-0.03, min(0.03, m.state["gap"]))
         want = [] if t < m.cooldown_until else self.strategy(self, m, t, fv, bfv, ref, book)
         mine = [o for o in m.orders if o.owner == "us"]
-        cancels, places = plan_changes(cfg, mine, want, t)
+        cancels, places = plan_changes(cfg, mine, want, t, m)
         if not cancels and not places:
-            return
-        cost = len(cancels) + len(places)
-        if m.budget < 1:
-            if not cancels:
-                return
-            places = []                              # out of budget: pulls only
-            cost = len(cancels)
-        m.budget -= cost
-        self.writes += cost
-        lc = self.lat()
-        if cancels:
-            m.inflight.append((t + lc, "cancel", cancels))
-        if places:
-            lp = self.lat()
-            m.inflight.append((t + (lc if cancels else 0) + lp, "place", [(w, fv) for w in places]))
+            return None
+        urgent = t - m.state.get("ref_moved_at", -99) < 15
+        key = (0 if not places else 0.5 if urgent else 1, 0 if m.headline else 1, 1 if cancels else 0,
+               -max([w[2] for w in places] or [0]))
+        return key, m, cancels, places, fv, len(cancels) == len(mine)
+
+    def our_cycle(self, t, paths):
+        """One bot cycle over all markets: plan each, then send in priority order within the write budget."""
+        self.wlog = [x for x in self.wlog if t - x[0] < 60]
+        spare = self.wcap - sum(c for _, c in self.wlog)
+        plans = sorted((x for x in (self.our_step(m, t, p) for m, p, c in paths) if x),
+                       key=lambda x: x[0])
+        bs, n, used = self.cfg.batch_size, 0, 0.0
+        for i, (key, m, cancels, places, fv, whole) in enumerate(plans):
+            c = (1 if whole else len(cancels)) if cancels else 0
+            c += math.ceil((n + len(places)) / bs) - math.ceil(n / bs)
+            if used + c > spare and key[0] != 0:
+                self.deferred += len(plans) - i          # everything after the first misfit waits
+                break
+            used, n = used + c, n + len(places)
+            lc = self.lat()
+            if cancels:
+                m.inflight.append((t + lc, "cancel", cancels))
+                hist = m.state.setdefault("reprices", {})
+                for side in {(o.is_bid, o.level) for o in cancels} & {(w[0], w[3]) for w in places}:
+                    hist.setdefault(side, []).append(t)
+            if places:
+                m.inflight.append((t + (lc if cancels else 0) + self.lat(), "place", [(w, fv) for w in places]))
+        if used:
+            self.wlog.append((t, used))
+            self.writes += used
 
     def land(self, m, t):
         keep = []
@@ -309,6 +367,16 @@ class Sim:
                         self.dups += 1
                     seen.add(k)
 
+    def at_best(self, m):
+        for is_bid in (True, False):
+            ours = [o.price for o in m.orders if o.owner == "us" and o.is_bid == is_bid and o.level == 0]
+            if not ours:
+                continue
+            ob = self.best(self.others(m, "us"), is_bid)
+            self.side_s += 1
+            if ob is None or (ours[0] >= ob - 1e-9 if is_bid else ours[0] <= ob + 1e-9):
+                self.best_s += 1
+
     # ---------------------------------------------------------------- run
     def run(self):
         for m in self.mkts:
@@ -318,9 +386,10 @@ class Sim:
         curve_pts = list(range(0, T + 1, 60))
         marked = {tt: 0.0 for tt in curve_pts}
         worst = {tt: 0.0 for tt in curve_pts}
-        for m, p, c in self.paths:
-            jump_due = []
-            for t in range(T + 1):
+        due = {id(m): [] for m in self.mkts}
+        for t in range(T + 1):
+            for m, p, c in self.paths:
+                jump_due = due[id(m)]
                 if t > 0 and abs(p[t] - p[t - 1]) >= 0.009:
                     jump_due.append((t + self.rng.uniform(5, 60), p[t] > p[t - 1], p[t]))
                 self.humans(m, t, c[t])
@@ -333,11 +402,13 @@ class Sim:
                     q = math.exp(self.rng.gauss(math.log(300), 0.7)) * (3 if m.headline else 1)
                     self.trade(m, t, j[1], round(q), j[2], "informed")
                 self.land(m, t)
-                m.budget = min(m.budget + self.budget_rate, 6.0)
-                if t % int(self.cycle) == 0:
-                    self.our_step(m, t, p)
+                self.see_ref(m, t, p)
+            if t % int(self.cycle) == 0:
+                self.our_cycle(t, self.paths)
+            for m, p, c in self.paths:
                 if any(o.owner == "us" for o in m.orders):
                     self.quoted_s += 1
+                    self.at_best(m)
                 self.alive_s += 1
                 if t % 60 == 0:
                     marked[t] += m.cash + m.inv * p[t]
@@ -362,6 +433,10 @@ class Sim:
         mk = sum(f[2] * f[3] * (pathp[id(f[1])][min(T, int(f[0]) + 900)] - f[4]) for f in self.fills)
         pnl = sum(m.cash + m.inv * pend[id(m)] for m in self.mkts)
         pnl_mid = sum(m.cash + m.inv * mids[id(m)] for m in self.mkts)
+        fpnl = [f[2] * f[3] * (pend[id(f[1])] - f[4]) for f in self.fills]
+        big = [i for i, f in enumerate(self.fills) if f[2] * (f[5] - f[4]) > 0.03]
+        big_sh = sum(self.fills[i][3] for i in big)
+        tot = sum(fpnl)
         picked = sum(f[3] for f in self.fills if f[7].startswith("r") or f[7] == "informed")
         hours = T / 3600.0
         return dict(fills=len(self.fills), shares=round(sh), edge_c=round(100 * edge / sh, 2) if sh else 0.0,
@@ -369,12 +444,31 @@ class Sim:
                     max_dd=round(self.max_dd), worst=round(self.worst_peak),
                     quoted=round(self.quoted_s / max(1, self.alive_s), 3),
                     writes_mh=round(self.writes / len(self.mkts) / hours, 1), dups=self.dups,
-                    picked_sh=round(picked))
+                    deferred=round(self.deferred / hours),
+                    picked_sh=round(picked), at_best=round(self.best_s / max(1, self.side_s), 3),
+                    big_vol=round(big_sh / sh, 3) if sh else 0.0,
+                    big_pnl=round(sum(fpnl[i] for i in big) / tot, 2) if tot > 0 else 0.0)
 
 
-def plan_changes(cfg, mine, want, t):
+def hold(cfg, m, cur, w, t):
+    """Bot.hold_side: keep a single safe order that is off target while it is young or this side keeps being
+    re-quoted (another bot stepping in front each time), unless Polymarket moved here in the last 15 s."""
+    if not cfg.churn_control or m is None or w is None or len(cur) != 1 or len(w) < 5 or w[4] is None:
+        return False
+    o, is_bid, limit = cur[0], w[0], w[4]
+    if (o.price > limit + 1e-9) if is_bid else (o.price < limit - 1e-9):
+        return False
+    if o.qty > w[2] + 1e-9 or t - m.state.get("ref_moved_at", -99) < 15:
+        return False
+    hist = [x for x in m.state.get("reprices", {}).get((is_bid, w[3]), []) if t - x <= cfg.churn_window_seconds]
+    m.state.setdefault("reprices", {})[(is_bid, w[3])] = hist
+    return t - o.t < cfg.min_quote_life_seconds or len(hist) >= cfg.churn_max_reprices
+
+
+def plan_changes(cfg, mine, want, t, m=None):
     """Reconcile our resting orders with the wanted list [(is_bid, price, size, level)]: same rules as
-    Bot.reconcile (keep an order a tick off if still safe, cancel before placing). Returns (cancels, places)."""
+    Bot.reconcile (keep an order a tick off if still safe, churn control, cancel before placing).
+    Returns (cancels, places)."""
     cancels, places = [], []
     for lvl_key in {(w[0], w[3]) for w in want} | {(o.is_bid, o.level) for o in mine}:
         is_bid, lvl = lvl_key
@@ -382,7 +476,7 @@ def plan_changes(cfg, mine, want, t):
         w = next((w for w in want if w[0] == is_bid and w[3] == lvl), None)
         price, size, limit = (w[1], w[2], w[4] if len(w) > 4 else None) if w else (None, 0, None)
         rest = [Resting(0, "", o.is_bid, o.price, o.qty, None) for o in cur]
-        if side_needs_change(rest, price, size, cfg, None, limit, is_bid=is_bid):
+        if side_needs_change(rest, price, size, cfg, None, limit, is_bid=is_bid) and not hold(cfg, m, cur, w, t):
             cancels += cur
             if w is not None:
                 places.append((is_bid, price, size, lvl))
@@ -435,9 +529,10 @@ def make_cfg(overrides):
 def _one(args):
     s, hours, regime, overrides, strategy = args
     ov = dict(overrides or {})
-    budget = float(ov.pop("_budget", BUDGET_PER_MARKET_MIN))   # writes per market-minute (not a Config setting)
+    share = float(ov.pop("_share", WRITE_SHARE))                # share of writes_per_minute for these markets
+    rival_inv = bool(ov.pop("_rival_inv", True))               # rivals with inventory caps and skew
     bias_hl = float(ov.pop("_bias_hl", 0))                     # T1 prototype: fair value = Polymarket + EMA gap
-    sim = Sim(s, hours, regime, make_cfg(ov), strategy, budget=budget)
+    sim = Sim(s, hours, regime, make_cfg(ov), strategy, share=share, rival_inv=rival_inv)
     sim.bias_hl = bias_hl
     return sim.run()
 
@@ -473,7 +568,8 @@ def compare(seeds, hours, regime, base=None, new=None, base_strategy=None, new_s
 def fmt_row(name, a):
     return (f"{name:<28} fills {a['fills']:6.0f} sh {a['shares']:8.0f} edge {a['edge_c']:5.2f}c mk15 {a['markout15_c']:5.2f}c "
             f"pnl {a['pnl']:7.0f} (mid {a['pnl_mid']:7.0f}, p10 {a['pnl_p10']:6.0f}) dd {a['max_dd']:5.0f} worst {a['worst']:6.0f} "
-            f"quoted {a['quoted']:.2f} w/mh {a['writes_mh']:5.1f} picked {a['picked_sh']:6.0f} dups {a['dups_max']}")
+            f"quoted {a['quoted']:.2f} w/mh {a['writes_mh']:5.1f} picked {a['picked_sh']:6.0f} dups {a['dups_max']} "
+            f"best {a['at_best']:.2f} big {a['big_vol']:.2f}/{a['big_pnl']:.2f} defer/h {a['deferred']:.0f}")
 
 
 def sweep(seeds, hours, regime, base, variants):
