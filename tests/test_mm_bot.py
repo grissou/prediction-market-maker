@@ -1258,6 +1258,29 @@ check("with the budget gone, the unsafe reprice goes out and the safe one waits"
       and bid21.order_id in a.orders, (a.ours("11"), a.ours("21")))
 del a.budget_left
 
+# While the first books are still loading after a start, writes stay at startup_writes_per_minute (30), so the
+# bigger write budget doesn't take the request budget the book downloads need.
+def safe_reprice(b, e):
+    o = [x for x in b.my_orders.values() if x.eid == e and x.is_bid][0]
+    return o, b.plan_change(b.ex[e], Quote(o.price + 0.01, int(o.qty), None, 0, o.price + 0.01, None), [o],
+                            0.5, M.utcnow(), time.monotonic())
+for loading in (True, False):
+    a, b = make_bot(); b.cycle()
+    a.wbudget, a.writes_left = 45, (lambda: 16)               # 29 writes used in the last minute
+    b.trading_since = time.monotonic()
+    if loading:
+        b.ex["22"].book = None
+    o21, ch21 = safe_reprice(b, "21")
+    b.send_changes([ch21])
+    check("first books still loading: 29 of the 30 start-up writes used -> a reprice waits" if loading else
+          "...all books in: the full write budget (16 left) -> it goes",
+          (o21.order_id in a.orders) == loading, (loading, a.ours("21")))
+a, b = make_bot(); b.cycle(); b.cfg.startup_writes_per_minute = 0
+a.wbudget, a.writes_left = 45, (lambda: 16)
+b.trading_since = time.monotonic(); b.ex["22"].book = None
+o21, ch21 = safe_reprice(b, "21"); b.send_changes([ch21])
+check("startup_writes_per_minute = 0: no start-up cap", o21.order_id not in a.orders)
+
 a, b = make_bot(); b.cycle()
 real_apply = b.apply_batch
 b.apply_batch = lambda *x: (_ for _ in ()).throw(RuntimeError("boom"))

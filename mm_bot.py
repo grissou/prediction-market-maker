@@ -362,6 +362,9 @@ class Config:
                                           #   3 minutes after the 2 Oct 08:08 restart
     writes_per_minute_max: int = 60       # ...it then grows slowly (+1 per 60 successful writes) up to this while no
                                           #   write is rate limited (= writes_per_minute: never grows)
+    startup_writes_per_minute: int = 30   # while the first download of every book is still running after a (re)start,
+                                          #   writes stay at most this (the old budget), so the bigger write budget
+                                          #   doesn't slow the book downloads new quotes need. 0 = no cap
     write_budget_cut: float = 0.75        # a write answered 429 cuts the write budget to this fraction (min 10/min)
     never_defer_unsafe: bool = True       # a change that removes an UNSAFE order (beyond its limit price, bigger than
                                           #   now allowed, or a side we no longer want) is never deferred by the
@@ -447,7 +450,7 @@ OVERRIDABLE = {
     "arb_enabled": (False, True), "arb_min_profit": (0.005, 0.20), "take_enabled": (False, True),
     "take_edge": (0.02, 0.30), "tail_low": (0.0, 0.20), "tail_high": (0.80, 1.0),
     "requests_per_minute": (10, 100), "writes_per_minute": (5, 100), "budget_reserve": (0, 60),
-    "writes_per_minute_max": (5, 100), "write_budget_cut": (0.25, 1.0), "never_defer_unsafe": (False, True),
+    "writes_per_minute_max": (5, 100), "startup_writes_per_minute": (0, 100), "write_budget_cut": (0.25, 1.0), "never_defer_unsafe": (False, True),
     "max_books_per_cycle": (1, 100), "book_stale": (60.0, 3600.0), "book_reverify_seconds": (10.0, 1800.0),
     "parallel_writes": (1, 8), "write_wait_seconds": (0.0, 30.0),
     "churn_control": (False, True), "min_quote_life_seconds": (0.0, 120.0), "churn_max_reprices": (1, 100),
@@ -2788,8 +2791,12 @@ class Bot:
         grace = self.cfg.burst_startup_grace_seconds
         if self.trading_since is None or grace <= 0:
             return False
-        up = now_m - self.trading_since
-        return up < grace or (up < self.BURST_LOADING_MAX_SECONDS and any(ex.book is None for ex in self.ex.values()))
+        return now_m - self.trading_since < grace or self.first_books_loading(now_m)
+
+    def first_books_loading(self, now_m):
+        """Since the trading loop started, some book has never been downloaded (at most BURST_LOADING_MAX_SECONDS)."""
+        return (self.trading_since is not None and now_m - self.trading_since < self.BURST_LOADING_MAX_SECONDS
+                and any(ex.book is None for ex in self.ex.values()))
 
     def update_burst(self, now_m):
         """Burst mode on/off (see BURST PROTECTION). Its effects are in decide() and plan_change()."""
@@ -2836,8 +2843,13 @@ class Bot:
         changes = sorted(changes, key=lambda c: c.key)
         # Within the request budget, keeping write_read_reserve back so reads (positions, orders, books) never
         # starve; the least urgent changes wait for the next cycle.
-        spare = min(getattr(self.api, "budget_left", lambda: 10 ** 6)() - cfg.write_read_reserve,
-                    getattr(self.api, "writes_left", lambda: 10 ** 6)())
+        writes_left = getattr(self.api, "writes_left", lambda: 10 ** 6)()
+        if cfg.startup_writes_per_minute and self.first_books_loading(time.monotonic()):
+            # Still downloading the first books after a (re)start: book downloads and writes share the request
+            # budget, so writes stay at the old 30/min until every book is in (pulls and unsafe orders still go).
+            used = int(getattr(self.api, "wbudget", 0)) - writes_left
+            writes_left = min(writes_left, cfg.startup_writes_per_minute - used)
+        spare = min(getattr(self.api, "budget_left", lambda: 10 ** 6)() - cfg.write_read_reserve, writes_left)
         kept, cost, orders = [], 0.0, 0
         for ch in changes:
             n = orders + len(ch.new)
