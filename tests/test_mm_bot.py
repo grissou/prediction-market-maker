@@ -1428,6 +1428,32 @@ time.sleep(0.05); t0 = time.monotonic(); wapi2.throttle(); waited = time.monoton
 th.join()
 check("a write waiting on the write budget doesn't hold up reads", waited < 0.3, f"{waited:.2f}s")
 
+print("--- live settings (settings_override.json, re-read every 30 s)")
+a, b = make_bot()
+alerts = []
+real_alert, M.alert = M.alert, lambda m: alerts.append(m)
+with open(b.cfg.overrides_file, "w") as f:
+    json.dump({"min_edge": 0.015, "burst_markets": 25, "api_key": "x", "max_half_spread": 5, "churn_control": "yes"}, f)
+logging.disable(logging.CRITICAL); b.check_overrides(force=True); logging.disable(logging.NOTSET)
+check("valid overrides applied", b.cfg.min_edge == 0.015 and b.cfg.burst_markets == 25, (b.cfg.min_edge, b.cfg.burst_markets))
+check("secrets, out-of-range values and wrong types refused (and reported), never applied",
+      b.cfg.api_key == "test-key" and b.cfg.max_half_spread == 0.04 and b.cfg.churn_control is False
+      and alerts and all(k in alerts[0] for k in ("api_key", "max_half_spread", "churn_control")), alerts)
+with open(b.cfg.overrides_file, "w") as f:
+    json.dump({"burst_markets": 25}, f)
+os.utime(b.cfg.overrides_file, (time.time() + 5, time.time() + 5))
+logging.disable(logging.CRITICAL); b.check_overrides(force=True); logging.disable(logging.NOTSET)
+check("a setting removed from the file goes back to its default", b.cfg.min_edge == 0.01 and b.cfg.burst_markets == 25)
+with open(b.cfg.overrides_file, "w") as f:
+    f.write("{broken")
+os.utime(b.cfg.overrides_file, (time.time() + 10, time.time() + 10))
+alerts.clear(); logging.disable(logging.CRITICAL); b.check_overrides(force=True); logging.disable(logging.NOTSET)
+check("an unreadable file keeps the current settings (and alerts)", b.cfg.burst_markets == 25 and alerts, alerts)
+M.alert = real_alert
+check("never overridable: secrets, URLs, files, the kill switch", not {"api_key", "base_url", "slug", "alert_url",
+      "max_drawdown_pct", "fills_csv", "overrides_file"} & set(M.OVERRIDABLE))
+check("every overridable name is a real setting", all(hasattr(Config(), k) for k in M.OVERRIDABLE))
+
 print("--- parallel requests")
 a, b = make_bot()
 res = b.in_parallel(lambda x: 1 / x, [1, 0, 2])

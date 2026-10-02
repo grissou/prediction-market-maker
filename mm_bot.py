@@ -334,6 +334,13 @@ class Config:
     realtime_session_max_seconds: float = 3600.0   # ...and at least this often anyway: a long-lived socket can die
                                                    #   without the library noticing (it happened on 29 Sep)
 
+    # --- LIVE SETTINGS (change settings without a restart) -----------------------------------
+    overrides_file: str = "settings_override.json"   # {"min_edge": 0.015, ...}: re-read every overrides_seconds;
+                                          #   only OVERRIDABLE settings, each checked; a removed key goes back to
+                                          #   its default. Every change is logged. "" = off
+    overrides_seconds: float = 30.0
+    slow_cycle_alert_seconds: float = 120.0   # a cycle running this long: status.json says so and one alert is sent
+
     # --- FILES (relative names are kept in the bot's own folder) -----------------------------
     fills_csv: str = "fills.csv"
     log_file: str = "mm_bot.log"          # "" = log to the terminal only
@@ -356,6 +363,60 @@ class Config:
 
 
 CFG = Config()
+
+# Settings that may be changed while the bot runs (settings_override.json), with their allowed range. Never
+# secrets, URLs, file names, the kill switch or anything read only at start-up.
+OVERRIDABLE = {
+    "min_edge": (0.0, 0.10), "max_half_spread": (0.005, 0.20), "skew_per_share": (0.0, 0.001),
+    "reprice_tolerance_ticks": (0, 10), "keep_fraction": (0.0, 1.0),
+    "order_size_frac": (0.0, 0.05), "size_min_frac": (0.0, 0.05), "size_max_frac": (0.0, 0.10),
+    "headline_size_frac": (0.0, 0.20), "headline_position_frac": (0.0, 0.30), "quote_capital_frac": (0.0, 1.0),
+    "max_position_frac": (0.0, 0.10), "max_party_delta_frac": (0.0, 0.50), "party_skew_at_cap": (0.0, 0.05),
+    "max_worst_case_frac": (0.05, 0.60), "kelly_fraction": (0.0, 1.0), "kelly_max_market_frac": (0.0, 0.10),
+    "ref_weight": (0.0, 1.0), "ref_guard_gap": (0.02, 0.30), "ref_jump_threshold": (0.005, 0.30),
+    "ref_jump_cooldown_seconds": (0.0, 3600.0), "jump_threshold": (0.01, 0.50), "jump_cooldown_seconds": (0.0, 3600.0),
+    "arb_enabled": (False, True), "arb_min_profit": (0.005, 0.20), "take_enabled": (False, True),
+    "take_edge": (0.02, 0.30), "tail_low": (0.0, 0.20), "tail_high": (0.80, 1.0),
+    "requests_per_minute": (10, 100), "writes_per_minute": (5, 100), "budget_reserve": (0, 60),
+    "max_books_per_cycle": (1, 100), "book_stale": (60.0, 3600.0), "book_reverify_seconds": (10.0, 1800.0),
+    "parallel_writes": (1, 8), "write_wait_seconds": (0.0, 30.0),
+    "churn_control": (False, True), "min_quote_life_seconds": (0.0, 120.0), "churn_max_reprices": (1, 100),
+    "churn_window_seconds": (5.0, 3600.0), "urgent_ref_move": (0.0, 0.10),
+    "burst_protection": (False, True), "burst_write_seconds": (0.5, 60.0), "burst_cycle_seconds": (2.0, 600.0),
+    "burst_timeouts": (1, 100), "burst_calm_seconds": (0.0, 3600.0), "burst_markets": (1, 300),
+    "burst_size_factor": (0.05, 1.0), "burst_extra_edge": (0.0, 0.05),
+    "slow_cycle_alert_seconds": (10.0, 3600.0), "summary_every_hours": (0, 24),
+}
+
+
+def validate_overrides(raw, cfg):
+    """{name: value} from the overrides file -> ({name: checked value}, [problems]). Unknown names, wrong types
+    and out-of-range values are refused (and reported), never applied."""
+    good, bad = {}, []
+    if not isinstance(raw, dict):
+        return good, ["the file must hold one JSON object, e.g. {\"min_edge\": 0.015}"]
+    for k, v in raw.items():
+        if k not in OVERRIDABLE:
+            bad.append(f"{k}: not a live setting")
+            continue
+        lo, hi = OVERRIDABLE[k]
+        cur = getattr(cfg, k)
+        if isinstance(cur, bool):
+            if not isinstance(v, bool):
+                bad.append(f"{k}: must be true or false")
+                continue
+        elif isinstance(cur, int):
+            if isinstance(v, bool) or not isinstance(v, int):
+                bad.append(f"{k}: must be a whole number")
+                continue
+        elif isinstance(v, bool) or not isinstance(v, (int, float)):
+            bad.append(f"{k}: must be a number")
+            continue
+        if not isinstance(cur, bool) and not (lo <= v <= hi):
+            bad.append(f"{k}: {v} is outside {lo}..{hi}")
+            continue
+        good[k] = float(v) if isinstance(cur, float) else v
+    return good, bad
 
 # =============================================================================================
 # FIXED FACTS - set by the exchange and the markets themselves. Not tuning knobs.
@@ -1554,6 +1615,8 @@ class Bot:
         self.errors_total = 0             # failed cycles since start (summaries report new ones)
         self.phase = "starting"           # what the bot is doing, for the status line
         self.selftest_passed = False
+        self.defaults = {k: getattr(cfg, k) for k in OVERRIDABLE}   # what a removed override goes back to
+        self.overrides, self.overrides_mtime, self.last_overrides_check = {}, None, -1e9
         self.selftest_future = None       # the self-test running in the background (see selftest_tick)
         self.selftest_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="selftest")
         self.selftest_eid = None
@@ -3109,6 +3172,48 @@ class Bot:
         except OSError as e:
             log.warning("could not write status file: %s", e)
 
+    # ------------------------------------------------------------------------------ live settings
+    def check_overrides(self, force=False):
+        """Every overrides_seconds: re-read settings_override.json if it changed, apply what's valid, put back
+        the default of anything removed, log every change and alert on anything refused."""
+        cfg = self.cfg
+        now_m = time.monotonic()
+        if not cfg.overrides_file or (not force and now_m - self.last_overrides_check < cfg.overrides_seconds):
+            return
+        self.last_overrides_check = now_m
+        path = bot_path(cfg.overrides_file)
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            mtime = None
+        if mtime == self.overrides_mtime:
+            return
+        self.overrides_mtime = mtime
+        raw = {}
+        if mtime is not None:
+            try:
+                with open(path) as f:
+                    raw = json.load(f)
+            except (OSError, ValueError) as e:
+                alert(f"{cfg.overrides_file} unreadable ({e}) - keeping the current settings")
+                return
+        good, bad = validate_overrides(raw, cfg)
+        if bad:
+            alert(f"{cfg.overrides_file}: ignored " + "; ".join(bad))
+        wanted = {**{k: self.defaults[k] for k in self.overrides if k not in good}, **good}
+        for k, v in wanted.items():
+            if getattr(cfg, k) != v:
+                log.warning("SETTING %s: %s -> %s%s", k, getattr(cfg, k), v, "" if k in good else " (default again)")
+                setattr(cfg, k, v)
+                if k == "requests_per_minute":
+                    self.api.budget = min(getattr(self.api, "budget", v), v)
+                if k == "writes_per_minute":
+                    self.api.wbudget = min(getattr(self.api, "wbudget", v), v)
+                if k in ("size_min_frac", "size_max_frac", "headline_size_frac", "quote_capital_frac"):
+                    self.size_plan_time = -1e9                 # re-plan sizes now
+        self.overrides = good
+        self.health["overrides"] = dict(good)
+
     # ------------------------------------------------------------------------------ dry-run helpers
     def sim_by_eid(self):
         out = defaultdict(list)
@@ -3429,6 +3534,7 @@ class Bot:
             while self.running:
                 t0 = time.monotonic()
                 try:
+                    self.check_overrides()
                     if t0 - self.last_reload > self.cfg.market_reload_seconds:
                         self.load_markets()
                     self.cycle()
