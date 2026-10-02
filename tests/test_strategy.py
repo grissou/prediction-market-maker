@@ -277,6 +277,9 @@ check("priming: the trading loop sets trading_since (fresh start and handover al
 # FAVOURITE-LONGSHOT SIDE BIAS (fl_*): below 20c the bid is the bad side, above 80c the ask
 
 FL = Config()
+check("FL: OFF by default (the bad-side losses were day one's skew quoting through fair value, DATA_REPORT_2 §10c)",
+      FL.fl_bias_enabled is False)
+FL.fl_bias_enabled = True                   # the tests below exercise the feature switched on
 
 
 def flq(fv, inv=0, bb=None, ba=None, cfg=FL, prev=None, **kw):
@@ -289,7 +292,7 @@ def plain(fv, inv=0, bb=None, ba=None, cfg=FL, **kw):
     return compute_quote(fv, inv, inv, bb, ba, cfg, order_size=200, **kw)
 
 
-check("FL: on by default, 20c / 80c, +1c, half size, 1c hysteresis, mid-band off",
+check("FL: settings when on: 20c / 80c, +1c, half size, 1c hysteresis, mid-band off",
       (FL.fl_bias_enabled, FL.fl_low, FL.fl_high, FL.fl_bad_side_extra_edge, FL.fl_bad_side_size_factor,
        FL.fl_hysteresis, FL.fl_mid_bid_extra_edge) == (True, 0.20, 0.80, 0.01, 0.5, 0.01, 0.0))
 check("FL: fl_side picks bid below 20c, ask above 80c, nothing between",
