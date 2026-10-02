@@ -494,6 +494,13 @@ class Config:
     analyze_daily_hour: int = -1          # send the first lines of `analyze` (last 24 h) to your phone daily at this
                                           #   hour UTC (-1 = off)
     slow_cycle_alert_seconds: float = 120.0   # a cycle running this long: status.json says so and one alert is sent
+    # Rival-floor map (analysis/rival_floor.py writes market_edge.json from the recorder's books): a per-market
+    # min_edge, max(min_edge, the market's entry capped at market_edge_max); markets without an entry keep
+    # min_edge. Off until calibrated on the live recorder data.
+    market_edge_enabled: bool = False
+    market_edge_file: str = "market_edge.json"   # {"<exchange id>": {"min_edge": 0.015, ...}, ...}; "" = off
+    market_edge_reload_seconds: float = 600.0    # re-read this often (when the file changed)
+    market_edge_max: float = 0.02         # no market's own edge above this
 
     # --- FILES (relative names are kept in the bot's own folder) -----------------------------
     fills_csv: str = "fills.csv"
@@ -657,6 +664,8 @@ OVERRIDABLE = {
     "reduce_join_best": (False, True),
     "reduce_join_min_edge": (0.0, 0.05),
     "reduce_join_min_shares": (0, 100000),
+    "market_edge_enabled": (False, True),
+    "market_edge_max": (0.005, 0.05),
 }
 
 
@@ -695,6 +704,32 @@ def validate_overrides(raw, cfg):
             if k in good:
                 del good[k]
                 bad.append(f"{k}: refresh_before_expiry ({refresh:.0f}) must be at most half of order_ttl ({ttl:.0f})")
+    return good, bad
+
+
+MARKET_EDGE_RANGE = (0.005, 0.05)
+
+
+def validate_market_edge(raw, known):
+    """market_edge.json -> ({eid: min_edge}, [problems]). Entries are {"min_edge": x, ...} or a bare number x, x in
+    MARKET_EDGE_RANGE (dollars); keys starting with "_" (metadata) are skipped; an unknown exchange id or a bad
+    value is refused (that entry only)."""
+    good, bad = {}, []
+    if not isinstance(raw, dict):
+        return good, ["the file must hold one JSON object {exchange id: {\"min_edge\": ...}}"]
+    lo, hi = MARKET_EDGE_RANGE
+    for k, v in raw.items():
+        k = str(k)
+        if k.startswith("_"):
+            continue
+        if k not in known:
+            bad.append(f"{k}: unknown exchange id")
+            continue
+        x = v.get("min_edge") if isinstance(v, dict) else v
+        if isinstance(x, bool) or not isinstance(x, (int, float)) or not (lo <= x <= hi):
+            bad.append(f"{k}: min_edge {x!r} is not a number in {lo}..{hi}")
+            continue
+        good[k] = float(x)
     return good, bad
 
 # =============================================================================================
@@ -2073,6 +2108,44 @@ def analyze(fills_path, db_path, hours=None, top=15):
         out.append(f"{labels.get(eid, eid)[:26]:26} {m['fills']:5d} {m['shares']:8.0f} {c(m, 'edge'):>7} "
                    + " ".join(f"{c(m, f'm{x}'):>7}" for x in MARKOUT_MINUTES)
                    + f" {m['pnl']:+8.0f} {pct(tb)} {pct(ta)} {uh if uh is None else round(uh, 1)!s:>10}")
+    out.extend(rival_floor_lines(db_path, since, top))
+    return out
+
+
+def rival_floor_lines(db_path, since=None, top=15):
+    """`analyze`, last table: the other traders' half-spread around the fair value and how often the best price
+    changes (60-s intervals), per market, from the recorder's books table, via rival_floor.py (next to mm_bot.py
+    or in analysis/). The widest `top` markets plus the spread of the recommended min_edge."""
+    if not (db_path and os.path.exists(db_path)):
+        return []
+    src = next((x for x in (os.path.join(HERE, "rival_floor.py"), os.path.join(HERE, "analysis", "rival_floor.py"))
+                if os.path.exists(x)), None)
+    if src is None:
+        return ["(rival floor: copy analysis/rival_floor.py next to mm_bot.py for this table)"]
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("rival_floor", src)
+        rf = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(rf)
+        db = sqlite3.connect(db_path)
+        try:
+            if not rf.has_rows(db, "books"):
+                return []
+            st = rf.stats_from_books(db, since.timestamp() if since else None, min_samples=10)
+        finally:
+            db.close()
+    except Exception as e:                    # an analysis aid: never let it break `analyze`
+        return [f"(rival floor unavailable: {e})"]
+    dist = defaultdict(int)
+    for v in st.values():
+        dist[v["min_edge"]] += 1
+    out = [f"rival floor (books, {len(st)} markets): recommended min_edge "
+           + ", ".join(f"{100 * k:g}c x{n}" for k, n in sorted(dist.items())),
+           f"{'market':26} {'half c':>6} {'top chg':>7} {'n':>6} {'edge c':>6}"]
+    for eid, v in sorted(st.items(), key=lambda kv: -kv[1]["rival_half_spread_c"])[:top]:
+        rate = v["top_change_rate"]
+        out.append(f"{v['label'][:26]:26} {v['rival_half_spread_c']:6.2f} {'-' if rate is None else f'{rate:.2f}':>7} "
+                   f"{v['samples']:6d} {100 * v['min_edge']:6g}")
     return out
 
 # =============================================================================================
@@ -2249,6 +2322,7 @@ class Bot:
         self.last_progress_write, self.last_slow_alert = -1e9, -1e9
         self.defaults = {k: getattr(cfg, k) for k in OVERRIDABLE}   # what a removed override goes back to
         self.overrides, self.overrides_mtime, self.last_overrides_check = {}, None, -1e9
+        self.market_edge, self.market_edge_mtime, self.last_market_edge_check = {}, None, -1e9   # rival-floor map
         self.selftest_future = None       # the self-test running in the background (see selftest_tick)
         self.selftest_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="selftest")
         self.selftest_eid = None
@@ -2602,6 +2676,7 @@ class Bot:
                                                  if e in self.ex and self.unload_side(self.ex[e], now_m))
         self.health["fl_bias_markets"] = {k: sum(1 for x in self.ex.values() if x.fl_tag.startswith(f" fl:{k}"))
                                           for k in ("bid", "ask")}
+        self.health["market_edge_markets"] = len(self.market_edge) if self.cfg.market_edge_enabled else 0
 
         # 8. Snapshot for later analysis (every record_seconds) -------------------------------------
         self.record(fvs, now_m)
@@ -3239,6 +3314,9 @@ class Bot:
             planned = min(full, max(1.0, cfg.ref_only_size_frac * self.bankroll()))
             if cfg.ref_only_reduce_full:          # ...but a held position leaves at the market's normal size
                 reduce_size = full
+        if cfg.market_edge_enabled and ex.eid in self.market_edge:   # rival-floor map: this market's own floor
+            own = max(cfg.min_edge, min(self.market_edge[ex.eid], cfg.market_edge_max))
+            edge = own if edge is None else max(edge, own)
         ex.age = self.age_hours(ex)
         adding = cfg.capital_ceiling_adding_size_factor if self.capital_over else 1.0
         side, bias_edge, bias_size = fl_side(fv, ex.fl_side, cfg)
@@ -4639,6 +4717,47 @@ class Bot:
         self.overrides = good
         self.health["overrides"] = dict(good)
 
+    def check_market_edge(self, force=False):
+        """Every market_edge_reload_seconds: re-read market_edge.json (rival-floor map) if it changed. Bad entries
+        are refused one by one (a file with nothing usable is refused whole); an unreadable file keeps the current
+        map; a removed file empties it."""
+        cfg = self.cfg
+        now_m = time.monotonic()
+        if not cfg.market_edge_file or (not force and now_m - self.last_market_edge_check < cfg.market_edge_reload_seconds):
+            return
+        self.last_market_edge_check = now_m
+        path = bot_path(cfg.market_edge_file)
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            mtime = None
+        if mtime == self.market_edge_mtime:
+            return
+        self.market_edge_mtime = mtime
+        if mtime is None:
+            if self.market_edge:
+                log.info("MARKET EDGE %s gone - every market back to min_edge", cfg.market_edge_file)
+            self.market_edge = {}
+            return
+        try:
+            with open(path) as f:
+                raw = json.load(f)
+        except (OSError, ValueError) as e:
+            log.info("MARKET EDGE %s refused (unreadable: %s) - keeping %d markets", cfg.market_edge_file, e,
+                     len(self.market_edge))
+            return
+        good, bad = validate_market_edge(raw, self.ex)
+        if bad and not good:
+            log.info("MARKET EDGE %s refused: %s - keeping %d markets", cfg.market_edge_file, "; ".join(bad[:5]),
+                     len(self.market_edge))
+            return
+        self.market_edge = good
+        vals = sorted(good.values())
+        log.info("MARKET EDGE %s loaded: %d markets%s%s%s", cfg.market_edge_file, len(good),
+                 f", {100 * vals[0]:g}-{100 * vals[-1]:g}c" if vals else "",
+                 "" if cfg.market_edge_enabled else " (market_edge_enabled is off: not used)",
+                 f"; refused {len(bad)}: " + "; ".join(bad[:5]) if bad else "")
+
     # ------------------------------------------------------------------------------ dry-run helpers
     def sim_by_eid(self):
         out = defaultdict(list)
@@ -5051,6 +5170,7 @@ class Bot:
                 t0 = time.monotonic()
                 try:
                     self.check_overrides()
+                    self.check_market_edge()
                     self.maybe_daily_analysis()
                     if t0 - self.last_reload > self.cfg.market_reload_seconds:
                         self.load_markets()

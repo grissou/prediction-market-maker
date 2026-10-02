@@ -203,6 +203,7 @@ def make_bot(live=True, only="", books=None, extra_markets=()):
     cfg.position_lots_file = os.path.join(d, "lots.json")
     cfg.record_file, cfg.ref_map_file, cfg.summary_every_hours = "", "", 0
     cfg.overrides_file = os.path.join(d, "overrides.json")
+    cfg.market_edge_file = os.path.join(d, "market_edge.json")
     cfg.handover_file = os.path.join(d, "handover.json")
     cfg.handover_exit_max_seconds = 0     # never os._exit the test process (the deadline has its own tests)
     pin_test_sizes(cfg)   # opt-in per test
