@@ -110,7 +110,15 @@ class Config:
                                           #   the kill switch, the worst-case cap and the summaries by up to 48k)
     reserved_calib_min: float = 1000.0    # "auto" only judges when locked cash changed by at least this much...
     reserved_calib_votes: int = 2         # ...and needs this many agreeing observations before deciding
-    max_worst_case_frac: float = 0.30     # worst-case settlement loss > 30% of account value -> reduce-only everywhere
+    max_worst_case_frac: float = 0.30     # settlement risk (risk_model) > 30% of account value -> reduce-only everywhere
+    risk_model: str = "correlated"        # R7. "sum_max" = the old measure: add up every race's own worst outcome, as
+                                          #   if all ~75 races went wrong at once (day one: 23.3k, growing 1.5k/h with
+                                          #   breadth, while the settlement sd was ~4.4k and a 10c national swing cost
+                                          #   +-249). "correlated" = national swing shock + risk_z x sd of the rest:
+    risk_swing_shock: float = 0.15        #   every Republican price up 15c and Democratic down 15c (or the reverse)...
+    risk_z: float = 3.0                   #   ...plus 3 standard deviations of the independent race outcomes
+    worst_case_backstop_frac: float = 0.60  # with "correlated": the old sum-of-maxima still forces reduce-only above
+                                            #   60% of account value (a backstop; it no longer binds at 30%)
     # Sizes below are FRACTIONS OF ACCOUNT VALUE (0.01 = 1%), recalculated as the account changes, so the
     # bot sizes up after gains and down after losses. "shares" = contracts that each pay up to 1.
     sizing_step_frac: float = 0.05        # ...but the account value they're a fraction of only moves in steps: it's
@@ -144,7 +152,18 @@ class Config:
     max_half_spread: float = 0.04         # never quote further than this from it
     order_size_frac: float = 0.005        # shares per order when size_by_activity is off (and before the first
                                           #   plan): 500 shares at 100k. Normally QUOTE SIZES BY ACTIVITY decides
-    skew_per_share: float = 0.00003       # reservation price moves 0.3c per 100 shares of race-adjusted inventory
+    skew_per_share: float = 0.00003       # skew_mode "share": reservation price moves 0.3c per 100 shares of
+                                          #   race-adjusted inventory, the same in every market (the old rule)
+    skew_mode: str = "quote"              # "quote" = scale the skew to the market's own quote size: holding one
+                                          #   full quote's worth of shares moves the reservation price skew_per_quote.
+                                          #   Day one, "share" moved it 12-24c after one 4-8k headline fill, so the
+                                          #   next quotes sat through fair value: 42% of shares traded at or through
+                                          #   our own fair value, -804 at the 60-min mid. "share" = the old rule
+    skew_per_quote: float = 0.005         # 0.5c per quote-size of inventory...
+    skew_max: float = 0.02                # ...at most 2c in total (both modes; 1.0 = no cap)
+    max_skew_through: float = 0.0         # a skewed quote may sit at most this far THROUGH fair value (0 = at fair
+                                          #   value at worst). Not applied in reduce-only/flatten, which must get out.
+                                          #   1.0 = off (the old behaviour: up to max_half_spread through it)
     keep_fraction: float = 0.5            # keep a partly-filled order (and its queue spot) while >= 50% remains
     reprice_tolerance_ticks: int = 1      # leave an order alone if its target price moved by at most this many
                                           #   ticks (0.5c each) and it still keeps min_edge without crossing anyone:
@@ -173,6 +192,14 @@ class Config:
     # --- FAIR VALUE --------------------------------------------------------------------------
     fv_min_depth: int = 200               # skip price levels until this many shares have accumulated (anti-spoofing)
     max_spread_for_fv: float = 0.30       # book wider than this -> no reliable price -> don't quote
+    # Thin books (R5). Day one 157-189 of 237 markets went unpriced although their books were two-sided and
+    # tight (median spread 1c) and 97% had a Polymarket price: fewer than fv_min_depth shares at the top.
+    # 72 held positions sat there, unquotable (Rep U.S. Senate +7,585 after 19:30).
+    ref_only_enabled: bool = True         # price such a market from Polymarket alone, when Polymarket is liquid
+                                          #   and the tournament's own (raw) mid is within ref_only_max_gap of it
+    ref_only_max_gap: float = 0.03        #   (guards against a wrong match: there is no depth-checked book price)
+    ref_only_min_edge: float = 0.015      # ...quoting wider than usual there...
+    ref_only_size_frac: float = 0.001     # ...and small: 100 shares at 100k (a position still sheds through skew)
 
     # --- REFERENCE PRICES (Polymarket via ref_prices.py; only active if ref_map_file exists) ---
     # Polymarket is treated as the better estimate of the true price: the tournament book is seeded
@@ -984,6 +1011,21 @@ def normalise(fvs):
     return {k: v / total for k, v in fvs.items()} if total > 0 else fvs
 
 
+def race_variance(legs):
+    """Variance of one race's settlement payout. legs = [(net YES shares, probability), ...]; exactly one leg
+    wins in a race (probabilities scaled to sum to 1); a lone market wins with its own probability."""
+    if len(legs) == 1:
+        (x, p), = legs
+        return x * x * p * (1 - p)                   # YES or NO shares: payout differs by |x| between outcomes
+    tot = sum(p for _, p in legs) or 1.0
+    probs = [p / tot for _, p in legs]
+    pays = []
+    for i in range(len(legs)):
+        pays.append(sum((x if j == i else 0.0) if x > 0 else (0.0 if j == i else -x) for j, (x, _) in enumerate(legs)))
+    mean = sum(p * v for p, v in zip(probs, pays))
+    return sum(p * (v - mean) ** 2 for p, v in zip(probs, pays))
+
+
 def worst_case_loss(legs):
     """How much the marked-to-market value of one race would fall in its worst outcome.
 
@@ -1114,7 +1156,7 @@ def plan_sizes(activity, headline, bankroll, cfg=CFG, prev=None, lock=None, prev
 
 def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=False, no_bid=False, no_ask=False,
                   bid_cap=None, ask_cap=None, kelly_p=None, bankroll=None, shift=0.0, order_size=None,
-                  position_limit=None):
+                  position_limit=None, min_edge=None):
     """
     fv         fair YES probability
     inv        our net YES shares on THIS exchange (negative = net NO); drives the hard position limit
@@ -1130,6 +1172,7 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
     shift              extra amount to lower the reservation price by (national-swing shading; see decide)
     order_size         shares per quote for this market (from the activity-based size plan); None = order_size_frac
     position_limit     flat limit on |net shares| here instead of Kelly / max_position_frac (party-control markets)
+    min_edge           overrides cfg.min_edge (e.g. wider in markets priced from Polymarket alone)
     """
     bankroll = bankroll or DEFAULT_BANKROLL
     max_order_cash = cfg.max_order_cash_frac * bankroll
@@ -1139,11 +1182,17 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
         max_order_cash = max(max_order_cash, order_size)   # a planned size has already been capital-checked
     # 1. Reservation price = fair value shifted against our inventory. Long -> lower r -> we bid
     #    less eagerly and offer more eagerly, which pushes the position back toward flat.
-    r = fv - cfg.skew_per_share * eff_inv - shift
+    if cfg.skew_mode == "quote" and order_size > 0:
+        skew = cfg.skew_per_quote * eff_inv / order_size
+    else:
+        skew = cfg.skew_per_share * eff_inv
+    skew = max(-cfg.skew_max, min(cfg.skew_max, skew))
+    r = fv - skew - shift
 
     # 2. Allowed band for each side: at least min_edge, at most max_half_spread away from r.
-    bid_lo, bid_hi = floor_tick(r - cfg.max_half_spread), floor_tick(r - cfg.min_edge)
-    ask_lo, ask_hi = ceil_tick(r + cfg.min_edge), ceil_tick(r + cfg.max_half_spread)
+    edge = cfg.min_edge if min_edge is None else min_edge
+    bid_lo, bid_hi = floor_tick(r - max(cfg.max_half_spread, edge)), floor_tick(r - edge)
+    ask_lo, ask_hi = ceil_tick(r + edge), ceil_tick(r + max(cfg.max_half_spread, edge))
 
     # 3. Penny: one tick better than the best other trader, so we're first in the queue while
     #    keeping the widest spread possible. Then clamp into the band. That clamp is what stops a
@@ -1152,6 +1201,12 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
     ask = ceil_tick(best_ask - TICK) if best_ask is not None else ask_hi
     bid = min(max(bid, bid_lo), bid_hi)
     ask = max(min(ask, ask_hi), ask_lo)
+    if not reduce_only and cfg.max_skew_through < 1.0:
+        # Skew sheds inventory by quoting less greedily, never by paying through our own fair value
+        # (day one: fills at <= -1c edge lost -804 at the 60-min mid; rival bots pick those quotes off).
+        bid_hi = min(bid_hi, floor_tick(fv + cfg.max_skew_through))
+        ask_lo = max(ask_lo, ceil_tick(fv - cfg.max_skew_through))
+        bid, ask = min(bid, bid_hi), max(ask, ask_lo)
 
     # 4. Never cross another trader's order (that would trade instantly, as a taker).
     if best_ask is not None:
@@ -1471,6 +1526,7 @@ class Bot:
         self.placed_qty = {}              # orderId -> shares we placed, and...
         self.filled_qty = defaultdict(float)   # ...shares filled so far (each fill counted once, from fills)
         self.ref_rejected = set()         # Polymarket keys currently ignored as implausible (alerted once)
+        self.ref_only = set()             # eids priced from Polymarket alone this cycle (thin book, R5)
         # Threads for sending several HTTP requests at once (downloads mostly wait on the network).
         self.pool = ThreadPoolExecutor(max_workers=max(1, cfg.parallel_requests), thread_name_prefix="http")
         # ...and for order writes, so a slow one never holds up the others or the cycle (see send_changes).
@@ -1679,9 +1735,10 @@ class Bot:
         refs, liquid = self.reference_prices(book_fvs)
         self.reference_jump_guard(now_m)
         fvs = dict(book_fvs)
+        self.ref_only = self.thin_book_prices(fvs, refs, liquid, now_m) if cfg.ref_only_enabled else set()
         if cfg.ref_weight > 0 and refs:
             for eid, r in refs.items():
-                if fvs.get(eid) is not None and eid in liquid:      # only lean on liquid Polymarket prices
+                if fvs.get(eid) is not None and eid in liquid and eid not in self.ref_only:   # liquid only
                     fvs[eid] = (1 - cfg.ref_weight) * fvs[eid] + cfg.ref_weight * r
             for members in self.groups.values():
                 if len(members) > 1:
@@ -1701,19 +1758,27 @@ class Bot:
         # 6. Portfolio-level risk ------------------------------------------------------------------
         eff = self.effective_inventory(inv)
         worst = self.total_worst_case(inv, fvs)
-        global_reduce = bool(equity) and worst > cfg.max_worst_case_frac * equity
         party_delta = sum(PARTY_SIGN.get(ex.party, 0) * inv.get(eid, 0.0) for eid, ex in self.ex.items())
+        if cfg.risk_model == "correlated":
+            # never above the sum of maxima, which is a hard bound (for a few big positions 3 sd exceeds it)
+            risk = min(worst, self.settlement_risk(inv, fvs, party_delta))
+            global_reduce = bool(equity) and (risk > cfg.max_worst_case_frac * equity
+                                              or worst > cfg.worst_case_backstop_frac * equity)
+        else:
+            risk = worst
+            global_reduce = bool(equity) and worst > cfg.max_worst_case_frac * equity
         if full:                                  # summary line on full checks only (event cycles can be every 2 s)
-            log.info("%s | account %s (locked in orders %.0f, %s) | worst-case loss %.0f%s | party delta %+.0f | "
+            log.info("%s | account %s (locked in orders %.0f, %s) | worst-case loss %.0f (risk %.0f)%s | party delta %+.0f | "
                      "priced %d/%d | resting %d",
                      "realtime" if realtime else ("polling (realtime connecting)" if self.feed else "polling"),
                      f"{equity:.0f}" if equity is not None else "?", reserved,
-                     {"add": "added back", "ignore": "already included"}.get(self.reserved_mode, "detecting"), worst,
+                     {"add": "added back", "ignore": "already included"}.get(self.reserved_mode, "detecting"), worst, risk,
                      " -> REDUCE-ONLY" if global_reduce else "", party_delta,
                      sum(v is not None for v in fvs.values()), len(fvs), sum(len(v) for v in resting.values()))
         self.health = {"account_value": equity, "locked_in_orders": round(reserved, 2),
                        "reserved_cash_mode": self.reserved_mode or "detecting", "worst_case_loss": round(worst, 2),
                        "reduce_only": global_reduce, "party_delta": party_delta,
+                       "settlement_risk": round(risk, 2), "risk_model": cfg.risk_model,
                        "markets_priced": sum(v is not None for v in fvs.values()), "markets_tracked": len(fvs),
                        "orders_resting": sum(len(v) for v in resting.values()),
                        "reference_prices": len(refs), "reference_prices_liquid": len(liquid),
@@ -1795,6 +1860,27 @@ class Bot:
                 if s is not None and s <= self.cfg.ref_liquid_spread:
                     liquid.add(eid)
         return refs, liquid
+
+    def thin_book_prices(self, fvs, refs, liquid, now_m):
+        """R5: markets whose book is too thin for a depth-checked price (fair_value None) but that have a
+        liquid Polymarket price get fv = Polymarket, if the tournament's raw best bid/ask (other traders,
+        any size, verified recently) are two-sided, not wider than max_spread_for_fv, and their mid is
+        within ref_only_max_gap of Polymarket. Fills fvs in place; returns the set of those eids."""
+        cfg, out = self.cfg, set()
+        for eid, ex in self.ex.items():
+            if fvs.get(eid) is not None or eid not in liquid or eid not in refs or not ex.book:
+                continue
+            if now_m - ex.verified >= cfg.book_stale:
+                continue
+            b = ex.book
+            if not b.get("bids") or not b.get("asks"):
+                continue
+            bb, ba = b["bids"][0]["price"], b["asks"][0]["price"]
+            if ba <= bb or ba - bb > cfg.max_spread_for_fv or abs((bb + ba) / 2 - refs[eid]) > cfg.ref_only_max_gap:
+                continue
+            fvs[eid] = refs[eid]
+            out.add(eid)
+        return out
 
     def reference_jump_guard(self, now_m):
         """After each new Polymarket reading, pull quotes on any market whose Polymarket price moved
@@ -2000,6 +2086,17 @@ class Bot:
                 eff[e] = inv.get(e, 0.0) - (sum(others) / len(others) if others else 0.0)
         return eff
 
+    def settlement_risk(self, inv, fvs, party_delta):
+        """R7: national swing shock (risk_swing_shock x |net Rep-minus-Dem YES shares|) plus risk_z standard
+        deviations of the settlement value of every race, races independent once the swing is taken out.
+        The cycle uses min(this, sum of per-race maxima)."""
+        var = 0.0
+        for members in self.groups.values():
+            legs = [(inv.get(e, 0.0), fvs.get(e) or self.ex[e].last_fv or 0.5) for e in members]
+            if any(x for x, _ in legs):
+                var += race_variance(legs)
+        return self.cfg.risk_swing_shock * abs(party_delta) + self.cfg.risk_z * math.sqrt(var)
+
     def total_worst_case(self, inv, fvs):
         """Sum over races of the worst-case settlement loss (see worst_case_loss)."""
         total = 0.0
@@ -2073,9 +2170,15 @@ class Bot:
         planned = self.size_plan.get(ex.eid, cfg.size_min_frac * self.bankroll()) if cfg.size_by_activity else None
         headline_limit = (cfg.headline_position_frac * self.bankroll()
                           if cfg.size_by_activity and ex.group in cfg.headline_races else None)
+        edge = None
+        if ex.eid in self.ref_only:               # R5: priced from Polymarket alone -> wider and small
+            edge = max(cfg.min_edge, cfg.ref_only_min_edge)
+            planned = min(planned if planned is not None else cfg.order_size_frac * self.bankroll(),
+                          max(1.0, cfg.ref_only_size_frac * self.bankroll()))
         return compute_quote(fv, ex.inv, inv_for_quote, best_bid, best_ask, cfg, reduce_only, no_bid, no_ask,
                              bid_cap, ask_cap, kelly_p=kelly_p, bankroll=self.bankroll(),
-                             shift=self.party_shift(ex, party_delta), order_size=planned, position_limit=headline_limit)
+                             shift=self.party_shift(ex, party_delta), order_size=planned, position_limit=headline_limit,
+                             min_edge=edge)
 
     def update_size_plan(self, now_m, fvs):
         """Every size_plan_seconds: work out how many shares to quote in each market (see plan_sizes).
@@ -2916,7 +3019,7 @@ class Bot:
         if h.get("realtime") == "reconnecting":
             problems.append("realtime feed down, polling meanwhile")
         if h.get("reduce_only"):
-            problems.append("reduce-only: worst-case loss above the cap")
+            problems.append("reduce-only: settlement risk above the cap")
         mapped = len(getattr(self.refs, "mapping", {}) or {}) if self.refs else 0
         if mapped and h and h.get("reference_prices", 0) < 0.5 * mapped:
             problems.append(f"Polymarket prices missing ({h.get('reference_prices', 0)} of {mapped})")

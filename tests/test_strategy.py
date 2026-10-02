@@ -5,6 +5,7 @@ Bot wiring, and a short run of the strategy simulator (tests/strategy_sim.py).
 Run:  python tests/test_strategy.py      (exit code 0 = all passed)
 """
 import logging
+import math
 import os
 import sys
 
@@ -34,6 +35,85 @@ a.pnl = lambda: {"totalAccountValue": 100000}
 b.cycle(); b.cycle()
 check("R1: account value = the API's number, locked cash not added on top",
       b.last_equity == 100000 and b.health["locked_in_orders"] > 0, (b.last_equity, b.health.get("locked_in_orders")))
+
+# =============================================================================================
+# R2 SKEW SCALED TO THE QUOTE SIZE, NEVER THROUGH FAIR VALUE
+
+c = Config()
+q_old = compute_quote(0.50, 8000, 8000, 0.40, 0.60, Config(skew_mode="share", skew_max=1.0, max_skew_through=1.0),
+                      order_size=10000, position_limit=10000)
+q_new = compute_quote(0.50, 8000, 8000, 0.40, 0.60, c, order_size=10000, position_limit=10000)
+check("R2: old rule, 8,000-share headline long -> ask 4c THROUGH fair value", q_old.ask is not None and q_old.ask <= 0.465, q_old)
+check("R2: new rule, same position -> ask never below fair value", q_new.ask is not None and q_new.ask >= 0.50, q_new)
+check("R2: new rule, long -> bid backs off (below fv - min_edge)", q_new.bid is not None and q_new.bid < 0.49, q_new)
+q_small = compute_quote(0.50, 100, 100, 0.47, 0.53, c, order_size=100)
+check("R2: one quote's worth of shares moves the reservation price 0.5c (limits 0.49/0.51 -> 0.485/0.505)",
+      abs(q_small.bid_limit - 0.485) < 1e-9 and abs(q_small.ask_limit - 0.505) < 1e-9, q_small)
+q_red = compute_quote(0.50, 8000, 8000, 0.40, 0.60, Config(skew_mode="share", skew_max=0.05), reduce_only=True, order_size=10000,
+                      position_limit=10000)
+check("R2: reduce-only may still go through fair value to get out", q_red.ask is not None and q_red.ask < 0.50, q_red)
+
+# =============================================================================================
+# R5 THIN BOOKS PRICED FROM POLYMARKET
+
+thin = {"11": {"bids": [lvl(0.29, 50)], "asks": [lvl(0.31, 50)]}, "12": {"bids": [lvl(0.69, 50)], "asks": [lvl(0.71, 50)]},
+        "21": {"bids": [lvl(0.48, 1000)], "asks": [lvl(0.56, 1000)]}, "22": {"bids": [lvl(0.44, 1000)], "asks": [lvl(0.52, 1000)]}}
+a, b = make_bot(books=thin)
+b.refs = FakeRefs({"Ohio Senate|Republican": 0.30, "Ohio Senate|Democratic": 0.70})
+b.cycle()
+def yes_side(o): return "buy" if (o["side"] == "yes") == (o["action"] == "buy") else "sell"
+mine = {(o["exchangeId"], yes_side(o)): o for o in a.orders.values()}
+check("R5: thin Ohio book (50 sh at top) + liquid Polymarket -> quoted around Polymarket",
+      ("11", "buy") in mine and ("11", "sell") in mine and "11" in b.ref_only, sorted(mine))
+bid11 = mine[("11", "buy")]["priceLimit"]
+check("R5: wider than usual (bid <= 0.285) and small (<= 100 shares)",
+      bid11 <= 0.285 and mine[("11", "buy")]["quantity"] <= 100, (bid11, mine[("11", "buy")]))
+a, b = make_bot(books=thin)
+b.refs = FakeRefs({"Ohio Senate|Republican": 0.40, "Ohio Senate|Democratic": 0.60})   # 10c from the book
+b.cycle()
+check("R5: Polymarket 10c from the thin book's mid -> not priced (possible wrong match)",
+      "11" not in b.ref_only and not any(o["exchangeId"] == "11" for o in a.orders.values()))
+a, b = make_bot(books=thin)
+b.refs = FakeRefs({"Ohio Senate|Republican": 0.30, "Ohio Senate|Democratic": 0.70}, spread=None)
+b.cycle()
+check("R5: Polymarket not liquid -> thin book stays unpriced", not b.ref_only)
+a, b = make_bot(books=thin); b.cfg.ref_only_enabled = False
+b.refs = FakeRefs({"Ohio Senate|Republican": 0.30, "Ohio Senate|Democratic": 0.70})
+b.cycle()
+check("R5: switched off -> old behaviour (thin book unpriced)", not any(o["exchangeId"] == "11" for o in a.orders.values()))
+
+# =============================================================================================
+# R7 CORRELATED SETTLEMENT RISK
+
+check("R7: lone 500 YES @0.5 -> variance 500^2 x 0.25", abs(race_variance([(500, 0.5)]) - 62500) < 1e-6)
+check("R7: hedged race pair -> variance 0", race_variance([(500, 0.14), (500, 0.86)]) < 1e-9)
+check("R7: long Rep + short Dem = the same bet twice -> variance of 1,000 shares",
+      abs(race_variance([(500, 0.5), (-500, 0.5)]) - 1000 ** 2 * 0.25) < 1e-6)
+a, b = make_bot()
+b.cycle()
+inv = {"11": 3000.0, "21": 3000.0}                       # Rep Ohio + Rep Utah: national swing adds up
+fvs = {"11": 0.14, "12": 0.86, "21": 0.52, "22": 0.48}
+r = b.settlement_risk(inv, fvs, party_delta=6000)
+want = 0.15 * 6000 + 3.0 * math.sqrt(race_variance([(3000, 0.14), (0, 0.86)]) + race_variance([(3000, 0.52), (0, 0.48)]))
+check("R7: risk = 15c swing x |party delta| + 3 sd of the races", abs(r - want) < 1e-6, (r, want))
+# 40 small races: sum-of-maxima says reduce-only, the correlated measure does not
+extra = []
+for i in range(40):
+    extra += [market(str(100 + 2 * i), str(1000 + 2 * i), "Republican", f"Race {i}"),
+              market(str(101 + 2 * i), str(1001 + 2 * i), "Democratic", f"Race {i}")]
+a, b = make_bot(extra_markets=extra)
+held = [{"exchangeId": str(1000 + 2 * i + i % 2), "quantity": 2000} for i in range(40)]   # alternate Rep/Dem
+a.positions = lambda: {"positions": held}
+b.cycle(); b.cycle()
+h = b.health
+check("R7: 40 independent 2,000-share races: sum of maxima 40k > 30% of 100k, correlated risk ~19k -> keeps quoting",
+      h["worst_case_loss"] > 30000 and h["settlement_risk"] < 30000 and not h["reduce_only"],
+      (h["worst_case_loss"], h["settlement_risk"], h["reduce_only"]))
+b.cfg.risk_model = "sum_max"; b.cycle()
+check("R7: switched off (sum_max) -> same book is reduce-only", b.health["reduce_only"])
+b.cfg.risk_model = "correlated"; b.cfg.worst_case_backstop_frac = 0.30; b.cycle()
+check("R7: sum-of-maxima backstop still forces reduce-only", b.health["reduce_only"])
+check("R7: risk never above the sum of maxima", b.health["settlement_risk"] <= b.health["worst_case_loss"] + 1e-6)
 
 # =============================================================================================
 # SIMULATOR SANITY
