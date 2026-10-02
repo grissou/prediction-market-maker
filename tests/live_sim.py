@@ -409,7 +409,7 @@ class LiveSim(Sim):
 
         def execute(eid, buy, qty, price):
             if not self.take_writes_ok(t):
-                return 0.0
+                return 0.0                        # refused for writes: nothing sold (the owed leg waits)
             m = by[eid]
             m.orders = [o for o in m.orders if o.owner != "us"]
             got = self.take(m, t, buy, qty, price)
@@ -436,7 +436,7 @@ class LiveSim(Sim):
 
         def execute(eid, buy, qty, price):
             if not self.take_writes_ok(t):
-                return 0.0
+                return None                       # refused for writes: not counted (as live)
             m = by[eid]
             m.orders = [o for o in m.orders if o.owner != "us"]
             got = self.take(m, t, buy, qty, price)
