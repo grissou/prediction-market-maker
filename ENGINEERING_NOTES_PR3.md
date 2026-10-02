@@ -34,9 +34,11 @@ only resolved to a minute. `analyze_daily_hour` (default -1 = off) pushes the he
 
 ## 5. Handover restart
 `kill -USR1` stops the bot WITHOUT cancelling: it waits for writes in flight, saves order notes and writes
-`handover.json`. A start within `handover_max_age` (300 s) skips the clean slate and adopts the resting orders
+`handover.json` (with its own record of resting orders and recent cancels). A start within `handover_max_age` (300 s) skips the clean slate and adopts the resting orders
 from its first open-orders read (fills still attributed from order_notes.json). Older note, kill switch or
 fatal exit: cancel as before. Risk: if the new version never starts, quotes rest unmanaged until they expire
-(order_ttl, 30 min) - so watch the restart. Deploy: `sudo systemctl kill -s USR1 mmbot; while systemctl
-is-active -q mmbot; do sleep 0.5; done; sudo systemctl start mmbot` (exit code 0 = systemd won't restart it
-itself). Plain `systemctl restart` keeps the old cancel-everything behaviour.
+(order_ttl, 30 min) - so watch the restart. Deploy: `deploy/handover-restart.sh` (USR1, wait, start; exit
+code 0 means systemd won't restart it by itself). Plain `systemctl restart` keeps the old cancel-everything
+behaviour. Reviewer fixes: the note carries the bot's own record, so orders the open-orders list doesn't show
+yet are never placed twice; queued writes (e.g. pulls) still go out on a handover; a stop signal after USR1
+cancels as usual (and isn't treated as a forced second Ctrl+C).

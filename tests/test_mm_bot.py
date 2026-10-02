@@ -1529,6 +1529,29 @@ a, b = make_bot()
 with open(b.cfg.handover_file, "w") as f:
     json.dump({"t": time.time() - 3600, "orders": 3}, f)
 check("a handover note older than handover_max_age is ignored (clean slate as usual)", not b.adopt_handover())
+a, b = make_bot(); b.cfg.selftest_enabled = False
+n2 = {"k": 0}
+real_cycle3 = b.cycle
+def then_handover2():
+    n2["k"] += 1
+    real_cycle3()
+    if n2["k"] == 1:
+        b.request_handover()
+b.cycle, b.cfg.loop_seconds = then_handover2, 0
+b.run()
+real_oo2 = a.open_orders
+a.open_orders = lambda tid, eid=None: []                  # the list lags: shows none of them yet
+b3 = Bot(a, b.cfg)
+a.calls.clear()
+b3.running = True
+b3.adopt_handover()
+b3.cycle()
+a.open_orders = real_oo2
+check("handover: orders the lagging list doesn't show yet are taken from the note, never placed twice",
+      not a.sent("batch") and len(b3.my_orders) == 8, (a.sent("batch"), len(b3.my_orders)))
+a, b = make_bot()
+b.request_handover(); b.request_stop()
+check("a normal stop after a handover request cancels as usual", b.handover is False)
 a, b = make_bot()
 b.handover, b.exit_code = True, EXIT_KILLED
 a.orders[1] = {"id": 1, "exchangeId": "11", "side": "yes", "action": "buy", "priceLimit": 0.05, "quantity": 5, "open": True,

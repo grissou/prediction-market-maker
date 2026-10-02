@@ -3397,8 +3397,9 @@ class Bot:
         """Ctrl+C / kill only raises a flag. The loop stops touching the book, then shutdown()
         cancels everything. Cancelling inside the handler would race the cycle, which could post
         fresh orders right after the cancel. A second Ctrl+C forces an immediate exit."""
-        if not self.running:
+        if not self.running and not self.handover:
             raise KeyboardInterrupt
+        self.handover = False             # a plain stop always cancels, even after a handover request
         log.info("stop requested - finishing the current request, then cancelling all orders (Ctrl+C again to force)")
         self.running = False
 
@@ -3424,6 +3425,19 @@ class Bot:
             log.info("handover file is %.0f s old - too old, starting from a clean slate", age)
             return False
         log.info("handover: adopting the %s orders the previous run left resting", info.get("orders", "?"))
+        now_m = time.monotonic()
+        for r in info.get("resting") or []:
+            try:
+                o = Resting(int(r["id"]), str(r["eid"]), bool(r["bid"]), float(r["price"]), float(r["qty"]),
+                            parse_ts(r.get("expires")))
+            except (KeyError, TypeError, ValueError):
+                continue
+            self.my_orders[o.order_id] = o
+            self.recent_orders[o.order_id] = (o, now_m)      # trusted over a lagging list for the grace period
+            if r.get("placed"):
+                self.placed_qty[o.order_id], self.filled_qty[o.order_id] = float(r["placed"]), float(r["placed"]) - o.qty
+        for oid in info.get("recent_cancels") or []:
+            self.recent_cancels[int(oid)] = now_m
         self.orders_stale = True                  # first cycle reads the list; sync_orders takes them over
         return True
 
@@ -3782,12 +3796,23 @@ class Bot:
             return
         # An order write still in flight could land after the cancel-all and be left resting: drop the queued
         # ones, wait for those already sent, and cancel again below if any are still running after that.
-        self.writer.shutdown(wait=False, cancel_futures=True)
-        self.drain_writes(timeout=2 * self.cfg.request_timeout)
-        if self.handover and self.exit_code == 0:
+        handover = self.handover and self.exit_code == 0
+        # On a handover queued writes still go out (a queued pull must not be lost: the quotes stay resting).
+        self.writer.shutdown(wait=False, cancel_futures=not handover)
+        self.drain_writes(timeout=(4 if handover else 2) * self.cfg.request_timeout)
+        if handover:
             self.notes_dirty = True
             self.save_order_notes()                   # the next run attributes their fills
-            write_json(bot_path(self.cfg.handover_file), {"t": time.time(), "orders": len(self.my_orders)})
+            now_m = time.monotonic()
+            write_json(bot_path(self.cfg.handover_file), {
+                "t": time.time(), "orders": len(self.my_orders),
+                # Our own record: the new run trusts it like its own for recent_order_grace_seconds, so an order
+                # placed moments ago that the open-orders list doesn't show yet is never placed twice.
+                "resting": [{"id": o.order_id, "eid": o.eid, "bid": o.is_bid, "price": o.price, "qty": o.qty,
+                             "placed": self.placed_qty.get(oid), "expires": iso(o.expires) if o.expires else None}
+                            for oid, o in self.my_orders.items()],
+                "recent_cancels": [oid for oid, t in self.recent_cancels.items()
+                                   if now_m - t <= self.cfg.recent_order_grace_seconds]})
             log.info("handover: %d orders left resting for the next run (they expire within %.0f min)",
                      len(self.my_orders), self.cfg.order_ttl / 60)
             return
