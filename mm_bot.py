@@ -169,6 +169,16 @@ class Config:
     mark_frag_window_hours: float = 24.0  # ...sd over the last this many hours of snapshots (refreshed every 30 min)
     mark_frag_min_samples: int = 60       # ...fewer 10-min changes than this in the window -> no estimate, no cap
     mark_frag_floor_sd: float = 0.002     # ...an sd below 0.2c counts as 0.2c, so the limit never explodes
+    behind_best_size_enabled: bool = False   # behind-the-best sizing: an ADDING quote (the side growing |race-netted
+                                          #   position|) resting behind_best_ticks or more behind the best OTHER
+                                          #   trader's price on its side is sized x behind_best_size_factor (never
+                                          #   below behind_best_min_size). Round 2: P(fill in 10 min) 33% at the best,
+                                          #   6-8% one tick behind, 2-5% two+ behind, ~33k of cash locked in those.
+                                          #   Reducing side, empty sides and ref-only markets unchanged; a resting
+                                          #   full-size order stays (it is a size factor, see Quote.bid_max)
+    behind_best_ticks: int = 2            # ...at least this many ticks behind the best other price
+    behind_best_size_factor: float = 0.5  # ...the adding side's size factor then (times the other factors)
+    behind_best_min_size: int = 100       # ...never shrunk below this many shares (coverage and the first fill stay)
     mark_frag_total_max_cash: float = 2000.0  # ...sum over positions of |pos| x sd above this -> every adding side
                                           #   withdrawn (like the capital ceiling at factor 0) until below 80% of it.
                                           #   Only with mark_frag_enabled. 0 = no total cap
@@ -734,6 +744,10 @@ OVERRIDABLE = {
     "mark_frag_min_samples": (2, 100000),
     "mark_frag_floor_sd": (0.0005, 0.10),
     "mark_frag_total_max_cash": (0.0, 1000000.0),
+    "behind_best_size_enabled": (False, True),
+    "behind_best_ticks": (1, 20),
+    "behind_best_size_factor": (0.0, 1.0),
+    "behind_best_min_size": (0, 100000),
 }
 
 
@@ -1657,6 +1671,7 @@ class Quote:
     # cash / risk limit: the biggest order already resting that may stay (None = the size itself).
     bid_max: int | None = field(default=None, compare=False)
     ask_max: int | None = field(default=None, compare=False)
+    behind: bool = field(default=False, compare=False)   # behind-the-best sizing shrank an adding side (log / status)
 
 
 NO_QUOTE = Quote()
@@ -1814,7 +1829,7 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
                   bid_cap=None, ask_cap=None, kelly_p=None, bankroll=None, shift=0.0, order_size=None,
                   position_limit=None, min_edge=None, reduce_size=None, net_inv=None, age_hours=0.0,
                   adding_factor=1.0, bias_side=None, bias_edge=0.0, bias_size=1.0, unload_side=None,
-                  unload_edge=0.0, unload_size=None, adding_limit_factor=1.0, frag_limit=None):
+                  unload_edge=0.0, unload_size=None, adding_limit_factor=1.0, frag_limit=None, behind_best=True):
     """
     fv         fair YES probability
     inv        our net YES shares on THIS exchange (negative = net NO); drives the hard position limit
@@ -1848,6 +1863,8 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
                        (turnover control: a market whose position cannot turn); 1 = no change
     frag_limit         mark-fragility cap (Bot.mark_frag_limit_for): limit on |this exchange's position| on the side
                        that GROWS it only (bid when inv >= 0, ask when inv <= 0); the shrinking side is untouched
+    behind_best        False = no behind-the-best sizing here (ref-only markets: already small); see
+                       cfg.behind_best_size_enabled
     """
     bankroll = bankroll or DEFAULT_BANKROLL
     max_order_cash = cfg.max_order_cash_frac * bankroll
@@ -1996,6 +2013,19 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
             bid_size = min(bid_size, bid_size * adding_factor)
         if net <= 0:
             ask_size = min(ask_size, ask_size * adding_factor)
+    behind = False
+    if behind_best and cfg.behind_best_size_enabled and cfg.behind_best_size_factor < 1.0:
+        # Behind-the-best sizing: an adding quote resting behind_best_ticks+ behind the best other order rarely
+        # fills and locks cash; shrink it (floor behind_best_min_size, never growing it). Like adding_factor this
+        # leaves bid_max / ask_max alone, so a full-size order already resting is kept (hot-fix 2.2).
+        gap = cfg.behind_best_ticks * TICK - 1e-9
+        f, floor = max(0.0, cfg.behind_best_size_factor), cfg.behind_best_min_size
+        if net >= 0 and bid_size > 0 and best_bid is not None and best_bid - bid >= gap:
+            new = min(bid_size, max(bid_size * f, floor))
+            behind, bid_size = behind or new < bid_size, new
+        if net <= 0 and ask_size > 0 and best_ask is not None and ask - best_ask >= gap:
+            new = min(ask_size, max(ask_size * f, floor))
+            behind, ask_size = behind or new < ask_size, new
     bid_size, ask_size = max(0, int(bid_size)), max(0, int(ask_size))   # the API only takes whole shares
     bid_max, ask_max = max(bid_size, int(bid_max)), max(ask_size, int(ask_max))
 
@@ -2006,7 +2036,7 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
     bid_limit = min(bid_hi, floor_tick(best_ask - TICK)) if best_ask is not None else bid_hi
     ask_limit = max(ask_lo, ceil_tick(best_bid + TICK)) if best_bid is not None else ask_lo
     return Quote(bid if bid_size else None, bid_size, ask if ask_size else None, ask_size, bid_limit, ask_limit,
-                 bid_max if bid_max != bid_size else None, ask_max if ask_max != ask_size else None)
+                 bid_max if bid_max != bid_size else None, ask_max if ask_max != ask_size else None, behind)
 
 
 def exit_quote(fv, inv, best_bid, best_ask, cfg=CFG, bankroll=None, max_size=None):
@@ -2508,6 +2538,7 @@ class Ex:
     fl_tag: str = ""                      # that bias for the quote log line ("" = none active)
     turnover_dead: bool = False           # turnover control: holding a position in a market with too little flow
     turnover_tag: str = ""                # " dead" on the quote log line while turnover control changes the quote
+    bb_tag: str = ""                      # " bb" on the quote log line while behind-the-best sizing shrinks a side
 
 
 def busy(ex, now_m):
@@ -3071,6 +3102,7 @@ class Bot:
         self.health["fl_bias_markets"] = {k: sum(1 for x in self.ex.values() if x.fl_tag.startswith(f" fl:{k}"))
                                           for k in ("bid", "ask")}
         self.health["market_edge_markets"] = len(self.market_edge) if self.cfg.market_edge_enabled else 0
+        self.health["behind_best_markets"] = sum(1 for x in self.ex.values() if x.bb_tag)
         self.health.update(self.turnover_health(inv, fvs))
 
         # 8. Snapshot for later analysis (every record_seconds) -------------------------------------
@@ -3899,7 +3931,7 @@ class Bot:
         fv is what we quote around; book_fv is the tournament book's own price (for the Polymarket guard);
         ref_liquid says whether the Polymarket price is reliable enough to size positions with Kelly."""
         cfg = self.burst_cfg if self.burst else self.cfg
-        ex.fl_tag, ex.turnover_tag, ex.turnover_dead = "", "", False
+        ex.fl_tag, ex.turnover_tag, ex.turnover_dead, ex.bb_tag = "", "", False, ""
         ex.inv, ex.eff, ex.ref = inv.get(ex.eid, 0.0), eff.get(ex.eid, 0.0), ref
         hrs = self.hours_to_close(ex)
         if hrs * 60 <= cfg.stop_minutes_before_close:
@@ -3994,13 +4026,16 @@ class Bot:
                      else "")                         # (shown only while it changes the quote: not when unloading)
         u_side = None if reduce_only else self.unload_side(ex, now_m)   # reduce-only / flatten: stricter anyway
         u_size = int(self.unloads[ex.eid]["left"] * cfg.fast_unload_size_mult) if u_side else None
-        return compute_quote(fv, ex.inv, inv_for_quote, best_bid, best_ask, cfg, reduce_only, no_bid, no_ask,
+        q = compute_quote(fv, ex.inv, inv_for_quote, best_bid, best_ask, cfg, reduce_only, no_bid, no_ask,
                              bid_cap, ask_cap, kelly_p=kelly_p, bankroll=self.bankroll(),
                              shift=self.party_shift(ex, party_delta), order_size=planned, position_limit=headline_limit,
                              min_edge=edge, reduce_size=reduce_size, net_inv=ex.eff, age_hours=ex.age,
                              adding_factor=adding, bias_side=side, bias_edge=bias_edge, bias_size=bias_size,
                              unload_side=u_side, unload_edge=cfg.fast_unload_edge, unload_size=u_size,
-                             adding_limit_factor=adding_limit, frag_limit=frag_limit)
+                             adding_limit_factor=adding_limit, frag_limit=frag_limit,
+                             behind_best=ex.eid not in self.ref_only)
+        ex.bb_tag = " bb" if q.behind else ""
+        return q
 
     def update_size_plan(self, now_m, fvs):
         """Every size_plan_seconds: work out how many shares to quote in each market (see plan_sizes).
@@ -4149,7 +4184,7 @@ class Bot:
                  ex.label, f"{fv:.3f}" if fv is not None else "  -  ",
                  f" (ref {ex.ref:.3f})" if ex.ref is not None else "", ex.inv, ex.eff,
                  f" age {ex.age:.0f}h" if ex.inv and ex.age > self.cfg.skew_age_after_hours else "",
-                 fmt(q.bid, q.bid_size), fmt(q.ask, q.ask_size) + ex.fl_tag + ex.turnover_tag)
+                 fmt(q.bid, q.bid_size), fmt(q.ask, q.ask_size) + ex.fl_tag + ex.turnover_tag + ex.bb_tag)
         if not doomed and not new:
             return None
         # An order that must not stay (unsafe: beyond its limit price, a side we no longer want, or above the
