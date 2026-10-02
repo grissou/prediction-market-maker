@@ -1476,6 +1476,27 @@ M.alert = real_alert
 check("a long cycle keeps status.json fresh (running seconds + phase) and alerts once",
       st.get("cycle_running_seconds") == 30 and st.get("cycle_phase") == "sending orders" and len(alerts) == 1, (st.get("cycle_phase"), alerts))
 
+print("--- analyze (local files only)")
+d = tempfile.mkdtemp()
+dbp, fp = os.path.join(d, "m.sqlite"), os.path.join(d, "f.csv")
+db = sqlite3.connect(dbp)
+db.execute("CREATE TABLE snapshots (ts TEXT, mode TEXT, eid TEXT, label TEXT, best_bid REAL, best_ask REAL, fair_value REAL, "
+           "reference REAL, our_bid REAL, our_ask REAL, position REAL)")
+t0 = utcnow() - timedelta(hours=1)
+for k in range(40):                                        # fv 0.50 -> 0.54 over 40 min; our bid at the top half the time
+    db.execute("INSERT INTO snapshots VALUES (?,?,?,?,?,?,?,?,?,?,?)", (iso(t0 + timedelta(minutes=k)), "live", "11", "Rep Ohio",
+               0.49, 0.52, 0.50 + 0.001 * k, None, 0.49 if k % 2 else 0.48, 0.52, 0))
+db.commit(); db.close()
+with open(fp, "w", newline="") as f:
+    w = csv.writer(f); w.writerow(FillLogger.COLUMNS)
+    w.writerow([1, iso(t0), "11", 5, "bid", 100, 0.49, 0.49, 0.50, ""])
+    w.writerow([2, iso(t0), "11", 6, "?", 100, 0.49, "", "", ""])
+lines = analyze(fp, dbp)
+check("analyze: edge at quote (+1c), 5-min markout (+1.5c), P&L at latest fair value (+4.9), unmatched count",
+      "1 matched, 1 not matched" in lines[0] and "+1.00" in lines[1] and "5m  +1.50c" in lines[1] and "+5" in lines[1], lines[:2])
+check("analyze: time at the top of the book per market", "50%" in lines[3] and "Rep Ohio" in lines[3], lines[3:4])
+check("analyze runs without a snapshot file", analyze(fp, "")[0].startswith("fills: 1 matched"))
+
 print("--- parallel requests")
 a, b = make_bot()
 res = b.in_parallel(lambda x: 1 / x, [1, 0, 2])

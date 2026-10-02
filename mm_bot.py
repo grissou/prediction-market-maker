@@ -15,6 +15,7 @@ COMMANDS
     python mm_bot.py run --live       trade for real
     python mm_bot.py cancel           cancel every open order in the tournament
     python mm_bot.py report           spread-capture stats from fills.csv
+    python mm_bot.py analyze [hours]  per-market edge, markouts, P&L, time at the top, undercuts (local files only)
     python mm_bot.py summary          build the phone summary now and send it (test your ALERT_URL)
 
 ENVIRONMENT (set by `source .venv/bin/activate` on the Mac, or by a .env file next to this script)
@@ -339,6 +340,8 @@ class Config:
                                           #   only OVERRIDABLE settings, each checked; a removed key goes back to
                                           #   its default. Every change is logged. "" = off
     overrides_seconds: float = 30.0
+    analyze_daily_hour: int = -1          # send the first lines of `analyze` (last 24 h) to your phone daily at this
+                                          #   hour UTC (-1 = off)
     slow_cycle_alert_seconds: float = 120.0   # a cycle running this long: status.json says so and one alert is sent
 
     # --- FILES (relative names are kept in the bot's own folder) -----------------------------
@@ -1482,6 +1485,104 @@ def report(path):
     print(f"  edge    {s['edge_c']:+.2f} c/share   total {s['edge_total']:+.0f} SUSQies")
     print(f"  markout {s['markout_c']:+.2f} c/share   (fair value ~1 cycle after the fill)")
 
+MARKOUT_MINUTES = (1, 5, 30)
+
+
+def analyze(fills_path, db_path, hours=None, top=15):
+    """The `analyze` command: from fills.csv and market_data.sqlite only (no API requests). Lines of text:
+      - per market: fills, shares, edge at the quote (c/share: how far inside fair value we traded), markout
+        after 1/5/30 min (fair value then vs our price, c/share: negative = picked off), P&L marked at the
+        latest fair value;
+      - per market from the snapshots: share of the time our bid/ask was the best price ("at top"), and how
+        often a quote that was at the top was beaten by the next snapshot ("undercut", per hour quoted).
+    hours: only the last N hours."""
+    out = []
+    since = (utcnow() - timedelta(hours=hours)) if hours else None
+    fvs = defaultdict(list)                                  # eid -> [(time, fv)] from the snapshots
+    tops = defaultdict(list)                                 # eid -> [(time, bid at top, ask at top, quoted)]
+    labels = {}
+    if db_path and os.path.exists(db_path):
+        db = sqlite3.connect(db_path)
+        try:
+            for ts, eid, label, bb, ba, fv, ob, oa in db.execute(
+                    "SELECT ts, eid, label, best_bid, best_ask, fair_value, our_bid, our_ask FROM snapshots ORDER BY ts"):
+                t = parse_ts(ts)
+                if t is None or (since and t < since):
+                    continue
+                labels[eid] = label
+                if fv is not None:
+                    fvs[eid].append((t, fv))
+                tops[eid].append((t, ob is not None and bb is not None and abs(ob - bb) < 1e-9,
+                                  oa is not None and ba is not None and abs(oa - ba) < 1e-9, ob is not None or oa is not None))
+        except sqlite3.Error as e:
+            out.append(f"(snapshots unreadable: {e})")
+        finally:
+            db.close()
+
+    def fv_at(eid, t):
+        series = fvs.get(eid) or []
+        for tt, v in series:                                 # first snapshot at or after t
+            if tt >= t:
+                return v
+        return None
+
+    per = defaultdict(lambda: {"fills": 0, "shares": 0.0, "edge": 0.0, "edge_n": 0.0, "pnl": 0.0,
+                               **{f"m{m}": 0.0 for m in MARKOUT_MINUTES}, **{f"m{m}_n": 0.0 for m in MARKOUT_MINUTES}})
+    unmatched = 0
+    for r in read_fills(fills_path):
+        t = parse_ts(r.get("filled_at"))
+        if since and (t is None or t < since):
+            continue
+        eid, side = str(r.get("exchange_id")), r.get("our_side")
+        try:
+            qty = float(r.get("qty") or 0)
+            price = float(r.get("quote_price") or r.get("fill_price") or 0)
+        except ValueError:
+            continue
+        if side not in ("bid", "ask"):
+            unmatched += 1
+            continue
+        sign = 1 if side == "bid" else -1                    # +1 = we bought YES
+        m = per[eid]
+        m["fills"] += 1
+        m["shares"] += qty
+        if r.get("fv_at_quote") not in ("", None):
+            m["edge"] += sign * (float(r["fv_at_quote"]) - price) * qty
+            m["edge_n"] += qty
+        for mins in MARKOUT_MINUTES:
+            v = fv_at(eid, t + timedelta(minutes=mins)) if t else None
+            if v is not None:
+                m[f"m{mins}"] += sign * (v - price) * qty
+                m[f"m{mins}_n"] += qty
+        last = fvs[eid][-1][1] if fvs.get(eid) else None
+        if last is not None:
+            m["pnl"] += sign * (last - price) * qty
+    c = lambda m, k: f"{100 * m[k] / m[k + '_n']:+6.2f}" if m.get(k + "_n") else "    - "
+    out.append(f"fills: {sum(m['fills'] for m in per.values())} matched, {unmatched} not matched to a bot quote"
+               + (f" (last {hours:g} h)" if hours else ""))
+    tot = {k: sum(m[k] for m in per.values()) for k in ("shares", "edge", "edge_n", "pnl",
+                                                        *[f"m{x}" for x in MARKOUT_MINUTES], *[f"m{x}_n" for x in MARKOUT_MINUTES])}
+    out.append(f"all markets: {tot['shares']:.0f} shares, edge {c(tot, 'edge')}c, markout "
+               + " / ".join(f"{x}m {c(tot, f'm{x}')}c" for x in MARKOUT_MINUTES) + f", P&L at latest fair value {tot['pnl']:+.0f}")
+    out.append(f"{'market':26} {'fills':>5} {'shares':>8} {'edge c':>7} " + " ".join(f"{f'mk{x}m':>7}" for x in MARKOUT_MINUTES)
+               + f" {'P&L':>8} {'top bid':>7} {'top ask':>7} {'undercut/h':>10}")
+    rows = []
+    for eid in set(per) | set(tops):
+        m, snaps = per[eid], tops.get(eid, [])
+        quoted = [x for x in snaps if x[3]]
+        top_b = sum(x[1] for x in quoted) / len(quoted) if quoted else None
+        top_a = sum(x[2] for x in quoted) / len(quoted) if quoted else None
+        under = sum(1 for p, q in zip(snaps, snaps[1:]) if (p[1] and q[3] and not q[1]) or (p[2] and q[3] and not q[2]))
+        span_h = (quoted[-1][0] - quoted[0][0]).total_seconds() / 3600 if len(quoted) > 1 else 0
+        rows.append((m["pnl"], eid, m, top_b, top_a, under / span_h if span_h else None))
+    for pnl, eid, m, tb, ta, uh in sorted(rows, key=lambda r: r[0])[:top] + (
+            sorted(rows, key=lambda r: r[0])[-top:] if len(rows) > 2 * top else sorted(rows, key=lambda r: r[0])[top:]):
+        pct = lambda v: f"{100 * v:6.0f}%" if v is not None else "     - "
+        out.append(f"{labels.get(eid, eid)[:26]:26} {m['fills']:5d} {m['shares']:8.0f} {c(m, 'edge'):>7} "
+                   + " ".join(f"{c(m, f'm{x}'):>7}" for x in MARKOUT_MINUTES)
+                   + f" {m['pnl']:+8.0f} {pct(tb)} {pct(ta)} {uh if uh is None else round(uh, 1)!s:>10}")
+    return out
+
 # =============================================================================================
 # BOT - state, the cycle, risk, order management, main loop
 # =============================================================================================
@@ -1616,6 +1717,7 @@ class Bot:
         self.phase = "starting"           # what the bot is doing, for the status line
         self.selftest_passed = False
         self.cycle_started, self.cycle_alerted = None, False
+        self.last_analysis_day = None
         self.last_progress_write, self.last_slow_alert = -1e9, -1e9
         self.defaults = {k: getattr(cfg, k) for k in OVERRIDABLE}   # what a removed override goes back to
         self.overrides, self.overrides_mtime, self.last_overrides_check = {}, None, -1e9
@@ -3197,6 +3299,19 @@ class Bot:
         except OSError as e:
             log.warning("could not write status file: %s", e)
 
+    def maybe_daily_analysis(self):
+        """Optional daily phone message: the headline lines of `analyze` over the last 24 h (local files only)."""
+        hour, now = self.cfg.analyze_daily_hour, utcnow()
+        if hour < 0 or not self.api.live or now.hour != hour or self.last_analysis_day == now.date():
+            return
+        self.last_analysis_day = now.date()
+        try:
+            lines = analyze(bot_path(self.cfg.fills_csv), bot_path(self.cfg.record_file) if self.cfg.record_file else "",
+                            hours=24, top=3)
+            notify("\n".join(lines[:2] + [l[:60] for l in lines[3:]]), title="mm_bot daily analysis", tags="bar_chart")
+        except Exception as e:                # a report must never disturb trading
+            log.warning("daily analysis failed: %s", e)
+
     # ------------------------------------------------------------------------------ live settings
     def check_overrides(self, force=False):
         """Every overrides_seconds: re-read settings_override.json if it changed, apply what's valid, put back
@@ -3569,6 +3684,7 @@ class Bot:
                 t0 = time.monotonic()
                 try:
                     self.check_overrides()
+                    self.maybe_daily_analysis()
                     if t0 - self.last_reload > self.cfg.market_reload_seconds:
                         self.load_markets()
                     self.cycle()
@@ -3679,6 +3795,10 @@ def main():
         print(json.dumps(orders[:20], indent=2))
     elif cmd == "cancel":
         print("done" if api.cancel_all(api.tournament()["id"]) else "some orders may remain - check UI")
+    elif cmd == "analyze":
+        hours = float(sys.argv[2]) if len(sys.argv) > 2 else None
+        print("\n".join(analyze(bot_path(CFG.fills_csv), bot_path(CFG.record_file), hours)))
+        return
     elif cmd == "summary":
         t = api.tournament()
         title, message = build_summary(api, bot_path(CFG.fills_csv), float(t.get("initialBalance") or DEFAULT_BANKROLL))
