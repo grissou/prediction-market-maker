@@ -311,6 +311,8 @@ class Config:
     # 60-s snapshots: ask-sum < 0.98 in 853 race-minutes/day (2.5%). The pair unwinder sells the set later.
     arb_two_sided: bool = True
     arb_min_profit_buy: float = 0.015     # ask-sum <= 0.985. Not done in reduce-only or the pre-close window
+    arb_buy_min_ref_sum: float = 0.99     # ...and only when every leg has a LIQUID Polymarket price and those raw prices
+                                          #   add up to at least this (an unlisted outsider shows up as a shortfall)
     arb_buy_min_sum: float = 0.90         # ...nor when the asks add up to less than this: that more likely means
                                           #   the market prices a winner OUTSIDE the listed parties (e.g. an
                                           #   independent with no market of its own), when a set pays nothing
@@ -628,6 +630,7 @@ OVERRIDABLE = {
     "arb_two_sided": (False, True),
     "arb_min_profit_buy": (0.005, 0.20),
     "arb_buy_min_sum": (0.5, 1.0),
+    "arb_buy_min_ref_sum": (0.8, 1.0),
     "pair_unwind_enabled": (False, True),
     "pair_unwind_min_profit": (0.0, 0.10),
     "pair_unwind_max_frac": (0.0, 0.10),
@@ -4256,12 +4259,13 @@ class Bot:
                           [cfg.max_position_frac * bank + inv.get(e, 0.0) for e in members] +   # selling lowers position
                           [cfg.max_order_cash_frac * bank / max(1 - p, TICK) for p, _ in bids.values()]))  # cash per order
             return "arb", "sell", bids, qty
-        fv_sum = sum(fvs.get(e) or 0.0 for e in members) if all(fvs.get(e) is not None for e in members) else None
-        if (cfg.arb_two_sided and asks and not self.global_reduce
-                and cfg.arb_buy_min_sum - 1e-9 <= sum(p for p, _ in asks.values()) <= 1 - cfg.arb_min_profit_buy + 1e-9
-                # the set pays 1 only if a LISTED party wins: our fair values (70% Polymarket) must add up to
-                # about 1 too, or the cheap asks price an unlisted outsider (110 of 113 races list Dem + Rep only)
-                and fv_sum is not None and fv_sum >= 1 - cfg.arb_min_profit_buy / 2 - 1e-9):
+        # The set pays 1 only if a LISTED party wins. Book fair values are normalised to sum to 1, so they cannot
+        # see an unlisted outsider: every leg needs a LIQUID Polymarket price and those RAW prices must add up to
+        # at least arb_buy_min_ref_sum (owner, 2 Oct 11:25; 110 of 113 races list Dem + Rep only).
+        refs_ok = (all(e in self.cur_liquid and self.cur_refs.get(e) is not None for e in members)
+                   and sum(self.cur_refs[e] for e in members) >= cfg.arb_buy_min_ref_sum - 1e-9)
+        if (cfg.arb_two_sided and asks and not self.global_reduce and refs_ok
+                and cfg.arb_buy_min_sum - 1e-9 <= sum(p for p, _ in asks.values()) <= 1 - cfg.arb_min_profit_buy + 1e-9):
             qty = int(min([cfg.arb_max_frac * bank] +
                           [size for _, size in asks.values()] +                            # only what's offered there
                           [cfg.max_position_frac * bank - inv.get(e, 0.0) for e in members] +   # buying raises position

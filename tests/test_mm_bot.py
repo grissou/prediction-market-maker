@@ -841,15 +841,34 @@ b.cycle()
 check("unwind skipped when the risk guard refuses it", a.inv == {"11": 500, "12": 500} and b.unwinds_total == 0, a.inv)
 
 print("--- two-sided arbitrage (buy every leg when the asks add up to <= 0.985)")
+# A set pays 1 only if a LISTED party wins: every leg needs a liquid Polymarket price and the RAW prices must add
+# up to >= arb_buy_min_ref_sum (0.99). Book fair values are normalised to 1, so they cannot see an outsider.
+ohio_refs = lambda r, d, spread=0.01: FakeRefs({"Ohio Senate|Republican": r, "Ohio Senate|Democratic": d,
+                                                "Utah Senate|Republican": 0.52, "Utah Senate|Democratic": 0.48}, spread=spread)
 a, b = unwind_bot({}, unwind_books((0.50, 300), (0.30, 200), a11=(0.58, 300), a12=(0.40, 200)))
 b.cycle()
-check("asks add up to 0.98 -> bought 200 YES on both legs (the ask size)", a.inv == {"11": 200, "12": 200}, a.inv)
+check("asks add up to 0.98 but NO Polymarket prices -> nothing bought (the guard needs liquid references)",
+      not a.inv and b.arbs_total == 0, a.inv)
+a, b = unwind_bot({}, unwind_books((0.50, 300), (0.30, 200), a11=(0.58, 300), a12=(0.40, 200)))
+b.refs = ohio_refs(0.56, 0.39)                            # raw references add up to 0.95: an outsider is priced
+b.cycle()
+check("asks 0.98, references add up to 0.95 -> nothing bought (unlisted candidate)", not a.inv and b.arbs_total == 0, a.inv)
+a, b = unwind_bot({}, unwind_books((0.50, 300), (0.30, 200), a11=(0.58, 300), a12=(0.40, 200)))
+b.refs = ohio_refs(0.56, 0.44, spread=None)               # last-trade-only Polymarket: not liquid
+b.cycle()
+check("asks 0.98, references 1.00 but one leg is not liquid -> nothing bought", not a.inv and b.arbs_total == 0, a.inv)
+a, b = unwind_bot({}, unwind_books((0.50, 300), (0.30, 200), a11=(0.58, 300), a12=(0.40, 200)))
+b.refs = ohio_refs(0.56, 0.44)
+b.cycle()
+check("asks add up to 0.98, liquid references add up to 1.00 -> bought 200 YES on both legs (the ask size)",
+      a.inv == {"11": 200, "12": 200}, a.inv)
 check("counted as an arbitrage", b.arbs_total == 1 and b.unwinds_total == 0, (b.arbs_total, b.unwinds_total))
 check("no buy leftovers resting on the Ohio legs", not a.ours("11") and not a.ours("12"), (a.ours("11"), a.ours("12")))
 b.cycle()
 arb_buy_rows = [r for r in read_fills(b.cfg.fills_csv) if r["exchange_id"] in ("11", "12")]
 check("buy-side fills logged as our bids", sorted(r["our_side"] for r in arb_buy_rows) == ["bid", "bid"], arb_buy_rows)
 a, b = unwind_bot({}, unwind_books((0.50, 300), (0.30, 200), a11=(0.59, 300), a12=(0.40, 200)))
+b.refs = ohio_refs(0.56, 0.44)
 b.cycle()
 check("asks add up to 0.99 -> nothing bought", not a.inv and b.arbs_total == 0, a.inv)
 a, b = unwind_bot({}, unwind_books((0.50, 300), (0.30, 200), a11=(0.58, 300), a12=(0.40, 200)), arb_two_sided=False)
@@ -869,6 +888,7 @@ b.cycle()
 check("our own ask at the top is excluded from the sum (others' 1.00 -> no buy)",
       not a.inv.get("11") and not a.inv.get("12") and b.arbs_total == 0, a.inv)
 a, b = unwind_bot({}, unwind_books((0.50, 300), (0.30, 200), a11=(0.58, 300), a12=(0.40, 200)))
+b.refs = ohio_refs(0.56, 0.44)
 b.cycle()
 a.books.update(unwind_books((0.605, 300), (0.40, 200), a11=(0.70, 300), a12=(0.55, 200)))
 b.arb_cooldown.clear()
