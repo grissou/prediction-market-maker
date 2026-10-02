@@ -441,5 +441,5 @@ S1, 8 seeds x 3 h quiet, paired seeds (raw: `tests/live_sim_round4_savers_S1_qui
   so S2 would cost ~58 CPU-min against the 26 CPU-min cap. Total used: ~18 CPU-min (S1 + a 2 x 0.25 h smoke).
 
 Recommended defaults: **both OFF** (neither passed S2, which was not run). If the owner wants writes back now, (b) is the
-better candidate (3 se fewer writes, P&L within noise); confirm on 16 x 6 quiet first (~16 CPU-min for base + 1 variant at
-the measured cost would really be ~47; 8 x 6 ~23).
+better candidate (3 se fewer writes, P&L within noise); confirm on 16 x 6 quiet first. At the measured cost a base +
+1 variant run is ~47 CPU-min at 16 x 6, ~23 at 8 x 6 (not the 16 planned).
