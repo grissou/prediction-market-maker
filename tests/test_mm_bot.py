@@ -1358,6 +1358,10 @@ new21 = [x for x in a.ours("21") if x not in before["21"]]
 check("...e.g. Utah: no new orders there", not new21, (before["21"], a.ours("21")))
 moved = [x for x in a.ours("11") if x not in before["11"]]
 check("burst: top markets repriced at half size", moved and all(n == 50 for _, _, n in moved), (before["11"], a.ours("11")))
+b.cancel("22", [o for o in b.my_orders.values() if o.eid == "22"], whole_exchange=True)
+b.feed.push(dirty={"22"}); b.cycle()
+check("burst: outside the top markets an EMPTY side still gets a quote, at reduced size",
+      len(a.ours("22")) == 2 and all(n == 50 for _, _, n in a.ours("22")), a.ours("22"))
 b.update_burst = real_ub
 b.write_log.clear(); b.burst_calm_since = time.monotonic() - 121
 b.update_burst(time.monotonic())
@@ -1531,6 +1535,18 @@ a.orders[1] = {"id": 1, "exchangeId": "11", "side": "yes", "action": "buy", "pri
                "expirationDate": iso(utcnow() + timedelta(minutes=20))}
 b.shutdown()
 check("kill switch / fatal exits always cancel, even after a handover request", not a.orders)
+a, b = make_bot(); b.cycle()
+real_pos = a.positions
+a.positions = lambda: (_ for _ in ()).throw(ApiError(409, "CONFLICT", "Tournament holdings cannot be valued"))
+b.orders_stale = True
+logging.disable(logging.CRITICAL)
+try:
+    b.cycle(); ok = True
+except ApiError:
+    ok = False
+logging.disable(logging.NOTSET)
+a.positions = real_pos
+check("positions 409 'holdings cannot be valued' (day one 16:30): the cycle goes on with the last read", ok and b.orders_stale)
 
 print("--- parallel requests")
 a, b = make_bot()
