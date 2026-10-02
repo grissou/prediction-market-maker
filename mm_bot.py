@@ -121,6 +121,15 @@ class Config:
     worst_case_backstop_frac: float = 0.69  # with "correlated": the old sum-of-maxima still forces reduce-only above
                                             #   69% of account value (~70k on 2026-10-02, the owner's choice; a
                                             #   backstop that no longer binds at 30%)
+    reduce_only_hysteresis: float = 0.03  # once in reduce-only, leave only below max_worst_case_frac - this (and the
+                                          #   backstop - this): risk hovering at 30% used to flip reduce-only every
+                                          #   cycle, each flip pulling (then re-placing) a side on every market held.
+                                          #   0 = no hysteresis (the old behaviour)
+    pulls_cancel_all_over: int = 25       # more pulls than this in one cycle (or more than the writes left this
+                                          #   minute, when that's also more than re-placing every quote costs): one
+                                          #   tournament-wide cancel-all (1 write) instead of one DELETE each; what
+                                          #   should rest is re-placed next cycle in batches. 0 = off. Not with
+                                          #   ONLY_EXCHANGES (its cancel-all is one write per exchange anyway)
     # Sizes below are FRACTIONS OF ACCOUNT VALUE (0.01 = 1%), recalculated as the account changes, so the
     # bot sizes up after gains and down after losses. "shares" = contracts that each pay up to 1.
     sizing_step_frac: float = 0.05        # ...but the account value they're a fraction of only moves in steps: it's
@@ -148,6 +157,12 @@ class Config:
     exit_max_slippage: float = 0.03            # ...but never more than 3c worse than fair value
     stop_minutes_before_close: float = 15.0    # nothing at all (orders cancelled)
     max_failed_cycles: int = 3            # this many API-error cycles in a row -> cancel everything until healthy
+    positions_stale_max_cycles: int = 3   # positions answering 409 "holdings cannot be valued": the last read is
+    positions_stale_max_seconds: float = 120.0  # reused for at most this many cycles in a row OR this long, whichever
+                                          #   comes first; then the cycle fails (an API error: after max_failed_cycles
+                                          #   of those every quote is pulled until positions read again), because
+                                          #   fills keep landing while inventory, limits and reduce-only stay frozen.
+                                          #   0 = no limit on that count (both 0 = reuse forever, the old behaviour)
 
     # --- QUOTING -----------------------------------------------------------------------------
     min_edge: float = 0.01                # never quote closer than this to our reservation price
@@ -299,6 +314,10 @@ class Config:
                                           #   our limit price); unsafe ones, pulls and expiries always go
     churn_max_reprices: int = 4           # a side repriced this many times within churn_window_seconds stops
     churn_window_seconds: float = 60.0    #   chasing: its order stays while safe (no ping-pong with another bot)
+    churn_count_sent: bool = True         # count a reprice toward churn_max_reprices only when its cancel is actually
+                                          #   sent (False = when planned, as before: a change deferred by the request
+                                          #   budget or dropped by burst mode still counted, so a side could be held
+                                          #   off target for up to churn_window_seconds without ever repricing)
     urgent_ref_move: float = 0.005        # Polymarket moved this much since the last reading: that market's changes
                                           #   are sent first (stale quotes get picked off by the fastest bot)
 
@@ -392,6 +411,12 @@ class Config:
     handover_file: str = "handover.json"        # written by a handover stop (SIGUSR1): the next start adopts the
     handover_max_age: float = 300.0             #   orders left resting instead of cancelling them, if within this
                                                 #   many seconds (else: clean slate as usual)
+    handover_exit_max_seconds: float = 150.0    # a handover stop that hasn't exited this long after SIGUSR1 exits at
+                                                #   once (exit 0): finishing the cycle, the 60 s write drain, then
+                                                #   queued writes on the writer threads (each up to ~4 x 15 s plus the
+                                                #   write-budget wait) had no bound. Writes still running are
+                                                #   abandoned: the next run re-reads the open-orders list (and without
+                                                #   a handover file starts from a clean slate). 0 = no cap
     record_file: str = "market_data.sqlite"     # snapshots for tuning later ("" = off)
     record_seconds: float = 60.0          # one snapshot of every market this often (~15 MB a day)
     record_books: bool = True             # also record OTHER traders' top book levels (with sizes) whenever a downloaded
@@ -434,6 +459,12 @@ OVERRIDABLE = {
     "burst_timeouts": (1, 100), "burst_calm_seconds": (0.0, 3600.0), "burst_markets": (1, 300),
     "burst_size_factor": (0.05, 1.0), "burst_extra_edge": (0.0, 0.05),
     "slow_cycle_alert_seconds": (10.0, 3600.0), "summary_every_hours": (0, 24),
+    "churn_count_sent": (False, True),
+    "positions_stale_max_cycles": (0, 100),
+    "positions_stale_max_seconds": (0.0, 3600.0),
+    "handover_exit_max_seconds": (0.0, 600.0),
+    "reduce_only_hysteresis": (0.0, 0.1),
+    "pulls_cancel_all_over": (0, 500),
 }
 
 
@@ -1734,10 +1765,17 @@ def busy(ex, now_m):
 class Change:
     """What one exchange needs this cycle: orders to cancel first (all of them with whole=True), then new ones.
     key orders the work: pulls first, then party-control markets, then the biggest quotes."""
-    __slots__ = ("ex", "doomed", "whole", "new", "key")
+    __slots__ = ("ex", "doomed", "whole", "new", "key", "count")
 
-    def __init__(self, ex, doomed, whole, new, key):
+    def __init__(self, ex, doomed, whole, new, key, count=True):
         self.ex, self.doomed, self.whole, self.new, self.key = ex, doomed, whole, new, key
+        self.count = count            # its cancels count as reprices (churn control) once sent
+
+    def reprice_sides(self):
+        """The sides this change cancels resting orders on (what churn control counts as a reprice)."""
+        if not self.count:
+            return []
+        return [side for side, is_bid in (("bid", True), ("ask", False)) if any(o.is_bid == is_bid for o in self.doomed)]
 
 
 class Write:
@@ -1776,6 +1814,9 @@ class Bot:
         self.calib_votes = []             # recent "add"/"ignore" verdicts while auto-detecting
         self.failed_cycles = 0
         self.pulled_after_errors = False
+        self.pos_fallbacks = 0            # cycles in a row on the last positions read (409, see cycle)
+        self.pos_fallback_since = None    # when that run of 409s started (monotonic)
+        self.pos_fallback_failing = False # ...and it went on too long: cycles fail until positions read again
         self.error_alerted = False        # one phone alert per outage, plus one when it ends
         self.last_reload = 0.0
         self.last_equity = None           # latest account value (read every slow_poll_seconds)
@@ -1830,6 +1871,7 @@ class Bot:
         self.cycle_started, self.cycle_alerted = None, False
         self.last_analysis_day = None
         self.handover = False             # SIGUSR1: stop without cancelling (see request_handover)
+        self.handover_timer = None        # ...and its exit deadline (see handover_deadline)
         self.last_progress_write, self.last_slow_alert = -1e9, -1e9
         self.defaults = {k: getattr(cfg, k) for k in OVERRIDABLE}   # what a removed override goes back to
         self.overrides, self.overrides_mtime, self.last_overrides_check = {}, None, -1e9
@@ -2004,11 +2046,16 @@ class Bot:
                 self.cached_pos = f_pos.result()
             except ApiError as e:
                 # ...except day one's 409 "holdings cannot be valued" (a market without a valuation price):
-                # positions only change through fills, so the last good read is fine for this cycle.
+                # positions only change through fills, so the last good read is fine for a cycle or two.
                 if e.status != 409 or self.cached_pos is None:
                     raise
-                log.warning("positions unavailable (%s) - using the last read for this cycle", e)
+                self.positions_fallback(e, now_m)     # raises once the last read is too old to trade on
                 pos_failed = True
+            else:
+                if self.pos_fallbacks:
+                    log.warning("positions readable again after %d cycles (%.0f s) on an old read",
+                                self.pos_fallbacks, now_m - self.pos_fallback_since)
+                self.pos_fallbacks, self.pos_fallback_since, self.pos_fallback_failing = 0, None, False
         if read_orders:
             self.cached_orders = f_orders.result()
             self.orders_stale = False
@@ -2084,14 +2131,19 @@ class Bot:
         eff = self.effective_inventory(inv)
         worst = self.total_worst_case(inv, fvs)
         party_delta = sum(PARTY_SIGN.get(ex.party, 0) * inv.get(eid, 0.0) for eid, ex in self.ex.items())
+        # Hysteresis: once in reduce-only, both caps are reduce_only_hysteresis lower until it has been left.
+        hyst = min(cfg.reduce_only_hysteresis, cfg.max_worst_case_frac / 2) if self.global_reduce else 0.0
         if cfg.risk_model == "correlated":
             # never above the sum of maxima, which is a hard bound (for a few big positions 3 sd exceeds it)
             risk = min(worst, self.settlement_risk(inv, fvs, party_delta))
-            global_reduce = bool(equity) and (risk > cfg.max_worst_case_frac * equity
-                                              or worst > cfg.worst_case_backstop_frac * equity)
+            global_reduce = bool(equity) and (risk > (cfg.max_worst_case_frac - hyst) * equity
+                                              or worst > (cfg.worst_case_backstop_frac - hyst) * equity)
         else:
             risk = worst
-            global_reduce = bool(equity) and worst > cfg.max_worst_case_frac * equity
+            global_reduce = bool(equity) and worst > (cfg.max_worst_case_frac - hyst) * equity
+        if global_reduce != self.global_reduce:
+            log.warning("%s reduce-only: risk %.0f, worst case %.0f, account %s", "ENTERING" if global_reduce
+                        else "leaving", risk, worst, f"{equity:.0f}" if equity is not None else "?")
         self.global_reduce = global_reduce
         if full:                                  # summary line on full checks only (event cycles can be every 2 s)
             log.info("%s | account %s (locked in orders %.0f, %s) | worst-case loss %.0f (risk %.0f)%s | party delta %+.0f | "
@@ -2190,6 +2242,27 @@ class Bot:
                     liquid.add(eid)
         return refs, liquid
 
+    def positions_fallback(self, e, now_m):
+        """Positions answered 409: reuse the last read, but only for positions_stale_max_cycles cycles in a row or
+        positions_stale_max_seconds, whichever first. Fills keep landing meanwhile, so inventory, position limits,
+        skew, reduce-only and the risk model would all run on a frozen inventory; past the limit this re-raises,
+        the cycle fails and on_cycle_error pulls every quote (after max_failed_cycles) until positions read again.
+        Logged when the run of 409s starts and when it ends (not every cycle)."""
+        cfg = self.cfg
+        if not self.pos_fallbacks:
+            self.pos_fallback_since = now_m
+            log.warning("positions unavailable (%s) - using the last read (at most %d cycles / %.0f s)",
+                        e, cfg.positions_stale_max_cycles, cfg.positions_stale_max_seconds)
+        self.pos_fallbacks += 1
+        age = now_m - self.pos_fallback_since
+        if ((cfg.positions_stale_max_cycles and self.pos_fallbacks > cfg.positions_stale_max_cycles)
+                or (cfg.positions_stale_max_seconds and age >= cfg.positions_stale_max_seconds)):
+            if not self.pos_fallback_failing:
+                self.pos_fallback_failing = True
+                log.error("positions still unavailable after %d cycles (%.0f s) - failing cycles (quotes are "
+                          "pulled) until they read again", self.pos_fallbacks - 1, age)
+            raise e
+
     def thin_book_prices(self, fvs, refs, liquid, now_m):
         """R5: markets whose book is too thin for a depth-checked price (fair_value None) but that have a
         liquid Polymarket price get fv = Polymarket, if the tournament's raw best bid/ask (other traders,
@@ -2222,27 +2295,6 @@ class Bot:
         self.ref_moved = {e for e, ex in self.ex.items() if f"{ex.group}|{ex.party}" in moved}
         for e in self.ref_moved:
             self.ex[e].ref_moved_at = time.monotonic()
-
-    def thin_book_prices(self, fvs, refs, liquid, now_m):
-        """R5: markets whose book is too thin for a depth-checked price (fair_value None) but that have a
-        liquid Polymarket price get fv = Polymarket, if the tournament's raw best bid/ask (other traders,
-        any size, verified recently) are two-sided, not wider than max_spread_for_fv, and their mid is
-        within ref_only_max_gap of Polymarket. Fills fvs in place; returns the set of those eids."""
-        cfg, out = self.cfg, set()
-        for eid, ex in self.ex.items():
-            if fvs.get(eid) is not None or eid not in liquid or eid not in refs or not ex.book:
-                continue
-            if now_m - ex.verified >= cfg.book_stale:
-                continue
-            b = ex.book
-            if not b.get("bids") or not b.get("asks"):
-                continue
-            bb, ba = b["bids"][0]["price"], b["asks"][0]["price"]
-            if ba <= bb or ba - bb > cfg.max_spread_for_fv or abs((bb + ba) / 2 - refs[eid]) > cfg.ref_only_max_gap:
-                continue
-            fvs[eid] = refs[eid]
-            out.add(eid)
-        return out
 
     def reference_jump_guard(self, now_m):
         """After each new Polymarket reading, pull quotes on any market whose Polymarket price moved
@@ -2630,7 +2682,7 @@ class Bot:
         pulling orders is always allowed, unless a cancel is already on its way."""
         if busy(ex, now_m):
             if q.bid is None and q.ask is None and resting and not ex.cancelling:
-                return Change(ex, resting, True, [], self.change_key(ex, pull=True, reprice=True))
+                return Change(ex, resting, True, [], self.change_key(ex, pull=True, reprice=True), count=False)
             return None
 
         bids = [o for o in resting if o.is_bid]
@@ -2647,9 +2699,10 @@ class Bot:
                 fix_ask = False
         if not (fix_bid or fix_ask):
             return None                   # book already matches: keep our queue position
-        for side, fix, rest in (("bid", fix_bid, bids), ("ask", fix_ask, asks)):
-            if fix and rest:
-                ex.reprices.setdefault(side, deque()).append(now_m)
+        if not self.cfg.churn_count_sent:            # old behaviour: counted when planned (see count_reprices)
+            for side, fix, rest in (("bid", fix_bid, bids), ("ask", fix_ask, asks)):
+                if fix and rest:
+                    ex.reprices.setdefault(side, deque()).append(now_m)
 
         if self.burst and ex.eid not in self.burst_set and not critical:
             # Burst mode, not a top market: no reprices. Keep what rests while it's still safe (price inside the
@@ -2706,6 +2759,12 @@ class Bot:
             hist.popleft()
         return young or len(hist) >= cfg.churn_max_reprices
 
+    def count_reprices(self, ch, now_m):
+        """Churn control: this change's cancels are being sent now - count them as reprices of their sides."""
+        if self.cfg.churn_count_sent and ch is not None:
+            for side in ch.reprice_sides():
+                ch.ex.reprices.setdefault(side, deque()).append(now_m)
+
     def change_key(self, ex, pull, reprice=False):
         """Sending order: pulls first, then the party-control markets, then quotes for empty sides (cheap: a
         share of one batch), then reprices (a cancel each), biggest quotes first within each."""
@@ -2719,6 +2778,7 @@ class Bot:
         ch = self.plan_change(ex, q, resting, fv, now, now_m)
         if ch is None:
             return []
+        self.count_reprices(ch, now_m)
         if ch.doomed and not self.cancel(ex.eid, ch.doomed, whole_exchange=ch.whole):
             log.warning("%s: could not confirm cancels - retrying next cycle", ex.label)
             return []                     # never stack new quotes on top of old ones
@@ -2766,6 +2826,8 @@ class Bot:
         side). The cycle waits at most write_wait_seconds; writes still running then carry on in the
         background, their exchanges are left alone (Ex.writes) and the results are applied next cycle."""
         cfg = self.cfg
+        if self.pull_storm(changes):
+            return
         deadline = time.monotonic() + cfg.write_wait_seconds
         changes = sorted(changes, key=lambda c: c.key)
         # Within the request budget, keeping write_read_reserve back so reads (positions, orders, books) never
@@ -2785,6 +2847,9 @@ class Bot:
             log.info("request budget: %d of %d order changes deferred to the next cycle",
                      len(changes) - len(kept), len(changes))
         changes = kept
+        now_m = time.monotonic()
+        for ch in changes:
+            self.count_reprices(ch, now_m)        # only what is sent counts (not what the budget deferred)
         waiting = set()
         for ch in changes:
             if ch.doomed:
@@ -2802,6 +2867,34 @@ class Bot:
             wait([w.future for w in self.writes], timeout=left, return_when=FIRST_COMPLETED)
             self.progress("waiting for order writes")
         self.harvest_writes()
+
+    def pull_storm(self, changes):
+        """Many pulls at once (reduce-only switching on pulls a side on every market held; pulls bypass the write
+        budget, so ~70 DELETEs used to take ~2.4 min of a 30/min budget, every write behind them waiting): send
+        ONE tournament-wide cancel-all instead and plan again next cycle, which re-places what should rest in
+        batches. True = done that (send nothing else this cycle). Only when it's clearly cheaper: more pulls
+        than pulls_cancel_all_over, or more than the writes left this minute AND than re-placing every quote
+        would cost. Never while the self-test runs (its orders would vanish under it) or with ONLY_EXCHANGES.
+        cancel_everything forgets our orders only once the cancel-all is confirmed (else orders_stale: re-read)."""
+        cfg = self.cfg
+        if not (self.api.live and cfg.pulls_cancel_all_over > 0) or cfg.only_exchanges or self.selftest_future:
+            return False
+        pulls = sum(1 if c.whole else len(c.doomed) for c in changes if c.key[0] == 0 and c.doomed)
+        if not pulls:
+            return False
+        left = getattr(self.api, "writes_left", lambda: 10 ** 6)()
+        replace = 1 + math.ceil(len(self.my_orders) / cfg.batch_size)   # this cancel-all + re-placing everything
+        if not (pulls > cfg.pulls_cancel_all_over or (pulls > left and pulls > replace)):
+            return False
+        log.warning("%d pulls planned (%d writes left this minute) - one cancel-all instead; what should rest "
+                    "is re-placed next cycle", pulls, left)
+        try:
+            if not self.cancel_everything():
+                log.warning("cancel-all instead of pulls: not confirmed - re-reading our orders next cycle")
+        except ApiError as e:                     # fall back to the pulls themselves: they reduce risk
+            log.error("cancel-all instead of %d pulls failed (%s) - sending the pulls", pulls, e)
+            return False
+        return True
 
     def send_orders(self, changes):
         """New orders of these changes in batches of batch_size, in the order given; party-control markets get
@@ -3623,6 +3716,28 @@ class Bot:
         log.info("handover requested - stopping without cancelling; the next start adopts the resting orders")
         self.handover = True
         self.running = False
+        cap = self.cfg.handover_exit_max_seconds
+        if cap > 0 and self.handover_timer is None:
+            self.handover_timer = threading.Timer(cap, self.handover_deadline, args=(cap,))
+            self.handover_timer.daemon = True
+            self.handover_timer.start()
+
+    def handover_deadline(self, cap):
+        """Timer thread, handover_exit_max_seconds after a handover request: if the process is still here, exit
+        now, so the deploy script (which waits for the old bot to stop) can start the new one. Only while it is
+        still a handover (a plain stop or the kill switch since then must cancel; they're never cut short)."""
+        if not (self.handover and self.exit_code == 0):
+            return
+        log.error("handover: still running %.0f s after the request - exiting now (writes still in flight are "
+                  "abandoned; the next run re-reads the open-orders list)", cap)
+        for h in logging.getLogger().handlers + log.handlers:
+            try:
+                h.flush()
+            except Exception:
+                pass
+        self.hard_exit(0)
+
+    hard_exit = staticmethod(os._exit)    # no interpreter clean-up: it would wait for the writer threads
 
     def adopt_handover(self):
         """At start: True if the previous run handed over recently (its orders are ours to manage, not cancel)."""
@@ -3797,6 +3912,9 @@ class Bot:
                 self.cfg.order_ttl, self.cfg.refresh_before_expiry = ttl, ttl / 5
             log.info("self-test passed: orders, sell->NO conversion, expiry and cancel all behave as expected")
             self.selftest_passed = True
+            # No test runs there any more: that exchange is an ordinary one again (lost-order recovery may lift
+            # its hold early; a whole-exchange cancel there no longer bumps cancel_gen).
+            self.selftest_eid = None
             return True
         if verdict == "busy":
             waited = time.monotonic() - (self.selftest_started or time.monotonic())
@@ -3916,8 +4034,12 @@ class Bot:
                 alert(f"{what} - pulling all quotes until cycles succeed again")
                 self.error_alerted = True
             try:
-                self.cancel_everything()
-                self.pulled_after_errors = True
+                # Only "pulled" once the cancel-all reports nothing left: a partial one (207 with orders still
+                # resting) is tried again on the next failed cycle instead of giving up for the whole outage.
+                if self.cancel_everything():
+                    self.pulled_after_errors = True
+                else:
+                    log.error("cancel-all left orders resting - trying again on the next failed cycle")
             except Exception as e:        # never let the error handler itself crash the bot
                 log.error("cancel-all failed too (%s) - orders expire within %.0f min anyway", e, self.cfg.order_ttl / 60)
 

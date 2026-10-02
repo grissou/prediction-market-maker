@@ -631,6 +631,14 @@ b.run()
 M.alert = real_alert
 check("...and its result is picked up once it's in: passed, test orders gone", b.selftest_passed and
       not [o for o in a.orders.values() if o["quantity"] == 1], cycles)
+check("F8: a passed self-test clears selftest_eid (that exchange is ordinary again)", b.selftest_eid is None)
+a, b = make_bot()
+b.selftest_eid = test_eid = b.selftest_start()
+b.selftest_finish(test_eid, ("passed", [], b.cfg.order_ttl))
+gen = b.cancel_gen
+b.cancel(test_eid, [], True)
+check("F8: after a pass, a whole-exchange cancel on the old test exchange does not bump cancel_gen",
+      b.selftest_eid is None and b.cancel_gen == gen, (b.selftest_eid, gen, b.cancel_gen))
 
 a, b = make_bot()
 a.batch_error = ApiError(409, "REQUEST_IN_FLIGHT", "in flight")
@@ -1403,6 +1411,37 @@ check("4 reprices in a minute on one side: it stops chasing (keeps its safe orde
 a.books["11"]["bids"] = [lvl(0.08, 1000)]; a.books["11"]["asks"] = [lvl(0.09, 1000)]   # fair value drops below our bid
 b.feed.push(dirty={"11"}); b.cycle()
 check("...but an order that's no longer safe always moves", ("bid", 0.115, 100) not in a.ours("11"), a.ours("11"))
+# F10: a reprice counts toward churn_max_reprices only when its cancel is sent, not when the budget defers it.
+for count_sent in (True, False):
+    a, b = make_bot(); b.cfg.churn_control, b.cfg.churn_count_sent = True, count_sent; b.cycle()
+    for o in list(b.recent_orders):
+        b.recent_orders[o] = (b.recent_orders[o][0], b.recent_orders[o][1] - 10)
+    start = a.ours("11")
+    a.books["11"]["bids"] = [lvl(0.11, 1000)]            # target moves to 0.115: a reprice
+    a.writes_left = lambda: 0                             # ...but no write budget left this cycle
+    b.feed = FakeFeed(); b.feed.push(dirty={"11"})
+    logging.disable(logging.CRITICAL); b.cycle(); logging.disable(logging.NOTSET)
+    deferred = len(b.ex["11"].reprices.get("bid") or ())
+    if count_sent:
+        check("F10: a reprice deferred by the write budget is not counted (and nothing was sent)",
+              deferred == 0 and a.ours("11") == start, (deferred, a.ours("11")))
+        del a.writes_left
+        b.feed.push(dirty={"11"}); b.cycle()
+        check("F10: ...once it is actually sent, it counts once",
+              len(b.ex["11"].reprices.get("bid") or ()) == 1 and ("bid", 0.115, 100) in a.ours("11"),
+              (b.ex["11"].reprices, a.ours("11")))
+    else:
+        check("F10: churn_count_sent=False keeps the old count-when-planned behaviour", deferred == 1, deferred)
+a, b = make_bot(); b.cfg.churn_control = True; b.cycle()
+b.burst, b.burst_set, b.burst_cfg = True, set(), b.cfg
+b.update_burst = lambda now_m: None
+for o in list(b.recent_orders):
+    b.recent_orders[o] = (b.recent_orders[o][0], b.recent_orders[o][1] - 10)
+a.books["11"]["bids"] = [lvl(0.11, 1000)]                # off target but still safe: burst mode keeps it
+b.feed = FakeFeed(); b.feed.push(dirty={"11"}); b.cycle()
+check("F10: a reprice that burst mode drops (keeps the safe order) is not counted",
+      not b.ex["11"].reprices.get("bid"), b.ex["11"].reprices)
+
 a, b = make_bot(); b.cfg.churn_control = True; b.cycle()
 b.refs = FakeRefs({"Ohio Senate|Republican": 0.14})
 b.refs.last_moves, b.refs.version = {"Ohio Senate|Republican": 0.01}, 2
@@ -1573,6 +1612,92 @@ logging.disable(logging.NOTSET)
 a.positions = real_pos
 check("positions 409 'holdings cannot be valued' (day one 16:30): the cycle goes on with the last read", ok and b.orders_stale)
 
+# F2: the 409 fallback is bounded: positions_stale_max_cycles cycles in a row (or positions_stale_max_seconds), then
+# the cycle fails (on_cycle_error then pulls quotes after max_failed_cycles); logged once at the start and the end.
+class _Grab(logging.Handler):
+    def __init__(s): super().__init__(); s.msgs = []
+    def emit(s, r): s.msgs.append(r.getMessage())
+def pos_409_run(b, n):
+    """n cycles with positions answering 409 -> list of True (cycle went on) / False (cycle failed)."""
+    out = []
+    for _ in range(n):
+        b.orders_stale = True
+        try:
+            b.cycle(); out.append(True)
+        except ApiError as e:
+            out.append(False if e.status == 409 else "other")
+    return out
+grab = _Grab()
+real_level, real_prop = M.log.level, M.log.propagate
+M.log.addHandler(grab); M.log.setLevel(logging.INFO); M.log.propagate = False
+try:
+    a, b = make_bot(); b.cycle()
+    real_pos = a.positions
+    a.positions = lambda: (_ for _ in ()).throw(ApiError(409, "CONFLICT", "Tournament holdings cannot be valued"))
+    seq = pos_409_run(b, 6)
+    check("F2: positions 409 -> the last read is reused 3 cycles in a row, then every cycle fails",
+          seq == [True, True, True, False, False, False], seq)
+    started = [m for m in grab.msgs if m.startswith("positions unavailable")]
+    failing = [m for m in grab.msgs if m.startswith("positions still unavailable")]
+    check("F2: logged once when the fallback starts and once when it starts failing (not every cycle)",
+          len(started) == 1 and len(failing) == 1, grab.msgs)
+    for _ in range(b.cfg.max_failed_cycles):
+        b.on_cycle_error("failed cycles", pull_now=False)
+    check("F2: ...and those failed cycles pull every quote (on_cycle_error)", not a.orders and b.pulled_after_errors,
+          a.orders)
+    a.positions = real_pos
+    grab.msgs.clear()
+    b.orders_stale = True; b.cycle()
+    check("F2: positions readable again: the run resets and its end is logged once",
+          b.pos_fallbacks == 0 and not b.pos_fallback_failing
+          and len([m for m in grab.msgs if m.startswith("positions readable again")]) == 1, grab.msgs)
+    a.positions = lambda: (_ for _ in ()).throw(ApiError(409, "CONFLICT", "Tournament holdings cannot be valued"))
+    b.cfg.positions_stale_max_cycles = 100
+    seq = pos_409_run(b, 1)
+    b.pos_fallback_since -= 121                       # the run of 409s started 2 minutes ago
+    seq += pos_409_run(b, 1)
+    check("F2: ...or after positions_stale_max_seconds, whichever comes first", seq == [True, False], seq)
+    a.positions = real_pos; b.orders_stale = True; b.cycle()
+    a.positions = lambda: (_ for _ in ()).throw(ApiError(409, "CONFLICT", "Tournament holdings cannot be valued"))
+    b.cfg.positions_stale_max_cycles, b.cfg.positions_stale_max_seconds = 0, 0
+    seq = pos_409_run(b, 6)
+    check("F2: both limits 0 = the old unbounded reuse", seq == [True] * 6, seq)
+    a.positions = real_pos
+finally:
+    M.log.removeHandler(grab); M.log.setLevel(real_level); M.log.propagate = real_prop
+
+# F6: a handover stop that hasn't exited within handover_exit_max_seconds exits at once (exit 0), so the deploy
+# script can start the new bot; never when it stopped being a handover (plain stop, kill switch) since.
+def handover_exits(setup):
+    a, b = make_bot()
+    exits = []
+    b.hard_exit = exits.append
+    b.cfg.handover_exit_max_seconds = 0.05
+    setup(b)
+    if b.handover_timer:
+        b.handover_timer.join(2)
+    return exits, b
+logging.disable(logging.CRITICAL)
+try:
+    exits, b = handover_exits(lambda b: b.request_handover())
+    check("F6: a handover still running after handover_exit_max_seconds exits at once with code 0", exits == [0], exits)
+    exits, b = handover_exits(lambda b: (b.request_handover(), b.request_handover()))
+    check("F6: ...one deadline per handover (a second SIGUSR1 doesn't start another)", exits == [0], exits)
+    exits, b = handover_exits(lambda b: (b.request_handover(), b.request_stop()))
+    check("F6: ...never after a plain stop (that one must cancel; systemd bounds it)", exits == [], exits)
+    def killed(b):
+        b.request_handover(); b.exit_code = M.EXIT_KILLED
+    exits, b = handover_exits(killed)
+    check("F6: ...never after the kill switch fired (it must cancel)", exits == [], exits)
+    def no_cap(b):
+        b.cfg.handover_exit_max_seconds = 0; b.request_handover()
+    exits, b = handover_exits(no_cap)
+    check("F6: handover_exit_max_seconds = 0: no deadline (the old behaviour)", exits == [] and b.handover_timer is None)
+finally:
+    logging.disable(logging.NOTSET)
+check("F6: the handover deadline is a live setting with a range", "handover_exit_max_seconds" in OVERRIDABLE
+      and _live.handover_exit_max_seconds == 150.0)
+
 print("--- parallel requests")
 a, b = make_bot()
 res = b.in_parallel(lambda x: 1 / x, [1, 0, 2])
@@ -1663,6 +1788,124 @@ finally:
     M.alert = real_alert
 check("an outage with a failing cancel-all alerts once, not every cycle", n_outage == 1, sent)
 check("recovery alerts once, and only after an alerted outage", n_back == 1 and n_quiet == 0, sent)
+
+# F3a: reduce-only hysteresis. Enter above max_worst_case_frac (30%), leave only below 30% - 3% (also the backstop).
+def reduce_seq(b, values, model="correlated"):
+    """Cycles with (settlement risk, sum-of-maxima worst case) forced -> b.global_reduce after each."""
+    out = []
+    b.cfg.risk_model = model
+    for risk, worst in values:
+        b.settlement_risk = lambda inv, fvs, pd, r=risk: r
+        b.total_worst_case = lambda inv, fvs, w=worst: w
+        b.cycle(); out.append(b.global_reduce)
+    return out
+logging.disable(logging.CRITICAL)
+try:
+    a, b = make_bot(); b.cycle()                          # account value 100,000
+    seq = reduce_seq(b, [(31e3, 50e3), (28e3, 50e3), (27.5e3, 50e3), (26.9e3, 50e3), (29.9e3, 50e3), (30.1e3, 50e3)])
+    check("F3: reduce-only enters above 30% and leaves only below 27% (no flapping around 30%)",
+          seq == [True, True, True, False, False, True], seq)
+    a, b = make_bot(); b.cycle()
+    seq = reduce_seq(b, [(10e3, 70e3), (10e3, 67e3), (10e3, 65.9e3)])
+    check("F3: ...the 69% backstop has the same hysteresis (leaves below 66%)", seq == [True, True, False], seq)
+    a, b = make_bot(); b.cycle()
+    seq = reduce_seq(b, [(31e3, 31e3), (28e3, 28e3), (26e3, 26e3)], model="sum_max")
+    check("F3: ...and so does the sum_max risk model", seq == [True, True, False], seq)
+    a, b = make_bot(); b.cycle(); b.cfg.reduce_only_hysteresis = 0.0
+    seq = reduce_seq(b, [(31e3, 50e3), (29.9e3, 50e3)])
+    check("F3: reduce_only_hysteresis = 0: the old single threshold", seq == [True, False], seq)
+    a, b = make_bot(); b.cycle(); b.cfg.max_worst_case_frac = 0.05; b.cfg.reduce_only_hysteresis = 0.1
+    seq = reduce_seq(b, [(6e3, 6e3), (2e3, 2e3)])
+    check("F3: a hysteresis bigger than the cap can't trap the bot in reduce-only", seq == [True, False], seq)
+finally:
+    logging.disable(logging.NOTSET)
+
+# F3b: many pulls in one cycle -> ONE tournament-wide cancel-all (1 write) instead of a DELETE each.
+def pull_storm_bot(**cfg):
+    a, b = make_bot(); b.cycle()                          # 8 quotes on 4 markets, no positions
+    for k, v in cfg.items():
+        setattr(b.cfg, k, v)
+    a.calls.clear()
+    b.settlement_risk = lambda inv, fvs, pd: 40e3         # reduce-only with no position: every quote is pulled
+    b.total_worst_case = lambda inv, fvs: 50e3
+    return a, b
+logging.disable(logging.CRITICAL)
+try:
+    a, b = pull_storm_bot(pulls_cancel_all_over=2)
+    b.cycle()
+    check("F3: more pulls than pulls_cancel_all_over: one tournament-wide cancel-all, no per-exchange cancels",
+          a.sent("cancel_all") == [("cancel_all", None)] and not a.sent("cancel_order") and not a.orders
+          and not b.my_orders and not a.sent("batch"), a.calls)
+    b.settlement_risk = lambda inv, fvs, pd: 0.0
+    b.cycle()
+    check("F3: ...and the next cycle re-places what should rest, in one batch", len(a.orders) == 8
+          and len(a.sent("batch")) == 1, (len(a.orders), a.calls))
+    a, b = pull_storm_bot(pulls_cancel_all_over=0)
+    b.cycle()
+    check("F3: pulls_cancel_all_over = 0: the pulls go one by one, as before",
+          len(a.sent("cancel_all")) == 4 and all(c[1] for c in a.sent("cancel_all")) and not a.orders, a.calls)
+    a, b = pull_storm_bot()
+    a.writes_left = lambda: 2
+    b.cycle()
+    check("F3: more pulls than the writes left (and than re-placing everything costs): one cancel-all",
+          a.sent("cancel_all") == [("cancel_all", None)] and not a.orders, a.calls)
+    a, b = pull_storm_bot(batch_size=2)                   # re-placing 8 quotes: 4 batches + the cancel-all = 5
+    a.writes_left = lambda: 3
+    b.cycle()
+    check("F3: ...but not when re-placing every quote would cost as much as the pulls",
+          len(a.sent("cancel_all")) == 4 and all(c[1] for c in a.sent("cancel_all")), a.calls)
+    a, b = pull_storm_bot(pulls_cancel_all_over=2)
+    b.selftest_future = object()                          # the self-test is running on its own thread
+    b.cycle()
+    check("F3: never while the self-test runs (its orders would vanish under it)",
+          ("cancel_all", None) not in a.sent("cancel_all") and not a.orders, a.calls)
+    a, b = pull_storm_bot(pulls_cancel_all_over=2)
+    real_ca = a.cancel_all
+    def ca_fails(tid, eid=None):
+        if eid is None:
+            a.log("cancel_all", None); raise ApiError(0, "NETWORK", "timeout")
+        return real_ca(tid, eid)
+    a.cancel_all = ca_fails
+    b.cycle()
+    check("F3: a cancel-all that fails falls back to the pulls themselves (they reduce risk)",
+          not a.orders and len(a.sent("cancel_all")) == 5, a.calls)
+    a, b = pull_storm_bot(pulls_cancel_all_over=2)
+    gen = b.cancel_gen
+    def ca_partial(tid, eid=None):
+        a.log("cancel_all", eid); return False            # 207 and the list still shows orders
+    a.cancel_all = ca_partial
+    b.cycle()
+    check("F3: a cancel-all not confirmed forgets nothing (re-read next cycle), never stacks quotes",
+          len(b.my_orders) == 8 and b.orders_stale and not a.sent("batch") and b.cancel_gen == gen + 1, a.calls)
+finally:
+    logging.disable(logging.NOTSET)
+
+# F11: a partial cancel-all (207, orders left) must not count as "pulled": the next failed cycle tries again.
+a, b = make_bot()
+answers, calls = [False, False, True], []
+b.cancel_everything = lambda: (calls.append(1), answers.pop(0))[1]
+real_alert, M.alert = M.alert, (lambda m: None)
+logging.disable(logging.CRITICAL)
+try:
+    b.on_cycle_error("unexpected error", pull_now=True)
+    first = b.pulled_after_errors
+    b.on_cycle_error("unexpected error", pull_now=True)
+    b.on_cycle_error("unexpected error", pull_now=True)
+    b.on_cycle_error("unexpected error", pull_now=True)
+finally:
+    logging.disable(logging.NOTSET)
+    M.alert = real_alert
+check("F11: a cancel-all that left orders resting is retried each failed cycle until it reports none left",
+      first is False and len(calls) == 3 and b.pulled_after_errors and not answers, (first, calls))
+
+# F7: a method defined twice in a class silently shadows the first (thin_book_prices was): none may be.
+import ast
+_dups = []
+for _node in ast.walk(ast.parse(open(M.__file__).read())):
+    if isinstance(_node, ast.ClassDef):
+        _names = [f.name for f in _node.body if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        _dups += [f"{_node.name}.{n}" for n in set(_names) if _names.count(n) > 1]
+check("no method is defined twice in one class (thin_book_prices was)", not _dups, _dups)
 
 print(f"\n{sum(RESULTS)}/{len(RESULTS)} passed")
 sys.exit(0 if all(RESULTS) else 1)

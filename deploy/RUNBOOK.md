@@ -18,7 +18,7 @@ Server: /opt/mmbot (Python 3.10 venv), systemd unit `mmbot`, live settings in /o
    (expected counts are in the package section).
 3. Back up: `mkdir -p /opt/mmbot/backup-<date> && cp /opt/mmbot/mm_bot.py /opt/mmbot/ref_prices.py /opt/mmbot/ref_map.json /opt/mmbot/backup-<date>/`.
 4. Copy the staged files into /opt/mmbot (not .env, not state files: fills.csv, order_notes.json, market_data.sqlite, settings_override.json).
-5. Restart without cancelling: `sh /opt/mmbot/deploy/handover-restart.sh` (SIGUSR1, waits up to 90 s, starts the new version, which
+5. Restart without cancelling: `sh /opt/mmbot/deploy/handover-restart.sh` (SIGUSR1, waits up to 240 s (the bot exits within 150 s), always starts the new version, which
    adopts the resting orders). Then `journalctl -u mmbot -f | grep -i 'handover\|ALERT\|BURST\|SETTING'`.
    - If the new version does not start within ~2 min, the resting orders are unmanaged until they expire (30 min): roll back at once.
    - A plain `systemctl restart mmbot` still cancels everything on stop and start; use it when the package section says so.
