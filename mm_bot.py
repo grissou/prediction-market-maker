@@ -52,6 +52,7 @@ All the numbers you can tune (risk limits, spreads, sizes, timings) are in SETTI
 """
 
 import asyncio
+import bisect
 import csv
 import email.utils
 import json
@@ -275,12 +276,19 @@ class Config:
                                           #   reverts is never traded
     take_cooldown_seconds: float = 60.0   # after taking in a market, leave it alone for this long
     take_order_ttl: float = 10.0          # take orders expire after this (leftovers are also cancelled at once)
+    take_ref_max_age_seconds: float = 30.0  # a Polymarket price not re-downloaded for this long never confirms or
+                                          #   triggers a take (a failed download keeps the old price for 5 min and
+                                          #   still counts as a reading). 0 = off
 
     # --- ORDER LIFECYCLE ---------------------------------------------------------------------
     order_ttl: float = 1800.0             # every order expires after 30 min (dead-man's switch). Longer = fewer
                                           #   replacements (each costs requests and our place in line)
     refresh_before_expiry: float = 180.0  # replace an order once it has less than 3 min to live
-    batch_size: int = 20                  # orders per POST /orders/batch
+    batch_size: int = 10                  # orders per POST /orders/batch. Was 20: 1 Oct 16:00-2 Oct 08:08, 273 of
+                                          #   the 417 "409 in flight" batches (each a batch that ran past the 15 s
+                                          #   timeout, then retried) were full 20-order batches, while batches
+                                          #   under 20 failed ~5% of the time. Smaller = faster writes, a bit more
+                                          #   write budget on big re-quotes (a restart: ~6 batches instead of 3)
     parallel_writes: int = 4              # order writes (cancels, batches) in flight at once. Cancels go first, then
                                           #   new orders: party-control (headline) markets first, then the biggest
                                           #   quotes. 1 = the old way: one write at a time, the cycle waiting for each
@@ -330,6 +338,11 @@ class Config:
     burst_cycle_seconds: float = 20.0     # ...or a cycle takes this long...
     burst_timeouts: int = 2               # ...or this many writes timed out in the last minute
     burst_calm_seconds: float = 120.0     # leave after this long without any of that
+    burst_startup_grace_seconds: float = 90.0   # after a (re)start or handover, the cycle-length trigger is ignored
+                                          #   this long, and while the first download of every book is still running
+                                          #   (at most BURST_LOADING_MAX_SECONDS): those cycles are long because of our
+                                          #   own throttled reads (2 Oct 08:08: 21 s -> burst for 2 min, write median
+                                          #   0.4 s). Slow writes and timeouts still trigger. 0 = no grace
     burst_markets: int = 40               # quote only this many markets: House/Senate, then by planned size
     burst_size_factor: float = 0.5        # new quotes at this fraction of their usual size
     burst_extra_edge: float = 0.005       # ...and this much further from fair value (one tick)
@@ -360,10 +373,21 @@ class Config:
     # NOTE: other commands (status, markets...) run while the bot is live use the same key's budget.
     requests_per_minute: int = 80         # hard budget, sliding 60 s window. Cut by 25% after a 429, then
                                           #   recovers slowly (+1 a minute), so it tunes itself
-    writes_per_minute: int = 30           # separate budget for order writes (each batch, cancel-all or DELETE = 1):
-                                          #   a copy of the platform docs says "100 reads and 30 writes per minute
-                                          #   per key". Day one peaked near 45 cancels/min without a 429, so a batch
-                                          #   probably counts once - CONFIRM with SIG; cut by 25% after a 429 too
+    writes_per_minute: int = 45           # separate budget for order writes (each batch, cancel-all or DELETE = 1),
+                                          #   the value it starts at. A copy of the platform docs says "100 reads and
+                                          #   30 writes per minute per key", but 1-2 Oct (16:00-08:08) ran 63 minutes
+                                          #   at >= 40 writes (peaks ~60) with no 429; the 6 429s came at 33-53 writes
+                                          #   and didn't follow the write rate. 30 deferred changes on every cycle for
+                                          #   3 minutes after the 2 Oct 08:08 restart
+    writes_per_minute_max: int = 60       # ...it then grows slowly (+1 per 60 successful writes) up to this while no
+                                          #   write is rate limited (= writes_per_minute: never grows)
+    startup_writes_per_minute: int = 30   # while the first download of every book is still running after a (re)start,
+                                          #   writes stay at most this (the old budget), so the bigger write budget
+                                          #   doesn't slow the book downloads new quotes need. 0 = no cap
+    write_budget_cut: float = 0.75        # a write answered 429 cuts the write budget to this fraction (min 10/min)
+    never_defer_unsafe: bool = True       # a change that removes an UNSAFE order (beyond its limit price, bigger than
+                                          #   now allowed, or a side we no longer want) is never deferred by the
+                                          #   request budget, like a pull (False = only pure pulls are exempt)
     budget_reserve: int = 20              # requests per minute kept free for orders, cancels and account
                                           #   reads; book downloads only use what's left
     parallel_requests: int = 2            # HTTP requests in flight at once (1 = one at a time)
@@ -451,13 +475,14 @@ OVERRIDABLE = {
     "arb_enabled": (False, True), "arb_min_profit": (0.005, 0.20), "take_enabled": (False, True),
     "take_edge": (0.02, 0.30), "tail_low": (0.0, 0.20), "tail_high": (0.80, 1.0),
     "requests_per_minute": (10, 100), "writes_per_minute": (5, 100), "budget_reserve": (0, 60),
+    "writes_per_minute_max": (5, 100), "startup_writes_per_minute": (0, 100), "write_budget_cut": (0.25, 1.0), "never_defer_unsafe": (False, True),
     "max_books_per_cycle": (1, 100), "book_stale": (60.0, 3600.0), "book_reverify_seconds": (10.0, 1800.0),
     "parallel_writes": (1, 8), "write_wait_seconds": (0.0, 30.0),
     "churn_control": (False, True), "min_quote_life_seconds": (0.0, 120.0), "churn_max_reprices": (1, 100),
     "churn_window_seconds": (5.0, 3600.0), "urgent_ref_move": (0.0, 0.10),
     "burst_protection": (False, True), "burst_write_seconds": (0.5, 60.0), "burst_cycle_seconds": (2.0, 600.0),
     "burst_timeouts": (1, 100), "burst_calm_seconds": (0.0, 3600.0), "burst_markets": (1, 300),
-    "burst_size_factor": (0.05, 1.0), "burst_extra_edge": (0.0, 0.05),
+    "burst_size_factor": (0.05, 1.0), "burst_extra_edge": (0.0, 0.05), "burst_startup_grace_seconds": (0.0, 600.0),
     "slow_cycle_alert_seconds": (10.0, 3600.0), "summary_every_hours": (0, 24),
     "churn_count_sent": (False, True),
     "positions_stale_max_cycles": (0, 100),
@@ -465,6 +490,15 @@ OVERRIDABLE = {
     "handover_exit_max_seconds": (0.0, 600.0),
     "reduce_only_hysteresis": (0.0, 0.1),
     "pulls_cancel_all_over": (0, 500),
+    # Quoting (R4, skew), thin-book pricing (R5), risk (R7), order lifecycle. All read from cfg where used, every
+    # cycle, so a change applies on the next cycle (refresh_before_expiry is checked against order_ttl below).
+    "skew_per_quote": (0.0, 0.05), "skew_max": (0.0, 0.1), "max_skew_through": (0.0, 0.05),
+    "improve_ticks": (0, 3), "undercut_step_back": (0.0, 0.05),
+    "ref_only_enabled": (False, True), "ref_only_max_gap": (0.005, 0.2), "ref_only_min_edge": (0.0, 0.1),
+    "ref_only_size_frac": (0.0, 0.02), "ref_only_reduce_full": (False, True),
+    "risk_swing_shock": (0.05, 0.5), "risk_z": (1.0, 6.0), "worst_case_backstop_frac": (0.3, 0.9),
+    "order_ttl": (300.0, 7200.0), "refresh_before_expiry": (30.0, 900.0), "batch_size": (1, 50),
+    "kelly_no_edge_frac": (0.0, 0.01), "take_ref_max_age_seconds": (0.0, 300.0),
 }
 
 
@@ -495,6 +529,14 @@ def validate_overrides(raw, cfg):
             bad.append(f"{k}: {v} is outside {lo}..{hi}")
             continue
         good[k] = float(v) if isinstance(cur, float) else v
+    # An order must live well past its refresh point, or every order is "about to expire" as soon as it's placed
+    # and gets replaced every cycle. (A key not in the file is judged at its current value.)
+    ttl, refresh = good.get("order_ttl", cfg.order_ttl), good.get("refresh_before_expiry", cfg.refresh_before_expiry)
+    if refresh * 2 > ttl:
+        for k in ("order_ttl", "refresh_before_expiry"):
+            if k in good:
+                del good[k]
+                bad.append(f"{k}: refresh_before_expiry ({refresh:.0f}) must be at most half of order_ttl ({ttl:.0f})")
     return good, bad
 
 # =============================================================================================
@@ -652,8 +694,16 @@ class Api:
         self.rate_limited = 0             # how many 429s we've had (shown in status.json - should stay 0)
         self.s = requests.Session()
         self.s.headers.update({"Authorization": f"Bearer {cfg.api_key}", "Content-Type": "application/json"})
-        # Keep one open connection per thread, so parallel requests don't queue for a connection.
-        self.s.mount("https://", HTTPAdapter(pool_connections=2, pool_maxsize=cfg.parallel_requests + 2))
+        # Keep one open connection per thread that can talk to the exchange at once, so none has to open (and
+        # then throw away: "Connection pool is full, discarding connection", 2 Oct 08:08:57) a fresh TLS
+        # connection, which costs 0.2-0.5 s and inflates the write times burst mode watches.
+        self.s.mount("https://", HTTPAdapter(pool_connections=4, pool_maxsize=self.pool_size(cfg), pool_block=False))
+
+    @staticmethod
+    def pool_size(cfg):
+        """Connections to keep: book downloads (parallel_requests) + order writes (parallel_writes) + the main
+        thread + the self-test thread + the realtime token refresh + one spare."""
+        return max(1, cfg.parallel_requests) + max(1, cfg.parallel_writes) + 4
 
     BUDGET_WINDOW = 60.0                  # seconds the per-minute budget is measured over
 
@@ -675,9 +725,11 @@ class Api:
                     self._wwindow.popleft()
                 if len(self._wwindow) >= int(self.wbudget):
                     start = max(start, self._wwindow[-int(self.wbudget)] + self.BUDGET_WINDOW)
-                self._wwindow.append(start)
+                bisect.insort(self._wwindow, start)
             self._next_start = general + self.gap   # a write waiting on the WRITE budget never holds up reads
-            self._window.append(start)
+            # Kept sorted: a write held back by the write budget starts later than reads throttled after it, and
+            # the clean-up above and the [-budget] lookup both assume oldest-first order.
+            bisect.insort(self._window, start)
         if start > now:
             time.sleep(start - now)
 
@@ -687,6 +739,10 @@ class Api:
             now = time.monotonic()
             used = sum(1 for t in self._window if now - t < self.BUDGET_WINDOW)
             return int(self.budget) - used
+
+    def write_ceiling(self):
+        """What the self-tuning write budget may grow to: writes_per_minute_max (never below the start value)."""
+        return float(max(self.cfg.writes_per_minute, getattr(self.cfg, "writes_per_minute_max", 0)))
 
     def writes_left(self):
         """How many more order writes fit in the write budget right now."""
@@ -738,8 +794,8 @@ class Api:
             if r.status_code in ok:
                 self.gap = max(self.cfg.min_request_gap, self.gap * 0.99)   # drift back to normal speed
                 self.budget = min(self.cfg.requests_per_minute, self.budget + 1 / 60)   # ~+1 per 60 successes
-                if method != "GET":
-                    self.wbudget = min(self.cfg.writes_per_minute, self.wbudget + 1 / 60)
+                if method != "GET":   # additive increase, up to writes_per_minute_max (AIMD; cut on a 429 below)
+                    self.wbudget = min(self.write_ceiling(), self.wbudget + 1 / 60)
                 return r.status_code, data
 
             err = data.get("error") if isinstance(data, dict) else None
@@ -758,7 +814,7 @@ class Api:
                     if not already_paused:        # the budget was too generous: cut it by a quarter
                         self.budget = max(20.0, self.budget * 0.75)
                         if method != "GET":
-                            self.wbudget = max(10.0, self.wbudget * 0.75)
+                            self.wbudget = max(10.0, self.wbudget * self.cfg.write_budget_cut)
                     self.rate_limited += 1
                 if not already_paused:
                     log.warning("RATE LIMITED (429): pausing all requests for %.0f s; budget now %.0f/min",
@@ -1474,6 +1530,15 @@ def exit_quote(fv, inv, best_bid, best_ask, cfg=CFG, bankroll=None, max_size=Non
     return NO_QUOTE
 
 
+def unsafe_order(o, price, size, limit, is_bid):
+    """A resting order that must not stay: we want nothing on its side, it's beyond its limit price (the price
+    past which the quote loses money; the target price when there's no limit), or bigger than now allowed."""
+    if price is None:
+        return True
+    lim = limit if limit is not None else price
+    return (o.price > lim + 1e-9 if is_bid else o.price < lim - 1e-9) or o.qty > size + 1e-9
+
+
 def side_needs_change(resting, price, size, cfg, now, limit=None, is_bid=True):
     """True if what's resting on ONE side of an exchange doesn't match what we want there.
     Leaving a good order alone keeps its place in the queue, which is worth money. So an order a tick
@@ -1849,6 +1914,7 @@ class Bot:
         self.write_log = deque()          # (time done, seconds taken, timed out) of recent writes (burst detection)
         self.last_cycle_seconds = 0.0
         self.burst, self.burst_calm_since, self.burst_set = False, 0.0, set()
+        self.trading_since = None         # monotonic time the trading loop started (burst_startup_grace_seconds)
         self.global_reduce = False
         self.ref_moved = set()            # eids whose Polymarket price moved >= urgent_ref_move at the latest reading
         self.ref_version_urgent = 0
@@ -2685,6 +2751,12 @@ class Bot:
                 return Change(ex, resting, True, [], self.change_key(ex, pull=True, reprice=True), count=False)
             return None
 
+        if self.burst and self.cfg.burst_size_factor != 1.0:
+            # Burst mode places burst_size_factor of each size: compare what rests with THAT size, or a half-size
+            # order fails keep_fraction (187 of 375 < 50%) and is cancelled and replaced every cycle.
+            k = self.cfg.burst_size_factor
+            q = replace(q, bid_size=max(1, int(q.bid_size * k)) if q.bid_size else 0,
+                        ask_size=max(1, int(q.ask_size * k)) if q.ask_size else 0)
         bids = [o for o in resting if o.is_bid]
         asks = [o for o in resting if not o.is_bid]
         fix_bid = side_needs_change(bids, q.bid, q.bid_size, self.cfg, now, q.bid_limit, is_bid=True)
@@ -2713,29 +2785,32 @@ class Bot:
             fix_ask = fix_ask and (q.ask is None or not asks or any(
                 o.price < (q.ask_limit if q.ask_limit is not None else q.ask) - 1e-9 or o.qty > q.ask_size + 1e-9 for o in asks))
             doomed = (bids if fix_bid else []) + (asks if fix_ask else [])
-            k = self.cfg.burst_size_factor
             new = [] if now_m < ex.pause_until else (
-                ([self.new_order(ex, True, q.bid, max(1, int(q.bid_size * k)), fv, now)] if fix_bid and q.bid is not None and not bids else [])
-                + ([self.new_order(ex, False, q.ask, max(1, int(q.ask_size * k)), fv, now)] if fix_ask and q.ask is not None and not asks else []))
+                ([self.new_order(ex, True, q.bid, q.bid_size, fv, now)] if fix_bid and q.bid is not None and not bids else [])
+                + ([self.new_order(ex, False, q.ask, q.ask_size, fv, now)] if fix_ask and q.ask is not None and not asks else []))
             if not doomed and not new:
                 return None
             return Change(ex, doomed, False, new, self.change_key(ex, pull=bool(doomed) or not new, reprice=bool(doomed)))
         # Cancel the wrong side(s). Both wrong -> one cancel-all for the exchange; else per order.
         doomed = (bids if fix_bid else []) + (asks if fix_ask else [])
         new = []
-        k = self.cfg.burst_size_factor if self.burst else 1.0
-        if now_m >= ex.pause_until:
+        if now_m >= ex.pause_until:       # (sizes already scaled for burst mode above)
             if fix_bid and q.bid is not None:
-                new.append(self.new_order(ex, True, q.bid, max(1, int(q.bid_size * k)), fv, now))
+                new.append(self.new_order(ex, True, q.bid, q.bid_size, fv, now))
             if fix_ask and q.ask is not None:
-                new.append(self.new_order(ex, False, q.ask, max(1, int(q.ask_size * k)), fv, now))
+                new.append(self.new_order(ex, False, q.ask, q.ask_size, fv, now))
         log.info("%s%-26.26s fv %s%s inv %+5.0f race %+5.0f | bid %s ask %s", "" if self.api.live else "[dry] ",
                  ex.label, f"{fv:.3f}" if fv is not None else "  -  ",
                  f" (ref {ex.ref:.3f})" if ex.ref is not None else "", ex.inv, ex.eff,
                  fmt(q.bid, q.bid_size), fmt(q.ask, q.ask_size))
         if not doomed and not new:
             return None
-        return Change(ex, doomed, fix_bid and fix_ask, new, self.change_key(ex, pull=not new, reprice=bool(doomed)))
+        # An order that must not stay (unsafe) makes this change as urgent as a pull: never deferred by the budget.
+        urgent = self.cfg.never_defer_unsafe and (
+            (fix_bid and any(unsafe_order(o, q.bid, q.bid_size, q.bid_limit, True) for o in bids))
+            or (fix_ask and any(unsafe_order(o, q.ask, q.ask_size, q.ask_limit, False) for o in asks)))
+        return Change(ex, doomed, fix_bid and fix_ask, new,
+                      self.change_key(ex, pull=not new or urgent, reprice=bool(doomed)))
 
     def hold_side(self, ex, resting, price, limit, size, is_bid, now, now_m):
         """Churn control: keep this side's single resting order although it's off target, because it's still safe
@@ -2785,6 +2860,21 @@ class Bot:
         return ch.new
 
     # ------------------------------------------------------------------------------ parallel order writes
+    BURST_LOADING_MAX_SECONDS = 600.0     # the "first book download still running" grace never lasts longer
+
+    def starting_up(self, now_m):
+        """Just (re)started: cycles are long because every book is being downloaded for the first time, under our
+        own request budget - not because the exchange is slow. See burst_startup_grace_seconds."""
+        grace = self.cfg.burst_startup_grace_seconds
+        if self.trading_since is None or grace <= 0:
+            return False
+        return now_m - self.trading_since < grace or self.first_books_loading(now_m)
+
+    def first_books_loading(self, now_m):
+        """Since the trading loop started, some book has never been downloaded (at most BURST_LOADING_MAX_SECONDS)."""
+        return (self.trading_since is not None and now_m - self.trading_since < self.BURST_LOADING_MAX_SECONDS
+                and any(ex.book is None for ex in self.ex.values()))
+
     def update_burst(self, now_m):
         """Burst mode on/off (see BURST PROTECTION). Its effects are in decide() and plan_change()."""
         cfg = self.cfg
@@ -2799,7 +2889,7 @@ class Bot:
         secs = sorted(d for _, d, _ in self.write_log)
         slow = (sum(t for _, _, t in self.write_log) >= cfg.burst_timeouts
                 or (secs and secs[len(secs) // 2] >= cfg.burst_write_seconds)
-                or self.last_cycle_seconds >= cfg.burst_cycle_seconds)
+                or (self.last_cycle_seconds >= cfg.burst_cycle_seconds and not self.starting_up(now_m)))
         if slow:
             self.burst_calm_since = now_m
             if not self.burst:
@@ -2832,8 +2922,13 @@ class Bot:
         changes = sorted(changes, key=lambda c: c.key)
         # Within the request budget, keeping write_read_reserve back so reads (positions, orders, books) never
         # starve; the least urgent changes wait for the next cycle.
-        spare = min(getattr(self.api, "budget_left", lambda: 10 ** 6)() - cfg.write_read_reserve,
-                    getattr(self.api, "writes_left", lambda: 10 ** 6)())
+        writes_left = getattr(self.api, "writes_left", lambda: 10 ** 6)()
+        if cfg.startup_writes_per_minute and self.first_books_loading(time.monotonic()):
+            # Still downloading the first books after a (re)start: book downloads and writes share the request
+            # budget, so writes stay at the old 30/min until every book is in (pulls and unsafe orders still go).
+            used = int(getattr(self.api, "wbudget", 0)) - writes_left
+            writes_left = min(writes_left, cfg.startup_writes_per_minute - used)
+        spare = min(getattr(self.api, "budget_left", lambda: 10 ** 6)() - cfg.write_read_reserve, writes_left)
         kept, cost, orders = [], 0.0, 0
         for ch in changes:
             n = orders + len(ch.new)
@@ -3352,8 +3447,11 @@ class Bot:
         if not cfg.take_enabled or not self.refs or version == self.take_version_seen:
             return taken
         self.take_version_seen = version
+        ages = self.refs.ages() if hasattr(self.refs, "ages") else {}
         for eid, ex in self.ex.items():
             p = refs.get(eid)
+            if p is not None and 0 < cfg.take_ref_max_age_seconds < ages.get(f"{ex.group}|{ex.party}", 0.0):
+                p = None                                  # an old price, kept through failed downloads: not evidence
             direction = self.take_direction(ex, p) if (p is not None and eid in liquid) else 0
             if direction != ex.take_dir:
                 ex.take_since = now_m                     # new direction (or none): the clock starts again
@@ -3678,8 +3776,10 @@ class Bot:
                 setattr(cfg, k, v)
                 if k == "requests_per_minute":
                     self.api.budget = min(getattr(self.api, "budget", v), v)
-                if k == "writes_per_minute":
-                    self.api.wbudget = min(getattr(self.api, "wbudget", v), v)
+                if k == "writes_per_minute":          # the owner asked for this rate: start from it now
+                    self.api.wbudget = float(v)
+                if k == "writes_per_minute_max":      # a lower ceiling applies at once; a higher one is grown into
+                    self.api.wbudget = min(getattr(self.api, "wbudget", v), max(v, cfg.writes_per_minute))
                 if k in ("size_min_frac", "size_max_frac", "headline_size_frac", "quote_capital_frac"):
                     self.size_plan_time = -1e9                 # re-plan sizes now
         self.overrides = good
@@ -4092,6 +4192,7 @@ class Bot:
                         log.warning("clean-slate cancel failed (%s) - going on; leftovers get re-read and managed", e)
                         self.orders_stale = True
             self.phase = "trading"
+            self.trading_since = time.monotonic()
             while self.running:
                 t0 = time.monotonic()
                 try:

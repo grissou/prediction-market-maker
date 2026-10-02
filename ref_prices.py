@@ -101,7 +101,7 @@ def session():
         if _session is None:
             _session = requests.Session()
             _session.headers.update({"User-Agent": "mm_bot-reference-prices"})
-            n = max(2, REF.parallel_fetches)
+            n = max(2, REF.parallel_fetches) + 2   # the pool's threads, plus the calling thread (Kalshi, search) + 1
             _session.mount("https://", requests.adapters.HTTPAdapter(pool_connections=4, pool_maxsize=n))
         return _session
 
@@ -283,6 +283,14 @@ class ReferencePrices:
         """{key: all-time traded volume in $} - how busy each market is (mm_bot sizes its quotes by it)."""
         with self.lock:
             return dict(self.volume)
+
+    def ages(self):
+        """{key: seconds since its price was last downloaded}. A failed download keeps the old price (up to
+        max_age_seconds) and still counts as a new reading (`version`), so callers that act on a reading being
+        CURRENT (mm_bot's take logic) check this."""
+        now = time.monotonic()
+        with self.lock:
+            return {k: now - t for k, (_, t) in self.prices.items()}
 
     def spreads(self):
         """{key: Polymarket bid/ask spread} (None where the price is only a last trade). mm_bot only

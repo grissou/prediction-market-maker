@@ -742,6 +742,19 @@ for e in b.ex.values():
     e.close = utcnow() + timedelta(hours=10)               # inside the 12 h pre-close window
 b.cycle(); later(b); b.refs.new_reading(b.refs.prices, {}); b.cycle()
 check("no taking in the pre-close window (no new positions)", not a.inv, a.inv)
+a, b = take_setup()
+b.refs.ages = lambda: {k: 120.0 for k in b.refs.prices}   # downloads failing: the same old price, re-read
+b.cycle(); later(b); b.refs.new_reading(b.refs.prices, {}); b.cycle()
+check("a Polymarket price not re-downloaded for > take_ref_max_age_seconds never triggers a take", not a.inv, a.inv)
+b.refs.ages = lambda: {k: 2.0 for k in b.refs.prices}     # fresh again: the 30 s confirmation starts over
+b.refs.new_reading(b.refs.prices, {}); b.cycle()
+check("...fresh again: the confirmation starts over (nothing at once)", not a.inv, a.inv)
+later(b); b.refs.new_reading(b.refs.prices, {}); b.cycle()
+check("...then trades once confirmed on fresh readings", a.inv.get("11") == 1000, a.inv)
+a, b = take_setup(); b.cfg.take_ref_max_age_seconds = 0
+b.refs.ages = lambda: {k: 120.0 for k in b.refs.prices}
+b.cycle(); later(b); b.refs.new_reading(b.refs.prices, {}); b.cycle()
+check("take_ref_max_age_seconds = 0: the old behaviour (age not checked)", a.inv.get("11") == 1000, a.inv)
 
 print("--- lagging open-orders list")
 a, b = make_bot()
@@ -1221,6 +1234,61 @@ check("with the request budget nearly gone, every pull still goes out", all(not 
       {e: a.ours(e) for e in ("11", "12", "21")})
 del a.budget_left
 
+# A reprice that removes an UNSAFE order (beyond its limit) is as urgent as a pull: never deferred by the budget.
+a, b = make_bot(); b.cycle()
+rest = lambda e: [o for o in b.my_orders.values() if o.eid == e]
+bid11 = [o for o in rest("11") if o.is_bid][0]
+ask11 = [o for o in rest("11") if not o.is_bid][0]
+now, now_m = M.utcnow(), time.monotonic()
+unsafe_q = Quote(bid11.price - 0.02, int(bid11.qty), ask11.price, int(ask11.qty), bid11.price - 0.01, ask11.price)
+safe_q = Quote(bid11.price + 0.01, int(bid11.qty), ask11.price, int(ask11.qty), bid11.price + 0.01, ask11.price)
+ch_unsafe = b.plan_change(b.ex["11"], unsafe_q, rest("11"), 0.14, now, now_m)
+ch_safe = b.plan_change(b.ex["11"], safe_q, rest("11"), 0.14, now, now_m)
+check("unsafe_order: beyond the limit, oversized or an unwanted side; a better-priced target is safe",
+      unsafe_order(bid11, bid11.price - 0.02, bid11.qty, bid11.price - 0.01, True)
+      and unsafe_order(bid11, bid11.price, bid11.qty - 1, None, True) and unsafe_order(bid11, None, 0, None, True)
+      and not unsafe_order(bid11, bid11.price + 0.01, bid11.qty, bid11.price + 0.01, True))
+check("a reprice whose old bid is now beyond its limit is keyed like a pull (never deferred)",
+      ch_unsafe is not None and ch_unsafe.key[0] == 0 and ch_unsafe.new, ch_unsafe and ch_unsafe.key)
+check("...a reprice of a still-safe order is not (it may wait for budget)", ch_safe is not None and ch_safe.key[0] != 0,
+      ch_safe and ch_safe.key)
+b.cfg.never_defer_unsafe = False
+ch_off = b.plan_change(b.ex["11"], unsafe_q, rest("11"), 0.14, now, now_m)
+check("never_defer_unsafe = False: the old keying (only pure pulls are exempt)", ch_off is not None and ch_off.key[0] != 0)
+b.cfg.never_defer_unsafe = True
+bid21 = [o for o in rest("21") if o.is_bid][0]
+ch_safe21 = b.plan_change(b.ex["21"], Quote(bid21.price + 0.01, int(bid21.qty), None, 0, bid21.price + 0.01, None),
+                          [bid21], 0.5, now, now_m)
+a.budget_left = lambda: 1
+b.send_changes([ch_unsafe, ch_safe21])
+check("with the budget gone, the unsafe reprice goes out and the safe one waits",
+      any(s == "bid" and abs(p - (bid11.price - 0.02)) < 1e-9 for s, p, _ in a.ours("11"))
+      and bid21.order_id in a.orders, (a.ours("11"), a.ours("21")))
+del a.budget_left
+
+# While the first books are still loading after a start, writes stay at startup_writes_per_minute (30), so the
+# bigger write budget doesn't take the request budget the book downloads need.
+def safe_reprice(b, e):
+    o = [x for x in b.my_orders.values() if x.eid == e and x.is_bid][0]
+    return o, b.plan_change(b.ex[e], Quote(o.price + 0.01, int(o.qty), None, 0, o.price + 0.01, None), [o],
+                            0.5, M.utcnow(), time.monotonic())
+for loading in (True, False):
+    a, b = make_bot(); b.cycle()
+    a.wbudget, a.writes_left = 45, (lambda: 16)               # 29 writes used in the last minute
+    b.trading_since = time.monotonic()
+    if loading:
+        b.ex["22"].book = None
+    o21, ch21 = safe_reprice(b, "21")
+    b.send_changes([ch21])
+    check("first books still loading: 29 of the 30 start-up writes used -> a reprice waits" if loading else
+          "...all books in: the full write budget (16 left) -> it goes",
+          (o21.order_id in a.orders) == loading, (loading, a.ours("21")))
+a, b = make_bot(); b.cycle(); b.cfg.startup_writes_per_minute = 0
+a.wbudget, a.writes_left = 45, (lambda: 16)
+b.trading_since = time.monotonic(); b.ex["22"].book = None
+o21, ch21 = safe_reprice(b, "21"); b.send_changes([ch21])
+check("startup_writes_per_minute = 0: no start-up cap", o21.order_id not in a.orders)
+
 a, b = make_bot(); b.cycle()
 real_apply = b.apply_batch
 b.apply_batch = lambda *x: (_ for _ in ()).throw(RuntimeError("boom"))
@@ -1380,6 +1448,61 @@ a, b = make_bot(); b.cfg.burst_protection = False
 b.write_log.extend([(time.monotonic(), 30.0, True)] * 5); b.update_burst(time.monotonic())
 check("burst_protection = False: never enters burst mode", not b.burst)
 
+# Start-up: the first cycles are long because of our own throttled book downloads (2 Oct 08:08: 21 s -> burst for
+# 2 min with a 0.4 s write median). The cycle-length trigger waits out burst_startup_grace_seconds and the first
+# download of every book; slow writes and timeouts still count.
+a, b = make_bot(); b.cycle()
+now_m = time.monotonic()
+b.trading_since, b.last_cycle_seconds = now_m - 5, 21.0
+b.update_burst(now_m)
+check("start-up: a 21 s first cycle doesn't trigger burst mode", not b.burst)
+b.write_log.extend([(now_m, 18.0, True), (now_m, 16.0, True)])
+b.update_burst(now_m)
+check("...but 2 write timeouts during the start-up grace still do", b.burst)
+a, b = make_bot(); b.cycle()
+now_m = time.monotonic()
+b.trading_since, b.last_cycle_seconds = now_m - 200, 21.0
+b.ex["11"].book = None                                     # still downloading the first books
+b.update_burst(now_m)
+check("past the grace, while the first download of every book is still running: no burst from cycle length",
+      not b.burst)
+b.trading_since = now_m - 700
+b.update_burst(now_m)
+check("...that part of the grace ends after BURST_LOADING_MAX_SECONDS (a book that never loads can't block it)", b.burst)
+a, b = make_bot(); b.cycle()
+now_m = time.monotonic()
+b.trading_since, b.last_cycle_seconds = now_m - 91, 21.0
+b.update_burst(now_m)
+check("past the grace with every book loaded: a 21 s cycle triggers burst mode as before", b.burst)
+a, b = make_bot(); b.cycle(); b.cfg.burst_startup_grace_seconds = 0
+now_m = time.monotonic()
+b.trading_since, b.last_cycle_seconds = now_m - 1, 21.0
+b.update_burst(now_m)
+check("burst_startup_grace_seconds = 0: the old behaviour (a long first cycle triggers it)", b.burst)
+a, b = make_bot(); b.cfg.selftest_enabled = False
+run_cycles(b, 1)
+check("run() starts the start-up grace clock when trading starts", b.trading_since is not None)
+
+# Burst half size vs keep_fraction: a size-375 quote is placed as 187; that order must then count as matching
+# (187.5 <= 187 was False: cancelled and replaced every cycle).
+a, b = make_bot(); b.cycle()
+b.burst, b.burst_set, b.burst_cfg = True, {"11"}, b.cfg
+o11 = [o for o in b.my_orders.values() if o.eid == "11"]
+bid11 = [o for o in o11 if o.is_bid][0]; ask11 = [o for o in o11 if not o.is_bid][0]
+q375 = Quote(bid11.price, 375, ask11.price, 375, bid11.price, ask11.price)
+now, now_m = M.utcnow(), time.monotonic()
+ch = b.plan_change(b.ex["11"], q375, [o for o in o11 if not o.is_bid], 0.14, now, now_m)
+check("burst: a 375-share quote is placed at 187 (half)", ch is not None and [o["quantity"] for o, _ in ch.new] == [187],
+      ch and [o["quantity"] for o, _ in ch.new])
+bid11.qty = ask11.qty = 187
+ch = b.plan_change(b.ex["11"], q375, o11, 0.14, now, now_m)
+check("burst: ...and a resting 187 then matches it (no cancel + replace every cycle)", ch is None,
+      ch and (ch.doomed, ch.new))
+b.burst = False
+ch = b.plan_change(b.ex["11"], q375, o11, 0.14, now, now_m)
+check("out of burst mode, the 187 is below keep_fraction of 375 and is replaced at full size",
+      ch is not None and sorted(o["quantity"] for o, _ in ch.new) == [375, 375], ch and ch.new)
+
 a, b = make_bot()
 a.cancel_all = lambda tid, eid=None: (_ for _ in ()).throw(ApiError(0, "NETWORK", "read timed out"))
 b.cfg.selftest_enabled = False
@@ -1498,6 +1621,38 @@ M.alert = real_alert
 check("never overridable: secrets, URLs, files, the kill switch", not {"api_key", "base_url", "slug", "alert_url",
       "max_drawdown_pct", "fills_csv", "overrides_file"} & set(M.OVERRIDABLE))
 check("every overridable name is a real setting", all(hasattr(Config(), k) for k in M.OVERRIDABLE))
+_d = Config()
+_ok, _bad = validate_overrides({k: getattr(_d, k) for k in M.OVERRIDABLE}, _d)
+check("every default is inside its live range (the file can always restore it)", not _bad and len(_ok) == len(M.OVERRIDABLE),
+      _bad)
+_new = {"skew_per_quote": 0.01, "skew_max": 0.05, "max_skew_through": 0.01, "improve_ticks": 0, "undercut_step_back": 0.01,
+        "ref_only_enabled": False, "ref_only_max_gap": 0.05, "ref_only_min_edge": 0.02, "ref_only_size_frac": 0.002,
+        "ref_only_reduce_full": False, "risk_swing_shock": 0.2, "risk_z": 2.5, "worst_case_backstop_frac": 0.5,
+        "order_ttl": 3600, "refresh_before_expiry": 300, "batch_size": 5, "kelly_no_edge_frac": 0.002,
+        "writes_per_minute_max": 80, "write_budget_cut": 0.5, "never_defer_unsafe": False,
+        "startup_writes_per_minute": 20, "burst_startup_grace_seconds": 120, "take_ref_max_age_seconds": 60}
+_ok, _bad = validate_overrides(_new, _d)
+check("the new live settings are accepted (quoting, thin-book, risk, lifecycle, write budget, burst, take)",
+      not _bad and _ok == {k: (float(v) if isinstance(getattr(_d, k), float) else v) for k, v in _new.items()}, _bad)
+_out = {"skew_per_quote": 0.06, "skew_max": 0.2, "max_skew_through": -0.01, "improve_ticks": 4, "undercut_step_back": 0.1,
+        "ref_only_enabled": 1, "ref_only_max_gap": 0.001, "ref_only_min_edge": 0.2, "ref_only_size_frac": 0.05,
+        "ref_only_reduce_full": "yes", "risk_swing_shock": 0.01, "risk_z": 7, "worst_case_backstop_frac": 0.95,
+        "order_ttl": 100, "refresh_before_expiry": 1000, "batch_size": 0, "kelly_no_edge_frac": 0.02,
+        "writes_per_minute_max": 200, "write_budget_cut": 0.1, "never_defer_unsafe": 0,
+        "startup_writes_per_minute": -1, "burst_startup_grace_seconds": 601, "take_ref_max_age_seconds": 301}
+_ok, _bad = validate_overrides(_out, _d)
+check("...and refused out of range or of the wrong type (every one)", not _ok and len(_bad) == len(_out), (_ok, _bad))
+_ok, _bad = validate_overrides({"order_ttl": 600, "refresh_before_expiry": 400}, _d)
+check("refresh_before_expiry over half of order_ttl is refused (orders would be replaced every cycle)",
+      not _ok and len(_bad) == 2, (_ok, _bad))
+_ok, _bad = validate_overrides({"order_ttl": 300}, _d)                # default refresh 180 > 150
+check("...also against the current value of the one not in the file", not _ok and _bad, (_ok, _bad))
+a, b = make_bot(); b.cycle()
+with open(b.cfg.overrides_file, "w") as f:
+    json.dump({"batch_size": 3, "order_ttl": 3600, "writes_per_minute": 20, "writes_per_minute_max": 25}, f)
+b.check_overrides()
+check("live: batch_size / order_ttl apply, writes_per_minute resets the write budget, a lower ceiling caps it",
+      b.cfg.batch_size == 3 and b.cfg.order_ttl == 3600 and b.api.wbudget <= 25, (b.cfg.batch_size, b.api.wbudget))
 
 print("--- start-up clean slate only when needed; status during long cycles")
 a, b = make_bot(); b.cfg.selftest_enabled = False
@@ -1721,7 +1876,27 @@ check("write budget: separate from reads (3 writes + 5 reads go at once)", time.
       wapi.writes_left())
 wapi.throttle(write=True)
 check("...a 4th write in the window waits for it", time.monotonic() - t0 >= 0.9, time.monotonic() - t0)
-check("default write budget: 30/min (conservative reading of the platform docs)", Config().writes_per_minute == 30)
+check("default write budget: starts at 45/min, may grow to 60/min (1-2 Oct: no 429 at >= 40 writes/min)",
+      Config().writes_per_minute == 45 and Config().writes_per_minute_max == 60 and Config().write_budget_cut == 0.75)
+check("default batch: 10 orders (full 20-order batches were 273 of the 417 '409 in flight' failures)",
+      Config().batch_size == 10)
+from dataclasses import replace as _replace
+for pr, pw in ((2, 4), (1, 1), (3, 8)):
+    _c = _replace(CFG, parallel_requests=pr, parallel_writes=pw)
+    _ad = Api(_c, False).s.get_adapter(_c.base_url)
+    threads_max = pr + pw + 3                                 # + main thread, self-test, realtime token refresh
+    check(f"HTTP pool covers every thread that can reach the exchange (parallel_requests {pr}, parallel_writes {pw})",
+          _ad._pool_maxsize >= threads_max and _ad._pool_connections >= 2 and not _ad._pool_block,
+          (_ad._pool_maxsize, threads_max))
+order_api = Api(CFG, False)
+order_api.gap, order_api.budget, order_api.wbudget, order_api.BUDGET_WINDOW = 0.0, 100, 1, 1.0
+order_api.throttle(write=True)
+held = threading.Thread(target=lambda: order_api.throttle(write=True)); held.start()   # waits ~1 s for the write budget
+time.sleep(0.05)
+t0 = time.monotonic(); order_api.throttle(); order_api.throttle(); read_wait = time.monotonic() - t0
+check("a write held by the write budget keeps the request window sorted; reads behind it don't wait",
+      list(order_api._window) == sorted(order_api._window) and read_wait < 0.2, (list(order_api._window), read_wait))
+held.join()
 budget_api = Api(CFG, False)
 budget_api.gap, budget_api.budget, budget_api.BUDGET_WINDOW = 0.001, 5, 1.0   # 5 requests per 1 s, for speed
 t0 = time.monotonic()
@@ -1744,6 +1919,34 @@ t0 = time.monotonic(); status, _ = limited_api.call("GET", "/x"); waited = time.
 check("429 -> waits Retry-After before retrying, then succeeds", status == 200 and waited >= 0.29, f"{waited:.2f}s")
 check("429 -> request gap doubled (0.4 -> 0.8, then drifts down 1%) and counted",
       abs(limited_api.gap - 0.8 * 0.99) < 1e-9 and limited_api.rate_limited == 1, (limited_api.gap, limited_api.rate_limited))
+
+# Write budget AIMD: +1 per 60 successful writes up to writes_per_minute_max; a 429 on a write cuts it.
+from dataclasses import replace as _replace
+aimd_api = Api(_replace(CFG, writes_per_minute=45, writes_per_minute_max=60, write_budget_cut=0.75), False)
+aimd_api.gap, aimd_api.BUDGET_WINDOW = 0.0, 0.001
+aimd_api.s.request = lambda *a, **k: Resp(200)
+for _ in range(60):
+    aimd_api.call("POST", "/orders/batch", body={})
+check("write budget grows +1 per 60 successful writes (45 -> 46)", abs(aimd_api.wbudget - 46) < 1e-6, aimd_api.wbudget)
+aimd_api.wbudget = 59.99
+for _ in range(5):
+    aimd_api.call("POST", "/orders/batch", body={})
+check("...never above writes_per_minute_max (60)", aimd_api.wbudget == 60, aimd_api.wbudget)
+aimd_api.call("GET", "/x")
+check("...reads don't grow the write budget", aimd_api.wbudget == 60)
+answers = [Resp(429, {"Retry-After": "0"}), Resp(200)]
+aimd_api.s.request = lambda *a, **k: answers.pop(0)
+aimd_api._next_start = 0.0
+aimd_api.call("POST", "/orders/batch", body={})
+check("a 429 on a write cuts the write budget by write_budget_cut (60 -> 45, then +1/60 for the retry)",
+      abs(aimd_api.wbudget - (45 + 1 / 60)) < 1e-6, aimd_api.wbudget)
+flat_api = Api(_replace(CFG, writes_per_minute=30, writes_per_minute_max=30), False)
+flat_api.gap, flat_api.BUDGET_WINDOW = 0.0, 0.001
+flat_api.s.request = lambda *a, **k: Resp(200)
+for _ in range(120):
+    flat_api.call("DELETE", "/orders/1")
+check("writes_per_minute_max = writes_per_minute: the budget never grows (old behaviour)", flat_api.wbudget == 30,
+      flat_api.wbudget)
 
 # HTML error page: retried as transient, then an ApiError - never a crash. (Sleeping disabled.)
 class R:

@@ -145,6 +145,12 @@ except RuntimeError:
 check("every batch failed: raises (the caller keeps the previous prices)", raised)
 R.http_get = real_get
 check("one shared session (connections kept open between refreshes)", R.session() is R.session())
+_rp = R.ReferencePrices.__new__(R.ReferencePrices)
+_rp.lock, _rp.prices = _th.Lock(), {"A|Republican": (0.5, time.monotonic() - 40)}
+check("ages(): seconds since each price was downloaded", 39 < _rp.ages()["A|Republican"] < 45, _rp.ages())
+_ad = R.session().get_adapter("https://gamma-api.polymarket.com")
+check("Polymarket session keeps a connection for every fetch thread plus the caller (no 'pool is full')",
+      _ad._pool_maxsize >= R.REF.parallel_fetches + 1 and not _ad._pool_block, _ad._pool_maxsize)
 R.FETCHERS.clear(); R.FETCHERS.update(real_fetchers)
 
 print("--- matching tournament races to Polymarket")
