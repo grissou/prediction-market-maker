@@ -132,6 +132,7 @@ def run_bot(enabled, s, headline_races=None, tilt_headline=False):
     a, b = make_bot()
     b.refs, b.cfg.ref_weight = FakeRefs({"Ohio Senate|Republican": 0.30}), 0.5
     b.cfg.ref_tilt_enabled, b.cfg.ref_tilt_headline = enabled, tilt_headline
+    b.cfg.ref_tilt_rampin_min = 0.0                       # the full tilt at once (ramp-in: test_tilt_rampin.py)
     if headline_races is not None:
         b.cfg.headline_races = headline_races
     b.tilt.s = s                                          # 1 market < 50: the estimator holds it

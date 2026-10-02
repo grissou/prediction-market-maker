@@ -785,6 +785,11 @@ class Config:
     # and headline gate as the blend) instead of the raw one. Arbitrage, the reference guard and ref_only pricing
     # stay on the raw price. Off (or ref_tilt_enabled off): unchanged.
     take_tilted_ref: bool = False
+    # --- Package 5: T2.1 ramp-in ---
+    # With ref_tilt_enabled, the tilt s APPLIED (blend and takes, via Bot.tilted_ref_for) rises linearly from 0 to
+    # the estimate over this many minutes after the flag is switched on (hot toggle, or at start with the flag on),
+    # so fair value does not jump in one step against inventory bought at tournament prices. 0 = no ramp.
+    ref_tilt_rampin_min: float = 120.0
 
 
 CFG = Config()
@@ -945,6 +950,8 @@ OVERRIDABLE = {
     "reduce_from_book_max_turnover": (0.0, 100000.0),
     # --- Package 5: X12 takes measured from the tilted reference ---
     "take_tilted_ref": (False, True),
+    # --- Package 5: T2.1 ramp-in ---
+    "ref_tilt_rampin_min": (0.0, 1440.0),
 }
 MAX_ORDER_TTL = 7200.0    # no order of ours lives longer than this (dead-man's switch), whatever the TTL settings
 LADDER_MAX_LEVELS = 8
@@ -1848,6 +1855,15 @@ def carry_ramp(s, hours_to_close, days):
     if not days or days <= 0 or hours_to_close is None or hours_to_close == float("inf"):
         return s
     return s * max(0.0, min(1.0, hours_to_close / (24.0 * days)))
+
+
+def rampin_factor(now, on_at, minutes):
+    """T2.1 ramp-in: the share of the tilt estimate applied `now`, min(1, (now - on_at) / (60 minutes)), rising
+    linearly from 0 when ref_tilt_enabled was switched on (on_at, monotonic seconds). minutes <= 0 (no ramp) or
+    on_at None (not started): 1.0. Never below 0, never above 1."""
+    if not minutes or minutes <= 0 or on_at is None:
+        return 1.0
+    return max(0.0, min(1.0, (now - on_at) / (60.0 * minutes)))
 
 
 def blend_fv(book_fv, r, cfg, s=0.0, legs=2, headline=False, hours_to_close=float("inf")):
@@ -3132,6 +3148,10 @@ class Bot:
         self.cur_refs, self.cur_liquid = {}, set()   # this cycle's Polymarket prices (for risk_fv)
         self.tilt = TiltEstimator(cfg).from_dict(self.load_tilt())   # T2.1: tournament tilt s (see update_tilt)
         self.tilt_s, self.tilt_exposure = self.tilt.s, 0.0
+        # T2.1 ramp-in: monotonic time ref_tilt_enabled was (last) seen switched on, None while off; the s actually
+        # applied = tilt_s x rampin_factor. Not persisted: a restart with the flag on restarts the ramp from 0,
+        # the safe choice (fair value never jumps by the full tilt after a restart).
+        self.tilt_on_at, self.tilt_s_applied = None, 0.0
         self.pos_marks = {}               # {eid: the exchange's own valuation price of the position (currentPrice)}
         self.fv_fallback_logged = {}      # {eid: source} - which fallback risk_fv used for a held position (logged once)
         self.mark_sd = {}                 # eid -> sd of the 10-min mid change (mark_frag_*; from the recorder)
@@ -3528,11 +3548,18 @@ class Bot:
         self.ref_only = self.thin_book_prices(fvs, refs, liquid, now_m) if cfg.ref_only_enabled else set()
         self.warn_unpriced_held(fvs, book_fvs, refs, liquid, now_m)
         self.update_tilt(book_fvs, refs, liquid, inv, now_m)      # T2.1: runs (read-only) with the flag off too
+        if cfg.ref_tilt_enabled:                                  # T2.1 ramp-in clock (not persisted: see __init__)
+            if self.tilt_on_at is None:
+                self.tilt_on_at = now_m
+        else:
+            self.tilt_on_at = None                                # re-enabling restarts the ramp
+        self.tilt_s_applied = (self.tilt_s * rampin_factor(now_m, self.tilt_on_at, cfg.ref_tilt_rampin_min)
+                               if cfg.ref_tilt_enabled else 0.0)
         if cfg.ref_weight > 0 and refs:
             for eid, r in refs.items():
                 if fvs.get(eid) is not None and eid in liquid and eid not in self.ref_only:   # liquid only
                     ex = self.ex[eid]
-                    fvs[eid] = blend_fv(fvs[eid], self.tilted_ref_for(ex, r), cfg)   # tilt applied once, there
+                    fvs[eid] = blend_fv(fvs[eid], self.tilted_ref_for(ex, r, now_m), cfg)   # tilt applied once, there
             for members in self.groups.values():
                 if len(members) > 1:
                     fvs.update(normalise({e: fvs[e] for e in members}))
@@ -3854,20 +3881,23 @@ class Bot:
         for e in self.ref_moved:
             self.ex[e].ref_moved_at = time.monotonic()
 
-    def tilted_ref_for(self, ex, r):
+    def tilted_ref_for(self, ex, r, now_m=None):
         """The Polymarket price r as this market's quotes see it: with ref_tilt_enabled (and, in a headline market,
-        ref_tilt_headline) the tilt-corrected r' = tilted_ref(r, s, legs) with s = self.tilt_s faded by carry_ramp
-        near the close; otherwise (or s 0) r unchanged. Shared by the blend and (take_tilted_ref) the takes."""
+        ref_tilt_headline) the tilt-corrected r' = tilted_ref(r, s, legs) with s = self.tilt_s x the ramp-in factor
+        (rampin_factor since the flag went on; now_m None = time.monotonic()) faded by carry_ramp near the close;
+        otherwise (or s 0) r unchanged. Shared by the blend and (take_tilted_ref) the takes."""
         cfg = self.cfg
         if r is None or not cfg.ref_tilt_enabled or (ex.group in cfg.headline_races and not cfg.ref_tilt_headline):
             return r
-        s = carry_ramp(self.tilt_s, self.hours_to_close(ex), getattr(cfg, "ref_tilt_carry_days", 0.0))
+        now_m = time.monotonic() if now_m is None else now_m
+        s = self.tilt_s * rampin_factor(now_m, self.tilt_on_at, getattr(cfg, "ref_tilt_rampin_min", 0.0))
+        s = carry_ramp(s, self.hours_to_close(ex), getattr(cfg, "ref_tilt_carry_days", 0.0))
         return tilted_ref(r, s, self.legs(ex)) if s else r
 
-    def take_ref(self, ex, r):
+    def take_ref(self, ex, r, now_m=None):
         """X12: the Polymarket price the stale-quote takes compare with the book and size from: tilted_ref_for with
-        take_tilted_ref, the raw r otherwise."""
-        return self.tilted_ref_for(ex, r) if getattr(self.cfg, "take_tilted_ref", False) else r
+        take_tilted_ref (ramp-in included), the raw r otherwise."""
+        return self.tilted_ref_for(ex, r, now_m) if getattr(self.cfg, "take_tilted_ref", False) else r
 
     def legs(self, ex):
         """Number of markets in this market's race (1 for a lone market)."""
@@ -6191,7 +6221,7 @@ class Bot:
             p = refs.get(eid)
             if p is not None and 0 < cfg.take_ref_max_age_seconds < ages.get(f"{ex.group}|{ex.party}", 0.0):
                 p = None                                  # an old price, kept through failed downloads: not evidence
-            p = self.take_ref(ex, p)                      # X12: the tilted r' with take_tilted_ref
+            p = self.take_ref(ex, p, now_m)               # X12: the tilted r' with take_tilted_ref
             direction = self.take_direction(ex, p) if (p is not None and eid in liquid) else 0
             if direction != ex.take_dir:
                 ex.take_since = now_m                     # new direction (or none): the clock starts again
@@ -6214,7 +6244,7 @@ class Bot:
             except ApiError as e:
                 log.warning("take on %s skipped: book download failed (%s)", ex.label, e)
                 continue
-            p = self.take_ref(ex, refs[eid])              # X12: the tilted r' with take_tilted_ref
+            p = self.take_ref(ex, refs[eid], now_m)       # X12: the tilted r' with take_tilted_ref
             if self.take_direction(ex, p) != ex.take_dir:
                 ex.take_dir = 0                           # the gap has closed: nothing to take
                 continue
@@ -7033,7 +7063,8 @@ class Bot:
                 "realised_pnl_scope": "maker fills only",   # arb / take fills (our_side '?') are not in realised_pnl
                 **(self.api.pause_state() if hasattr(self.api, "pause_state") else {}),
                 # T2.1: the tilt estimate (also restored from here at start) and the position's exposure to it
-                "tilt_s": round(self.tilt_s, 4), "tilt_exposure": round(self.tilt_exposure),
+                "tilt_s": round(self.tilt_s, 4), "tilt_s_applied": round(self.tilt_s_applied, 4),
+                "tilt_exposure": round(self.tilt_exposure),
                 "tilt_state": self.tilt.to_dict(),
                 "seconds_since_cycle": round(time.monotonic() - self.last_cycle_done, 1)
                 if self.last_cycle_done is not None else None})

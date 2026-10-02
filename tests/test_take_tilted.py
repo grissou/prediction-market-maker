@@ -59,6 +59,7 @@ def later(b, seconds=31):
 def run(books=BOOKS, refs=REFS, s=S, close_h=None, kelly_log=None, **cfg_kw):
     """Two cycles (gap seen, then confirmed 31 s later): the inventory the takes left, and the bot."""
     a, b = make_bot(books=json.loads(json.dumps(books)))
+    b.cfg.ref_tilt_rampin_min = 0.0                       # the full tilt at once (ramp-in: test_tilt_rampin.py)
     for k, v in cfg_kw.items():
         setattr(b.cfg, k, v)
     b.tilt.update = lambda samples, now_m: s              # pin the tilt estimate
