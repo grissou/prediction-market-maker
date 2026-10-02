@@ -621,6 +621,8 @@ class Config:
     turnover_dead_adding_factor: float = 0.25    # 0 = adding side withdrawn in dead markets
     turnover_dead_max_position_frac: float = 0.5
     turnover_use_tape: bool = True        # count other traders' trades from the realtime feed (and its recording)
+    turnover_alive_shares_per_hour: float = 75.0   # hysteresis: a dead market is alive again only above this flow
+    turnover_min_state_minutes: float = 30.0       # a market stays dead / alive at least this long before flipping
 
     # --- CONNECTION / ALERTS (from the environment: see top of file) ------------------------
     summary_every_hours: int = 2          # phone summary every N hours, on the hour UTC (2 = 00:00, 02:00, 04:00...),
@@ -728,6 +730,8 @@ OVERRIDABLE = {
     "turnover_dead_adding_factor": (0.0, 1.0),
     "turnover_dead_max_position_frac": (0.0, 1.0),
     "turnover_use_tape": (False, True),
+    "turnover_alive_shares_per_hour": (0.0, 100000.0),
+    "turnover_min_state_minutes": (0.0, 1440.0),
     "mark_frag_enabled": (False, True),
     "mark_frag_max_step_cash": (1.0, 100000.0),
     "mark_frag_window_hours": (1.0, 168.0),
@@ -1844,8 +1848,9 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
     unload_side        "bid" / "ask" / None: fast unload window (see Bot.note_unloads). That side, if it shrinks this
                        exchange's position, quotes unload_edge from fv (or closer, if the skews already put it
                        there), never crossing the best other order, at unload_size shares capped by the position
-    adding_limit_factor  the position limit on the side that grows |net_inv| is this fraction of the normal one
-                       (turnover control: a market whose position cannot turn); 1 = no change
+    adding_limit_factor  the side that grows |net_inv| WANTS at most this fraction of the normal position limit
+                       (turnover control: a market whose position cannot turn), at least 1 share while the normal
+                       limits would quote it; bid_max / ask_max keep the normal limits. 1 = no change
     frag_limit         mark-fragility cap (Bot.mark_frag_limit_for): limit on |this exchange's position| on the side
                        that GROWS it only (bid when inv >= 0, ask when inv <= 0); the shrinking side is untouched
     """
@@ -1938,11 +1943,6 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
         long_limit = kelly_position(kelly_p, bid, bankroll, cfg, yes=True)     # most YES we'd hold
         short_limit = kelly_position(kelly_p, ask, bankroll, cfg, yes=False)   # most NO we'd hold
     net = eff_inv if net_inv is None else net_inv
-    if adding_limit_factor < 1.0:             # turnover control: a smaller limit on the side that grows |net|
-        if net > 0:
-            long_limit *= max(0.0, adding_limit_factor)
-        elif net < 0:
-            short_limit *= max(0.0, adding_limit_factor)
 
     def limited(bid_size, ask_size):
         """Steps 5-6 after the size factors: position, cash and risk limits (applied to the scaled sizes and,
@@ -1991,12 +1991,32 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
     if bias_side == "ask" and bias_size != 1.0:
         ask_size = min(ask_size, max(order_size * bias_size, inv))
     bid_size, ask_size = limited(bid_size, ask_size)
+    # Turnover control: the side growing |net| WANTS no more than the smaller limit allows, like a size factor (the
+    # bid_max / ask_max above keep the normal limits, so an order already resting within them stays). A side the
+    # normal limits would quote keeps at least 1 share, so its resting order is not pulled when a market turns dead.
+    hold_bid = hold_ask = False
+    if adding_limit_factor < 1.0:
+        f = max(0.0, adding_limit_factor)
+        if net > 0 and bid_size >= 1:
+            room = long_limit * f - inv
+            if cfg.limits_use_race_net:
+                room = min(room, long_limit * f - net)
+            bid_size, hold_bid = max(1, min(bid_size, room)), True
+        elif net < 0 and ask_size >= 1:
+            room = short_limit * f + inv
+            if cfg.limits_use_race_net:
+                room = min(room, short_limit * f + net)
+            ask_size, hold_ask = max(1, min(ask_size, room)), True
     if adding_factor < 1.0:                   # capital ceiling: the side growing |net| shrinks (0 = not quoted)
         if net >= 0:
             bid_size = min(bid_size, bid_size * adding_factor)
         if net <= 0:
             ask_size = min(ask_size, ask_size * adding_factor)
     bid_size, ask_size = max(0, int(bid_size)), max(0, int(ask_size))   # the API only takes whole shares
+    if hold_bid and adding_factor > 0:
+        bid_size = max(1, bid_size)
+    if hold_ask and adding_factor > 0:
+        ask_size = max(1, ask_size)
     bid_max, ask_max = max(bid_size, int(bid_max)), max(ask_size, int(ask_max))
 
     if bid >= ask:
@@ -2118,23 +2138,33 @@ class TurnoverTracker:
     (unix time, shares). Observed flow = the larger of the two (the tape includes our fills, so adding them would
     count ours twice; our fills are the floor when the tape has gaps), per hour of OBSERVED time in the window.
 
-    Observed time = the part of the window covered by this run (since `start`) or by the seeds read at start-up
-    (fills.csv, the recorder: [seed_from, seed_to]); a restart gap is not observed. Until it reaches
-    MIN_COVERAGE of the window nothing is judged (every market is alive): no false "dead" in the first hours
-    after a start without history."""
+    Observed time = the part of the window covered by this run (since `start`) or by the seeds read at start-up.
+    Seeds give time points (fills.csv fills; the recorder's trades and snapshot times, one a minute while it ran);
+    points no more than GAP_SECONDS apart (and the last one to the start) join into observed intervals, and a longer
+    gap - an outage, a restart after one - is NOT observed (it is not zero flow). Until the observed time reaches
+    MIN_COVERAGE of the window nothing is judged (every market is alive): no false "dead" in the first hours after
+    a start without history, nor after a restart that followed an outage."""
     KEEP_HOURS = 48.0                     # retention (the largest turnover_window_hours allowed live)
     MIN_COVERAGE = 0.9                    # share of the window that must be observed before judging
+    GAP_SECONDS = 600.0                   # seed points further apart than this: the time between is unobserved
 
     def __init__(self, start=None):
         self.start = time.time() if start is None else float(start)
-        self.seed_from = self.seed_to = None   # what the start-up seeds cover (None = no seed)
+        self.seed_points = []             # unix times before `start` known to be observed
+        self.seed_spans = []              # [(t0, t1)] observed intervals built from them (see _rebuild)
         self.ours, self.tape = defaultdict(deque), defaultdict(deque)
 
-    def _cover(self, t0, t1):
-        if self.seed_from is None:
-            self.seed_from, self.seed_to = t0, t1
-        else:
-            self.seed_from, self.seed_to = min(self.seed_from, t0), max(self.seed_to, t1)
+    def _cover(self, points):
+        """Add observed time points (before start) and rebuild the observed intervals."""
+        self.seed_points.extend(float(t) for t in points if t is not None and float(t) <= self.start)
+        pts = sorted(set(self.seed_points))
+        spans = []
+        for t in pts + ([self.start] if pts else []):
+            if spans and t - spans[-1][1] <= self.GAP_SECONDS:
+                spans[-1][1] = t
+            else:
+                spans.append([t, t])
+        self.seed_spans = [(a, b) for a, b in spans if b > a]
 
     def add(self, eid, t, qty, tape=False):
         """One trade of |qty| shares at unix time t (ours, or from the tape)."""
@@ -2150,12 +2180,10 @@ class TurnoverTracker:
                     dq.popleft()
 
     def observed_hours(self, now, window_hours):
-        """Hours of the window [now - window, now] covered by this run or by the seeds."""
+        """Hours of the window [now - window, now] covered by this run or by the seeds' intervals."""
         lo = now - 3600 * window_hours
         run = max(0.0, now - max(lo, self.start))
-        seed = 0.0
-        if self.seed_from is not None:
-            seed = max(0.0, min(self.seed_to, self.start, now) - max(self.seed_from, lo))
+        seed = sum(max(0.0, min(b, self.start, now) - max(a, lo)) for a, b in self.seed_spans)
         return min(window_hours, (run + seed) / 3600)
 
     def judged(self, now, window_hours):
@@ -2178,63 +2206,77 @@ class TurnoverTracker:
         return self.shares(eid, now, window_hours, use_tape) / max(self.observed_hours(now, window_hours), 1e-9)
 
     def seed_fills(self, rows, now):
-        """fills.csv rows (read_fills): those within KEEP_HOURS feed `ours`; the file's first and last fill
-        bound what it covers. Returns how many rows were used."""
-        pts = []
+        """fills.csv rows (read_fills): those within KEEP_HOURS feed `ours` and count as observed time points.
+        Returns how many rows were used."""
+        cut, pts = now - 3600 * self.KEEP_HOURS, []
         for r in rows:
             try:
                 t = parse_ts(r.get("filled_at"))
                 q = float(r.get("qty") or 0)
             except (TypeError, ValueError):
                 continue
-            if t is not None:
+            if t is not None and cut <= t.timestamp() <= self.start:
                 pts.append((t.timestamp(), str(r.get("exchange_id")), q))
-        if not pts:
-            return 0
         pts.sort()
-        self._cover(min(pts[0][0], self.start), min(pts[-1][0], self.start))
-        cut, used = now - 3600 * self.KEEP_HOURS, 0
         for t, eid, q in pts:
-            if cut <= t <= self.start:
-                self.add(eid, t, q)
-                used += 1
-        return used
+            self.add(eid, t, q)
+        self._cover(t for t, _, _ in pts)
+        return len(pts)
+
+    @staticmethod
+    def _first_rowid_at(db, table, ts_min, to_ts):
+        """Smallest rowid whose ts >= ts_min (rowid grows with time): a binary search, a few indexed reads."""
+        top = db.execute(f"SELECT MAX(rowid) FROM {table}").fetchone()[0]
+        if top is None:
+            return None
+        lo, hi = 1, top + 1
+        while lo < hi:
+            mid = (lo + hi) // 2
+            row = db.execute(f"SELECT ts FROM {table} WHERE rowid >= ? ORDER BY rowid LIMIT 1", (mid,)).fetchone()
+            t = to_ts(row[0]) if row else None
+            if row is None or (t is not None and t >= ts_min):
+                hi = mid
+            else:
+                lo = mid + 1
+        return lo
 
     def seed_tape(self, db_path, now):
-        """The recorder's trades table (read-only): rows within KEEP_HOURS feed `tape`; its first and last rows,
-        and the last snapshot row, bound what the recording covers. Returns rows used (0 = nothing to read)."""
+        """The recorder (read-only): its trades within KEEP_HOURS feed `tape`; their times and the snapshot times
+        (one a minute while the bot ran) are observed time points. Returns trades used (0 = nothing to read)."""
         if not db_path or not os.path.exists(db_path):
             return 0
         try:
             db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         except sqlite3.Error:
             return 0
+        cut, pts, rows = now - 3600 * self.KEEP_HOURS, [], []
+
+        def snap_ts(v):
+            t = parse_ts(v) if isinstance(v, str) else None
+            return t.timestamp() if t is not None else None
         try:
             names = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            if "trades" not in names:
-                return 0
-            first = db.execute("SELECT ts FROM trades ORDER BY rowid LIMIT 1").fetchone()
-            last = db.execute("SELECT ts FROM trades ORDER BY rowid DESC LIMIT 1").fetchone()
-            if not first or first[0] is None:
-                return 0
-            hi = float(last[0])
-            if "snapshots" in names:                    # the recording ran until its last snapshot
-                snap = db.execute("SELECT ts FROM snapshots ORDER BY rowid DESC LIMIT 1").fetchone()
-                st = parse_ts(snap[0]) if snap and isinstance(snap[0], str) else None
-                if st is not None:
-                    hi = max(hi, st.timestamp())
-            self._cover(min(float(first[0]), self.start), min(hi, self.start))
-            rows = db.execute("SELECT ts, eid, quantity FROM trades WHERE ts >= ? AND ts <= ? ORDER BY ts",
-                              (now - 3600 * self.KEEP_HOURS, self.start)).fetchall()
+            if "trades" in names:
+                first = self._first_rowid_at(db, "trades", cut, lambda v: float(v) if v is not None else None)
+                if first is not None:
+                    rows = db.execute("SELECT ts, eid, quantity FROM trades WHERE rowid >= ? AND ts <= ? "
+                                      "ORDER BY ts", (first, self.start)).fetchall()
+            if "snapshots" in names:
+                first = self._first_rowid_at(db, "snapshots", cut, snap_ts)
+                if first is not None:
+                    pts = [snap_ts(r[0]) for r in db.execute("SELECT DISTINCT ts FROM snapshots WHERE rowid >= ?",
+                                                             (first,))]
         except (sqlite3.Error, TypeError, ValueError):
             return 0
         finally:
             db.close()
         used = 0
         for t, eid, q in rows:
-            if t is not None and q is not None:
+            if t is not None and q is not None and cut <= float(t):
                 self.add(eid, t, q, tape=True)
                 used += 1
+        self._cover([float(t) for t, _, _ in rows if t is not None and float(t) >= cut]
+                    + [t for t in pts if t is not None and t >= cut])
         return used
 
 
@@ -2648,6 +2690,7 @@ class Bot:
         self.turnover = TurnoverTracker() # turnover control: shares traded per market (ours + the tape)
         self.turnover_flow = {}           # eid -> observed shares/h (None = not judged yet), see refresh_turnover
         self.turnover_refreshed = -1e9    # monotonic time of the last refresh
+        self.turnover_state = {}          # eid -> (dead?, monotonic time it became so): hysteresis (refresh_turnover)
         self.seed_turnover()
         self.last_summary_slot = None     # (date, hour) of the last phone summary
         self.value_at_last_summary = None
@@ -3870,12 +3913,27 @@ class Bot:
         self.turnover.prune(now)
         self.turnover_flow = {e: self.turnover.per_hour(e, now, cfg.turnover_window_hours, cfg.turnover_use_tape)
                               for e in self.ex}
+        # Hysteresis: dead below turnover_min_shares_per_hour, alive again only above turnover_alive_shares_per_hour,
+        # and no flip before turnover_min_state_minutes in the current state (a market's first verdict is at once).
+        hold = 60 * cfg.turnover_min_state_minutes
+        for e, flow in self.turnover_flow.items():
+            st = self.turnover_state.get(e)
+            if flow is None:
+                self.turnover_state.pop(e, None)          # not judged (yet): alive, no state kept
+                continue
+            dead = st[0] if st else False
+            want = (flow < cfg.turnover_min_shares_per_hour if not dead
+                    else flow <= max(cfg.turnover_alive_shares_per_hour, cfg.turnover_min_shares_per_hour))
+            if st is None:
+                self.turnover_state[e] = (want, now_m)
+            elif want != dead and now_m - st[1] >= hold:
+                self.turnover_state[e] = (want, now_m)
 
     def turnover_dead(self, ex, size, cfg):
-        """A dead market where we hold a position: observed flow below turnover_min_shares_per_hour (once judged)
+        """A dead market where we hold a position: dead per refresh_turnover (flow, hysteresis; once judged)
         and |race-netted position| at least min(one quote, 100 shares)."""
-        flow = self.turnover_flow.get(ex.eid)
-        if flow is None or flow >= cfg.turnover_min_shares_per_hour:
+        st = self.turnover_state.get(ex.eid)
+        if not st or not st[0]:
             return False
         return abs(ex.eff) >= max(1.0, min(size or 0.0, 100.0))
 
