@@ -976,6 +976,7 @@ class Api:
         self.rate_limited = 0             # how many 429s we've had (shown in status.json - should stay 0)
         self.paused_until = 0.0           # monotonic end of the exchange's 429 pause (Retry-After); 0 = none
         self.pauses_total = 0             # 429 pauses started (several 429s inside one pause extend it)
+        self.write_budget_wait_total = 0  # main-thread writes not sent: they would have waited (WRITE_BUDGET_WAIT)
         self.tl = threading.local()       # per thread: max_write_wait (the main thread's cap on a write's wait)
         self.s = requests.Session()
         self.s.headers.update({"Authorization": f"Bearer {cfg.api_key}", "Content-Type": "application/json"})
@@ -1015,6 +1016,7 @@ class Api:
                     start = max(start, self._wwindow[-int(self.wbudget)] + self.BUDGET_WINDOW)
                 cap = getattr(self.tl, "max_write_wait", None)
                 if cap is not None and start - now > cap:
+                    self.write_budget_wait_total = getattr(self, "write_budget_wait_total", 0) + 1
                     raise ApiError(429, "WRITE_BUDGET_WAIT", f"a write would wait {start - now:.0f} s for the write "
                                    f"budget / rate-limit pause (main thread: at most {cap:.0f} s) - not sent")
                 bisect.insort(self._wwindow, start)
@@ -2635,6 +2637,7 @@ class Bot:
         self.arbs_total = 0               # arbitrages / takes since start (summaries report the change)
         self.unwinds_total = 0            # pair unwinds since start (status.json pair_unwinds_total)
         self.takes_total = 0
+        self.takes_skipped_budget = self.arbs_skipped_budget = 0   # not sent: write budget busy (status.json)
         self.take_version_seen = 0        # last Polymarket reading the take logic has counted
         self.db = self.open_recorder()
         self.last_record = -1e9
@@ -3019,6 +3022,9 @@ class Bot:
                        "realtime": "connected" if realtime else ("reconnecting" if self.feed else "off"),
                        "realtime_events": self.feed.events if self.feed else 0,
                        "takes_total": self.takes_total,
+                       "takes_skipped_budget": self.takes_skipped_budget,
+                       "arbs_skipped_budget": self.arbs_skipped_budget,
+                       "write_budget_wait_total": getattr(self.api, "write_budget_wait_total", 0),
                        "quote_capital_planned": round(getattr(self, "plan_capital", 0.0)),
                        "biggest_quotes": {self.ex[e].label: s for e, s in sorted(self.size_plan.items(),
                                           key=lambda kv: -kv[1])[:6] if e in self.ex},
@@ -4832,7 +4838,9 @@ class Bot:
 
     def execute_arbitrage(self, race, members, levels, qty, fvs, now_m, action="sell", kind="arb"):
         cfg = self.cfg
-        if not self.writes_ready(len(members) + 1):
+        # Writes: a cancel per leg, the batch, a leftover cancel per leg = 2n + 1.
+        if not self.writes_ready(2 * len(members) + 1):
+            self.arbs_skipped_budget += 1
             log.info("%s on %s skipped: write budget busy (next cycle)", "pair unwind" if kind == "unwind"
                      else "arbitrage", race)
             return
@@ -4862,6 +4870,11 @@ class Bot:
         try:
             results = self.api.place_batch(orders)
         except ApiError as e:
+            if e.code == "WRITE_BUDGET_WAIT":             # never sent: nothing can have traded, no hold, no alert
+                self.arbs_skipped_budget += 1
+                log.warning("%s on %s not sent: write budget busy (our quotes there are re-placed next cycle)",
+                            what[0].lower(), race)
+                return
             for m in members:                             # outcome unknown: don't pile in again
                 self.ex[m].pending_until = now_m + cfg.pending_seconds
             alert(f"arbitrage on {race}: placement failed ({e}) - check positions")
@@ -4970,6 +4983,12 @@ class Bot:
             room = min(room, max(0.0, -inv) if buy else max(0.0, inv))
         cost = price if buy else 1 - price
         qty = int(min(level["quantity"], room, cfg.max_order_cash_frac * bank / max(cost, TICK)))
+        if qty >= 1 and not self.writes_ready(3):
+            # Checked BEFORE pulling our own quote (cancel + take + leftover cancel): a take that can't be sent
+            # must not leave the market unquoted. The direction stays confirmed: taken once the budget frees.
+            self.takes_skipped_budget += 1
+            log.info("take on %s skipped: write budget busy (next cycle)", ex.label)
+            return False
         ex.take_until = now_m + cfg.take_cooldown_seconds
         ex.take_dir = 0                                                  # a new gap must be confirmed afresh
         if qty < 1:
@@ -4990,6 +5009,12 @@ class Bot:
         try:
             results = self.api.place_batch([order])
         except ApiError as e:
+            if e.code == "WRITE_BUDGET_WAIT":             # never sent: no hold, no alert; quotes back next cycle
+                self.takes_skipped_budget += 1
+                self.takes_total -= 1
+                log.warning("take on %s not sent: write budget busy (our quote there is re-placed next cycle)",
+                            ex.label)
+                return True
             ex.pending_until = now_m + cfg.pending_seconds
             alert(f"take on {ex.label} failed ({e}) - check positions")
             if e.code in FATAL_API_CODES:
