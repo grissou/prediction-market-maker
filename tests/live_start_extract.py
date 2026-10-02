@@ -7,9 +7,15 @@ the position's direction; shares not covered are stamped at the first fill time)
 snapshot time (negative)."""
 import csv
 import json
+import os
 import sqlite3
 import sys
 from datetime import datetime
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+os.environ.setdefault("SUPERMARKET_API_KEY", "test-key")
+os.environ.setdefault("TOURNAMENT_SLUG", "test")
+import mm_bot as M                                   # noqa: E402  (mark_step_sd: the bot's own estimator)
 
 
 def ts(s):
@@ -29,6 +35,16 @@ def main(status_path, db_path, fills_path, out_path):
     for f in fills:
         nfills[f["exchange_id"]] = nfills.get(f["exchange_id"], 0) + 1
     pos_by_label = status.get("positions") or {}
+    series = {}                                       # 24 h of book mids per market (mark fragility)
+    for eid, when, bb, ba in c.execute("select eid, ts, best_bid, best_ask from snapshots where ts <= ? and ts >= ? "
+                                       "and best_bid is not null and best_ask is not null order by eid, ts",
+                                       (status["updated"], M.iso(datetime.fromtimestamp(t0 - 86400, M.timezone.utc)))):
+        series.setdefault(eid, []).append((ts(when), (bb + ba) / 2))
+    recent = {}                                       # our fills in the 6 h before (turnover seed)
+    for f in fills:
+        t = ts(f["filled_at"]) - t0
+        if -6 * 3600 <= t <= 0:
+            recent.setdefault(f["exchange_id"], []).append([round(t), abs(float(f["qty"] or 0))])
     out = []
     for eid, label, bb, ba, fv, ref, pos, when in rows:
         party = {"Dem": "Democratic", "Rep": "Republican"}.get(label.split()[0])
@@ -47,7 +63,8 @@ def main(status_path, db_path, fills_path, out_path):
         if need > 0.5:
             lots.insert(0, [need if q > 0 else -need, round(first - t0)])
         out.append(dict(eid=eid, label=label, party=party, race=race, best_bid=bb, best_ask=ba, fv=fv, ref=ref,
-                        pos=q, lots=lots if q else [], fills16h=nfills.get(eid, 0)))
+                        pos=q, lots=lots if q else [], fills16h=nfills.get(eid, 0),
+                        mark_sd=M.mark_step_sd(series.get(eid, []), 60, 0.002), recent_fills=recent.get(eid, [])))
     json.dump(dict(updated=status["updated"], account_value=status["account_value"],
                    locked_in_orders=status["locked_in_orders"], party_delta=status.get("party_delta"),
                    markets=out), open(out_path, "w"), indent=0)

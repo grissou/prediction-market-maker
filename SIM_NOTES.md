@@ -365,3 +365,56 @@ the bot would have bought sets that pay nothing if the outsider wins. The guard 
 - Fills on legs not quoted are not modelled.
 - Not yet run: all-on minus fast unload, the new fast unload and reduce-join versions, and the R3 ladder at 11k cash
   on the 032bdae head.
+
+# Round 3b: Package 3 candidates from the live start (head b6ca213 merged)
+
+## Simulator changes
+- `tests/live_sim.py` now drives the newly merged code:
+  - **R3 ladder:** `Bot.ladder_targets`. The cash budget is computed as `Bot.ladder_setup` does: free cash minus
+    `ladder_min_cash_frac` × equity, capped by `quote_capital_frac`. Level-0-first write ordering follows
+    `plan_exchange` (strategy_sim's `real_ladder_rules`). The write gate is `ladder_min_writes` scaled to this
+    simulator's write share; when it binds, resting ladder orders stay and nothing new is placed.
+  - **Turnover control:** `Bot.refresh_turnover` / `turnover_dead`. Every simulated trade goes into the tape, the
+    tracker is seeded with our real fills from the 6 h before 08:14, and a simulated clock stands in for mm_bot's
+    `time.time()`.
+  - **Mark fragility:** `Bot.update_mark_frag`, plus `mark_sd` from the real 24 h of snapshots, via the bot's own
+    `mark_step_sd`.
+  - **Behind-the-best sizing, the new fast unload and the new reduce-join:** all inside `Bot.decide`.
+  - **Outsider guard:** `Bot.arb_plan` with `cur_refs` / `cur_liquid` (raw Polymarket prices), i.e. the new
+    `arb_buy_min_ref_sum` guard.
+- **Write share:** these 74 markets now get all 30 writes/min (`SIM_LIVE_SHARE=1.0`; round 3 used 0.24). Unlimited,
+  they would use 27/min. At the base they use 20/min and defer about 1,600 changes per hour.
+
+## 6 h quiet, 16 seeds. Δ vs "Package 2 as live" (Config defaults: every Package 3 candidate off)
+Base: P&L +2,930 (+1,290 at the lagged mark). Cash freed 6.6k. Capital goes from 0.90 to 0.835 (peak 0.917). Median
+held-share age at the end is 3.7 h. Peak worst case 45k. 20.2 writes/min. 11.8k shares of sets unwound, 5.9k shares
+of arbitrage (+314). 0 outsider fills.
+
+| Variant | ΔP&L | Δlagged mark | Cash freed | Δcapital end / peak (pts) | Δage | Δworst | Δwrites/min | Verdict |
+|---|---|---|---|---|---|---|---|---|
+| (1) join + turnover + behind-best + mark-frag + ladder | -65 ± 99 | -13 ± 110 | **+1.2k ± 0.5k** | -1.1 / +0.1 | 0 | -0.1k | **+3.7** | neutral; costs writes |
+| (2) new fast unload (1c, 180 s) | -165 ± 110 | -153 ± 110 | -0.2k | +0.2 / +0.1 | 0 | -0.1k | 0 | negative-leaning, now 3 setups in a row |
+| (3) new reduce_join_best | -48 ± 81 | -112 ± 87 | -1.0k | +1.0 / +0.7 | +0.3 h | +0.3k | +0.2 | noise, leaning negative |
+| (4) turnover control | +49 ± 62 | +53 ± 74 | 0 | 0 | +0.3 h | +0.1k | -0.3 | **untested**: no simulated market fell below 50 sh/h |
+| (5) behind-the-best sizing | -99 ± 83 | -52 ± 98 | -0.9k | +0.9 / +0.2 | 0 | 0 | -0.2 | noise, leaning negative |
+| (6) mark fragility (100/step) | -29 ± 52 | -15 ± 64 | +0.2k | -0.2 / +0.2 | +0.4 h | +0.2k | -0.1 | does nothing: the cap rarely binds at these sd's |
+| (7) R3 ladder (min cash 0.1) at ~10k free cash | -5 ± 49 | -30 ± 69 | -1.2k | +1.2 / 0 | +0.2 h | -0.2k | **+2.0** | almost idle: 246 ladder shares (+4.5) in 6 h; write gate binds in **11%** of cycles |
+| (8) refill cooldown OFF | -14 ± 94 | +18 ± 91 | +0.8k | -0.8 / -0.5 | +0.2 h | -0.3k | -0.1 | does nothing |
+| (9) ceiling adding factor 0.5 (vs 0.25) | **+262 ± 100** | **+200 ± 100** | -1.5k | +1.5 / +0.05 | +0.1 h | +1.3k | +1.3 | **real gain** (2.6 se) for 1.5 points of capital |
+| (10) arb_buy_min_ref_sum 0.8 (guard loosened) | **-898 ± 94** | **-777 ± 100** | **-8.2k** | **+8.1 / +5.9** | 0 | -1.2k | +0.1 | 23.8k outsider shares bought. The 0.99 guard (default) is worth +900 per 6 h; with it, 0 outsider fills |
+
+## Not run (stopped to save credits)
+- 6 h news: only the base finished (16 seeds). P&L +2,500, lagged mark +889, cash freed 7.6k, capital 0.90 -> 0.826 (peak
+  0.925), age 4.0 h, 21.1 writes/min, 1,890 deferred changes per hour. No variant deltas.
+- 12 h runs of the winners: not run.
+
+## Recommended Package 3 defaults
+- **capital_ceiling_adding_size_factor 0.5** (medium: +262 ± 100 for +1.5 points of capital; round 2 said the same).
+- **arb_buy_min_ref_sum 0.99** (high).
+- **fast_unload_enabled off** (medium).
+- **reduce_join_best, behind_best_size_enabled, mark_frag_enabled off** (low: noise, none helps; mark-frag can stay
+  as a safety cap with a lower step if the owner wants it).
+- **turnover_control:** no evidence either way (the simulator has no dead markets). Ship off, or on only after
+  checking its live dead-market list.
+- **ladder_enabled off at today's cash.** At 10% minimum free cash it barely places anything and adds 2 writes/min.
+- **refill cooldown:** either (no effect).
