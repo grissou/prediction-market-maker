@@ -38,7 +38,10 @@ check("defaults: off, headline gate off, 50 markets, 30 min half-life, max 12%, 
        c.ref_tilt_winsor) == (False, False, 50, 30.0, 0.12, 0.08))
 names = ["ref_tilt_enabled", "ref_tilt_headline", "ref_tilt_min_markets", "ref_tilt_halflife_min", "ref_tilt_max",
          "ref_tilt_winsor"]
-check("all six live-overridable, at the end of OVERRIDABLE", list(M.OVERRIDABLE)[-6:] == names, list(M.OVERRIDABLE)[-6:])
+_ov = list(M.OVERRIDABLE)
+_i = _ov.index(names[0])
+check("all six live-overridable, one block after the savers", _ov[_i:_i + 6] == names and _i > _ov.index("ttl_expire_grace_seconds"),
+      _ov[_i:_i + 6])
 good, bad = M.validate_overrides({"ref_tilt_enabled": True, "ref_tilt_max": 0.5}, c)
 check("override ranges: flag accepted, ref_tilt_max 0.5 refused", good == {"ref_tilt_enabled": True} and len(bad) == 1,
       (good, bad))
