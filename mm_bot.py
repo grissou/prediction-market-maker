@@ -771,6 +771,14 @@ class Config:
     # ref-only markets, not without a book price.
     gap_size_shrink: float = 0.0          # 0 = off; the gap (in price) at which the adding size reaches the floor (try 0.03)
     gap_size_floor: float = 0.25          # the smallest factor
+    # --- Package 5: X11 reduce_from_book scope ---
+    # reduce_from_book_dead_only True: A (reduce_from_book) applies only in markets flagged turnover-dead
+    # (ex.turnover_dead, refresh_turnover's hysteresis verdict while holding a position) or, with
+    # reduce_from_book_max_turnover > 0, whose observed flow (turnover_flow, shares/h over turnover_window_hours) is
+    # below it. A not-yet-judged market (no flow figure) is not eligible by the threshold. Elsewhere the reducing
+    # side keeps the plain quote: in active markets the book-priced exit is picked off by informed takers.
+    reduce_from_book_dead_only: bool = False
+    reduce_from_book_max_turnover: float = 0.0   # shares/h; 0 = only the turnover_dead flag
 
 
 CFG = Config()
@@ -926,6 +934,9 @@ OVERRIDABLE = {
     # --- Package 5: X5 gap-size shrink ---
     "gap_size_shrink": (0.0, 0.2),
     "gap_size_floor": (0.0, 1.0),
+    # --- Package 5: X11 reduce_from_book scope ---
+    "reduce_from_book_dead_only": (False, True),
+    "reduce_from_book_max_turnover": (0.0, 100000.0),
 }
 MAX_ORDER_TTL = 7200.0    # no order of ours lives longer than this (dead-man's switch), whatever the TTL settings
 LADDER_MAX_LEVELS = 8
@@ -4634,6 +4645,11 @@ class Bot:
         reduce_fv = (book_fv if cfg.reduce_from_book and book_fv is not None and ex.eid not in self.ref_only
                      and (cfg.reduce_from_book_headline or ex.group not in cfg.headline_races)
                      and now_m - ex.ref_jump_at >= cfg.reduce_from_book_pause_s else None)
+        if reduce_fv is not None and cfg.reduce_from_book_dead_only:   # X11: only where little informed flow
+            flow = self.turnover_flow.get(ex.eid)
+            if not (ex.turnover_dead or (cfg.reduce_from_book_max_turnover > 0 and flow is not None
+                                         and flow < cfg.reduce_from_book_max_turnover)):
+                reduce_fv = None
         q = compute_quote(fv, ex.inv, inv_for_quote, best_bid, best_ask, cfg, reduce_only, no_bid, no_ask,
                              bid_cap, ask_cap, kelly_p=kelly_p, bankroll=self.bankroll(),
                              shift=self.party_shift(ex, party_delta), order_size=planned, position_limit=headline_limit,
