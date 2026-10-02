@@ -35,3 +35,10 @@ Total <= 13.
 
 ## Rules kept
 Never re-run a configuration; every result into SIM_NOTES.md "Round 4"; runs in the background; at a cap, stop and write up.
+
+## Actuals
+- Real cost ~14.6 CPU-s per seed-hour (2.9x the estimate): 8 x 3 base + 2 variants = 17.5 CPU-min.
+- Item 2: S1 run (17.5) + smoke (~0.5) = ~18 CPU-min; S2 not run (would be ~58 CPU-min at the real cost).
+- Item 3: gate diagnosis ~2 CPU-min; P&L runs not run (ladder idle at 0.90 and 0.80, nothing to measure).
+- Item 4: 0 CPU-min; the 16 x 6 news run was refused by the session's permission classifier ("Interfere With Workloads").
+  At the real cost it would have been ~70 CPU-min, over the 30 cap anyway.
