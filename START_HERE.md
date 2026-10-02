@@ -1,14 +1,13 @@
 # START HERE (Team run, branch `claude/run-c-tournament-improvements-pycdet`)
 
-Status: **wrapping up** (started 2026-10-02 08:50 UTC; credits nearly spent at 14:35 UTC). **Package 1 READY at 10:10 UTC, Package 2 READY at 11:05 UTC, hot-fix Package 2.1 READY at 12:05 UTC, hot-fix Package 2.2 READY at 12:40 UTC, Package 2.3 READY at 13:10 UTC (deploy this one)** (deploy-ready, cumulative). Package 2 is LIVE since 11:21:57. Base: `claude/live-2026-10-02b` (5c0463a), the code live since 08:34.
+Status: **complete** (Team complete at 14:45 UTC) (started 2026-10-02 08:50 UTC; credits nearly spent at 14:35 UTC). **Package 1 READY at 10:10 UTC, Package 2 READY at 11:05 UTC, hot-fix Package 2.1 READY at 12:05 UTC, hot-fix Package 2.2 READY at 12:40 UTC, Package 2.3 READY at 13:10 UTC, Package 3 READY at 14:45 UTC (deploy this one)** (deploy-ready, cumulative). Package 2 is LIVE since 11:21:57. Base: `claude/live-2026-10-02b` (5c0463a), the code live since 08:34.
 The Builder's previous START_HERE is kept as `START_HERE_BUILDER.md`; Run A's notes are `ENGINEERING_NOTES.md`.
 Plan: `PLAN.md`. Packages appear below as they become READY (commit messages start "READY: Package N").
 Deploy only commits whose message starts "READY"; the branch is cumulative.
 
 ## HANDOFF (read this if you are picking the work up)
 **State at 14:35 UTC, 2 Oct.** Live: Package 2 (83f6d45) since 11:21:57 with settings_override `{"arb_two_sided": false, "worst_case_backstop_frac": 0.8}`
-plus the stop-gap keys below. Deploy candidate: **Package 2.3 (c8e881f)**; Package 3 follows at HEAD once marked READY (same code plus the defaults
-below and the Package 3 features, most OFF).
+plus the stop-gap keys below. Deploy candidate: **Package 3 (HEAD, "READY: Package 3")**; it includes 2.1-2.3.
 **Where everything is** (all on this branch, PR #5): `START_HERE.md` (this file: packages, parameter table, owner flags), `PLAN.md`, `deploy/RUNBOOK.md`
 (parameter-only, handover code deploy, rollback, emergency), `DATA_REPORT_2.md` + `analysis/*.py` (day-two analysis, valuation rule, outsider races,
 rival floors, turnover, mark fragility, mark rule, follow-ups), `ideas/IDEAS_ROUND1..3.md` + `analysis/explorer_r2/` (idea rounds with the data facts
@@ -196,6 +195,24 @@ trade-average mark. Usage: `python tests/live_sim.py SEEDS HOURS quiet|news '{se
 pair unwind +88 ± 76 (ages -0.85 h); age skew +5 ± 98; arbitrage -54 ± 90; refill cooldown -120 ± 97; fast unload (old 0.5c/300 s) -257 ± 94;
 reduce-join (old) -58 ± 61. The outsider races got 0 arbitrage fills. Limits: 68 of 237 markets simulated; buy-side chances ~2x real.
 
+### Package 3 (READY 14:45 UTC): defaults from the real-book simulator and the Reviewer; new features present, most OFF. Code deploy (handover restart). Commit "READY: Package 3".
+Includes 2.1-2.3. Changes against 2.3: `capital_ceiling_adding_size_factor` 0.25 -> 0.5 (the ceiling binds live; factor 0 was a cliff of -131/h, 0.5 recovers
+~70%); `mark_frag_enabled` ON (per-position cap: a position may add at most 100 cash of mark noise per 10-min step; on the snapshot 3 positions would be
+capped: both RI Senate legs and Dem U.S. Senate; the total cap stays off); `market_edge_enabled` ON (inert until `market_edge.json` exists: run
+`python analysis/rival_floor.py --mode sweep_only` on the server's market_data.sqlite and copy the file next to mm_bot.py; the loader refuses bad
+entries); `refill_cooldown_enabled` OFF (real-book simulator -120 ± 97; the day-one losses it targeted were the old skew bug). OFF and awaiting evidence
+(switch on via settings_override only after a simulator or live A/B result): `fast_unload_enabled`, `reduce_join_best`, `turnover_control_enabled`,
+`behind_best_size_enabled`, `ladder_enabled` (the ladder also needs the Reviewer's write-churn fixes L1-L4, listed below, before any live use).
+Suites: test_mm_bot 588, test_strategy 114, test_ref_prices 37, test_recorder_refill 37, test_fast_unload 61, test_turnover 94, test_mark_frag 52,
+test_behind_best 36, test_stress 20 (and with STRESS_LADDER=1); Python 3.11 and 3.10.
+Watch in the first 10 minutes: as for 2.3, plus status.json `mark_frag_capped_markets` (expect ~3) and `mark_frag_top`; `market_edge_markets`
+(0 until the file exists); adding-side sizes at half under the ceiling (not a quarter).
+Unfinished at wrap-up (work in progress in sub-agent worktrees, NOT merged): the ladder's Reviewer fixes L1-L4 (hair-trigger urgent pulls one tick
+behind the touch -> stale not urgent; ladder-only pulls excluded from the cancel-all count; 1-tick tolerance, re-anchor hysteresis at 2c and
+min_quote_life for ladder orders; per-order cash cap in ladder_caps) and the Strategist's round-3b runs (new fast unload, new reduce-join, turnover,
+behind-best, mark cap, the real ladder at 10k free cash, refill cooldown off vs on, ceiling 0.25 vs 0.5 on `tests/live_sim.py`). Both are specified
+above and in SIM_NOTES.md; a new session can redo them from this branch.
+
 ## Parameter changes (cumulative against live)
 | Setting | Live | New | Evidence | Expected effect |
 |---|---|---|---|---|
@@ -215,6 +232,10 @@ reduce-join (old) -58 ± 61. The outsider races got 0 arbitrage fills. Limits: 6
 | ref_only_use_tops / startup_books_first (new) | - | on | coverage 30 -> 101 in 6 min after restart | ~190 priced within 2 min of a restart |
 | refill_cooldown_* (new) | - | on | -936 on 3rd+ same-side fills | fewer walks against us |
 | fl_bias_enabled (new) | - | off | §10c: a skew artefact | none |
+| capital_ceiling_adding_size_factor | 0.25 (P2) | 0.5 | real-book simulator: factor 0 a cliff, 0.5 recovers ~70% | adding sides at half size under the ceiling |
+| mark_frag_enabled (new) | - | on (per-position cap 100/step) | Reviewer second pass; 3 positions capped on the snapshot | less mark noise in thin markets |
+| market_edge_enabled (new) | - | on (inert without market_edge.json) | Reviewer: only widens, cheap | per-market floors once the file exists |
+| refill_cooldown_enabled | on (P2) | off | real-book simulator -120 ± 97 | none expected |
 
 ## Packages
 
