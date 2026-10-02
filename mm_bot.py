@@ -254,6 +254,16 @@ class Config:
                                           #   failure - try again this much later, quoting meanwhile
     selftest_alert_after: float = 900.0   # ...and send one alert if it still hasn't managed after this long
 
+    # --- CHURN CONTROL (a crowded book: other bots re-quote one tick inside us all day) ---------------
+    # Every reprice costs a write (30/min budget) and our place in line. Only reprice when it matters.
+    churn_control: bool = True
+    min_quote_life_seconds: float = 5.0   # an order younger than this isn't repriced while it's still safe (inside
+                                          #   our limit price); unsafe ones, pulls and expiries always go
+    churn_max_reprices: int = 4           # a side repriced this many times within churn_window_seconds stops
+    churn_window_seconds: float = 60.0    #   chasing: its order stays while safe (no ping-pong with another bot)
+    urgent_ref_move: float = 0.005        # Polymarket moved this much since the last reading: that market's changes
+                                          #   are sent first (stale quotes get picked off by the fastest bot)
+
     # --- BURST PROTECTION (the exchange is slow: day one's open, writes 15-30 s) ------------------
     # While writes or cycles are slow, every quote can sit stale for long, and every change costs a slow write.
     # So: quote only the biggest markets, smaller and one tick wider; elsewhere keep what's resting while it's
@@ -498,6 +508,7 @@ class Api:
         self.budget = float(cfg.requests_per_minute)   # current per-minute budget (self-tuning)
         self.wbudget = float(cfg.writes_per_minute)    # ...and for order writes on their own (self-tuning)
         self._wwindow = deque()           # start times of writes in the last BUDGET_WINDOW seconds
+        self.write_times = deque(maxlen=500)   # (time done, seconds on the wire, timed out) per write attempt
         self.rate_limited = 0             # how many 429s we've had (shown in status.json - should stay 0)
         self.s = requests.Session()
         self.s.headers.update({"Authorization": f"Bearer {cfg.api_key}", "Content-Type": "application/json"})
@@ -518,13 +529,14 @@ class Api:
             start = max(now, self._next_start)
             if len(self._window) >= int(self.budget):
                 start = max(start, self._window[-int(self.budget)] + self.BUDGET_WINDOW)
+            general = start
             if write:
                 while self._wwindow and now - self._wwindow[0] >= self.BUDGET_WINDOW:
                     self._wwindow.popleft()
                 if len(self._wwindow) >= int(self.wbudget):
                     start = max(start, self._wwindow[-int(self.wbudget)] + self.BUDGET_WINDOW)
                 self._wwindow.append(start)
-            self._next_start = start + self.gap
+            self._next_start = general + self.gap   # a write waiting on the WRITE budget never holds up reads
             self._window.append(start)
         if start > now:
             time.sleep(start - now)
@@ -557,6 +569,7 @@ class Api:
         delay = 0.25                      # first back-off wait; doubles each retry up to 8 s
         for attempt in range(retries + 1):
             self.throttle(write=method != "GET")
+            t_sent = time.monotonic()
             try:
                 r = self.s.request(method, self.cfg.base_url + path, timeout=self.cfg.request_timeout,
                                    params={k: v for k, v in (params or {}).items() if v is not None},
@@ -567,11 +580,15 @@ class Api:
                 # at once only earns 409 REQUEST_IN_FLIGHT (day one, every time) and costs a request. Hand it
                 # back as "outcome unknown" instead; the bot recovers it from the open-orders list.
                 sent = isinstance(e, requests.exceptions.ReadTimeout)
+                if method != "GET":
+                    self.write_times.append((time.monotonic(), time.monotonic() - t_sent, sent))
                 if attempt == retries or (sent and not retry_sent and self.cfg.write_fail_fast):
                     raise ApiError(0, "NETWORK", str(e))
                 time.sleep(delay); delay = min(delay * 2, 8)
                 continue
 
+            if method != "GET":
+                self.write_times.append((time.monotonic(), time.monotonic() - t_sent, False))
             # A proxy can answer with an HTML error page; never let that crash the bot.
             try:
                 data = r.json() if r.content else {}
@@ -1428,6 +1445,7 @@ class Ex:
     pause_until: float = 0.0              # order was rejected: back off
     unconfirmed_hold: float = -1.0        # the pending_until set for orders whose batch outcome was unknown
     writes: int = 0                       # our writes (cancels / batches) touching it still in flight
+    reprices: dict = field(default_factory=dict)   # side -> times we repriced it lately (churn control)
     cancelling: bool = False              # ...one of them is a cancel
     inv: float = 0.0                      # for logging / recording
     eff: float = 0.0                      # for logging
@@ -1518,6 +1536,9 @@ class Bot:
         self.write_log = deque()          # (time done, seconds taken, timed out) of recent writes (burst detection)
         self.last_cycle_seconds = 0.0
         self.burst, self.burst_calm_since, self.burst_set = False, 0.0, set()
+        self.global_reduce = False
+        self.ref_moved = set()            # eids whose Polymarket price moved >= urgent_ref_move at the latest reading
+        self.ref_version_urgent = 0
         self.refs = self.load_reference_prices()
         self.ref_version_seen = 0         # last Polymarket reading the jump guard has looked at
         self.last_tops = {}               # latest bulk best bid/ask per exchange (for recording)
@@ -1640,6 +1661,12 @@ class Bot:
     def cycle(self):
         cfg = self.cfg
         now, now_m = utcnow(), time.monotonic()
+        try:
+            self.cycle_body(cfg, now, now_m)
+        finally:
+            self.last_cycle_seconds = time.monotonic() - now_m
+
+    def cycle_body(self, cfg, now, now_m):
 
         # 0. What does this cycle need to read? ----------------------------------------------------
         # With a healthy realtime feed, most cycles are triggered by a pushed event and only read what
@@ -1719,6 +1746,7 @@ class Bot:
             if len(members) > 1:
                 book_fvs.update(normalise({e: book_fvs[e] for e in members}))
         refs, liquid = self.reference_prices(book_fvs)
+        self.mark_ref_moves()
         self.reference_jump_guard(now_m)
         fvs = dict(book_fvs)
         if cfg.ref_weight > 0 and refs:
@@ -1744,6 +1772,7 @@ class Bot:
         eff = self.effective_inventory(inv)
         worst = self.total_worst_case(inv, fvs)
         global_reduce = bool(equity) and worst > cfg.max_worst_case_frac * equity
+        self.global_reduce = global_reduce
         party_delta = sum(PARTY_SIGN.get(ex.party, 0) * inv.get(eid, 0.0) for eid, ex in self.ex.items())
         if full:                                  # summary line on full checks only (event cycles can be every 2 s)
             log.info("%s | account %s (locked in orders %.0f, %s) | worst-case loss %.0f%s | party delta %+.0f | "
@@ -1839,6 +1868,16 @@ class Bot:
                 if s is not None and s <= self.cfg.ref_liquid_spread:
                     liquid.add(eid)
         return refs, liquid
+
+    def mark_ref_moves(self):
+        """Which markets' Polymarket price just moved (urgent: see urgent_ref_move). Cleared once handled."""
+        version = getattr(self.refs, "version", 0)
+        if not self.refs or version == self.ref_version_urgent:
+            self.ref_moved = set()
+            return
+        self.ref_version_urgent = version
+        moved = {k for k, m in getattr(self.refs, "last_moves", {}).items() if m >= self.cfg.urgent_ref_move}
+        self.ref_moved = {e for e, ex in self.ex.items() if f"{ex.group}|{ex.party}" in moved}
 
     def reference_jump_guard(self, now_m):
         """After each new Polymarket reading, pull quotes on any market whose Polymarket price moved
@@ -2201,15 +2240,27 @@ class Bot:
         asks = [o for o in resting if not o.is_bid]
         fix_bid = side_needs_change(bids, q.bid, q.bid_size, self.cfg, now, q.bid_limit, is_bid=True)
         fix_ask = side_needs_change(asks, q.ask, q.ask_size, self.cfg, now, q.ask_limit, is_bid=False)
+        # Reduce-only, flatten and exit windows: always do exactly what the risk logic asks (no holding, no
+        # burst-mode skipping), or a position could be left to grow or never be exited.
+        critical = self.global_reduce or self.hours_to_close(ex) <= self.cfg.flatten_hours_before_close
+        if self.cfg.churn_control and not critical:
+            if fix_bid and self.hold_side(ex, bids, q.bid, q.bid_limit, q.bid_size, True, now, now_m):
+                fix_bid = False
+            if fix_ask and self.hold_side(ex, asks, q.ask, q.ask_limit, q.ask_size, False, now, now_m):
+                fix_ask = False
         if not (fix_bid or fix_ask):
             return None                   # book already matches: keep our queue position
+        for side, fix, rest in (("bid", fix_bid, bids), ("ask", fix_ask, asks)):
+            if fix and rest:
+                ex.reprices.setdefault(side, deque()).append(now_m)
 
-        if self.burst and ex.eid not in self.burst_set:
-            # Burst mode, not a top market: keep what rests while it's still safe; pull what isn't; place nothing.
-            fix_bid = fix_bid and (q.bid is None or any(o.price > (q.bid_limit if q.bid_limit is not None else q.bid) + 1e-9
-                                                        for o in bids))
-            fix_ask = fix_ask and (q.ask is None or any(o.price < (q.ask_limit if q.ask_limit is not None else q.ask) - 1e-9
-                                                        for o in asks))
+        if self.burst and ex.eid not in self.burst_set and not critical:
+            # Burst mode, not a top market: keep what rests while it's still safe (price inside the limit, size not
+            # above what's wanted); pull what isn't; place nothing.
+            fix_bid = fix_bid and (q.bid is None or any(
+                o.price > (q.bid_limit if q.bid_limit is not None else q.bid) + 1e-9 or o.qty > q.bid_size + 1e-9 for o in bids))
+            fix_ask = fix_ask and (q.ask is None or any(
+                o.price < (q.ask_limit if q.ask_limit is not None else q.ask) - 1e-9 or o.qty > q.ask_size + 1e-9 for o in asks))
             doomed = (bids if fix_bid else []) + (asks if fix_ask else [])
             return Change(ex, doomed, False, [], self.change_key(ex, pull=True, reprice=True)) if doomed else None
         # Cancel the wrong side(s). Both wrong -> one cancel-all for the exchange; else per order.
@@ -2229,10 +2280,33 @@ class Bot:
             return None
         return Change(ex, doomed, fix_bid and fix_ask, new, self.change_key(ex, pull=not new, reprice=bool(doomed)))
 
+    def hold_side(self, ex, resting, price, limit, size, is_bid, now, now_m):
+        """Churn control: keep this side's single resting order although it's off target, because it's still safe
+        (inside the limit price) and either young (min_quote_life_seconds) or this side keeps getting re-quoted
+        (churn_max_reprices in churn_window_seconds: another bot is stepping in front of us each time)."""
+        cfg = self.cfg
+        if price is None or limit is None or len(resting) != 1:
+            return False
+        o = resting[0]
+        if (o.price > limit + 1e-9) if is_bid else (o.price < limit - 1e-9):
+            return False                                  # no longer safe: must move
+        if o.qty > size + 1e-9:
+            return False                                  # bigger than now allowed (limits tightened): must shrink
+        if o.expires and (o.expires - now).total_seconds() < cfg.refresh_before_expiry:
+            return False
+        if ex.eid in self.ref_moved:
+            return False                                  # Polymarket just moved here: follow it now
+        young = o.order_id in self.recent_orders and now_m - self.recent_orders[o.order_id][1] < cfg.min_quote_life_seconds
+        hist = ex.reprices.get("bid" if is_bid else "ask") or deque()
+        while hist and now_m - hist[0] > cfg.churn_window_seconds:
+            hist.popleft()
+        return young or len(hist) >= cfg.churn_max_reprices
+
     def change_key(self, ex, pull, reprice=False):
         """Sending order: pulls first, then the party-control markets, then quotes for empty sides (cheap: a
         share of one batch), then reprices (a cancel each), biggest quotes first within each."""
-        return (0 if pull else 1, 0 if ex.group in self.cfg.headline_races else 1, 1 if reprice else 0,
+        return (0 if pull else 0.5 if ex.eid in self.ref_moved else 1, 0 if ex.group in self.cfg.headline_races else 1,
+                1 if reprice else 0,
                 -self.size_plan.get(ex.eid, 0))
 
     def reconcile(self, ex, q, resting, fv, now, now_m):
@@ -2250,6 +2324,9 @@ class Bot:
     def update_burst(self, now_m):
         """Burst mode on/off (see BURST PROTECTION). Its effects are in decide() and plan_change()."""
         cfg = self.cfg
+        times = getattr(self.api, "write_times", None)       # measured on the wire (no queueing / throttle wait)
+        while times:
+            self.write_log.append(times.popleft())
         while self.write_log and now_m - self.write_log[0][0] > 60:
             self.write_log.popleft()
         if not cfg.burst_protection:
@@ -2379,9 +2456,6 @@ class Bot:
         for w in done:
             if w.future.cancelled():
                 continue                  # never sent (dropped from the queue by stop_queued_writes)
-            exc = w.future.exception()
-            self.write_log.append((now_m, (w.done_at or now_m) - w.sent,
-                                   isinstance(exc, ApiError) and exc.status == 0))
             try:
                 self.apply_write(w, now_m)
             except Exception:
@@ -3358,7 +3432,6 @@ class Bot:
                     if t0 - self.last_reload > self.cfg.market_reload_seconds:
                         self.load_markets()
                     self.cycle()
-                    self.last_cycle_seconds = time.monotonic() - t0
                     if self.running:
                         self.selftest_tick()      # stops the bot (exit code 3) if the API surprises us
                     self.failed_cycles, self.pulled_after_errors = 0, False

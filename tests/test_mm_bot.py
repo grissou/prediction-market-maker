@@ -5,6 +5,7 @@ Offline tests for mm_bot.py. No network: a FakeApi plays the exchange, following
 Run:  python tests/test_mm_bot.py      (exit code 0 = all passed; GitHub Actions runs this on every push)
 """
 import csv
+from collections import deque
 import json
 import logging
 import os
@@ -1375,6 +1376,57 @@ except ApiError:
 finally:
     logging.disable(logging.NOTSET)
 check("startup: a clean-slate cancel that times out doesn't crash the bot; it goes on quoting", not crashed and a.orders)
+
+print("--- churn control (crowded book: bots stepping in front of us all day)")
+a, b = make_bot(); b.cfg.churn_control = True; b.cycle()
+start = a.ours("11")
+a.books["11"]["bids"] = [lvl(0.11, 1000)]                # a rival pennies our 0.105 bid: target becomes 0.115
+b.feed = FakeFeed(); b.feed.push(dirty={"11"}); b.cycle()
+check("an order younger than min_quote_life_seconds isn't chased while it's safe", a.ours("11") == start, a.ours("11"))
+for o in list(b.recent_orders):
+    b.recent_orders[o] = (b.recent_orders[o][0], b.recent_orders[o][1] - 10)
+b.feed.push(dirty={"11"}); b.cycle()
+check("...older than that: repriced as before", ("bid", 0.115, 100) in a.ours("11"), a.ours("11"))
+b.ex["11"].reprices["bid"] = deque([time.monotonic()] * 4)
+a.books["11"]["bids"] = [lvl(0.12, 1000)]
+for o in list(b.recent_orders):
+    b.recent_orders[o] = (b.recent_orders[o][0], b.recent_orders[o][1] - 10)
+b.feed.push(dirty={"11"}); b.cycle()
+check("4 reprices in a minute on one side: it stops chasing (keeps its safe order, no ping-pong)",
+      ("bid", 0.115, 100) in a.ours("11"), a.ours("11"))
+a.books["11"]["bids"] = [lvl(0.08, 1000)]; a.books["11"]["asks"] = [lvl(0.09, 1000)]   # fair value drops below our bid
+b.feed.push(dirty={"11"}); b.cycle()
+check("...but an order that's no longer safe always moves", ("bid", 0.115, 100) not in a.ours("11"), a.ours("11"))
+a, b = make_bot(); b.cfg.churn_control = True; b.cycle()
+b.refs = FakeRefs({"Ohio Senate|Republican": 0.14})
+b.refs.last_moves, b.refs.version = {"Ohio Senate|Republican": 0.01}, 2
+b.mark_ref_moves()
+check("a Polymarket move of >= 0.5c makes that market's changes the most urgent",
+      b.change_key(b.ex["11"], pull=False)[0] == 0.5 and b.change_key(b.ex["21"], pull=False)[0] == 1)
+b.mark_ref_moves()
+check("...for that reading only", not b.ref_moved)
+
+# Review fixes (items 7-8)
+a, b = make_bot(); b.cycle()
+b.burst, b.burst_set, b.burst_cfg = True, set(), b.cfg
+b.update_burst = lambda now_m: None
+a.inv["21"] = 300                                          # long Utah, and the exit window has started
+for e in b.ex.values():
+    e.close = utcnow() + timedelta(hours=1)
+b.cycle(); b.cycle()
+check("burst mode never blocks the election-night exit (markets outside the top N still get exit orders)",
+      any(side == "ask" for side, _, _ in a.ours("21")), a.ours("21"))
+a, b = make_bot(); b.cfg.churn_control = True; b.cycle()
+o = next(x for x in b.my_orders.values() if x.eid == "11" and x.is_bid)
+check("churn hold never keeps an order bigger than the size now wanted",
+      not b.hold_side(b.ex["11"], [o], o.price, o.price + 0.01, o.qty - 10, True, utcnow(), time.monotonic()))
+wapi2 = Api(CFG, False)
+wapi2.gap, wapi2.budget, wapi2.wbudget, wapi2.BUDGET_WINDOW = 0.001, 100, 1, 1.0
+wapi2.throttle(write=True)
+th = threading.Thread(target=lambda: wapi2.throttle(write=True)); th.start()   # waits ~1 s for the write window
+time.sleep(0.05); t0 = time.monotonic(); wapi2.throttle(); waited = time.monotonic() - t0
+th.join()
+check("a write waiting on the write budget doesn't hold up reads", waited < 0.3, f"{waited:.2f}s")
 
 print("--- parallel requests")
 a, b = make_bot()
