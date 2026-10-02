@@ -764,6 +764,13 @@ class Config:
     # close the tilt s applied in blend_fv ramps linearly to 0 at the close (carry_ramp), so quotes lean back to raw
     # Polymarket and the book takes the favourite-longshot carry late. The estimator itself is untouched.
     ref_tilt_carry_days: float = 0.0      # NOT live-overridable (not in OVERRIDABLE): code change + restart
+    # --- Package 5: X5 gap-size shrink ---
+    # Where the quoted fv (Polymarket-blended, tilt-corrected if T2.1 is on) sits far from the book's own price, the
+    # side that ADDS to the position shrinks: factor = max(gap_size_floor, 1 - |fv - book_fv| / gap_size_shrink),
+    # multiplied into decide's adding factor (like the capital ceiling's). The reducing side is untouched. Not in
+    # ref-only markets, not without a book price.
+    gap_size_shrink: float = 0.0          # 0 = off; the gap (in price) at which the adding size reaches the floor (try 0.03)
+    gap_size_floor: float = 0.25          # the smallest factor
 
 
 CFG = Config()
@@ -916,6 +923,9 @@ OVERRIDABLE = {
     "hold_target_headline": (False, True),
     # (Package 5 T2.3 ref_tilt_carry_days is a HARD GATE and deliberately NOT here: changing it from 0 needs a code
     #  change and a restart, never a live override.)
+    # --- Package 5: X5 gap-size shrink ---
+    "gap_size_shrink": (0.0, 0.2),
+    "gap_size_floor": (0.0, 1.0),
 }
 MAX_ORDER_TTL = 7200.0    # no order of ours lives longer than this (dead-man's switch), whatever the TTL settings
 LADDER_MAX_LEVELS = 8
@@ -2098,6 +2108,14 @@ def mark_step_sd(series, min_samples=60, floor=0.002, step=MARK_FRAG_STEP_SECOND
 def mark_frag_limit(sd, cfg, quote_size):
     """The adding side's position limit from the mark-fragility cap: max_step_cash / sd, never below one quote."""
     return max(cfg.mark_frag_max_step_cash / sd, quote_size or 0.0)
+
+
+def gap_size_factor(fv, book_fv, cfg=CFG):
+    """X5: the adding side's size factor where the quoted fv and the book's own price disagree: 1 at no gap, falling
+    linearly to cfg.gap_size_floor at a gap of cfg.gap_size_shrink (and staying there). 1 when off (shrink <= 0)."""
+    if cfg.gap_size_shrink <= 0 or fv is None or book_fv is None:
+        return 1.0
+    return max(cfg.gap_size_floor, 1.0 - abs(fv - book_fv) / cfg.gap_size_shrink)
 
 
 def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=False, no_bid=False, no_ask=False,
@@ -4593,6 +4611,8 @@ class Bot:
             adding *= cfg.turnover_dead_adding_factor
             adding_limit = cfg.turnover_dead_max_position_frac
             ex.turnover_tag = " dead"
+        if cfg.gap_size_shrink > 0 and book_fv is not None and ex.eid not in self.ref_only:   # X5 gap-size shrink
+            adding *= gap_size_factor(fv, book_fv, cfg)
         frag_limit = None
         if cfg.mark_frag_enabled:                 # mark-fragility cap: the adding side's limit, and the total cap
             if self.mark_frag_over:
