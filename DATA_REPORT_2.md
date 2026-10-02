@@ -357,3 +357,44 @@ Favourite-longshot cells (edge / markout in c, shares):
 - Engineer 3's "−1.88c at night" for longshot bids matches the **edge at quote** in 02-08 (−1.87c). It is not an adverse markout: the mid-based markout is +0.10 to +0.51c at night.
 - Within the night, the edge gets worse from 22-02 to 02-08 (−0.99 → −1.87c) but on few shares (5k).
 - Treat it as a quoting-through-fair-value effect (reduce-only and skew exits), not as toxic flow in longshot bids.
+
+**(d) The exchange's valuation rule (`analysis/valuation_tape.py`).**
+
+The owner's live data shows no fees, and a per-position `currentPrice` that is off the price grid. The test below asks which candidate mark makes the account series behave.
+
+- **Method.** Each candidate mark is computed from *our* fills only, which are a partial tape. Markets with no qualifying trade fall back to the mid.
+- **Model.** Model equity = 100,000 + cash + Σ position × mark.
+- **Two checks:**
+  - Residual = real equity − model equity, over all 290 snapshots.
+  - Slope of the account change on the model change, on the 17 intervals whose fills were at least 80% U.S. Senate/House shares, where we are much of the volume. A slope of 1 means the account moves the way that mark predicts.
+
+| Rule | Residual sd | Step sd | Residual 08:13 | Headline slope | Headline RMS of misfit |
+|---|---|---|---|---|---|
+| Tournament mid | 493 | 197 | −107 | 0.31 | 330 |
+| Last trade | 452 | 195 | −130 | 0.21 | 368 |
+| VWAP, last 5 trades | 445 | 180 | −308 | **1.08** | 256 |
+| VWAP, last 20 trades | 414 | 182 | −491 | 0.99 | 262 |
+| Simple average, last 5 / 20 trades | 458 / 424 | 186 / 187 | −275 / −522 | 0.89 / 0.84 | 294 / 295 |
+| Time-window VWAP, 15 / 30 / 60 min | 445 | 183 / 179 / 181 | −153 / −175 / −175 | 0.95 / **1.16** / 1.08 | 267 / **241** / 247 |
+| EMA over trades, α 0.1 / 0.3 | 412 / 442 | 193 / 190 | −556 / −312 | 0.12 / 0.28 | 331 / 323 |
+
+- **Trade-average marks fit; mid, last trade and EMA do not.** VWAP over the last 5-20 trades and time-window VWAP (15-60 min) give slopes of 0.95-1.16 and the lowest misfit. Mid, last trade and EMA give slopes of 0.12-0.31.
+- **The best fit is a 30-min VWAP or a VWAP of the last ~5 trades.** The partial tape and n = 17 cannot separate these two, or volume-weighted from simple averages. Levels cannot discriminate either: every residual sd is about 410-490.
+
+**Data that would pin it down:**
+1. **Full public trade tape** (the recorder's trades table): trade id, exchange id, price, quantity, exact timestamp (ms), aggressor side, and whether we were a party.
+2. **`/positions` (or holdings) every 60 s and on every trade event:** per position exchange id, quantity, `currentPrice`, cost basis, realised and unrealised P&L, plus the response's server timestamp.
+3. **`totalAccountValue` with its timestamp** at the same cadence.
+4. **The deciding test:** match `currentPrice` to 4 decimals against each candidate (last-N VWAP or simple average, N = 1-50; W-minute VWAP, W = 5-120; EMA). If `currentPrice` changes with *no new trade* (old trades aging out), the rule is time-window; if it only changes on trades, it is last-N or EMA. Also log the price for a market with no trades, to see the fallback (the CONFLICT error says a market with no trades has none).
+
+**Trading implications** (accounting only; we never trade to move a mark):
+- **Any trade-average rule:**
+  - A position bought at the bid marks near its cost at first, and its edge shows only when the position is closed or others trade near the mid. Rank tracks *realised* P&L, and unrealised P&L lags by minutes to hours.
+  - Large inventory in thin markets adds rank noise in both directions (Rep FL Senate marked at 0.7734 vs mid 0.8575).
+  - Keep risk, the kill switch and sizing on our own mark (mid or fair value), but estimate rank with the exchange's rule.
+- **Last-N:** the mark freezes in quiet markets, so stale marks persist until someone trades. Our own fills dominate the average in thin markets.
+- **Time-window:**
+  - The mark steps when old trades drop out, even with no trading.
+  - In a quiet market it falls back to the last trade, so a sweep print can sit as the mark for the whole window. (That is how the 22:04 dip of about −1,000 looks.)
+- **EMA:** the longest lag; mark-to-market P&L arrives slowest.
+- **What the rules agree on:** realising edge (flattening inventory) is what moves rank. The gap between our mark and the exchange's (+577 at mid, +2,657 at our fair value) is P&L we have earned but the leaderboard does not yet show.
