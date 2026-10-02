@@ -674,6 +674,31 @@ class Config:
     slug: str = os.environ.get("TOURNAMENT_SLUG", "")
     only_exchanges: str = os.environ.get("ONLY_EXCHANGES", "")
 
+    # --- WRITE SAVERS (Round 4 item 2; IDEAS_ROUND3 A1/A10 and A4/A5) - both OFF by default ------------------
+    # (a) No-chase. 24% of quote changes were a pure 0.5c chase of a rival with neither our fair value nor our
+    # inventory changed, and quotes < 2 min old earn less than resting ones. When the only trigger for re-pricing a
+    # level-0 side is that its target moved (a rival stepped in front / away) - fair value within no_chase_fv_epsilon
+    # of its value at placement, inventory as at placement, the order not (partly) filled - the order stays while it
+    # is within no_chase_tolerance_ticks of the new target (instead of reprice_tolerance_ticks). Everything else
+    # still applies: outside its limit price (unsafe/crossing), bigger than now allowed, mostly filled, expiring.
+    no_chase_enabled: bool = False
+    no_chase_tolerance_ticks: int = 2     # 0.5c ticks; only used with no_chase_enabled
+    no_chase_fv_epsilon: float = 0.0025   # fair value moved more than this since placement -> normal tolerance
+    # (b) TTL saver. order_ttl refreshes rewrite every resting order every ~27 min (~20% of writes).
+    # ttl_tiers_enabled: level-0 orders get a TTL by market tier - headline races order_ttl, "busy" (planned quote
+    # size >= ttl_busy_size_frac of the account) order_ttl_busy, the rest order_ttl_quiet - times a +-ttl_jitter_frac
+    # random factor (so a restart's orders don't all refresh in the same minute), never above MAX_ORDER_TTL (the
+    # dead-man's switch stays bounded at 2 h). ttl_expire_as_cancel: a level-0 order is NOT refreshed (cancel + new)
+    # before it expires; it is left to expire on the exchange (no DELETE), and the side is re-quoted only once it has
+    # been gone ttl_expire_grace_seconds (clock-skew margin: never two of our orders resting on one side).
+    ttl_tiers_enabled: bool = False
+    order_ttl_busy: float = 3600.0
+    order_ttl_quiet: float = 6000.0       # x(1 +- 0.2) = 80-120 min (capped at MAX_ORDER_TTL)
+    ttl_jitter_frac: float = 0.2
+    ttl_busy_size_frac: float = 0.01      # same split as the ladder's default "busy" (1,000 shares at 100k)
+    ttl_expire_as_cancel: bool = False
+    ttl_expire_grace_seconds: float = 5.0
+
 
 CFG = Config()
 
@@ -791,7 +816,18 @@ OVERRIDABLE = {
     "behind_best_ticks": (1, 20),
     "behind_best_size_factor": (0.0, 1.0),
     "behind_best_min_size": (0, 100000),
+    "no_chase_enabled": (False, True),
+    "no_chase_tolerance_ticks": (1, 10),
+    "no_chase_fv_epsilon": (0.0, 0.02),
+    "ttl_tiers_enabled": (False, True),
+    "order_ttl_busy": (300.0, 7200.0),
+    "order_ttl_quiet": (300.0, 7200.0),
+    "ttl_jitter_frac": (0.0, 0.5),
+    "ttl_busy_size_frac": (0.0, 0.20),
+    "ttl_expire_as_cancel": (False, True),
+    "ttl_expire_grace_seconds": (0.0, 60.0),
 }
+MAX_ORDER_TTL = 7200.0    # no order of ours lives longer than this (dead-man's switch), whatever the TTL settings
 LADDER_MAX_LEVELS = 8
 
 
@@ -844,6 +880,16 @@ def validate_overrides(raw, cfg):
             if k in good:
                 del good[k]
                 bad.append(f"{k}: refresh_before_expiry ({refresh:.0f}) must be at most half of order_ttl ({ttl:.0f})")
+    # TTL saver: the same rule for the shortest tier TTL after jitter (order_ttl_for also clamps, this reports it).
+    keys = ("order_ttl_busy", "order_ttl_quiet", "ttl_jitter_frac")
+    tiers = [good.get(k, getattr(cfg, k)) for k in keys]
+    refresh = good.get("refresh_before_expiry", cfg.refresh_before_expiry)
+    if min(tiers[0], tiers[1]) * (1 - tiers[2]) < 2 * refresh:
+        for k in keys + ("refresh_before_expiry",):
+            if k in good:
+                del good[k]
+                bad.append(f"{k}: the shortest tier TTL after jitter ({min(tiers[0], tiers[1]) * (1 - tiers[2]):.0f}) "
+                           f"must be at least twice refresh_before_expiry ({refresh:.0f})")
     return good, bad
 
 
@@ -2146,28 +2192,75 @@ def unsafe_order(o, price, size, limit, is_bid):
     return (o.price > lim + 1e-9 if is_bid else o.price < lim - 1e-9) or o.qty > size + 1e-9
 
 
-def side_needs_change(resting, price, size, cfg, now, limit=None, is_bid=True, max_size=None):
+def side_needs_change(resting, price, size, cfg, now, limit=None, is_bid=True, max_size=None, tol_ticks=None,
+                      expire_as_cancel=False):
     """True if what's resting on ONE side of an exchange doesn't match what we want there.
     Leaving a good order alone keeps its place in the queue, which is worth money. So an order a tick
     (reprice_tolerance_ticks) off the target is kept, as long as it's inside `limit` (see Quote).
     max_size: the biggest order still acceptable (default: size). Burst mode passes the normal size here while
     `size` is the burst size, so a full-size order placed before the burst stays and a half-size one placed
-    during it stays too - neither is cancelled and re-placed when the exchange is slow."""
+    during it stays too - neither is cancelled and re-placed when the exchange is slow.
+    tol_ticks: the tolerance instead of reprice_tolerance_ticks (no-chase). expire_as_cancel: an order about to
+    expire is kept (it is left to expire instead of being refreshed: ttl_expire_as_cancel)."""
     if price is None:
         return bool(resting)                                    # want nothing: anything there must go
     if len(resting) != 1:
         return True                                             # missing, or duplicates
     o = resting[0]
     if abs(o.price - price) > 1e-9:
-        close = abs(o.price - price) <= cfg.reprice_tolerance_ticks * TICK + 1e-9
+        tol = cfg.reprice_tolerance_ticks if tol_ticks is None else tol_ticks
+        close = abs(o.price - price) <= tol * TICK + 1e-9
         safe = limit is not None and (o.price <= limit + 1e-9 if is_bid else o.price >= limit - 1e-9)
         if not (close and safe):
             return True                                         # wrong price
     if not (size * cfg.keep_fraction <= o.qty <= (max_size if max_size is not None else size)):
         return True                                             # mostly filled, or bigger than we now want
-    if o.expires and (o.expires - now).total_seconds() < cfg.refresh_before_expiry:
+    if not expire_as_cancel and o.expires and (o.expires - now).total_seconds() < cfg.refresh_before_expiry:
         return True                                             # about to expire
     return False
+
+
+def chase_only(cfg, fv, placed_fv, inv, placed_inv, qty, placed_qty):
+    """No-chase (no_chase_enabled): True if nothing of OURS changed since this order was placed - fair value within
+    no_chase_fv_epsilon, the same inventory, not (partly) filled - so a re-price would only follow a rival's move.
+    Unknown placement notes -> False (normal rules). Shared by Bot.plan_change and the simulators' plan_changes."""
+    if not cfg.no_chase_enabled or None in (fv, placed_fv, inv, placed_inv, qty, placed_qty):
+        return False
+    return (abs(fv - placed_fv) <= cfg.no_chase_fv_epsilon + 1e-12 and abs(inv - placed_inv) < 1e-9
+            and qty >= placed_qty - 1e-9)
+
+
+def no_chase_needs_change(resting, price, size, cfg, now, limit, is_bid, max_size, fv, placed_fv, inv, placed_inv,
+                          placed_qty, expire_as_cancel=False):
+    """side_needs_change with the no-chase rule: when chase_only holds for the single resting order, judge it at
+    no_chase_tolerance_ticks instead of reprice_tolerance_ticks (every other test - limit price, size, expiry -
+    unchanged). The one decision both Bot.plan_change and strategy_sim.plan_changes use."""
+    fix = side_needs_change(resting, price, size, cfg, now, limit, is_bid, max_size, expire_as_cancel=expire_as_cancel)
+    if (fix and price is not None and len(resting) == 1
+            and chase_only(cfg, fv, placed_fv, inv, placed_inv, resting[0].qty, placed_qty)):
+        fix = side_needs_change(resting, price, size, cfg, now, limit, is_bid, max_size,
+                                tol_ticks=max(cfg.no_chase_tolerance_ticks, cfg.reprice_tolerance_ticks),
+                                expire_as_cancel=expire_as_cancel)
+    return fix
+
+
+def ttl_tier(headline, size, bank, cfg):
+    """TTL saver tier of a market: "headline" (headline_races), "busy" (planned quote size >= ttl_busy_size_frac of
+    the account) or "quiet"."""
+    if headline:
+        return "headline"
+    return "busy" if size >= cfg.ttl_busy_size_frac * bank - 1e-9 else "quiet"
+
+
+def order_ttl_for(cfg, tier, u):
+    """Seconds a new level-0 order lives. u: a uniform [0, 1) draw (the jitter). Without ttl_tiers_enabled, exactly
+    order_ttl. With it: the tier's TTL x (1 +- ttl_jitter_frac), kept within [2 x refresh_before_expiry,
+    MAX_ORDER_TTL] (never "about to expire" at birth; the dead-man's switch stays bounded)."""
+    if not cfg.ttl_tiers_enabled:
+        return cfg.order_ttl
+    base = {"headline": cfg.order_ttl, "busy": cfg.order_ttl_busy}.get(tier, cfg.order_ttl_quiet)
+    ttl = base * (1 + cfg.ttl_jitter_frac * (2 * u - 1))
+    return max(2 * cfg.refresh_before_expiry, min(MAX_ORDER_TTL, ttl))
 
 
 LADDER_TIER = 2       # change_key tier of ladder work: after pulls (0), urgent reprices (0.5) and level-0 changes (1)
@@ -2807,6 +2900,7 @@ class Bot:
         self.unconfirmed = {}             # eid -> [(order, meta, time sent)]: sent, outcome unknown (see adopt_unconfirmed)
         self.placed_qty = {}              # orderId -> shares we placed, and...
         self.filled_qty = defaultdict(float)   # ...shares filled so far (each fill counted once, from fills)
+        self.last_expiry = {}             # ttl_expire_as_cancel: (eid, is_bid) -> expiry of the level-0 order seen there
         self.ref_rejected = set()         # Polymarket keys currently ignored as implausible (alerted once)
         self.ref_only = set()             # eids priced from Polymarket alone this cycle (thin book, R5)
         self.lad_cash_left = 0.0          # R3 ladder: cash the ladder may still lock this cycle (see ladder_setup)
@@ -4331,8 +4425,13 @@ class Bot:
                         ask_size=max(1, int(q.ask_size * k)) if q.ask_size else 0)
         bids = [o for o in resting if o.is_bid]
         asks = [o for o in resting if not o.is_bid]
-        fix_bid = side_needs_change(bids, q.bid, q.bid_size, self.cfg, now, q.bid_limit, is_bid=True, max_size=full_bid)
-        fix_ask = side_needs_change(asks, q.ask, q.ask_size, self.cfg, now, q.ask_limit, is_bid=False, max_size=full_ask)
+        fix_bid = self.side_fix(ex, bids, q.bid, q.bid_size, q.bid_limit, True, full_bid, fv, now)
+        fix_ask = self.side_fix(ex, asks, q.ask, q.ask_size, q.ask_limit, False, full_ask, fv, now)
+        if self.cfg.ttl_expire_as_cancel:  # an order just left to expire: re-quote that side only after the grace
+            if self.expiry_wait(ex, bids, True, now):
+                fix_bid = False
+            if self.expiry_wait(ex, asks, False, now):
+                fix_ask = False
         # Reduce-only, flatten and exit windows: always do exactly what the risk logic asks (no holding, no
         # burst-mode skipping), or a position could be left to grow or never be exited.
         critical = self.global_reduce or self.hours_to_close(ex) <= self.cfg.flatten_hours_before_close
@@ -4993,11 +5092,52 @@ class Bot:
         order = {"exchangeId": ex.eid, "side": "yes", "action": "buy" if is_bid else "sell",
                  "quantity": int(size), "price": round(price, 3), "tournamentId": self.tid,
                  # Dead-man's switch: the order dies on its own unless we keep refreshing it.
-                 "expirationDate": iso(now + timedelta(seconds=self.cfg.order_ttl))}
+                 "expirationDate": iso(now + timedelta(seconds=self.order_ttl(ex, level)))}
         meta = {"our_side": "bid" if is_bid else "ask", "price": round(price, 3), "fv": fv, "t": time.time()}
+        if not level and self.cfg.no_chase_enabled:   # no-chase: what we placed it at (inventory, size)
+            meta["inv"], meta["qty"] = ex.inv, int(size)
         if level:
             meta["level"] = level
         return order, meta
+
+    def order_ttl(self, ex, level=0):
+        """Seconds a new order lives: order_ttl, or with ttl_tiers_enabled its market tier's (level 0 only; the
+        ladder keeps order_ttl). Always <= MAX_ORDER_TTL when tiered."""
+        cfg = self.cfg
+        if level or not cfg.ttl_tiers_enabled:
+            return cfg.order_ttl
+        bank = self.bankroll()
+        size = (self.size_plan.get(ex.eid, cfg.size_min_frac * bank) if cfg.size_by_activity
+                else cfg.order_size_frac * bank)
+        return order_ttl_for(cfg, ttl_tier(ex.group in cfg.headline_races, size, bank, cfg), random.random())
+
+    def side_fix(self, ex, resting, price, size, limit, is_bid, max_size, fv, now):
+        """plan_change's per-side test: side_needs_change, plus the write savers when on (no_chase_needs_change,
+        ttl_expire_as_cancel)."""
+        cfg = self.cfg
+        meta = (self.order_meta.get(resting[0].order_id) or {}) if len(resting) == 1 else {}
+        return no_chase_needs_change(resting, price, size, cfg, now, limit, is_bid, max_size, fv, meta.get("fv"),
+                                     ex.inv, meta.get("inv"), meta.get("qty"), expire_as_cancel=cfg.ttl_expire_as_cancel)
+
+    def expiry_wait(self, ex, resting, is_bid, now):
+        """ttl_expire_as_cancel: True while this side's order expired less than ttl_expire_grace_seconds ago (our
+        clock may run ahead of the exchange's: re-quoting at once could leave two orders resting there)."""
+        key = (ex.eid, is_bid)
+        if resting:
+            exp = [o.expires for o in resting if o.expires]
+            if exp:
+                self.last_expiry[key] = max(exp)
+            return False
+        last = self.last_expiry.get(key)
+        if last is None:
+            return False
+        if now < last:                    # gone before its expiry (filled / cancelled): nothing to wait for
+            del self.last_expiry[key]
+            return False
+        if (now - last).total_seconds() < self.cfg.ttl_expire_grace_seconds:
+            return True
+        del self.last_expiry[key]
+        return False
 
     def sync_orders(self, raw_orders, now_m):
         """Reset our record of our resting orders (self.my_orders) from the API's open-orders list.

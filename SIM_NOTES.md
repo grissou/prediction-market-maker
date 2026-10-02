@@ -485,3 +485,28 @@ Sim behaviour change: live_sim now runs ladder_targets in write-gated cycles too
 cash bookkeeping). In these runs P&L was identical before and after the change.
 
 CPU: gate diagnosis 47 s + 56 s (re-run after adding counters) + ~15 s probes = ~2 CPU-min.
+
+## Round 4 (Finisher): item 2, write savers
+Code eeaf290 (both OFF by default). `tests/live_sim.py`, BASE_JSON = the owner's live overrides (arb_two_sided false,
+worst_case_backstop_frac 0.8, capital_ceiling_adding_size_factor 0.5, writes_per_minute(_max) 28, burst_cycle 60).
+Simulator change: `strategy_sim.plan_changes` now models order expiry as live (order_ttl 1800 s, refresh 180 s before,
+expired orders leave the book), in the base too; without it the TTL saver cannot show anything. So base numbers here
+are not comparable with earlier rounds (base: 22.1 writes/min, 6,760 deferred changes/h, P&L +1,660 per 3 h).
+
+S1, 8 seeds x 3 h quiet, paired seeds (raw: `tests/live_sim_round4_savers_S1_quiet_8x3.txt`):
+
+| Variant | dP&L | d lagged | d writes/min | d deferred/h | d capital at end | d freed | verdict |
+|---|---|---|---|---|---|---|---|
+| (a) no-chase (`no_chase_enabled`, 2 ticks, eps 0.25c) | -43 ± 62 | -125 ± 91 | -0.26 ± 0.40 | -685 ± 780 | +0.035 ± 0.013 | -3.5k ± 1.4k | nominal pass (writes down, P&L -0.7 se), but the writes drop is noise |
+| (b) TTL saver (`ttl_tiers_enabled` + `ttl_expire_as_cancel`) | -43 ± 39 | -50 ± 57 | **-1.10 ± 0.35** | -206 ± 280 | +0.027 ± 0.015 | -2.75k ± 1.5k | fails narrowly (P&L -1.1 se); the only clear write saving |
+
+- The simulator is write-starved: writes freed are spent at once on deferred changes, so writes/min understates the
+  saving (deferred/h falls more). A 2-seed x 0.25 h smoke showed no-chase at -2.15 writes/min before the backlog builds.
+- Both savers leave more capital in positions at the end (+3 points) and free less cash (-3k): the freed writes go to
+  deferred changes, which in this world are mostly adding quotes. Worth knowing before switching either on.
+- S2 (16 x 6 quiet, 8 x 3 news) **not run**: S1 cost 17.5 CPU-min (~14.6 CPU-s per seed-hour, 2.9x the 5 s estimate),
+  so S2 would cost ~58 CPU-min against the 26 CPU-min cap. Total used: ~18 CPU-min (S1 + a 2 x 0.25 h smoke).
+
+Recommended defaults: **both OFF** (neither passed S2, which was not run). If the owner wants writes back now, (b) is the
+better candidate (3 se fewer writes, P&L within noise); confirm on 16 x 6 quiet first. At the measured cost a base +
+1 variant run is ~47 CPU-min at 16 x 6, ~23 at 8 x 6 (not the 16 planned).
