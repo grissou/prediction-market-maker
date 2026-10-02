@@ -1630,6 +1630,14 @@ wapi.throttle(write=True)
 check("...a 4th write in the window waits for it", time.monotonic() - t0 >= 0.9, time.monotonic() - t0)
 check("default write budget: starts at 45/min, may grow to 60/min (1-2 Oct: no 429 at >= 40 writes/min)",
       Config().writes_per_minute == 45 and Config().writes_per_minute_max == 60 and Config().write_budget_cut == 0.75)
+from dataclasses import replace as _replace
+for pr, pw in ((2, 4), (1, 1), (3, 8)):
+    _c = _replace(CFG, parallel_requests=pr, parallel_writes=pw)
+    _ad = Api(_c, False).s.get_adapter(_c.base_url)
+    threads_max = pr + pw + 3                                 # + main thread, self-test, realtime token refresh
+    check(f"HTTP pool covers every thread that can reach the exchange (parallel_requests {pr}, parallel_writes {pw})",
+          _ad._pool_maxsize >= threads_max and _ad._pool_connections >= 2 and not _ad._pool_block,
+          (_ad._pool_maxsize, threads_max))
 order_api = Api(CFG, False)
 order_api.gap, order_api.budget, order_api.wbudget, order_api.BUDGET_WINDOW = 0.0, 100, 1, 1.0
 order_api.throttle(write=True)

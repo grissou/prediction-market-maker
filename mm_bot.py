@@ -631,8 +631,16 @@ class Api:
         self.rate_limited = 0             # how many 429s we've had (shown in status.json - should stay 0)
         self.s = requests.Session()
         self.s.headers.update({"Authorization": f"Bearer {cfg.api_key}", "Content-Type": "application/json"})
-        # Keep one open connection per thread, so parallel requests don't queue for a connection.
-        self.s.mount("https://", HTTPAdapter(pool_connections=2, pool_maxsize=cfg.parallel_requests + 2))
+        # Keep one open connection per thread that can talk to the exchange at once, so none has to open (and
+        # then throw away: "Connection pool is full, discarding connection", 2 Oct 08:08:57) a fresh TLS
+        # connection, which costs 0.2-0.5 s and inflates the write times burst mode watches.
+        self.s.mount("https://", HTTPAdapter(pool_connections=4, pool_maxsize=self.pool_size(cfg), pool_block=False))
+
+    @staticmethod
+    def pool_size(cfg):
+        """Connections to keep: book downloads (parallel_requests) + order writes (parallel_writes) + the main
+        thread + the self-test thread + the realtime token refresh + one spare."""
+        return max(1, cfg.parallel_requests) + max(1, cfg.parallel_writes) + 4
 
     BUDGET_WINDOW = 60.0                  # seconds the per-minute budget is measured over
 

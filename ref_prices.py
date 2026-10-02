@@ -101,7 +101,7 @@ def session():
         if _session is None:
             _session = requests.Session()
             _session.headers.update({"User-Agent": "mm_bot-reference-prices"})
-            n = max(2, REF.parallel_fetches)
+            n = max(2, REF.parallel_fetches) + 2   # the pool's threads, plus the calling thread (Kalshi, search) + 1
             _session.mount("https://", requests.adapters.HTTPAdapter(pool_connections=4, pool_maxsize=n))
         return _session
 
