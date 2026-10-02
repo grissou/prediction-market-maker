@@ -146,6 +146,30 @@ check("R7: sum-of-maxima backstop still forces reduce-only", b.health["reduce_on
 check("R7: risk never above the sum of maxima", b.health["settlement_risk"] <= b.health["worst_case_loss"] + 1e-6)
 
 # =============================================================================================
+# CANCEL-EVERYTHING THAT FAILS MUST NOT FORGET LIVE ORDERS (bug on main and pr1; found by test_stress seed 3)
+
+a, b = make_bot()
+b.cycle()
+before = dict(a.orders)
+real_cancel_all = a.cancel_all
+def failing_cancel_all(tid, eid=None):
+    raise ApiError(409, "REQUEST_IN_FLIGHT", "busy")
+a.cancel_all = failing_cancel_all
+b.failed_cycles = b.cfg.max_failed_cycles - 1
+b.on_cycle_error("test", pull_now=False)                 # 3rd failed cycle -> cancel everything -> it fails
+a.cancel_all = real_cancel_all
+check("cancel-all fails: the bot still knows its orders (none forgotten while they rest)",
+      set(b.my_orders) == set(before) and not any(o in b.recent_cancels for o in before),
+      (sorted(b.my_orders), sorted(before)))
+b.pulled_after_errors, b.failed_cycles = False, 0
+b.cycle()
+dup = {}
+for o in a.orders.values():
+    k = (o["exchangeId"], (o["side"] == "yes") == (o["action"] == "buy"))
+    dup[k] = dup.get(k, 0) + 1
+check("cancel-all fails: the next cycle places no second set (no duplicate quotes)", max(dup.values()) == 1, dup)
+
+# =============================================================================================
 # SIMULATOR SANITY
 
 agg, rows = S.run_many(1, 0.5, "quiet")

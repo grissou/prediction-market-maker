@@ -2772,11 +2772,19 @@ class Bot:
         self.cancel_gen += 1
         if hasattr(self, "writes"):
             self.stop_queued_writes()
-        self.forget_orders(list(self.my_orders))
         self.orders_stale = True                  # confirm with a fresh read next cycle
+        # Forget our orders only once the cancel is confirmed. Forgetting them first (as before) meant a cancel
+        # that failed (409, timeout) left every order resting while the bot believed - and for
+        # recent_order_grace_seconds even hid from the open-orders list - that they were gone: the next cycle
+        # quoted every market a second time.
+        gone = list(self.my_orders)
         if not self.cfg.only_exchanges:
-            return self.api.cancel_all(self.tid)
-        return all([self.api.cancel_all(self.tid, eid) for eid in self.ex])   # list: try every one
+            ok = self.api.cancel_all(self.tid)
+        else:
+            ok = all([self.api.cancel_all(self.tid, eid) for eid in self.ex])   # list: try every one
+        if ok:
+            self.forget_orders(gone)
+        return ok
 
     def cancel(self, eid, orders, whole_exchange, quiet=False):
         """Cancel orders on one exchange. Returns True only if we're sure they're gone."""
