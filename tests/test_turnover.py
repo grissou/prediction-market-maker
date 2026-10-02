@@ -36,6 +36,9 @@ def iso_at(t):
 
 print("--- settings")
 c = M.Config()
+check("hysteresis settings: alive above 75 sh/h, 30 min minimum state life, live-overridable",
+      (c.turnover_alive_shares_per_hour, c.turnover_min_state_minutes) == (75.0, 30.0)
+      and not M.validate_overrides({"turnover_alive_shares_per_hour": 60.0, "turnover_min_state_minutes": 10.0}, c)[1])
 check("defaults: OFF until reviewed (Package 3), 6 h window, 50 sh/h, adding x0.25, limit x0.5, tape on",
       (c.turnover_control_enabled, c.turnover_window_hours, c.turnover_min_shares_per_hour,
        c.turnover_dead_adding_factor, c.turnover_dead_max_position_frac, c.turnover_use_tape)
@@ -82,60 +85,101 @@ check("judged after 6 h, 0 sh/h for a silent market", tr.per_hour("1", now + 5 *
 print("--- seeding from fills.csv")
 d = tempfile.mkdtemp()
 fpath = os.path.join(d, "fills.csv")
-with open(fpath, "w", newline="") as f:
-    w = csv.writer(f)
-    w.writerow(M.FillLogger.COLUMNS)
-    for i, (age, eid, q) in enumerate([(30, "1", 1000), (5, "1", 200), (2, "1", 100), (1, "2", 300), (0.2, "1", 50)]):
-        w.writerow([i, iso_at(now - age * H), eid, i, "bid", q, 0.5, 0.5, 0.5, 0.5])
+
+
+def write_fills(path, rows):
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(M.FillLogger.COLUMNS)
+        for i, (t, eid, q) in enumerate(rows):
+            w.writerow([i, iso_at(t), eid, i, "bid", q, 0.5, 0.5, 0.5, 0.5])
+
+
+# a fill every 5 min over the last 7 h (market 1, 10 sh each), plus one 60 h old (beyond the 48 h kept)
+rows = [(now - 60 * H, "1", 999)] + [(now - k * 300 - 30, "1", 10) for k in range(84)]
+write_fills(fpath, rows)
 tr = M.TurnoverTracker(start=now)
 n = tr.seed_fills(M.read_fills(fpath), now)
-check("all 5 rows used (within the 48 h kept, even the 30 h-old one)", n == 5, n)
-check("seed covers the file's first..last fill: judged at once after a restart", tr.judged(now, 6.0)
-      and abs(tr.observed_hours(now, 6.0) - 5.8) < 1e-6, tr.observed_hours(now, 6.0))
-check("market 1: 350 shares in 6 h, over 5.8 observed h", abs(tr.per_hour("1", now, 6.0) - 350 / 5.8) < 1e-6,
+check("84 rows used (the 60 h-old one is beyond the 48 h kept)", n == 84, n)
+check("fills 5 min apart up to the restart: the whole window observed, judged at once",
+      tr.judged(now, 6.0) and abs(tr.observed_hours(now, 6.0) - 6.0) < 1e-6, tr.observed_hours(now, 6.0))
+check("market 1: 72 fills x 10 in 6 h = 120 sh/h", abs(tr.per_hour("1", now, 6.0) - 120) < 1e-6,
       tr.per_hour("1", now, 6.0))
+# the same, but the bot was down for the last 2 h before this start (an outage): the gap is not zero flow
+write_fills(fpath, [r for r in rows if r[0] < now - 2 * H])
 tr = M.TurnoverTracker(start=now)
-with open(fpath, "w", newline="") as f:
-    w = csv.writer(f)
-    w.writerow(M.FillLogger.COLUMNS)
-    w.writerow([1, iso_at(now - 4 * H), "1", 1, "bid", 100, 0.5, 0.5, 0.5, 0.5])
-    w.writerow([2, iso_at(now - 3 * H), "1", 2, "ask", 100, 0.5, 0.5, 0.5, 0.5])
 tr.seed_fills(M.read_fills(fpath), now)
-check("a short seed (fills only 4..3 h ago, a 3 h gap before the restart): 1 h observed, not judged",
-      abs(tr.observed_hours(now, 6.0) - 1.0) < 1e-6 and not tr.judged(now, 6.0))
+check("a 2 h outage before the restart is unobserved: 4 h of 6 observed, not judged (alive)",
+      abs(tr.observed_hours(now, 6.0) - (4 - 30 / 3600)) < 0.01 and not tr.judged(now, 6.0)
+      and tr.per_hour("1", now, 6.0) is None, tr.observed_hours(now, 6.0))
+check("...as the window moves the old seed leaves it: 3 h later 4.0 h observed, still not judged",
+      not tr.judged(now + 3 * H, 6.0) and abs(tr.observed_hours(now + 3 * H, 6.0) - 4.0) < 0.01)
+check("...judged once this run alone covers 90% (5.4 h)", tr.judged(now + 5.4 * H, 6.0))
+# an outage INSIDE the window (35 min, no fills), then fills again until the restart
+write_fills(fpath, [r for r in rows if not (now - 3 * H < r[0] < now - 3 * H + 35 * 60)])
+tr = M.TurnoverTracker(start=now)
+tr.seed_fills(M.read_fills(fpath), now)
+check("a 35 min gap inside the window (> 10 min) is unobserved: ~5.5 h observed",
+      5.3 < tr.observed_hours(now, 6.0) < 5.6, tr.observed_hours(now, 6.0))
+write_fills(fpath, [r for r in rows if not (now - 3 * H < r[0] < now - 3 * H + 8 * 60)])
+tr = M.TurnoverTracker(start=now)
+tr.seed_fills(M.read_fills(fpath), now)
+check("...a gap of <= 10 min is observed (quiet, not an outage)", abs(tr.observed_hours(now, 6.0) - 6.0) < 1e-6,
+      tr.observed_hours(now, 6.0))
+write_fills(fpath, [(now - 4 * H, "1", 100), (now - 3 * H, "1", 100)])
+tr = M.TurnoverTracker(start=now)
+tr.seed_fills(M.read_fills(fpath), now)
+check("two isolated fills (1 h apart, 3 h before the start): nothing observed, not judged",
+      tr.observed_hours(now, 6.0) == 0.0 and not tr.judged(now, 6.0))
 check("an empty / missing fills.csv seeds nothing", M.TurnoverTracker(start=now).seed_fills([], now) == 0)
 
-print("--- seeding from the recorder's trades table")
+print("--- seeding from the recorder (trades + snapshot times)")
+
+
+def make_db(path, trades, snap_times):
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE trades (ts REAL, eid TEXT, price REAL, quantity REAL, item TEXT)")
+    db.execute("""CREATE TABLE snapshots (ts TEXT, mode TEXT, eid TEXT, label TEXT, best_bid REAL, best_ask REAL,
+                  fair_value REAL, reference REAL, our_bid REAL, our_ask REAL, position REAL)""")
+    db.executemany("INSERT INTO trades VALUES (?,?,?,?,?)", [(t, e, 0.5, q, "{}") for t, e, q in trades])
+    for t in snap_times:                                 # two markets per snapshot, as the bot writes them
+        for e in ("1", "2"):
+            db.execute("INSERT INTO snapshots VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                       (iso_at(t), "live", e, "X", 0.4, 0.5, 0.45, None, None, None, 0))
+    db.commit()
+    db.close()
+
+
+trades = [(now - 50 * H, "1", 5), (now - 8 * H, "1", 70), (now - 2 * H, "1", 400), (now - 1 * H, "2", -30),
+          (now - 0.9 * H, "2", None)]
 dbp = os.path.join(d, "market_data.sqlite")
-db = sqlite3.connect(dbp)
-db.execute("CREATE TABLE trades (ts REAL, eid TEXT, price REAL, quantity REAL, item TEXT)")
-db.execute("""CREATE TABLE snapshots (ts TEXT, mode TEXT, eid TEXT, label TEXT, best_bid REAL, best_ask REAL,
-              fair_value REAL, reference REAL, our_bid REAL, our_ask REAL, position REAL)""")
-db.executemany("INSERT INTO trades VALUES (?,?,?,?,?)", [(now - 8 * H, "1", 0.5, 70, "{}"),
-                                                         (now - 2 * H, "1", 0.5, 400, "{}"),
-                                                         (now - 1 * H, "2", 0.5, -30, "{}"),
-                                                         (now - 0.9 * H, "2", 0.5, None, "{}")])
-db.execute("INSERT INTO snapshots VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-           (iso_at(now - 60), "live", "1", "Rep X", 0.4, 0.5, 0.45, None, None, None, 0))
-db.commit()
-db.close()
+make_db(dbp, trades, [now - 7 * H + 60 * k for k in range(7 * 60)])     # snapshots every minute until the start
 tr = M.TurnoverTracker(start=now)
 n = tr.seed_tape(dbp, now)
-check("3 tape rows with a quantity used (the None one skipped)", n == 3, n)
-check("covered from the first trade to the last snapshot (1 min before the start): judged at once",
-      tr.judged(now, 6.0) and abs(tr.observed_hours(now, 6.0) - (6 - 1 / 60)) < 1e-6, tr.observed_hours(now, 6.0))
+check("3 tape rows used (50 h old: beyond 48 h; None quantity skipped)", n == 3, n)
+check("snapshots every minute up to the start: judged at once", tr.judged(now, 6.0)
+      and abs(tr.observed_hours(now, 6.0) - 6.0) < 1e-6, tr.observed_hours(now, 6.0))
 check("market 1 flow from the tape: 400 in the window", tr.shares("1", now, 6.0) == 400)
 check("|negative| quantity counts (market 2: 30)", tr.shares("2", now, 6.0) == 30)
+dbp2 = os.path.join(d, "outage.sqlite")                 # recording stopped 45 min before this start (an outage)
+make_db(dbp2, trades, [now - 7 * H + 60 * k for k in range(int(6.25 * 60))])
+tr = M.TurnoverTracker(start=now)
+tr.seed_tape(dbp2, now)
+check("recording ended 45 min before the start: 5.25 h observed, not judged (no false dead after an outage)",
+      abs(tr.observed_hours(now, 6.0) - 5.25) < 0.02 and not tr.judged(now, 6.0), tr.observed_hours(now, 6.0))
+tr.seed_fills(M.read_fills(fpath), now)
+check("fills.csv and the recorder combine (still not bridging the outage)", not tr.judged(now, 6.0))
 check("no file: 0, nothing seeded", M.TurnoverTracker(start=now).seed_tape(os.path.join(d, "none.sqlite"), now) == 0)
-db = sqlite3.connect(os.path.join(d, "notrades.sqlite"))
+db = sqlite3.connect(os.path.join(d, "empty.sqlite"))
+db.execute("CREATE TABLE trades (ts REAL, eid TEXT, price REAL, quantity REAL, item TEXT)")
 db.execute("CREATE TABLE snapshots (ts TEXT)")
 db.commit()
 db.close()
 tr = M.TurnoverTracker(start=now)
-check("a recording without a trades table: 0, no coverage claimed",
-      tr.seed_tape(os.path.join(d, "notrades.sqlite"), now) == 0 and tr.seed_from is None)
+check("empty tables: 0, no coverage claimed", tr.seed_tape(os.path.join(d, "empty.sqlite"), now) == 0
+      and not tr.seed_spans)
 
-print("--- compute_quote: adding-side position limit")
+print("--- compute_quote: adding-side position limit (on the wanted size only)")
 cfg = M.Config()
 cfg.skew_per_quote = 0.0
 cfg.skew_age_enabled = False
@@ -144,14 +188,28 @@ base = M.compute_quote(0.50, 300, 300, 0.45, 0.55, cfg, **kw)
 q = M.compute_quote(0.50, 300, 300, 0.45, 0.55, cfg, adding_limit_factor=0.5, **kw)
 check("long 300, limit 1,000 x0.5 = 500: bid still 100 (room 200)", q.bid_size == 100 and q == base, (q, base))
 q = M.compute_quote(0.50, 450, 450, 0.45, 0.55, cfg, adding_limit_factor=0.5, **kw)
-check("long 450: bid 50 (room to 500)", q.bid_size == 50, q)
+check("long 450: wants 50 (room to 500), a resting 100 may stay (bid_max 100: normal limit)",
+      q.bid_size == 50 and q.bid_max == 100, q)
 q = M.compute_quote(0.50, 600, 600, 0.45, 0.55, cfg, adding_limit_factor=0.5, **kw)
 b0 = M.compute_quote(0.50, 600, 600, 0.45, 0.55, cfg, **kw)
-check("long 600 > 500: bid withdrawn, ask (reducing) unchanged", q.bid is None and (q.ask, q.ask_size)
-      == (b0.ask, b0.ask_size) and b0.bid_size == 100, (q, b0))
+check("long 600 > 500: bid held at 1 share (nothing more wanted), bid_max 100, ask (reducing) unchanged",
+      q.bid == b0.bid and q.bid_size == 1 and q.bid_max == 100 and (q.ask, q.ask_size) == (b0.ask, b0.ask_size),
+      (q, b0))
+check("...so a resting 100-share bid is kept (not unsafe), none bigger",
+      not M.side_needs_change([M.Resting(1, "21", True, b0.bid, 100, None)], q.bid, q.bid_size, cfg, M.utcnow(), q.bid_limit,
+                              True, max(q.bid_size, q.bid_max or 0))
+      and M.side_needs_change([M.Resting(1, "21", True, b0.bid, 150, None)], q.bid, q.bid_size, cfg, M.utcnow(), q.bid_limit,
+                              True, max(q.bid_size, q.bid_max or 0)))
+q = M.compute_quote(0.50, 990, 990, 0.45, 0.55, cfg, adding_limit_factor=0.5, **kw)
+check("long 990: bid_max = the normal limit's room (10)", q.bid_size == 1 and q.bid_max == 10, q)
+q = M.compute_quote(0.50, 1000, 1000, 0.45, 0.55, cfg, adding_limit_factor=0.5, **kw)
+check("at the normal limit: no bid (the normal limit pulls, as today)", q.bid is None, q)
 q = M.compute_quote(0.50, -600, -600, 0.45, 0.55, cfg, adding_limit_factor=0.5, **kw)
 b0 = M.compute_quote(0.50, -600, -600, 0.45, 0.55, cfg, **kw)
-check("short 600: ask withdrawn, bid unchanged", q.ask is None and (q.bid, q.bid_size) == (b0.bid, b0.bid_size), q)
+check("short 600: ask held at 1, bid unchanged", q.ask_size == 1 and q.ask_max == 100
+      and (q.bid, q.bid_size) == (b0.bid, b0.bid_size), q)
+q = M.compute_quote(0.50, 600, 600, 0.45, 0.55, cfg, adding_limit_factor=0.5, adding_factor=0.0, **kw)
+check("with adding factor 0: withdrawn (as the capital ceiling at 0)", q.bid is None, q)
 check("flat: no side is adding, unchanged", M.compute_quote(0.50, 0, 0, 0.45, 0.55, cfg, adding_limit_factor=0.5, **kw)
       == M.compute_quote(0.50, 0, 0, 0.45, 0.55, cfg, **kw))
 
@@ -161,6 +219,7 @@ FV = 0.52                                                # market 21 (Rep Utah):
 
 def bot(**kw):
     a, b = make_bot(); b.cfg.turnover_control_enabled = True   # OFF by default until reviewed; tested on
+    b.cfg.turnover_min_state_minutes = 0.0               # flips at once here; the hysteresis has its own tests
     for k, v in kw.items():
         setattr(b.cfg, k, v)
     b.cycle()
@@ -193,8 +252,9 @@ check("dead (0 sh/h) holding 300: adding bid 100 x0.25 = 25, reducing ask unchan
       q.bid_size == 25 and (q.ask, q.ask_size) == (ref300.ask, ref300.ask_size) and q.bid == ref300.bid, (q, ref300))
 check("...tagged dead for the quote log", b.ex["21"].turnover_dead and b.ex["21"].turnover_tag == " dead")
 q = dec(b, 600)
-check("dead holding 600 > 0.5 x 1,000 limit: adding bid withdrawn, ask unchanged",
-      q.bid is None and (q.ask, q.ask_size) == (ref600.ask, ref600.ask_size) and ref600.bid_size == 100, (q, ref600))
+check("dead holding 600 > 0.5 x 1,000 limit: adding bid held at 1 share (bid_max 100), ask unchanged",
+      q.bid == ref600.bid and q.bid_size == 1 and q.bid_max == 100
+      and (q.ask, q.ask_size) == (ref600.ask, ref600.ask_size) and ref600.bid_size == 100, (q, ref600))
 q = dec(b, -300)
 check("dead short 300: the ask (adding) at 25, bid unchanged", q.ask_size == 25, q)
 q = dec(b, 0)
@@ -304,12 +364,43 @@ a, b = make_bot(); b.cfg.turnover_control_enabled = True   # OFF by default unti
 with open(b.cfg.fills_csv, "w", newline="") as f:
     w = csv.writer(f)
     w.writerow(M.FillLogger.COLUMNS)
-    w.writerow([1, iso_at(time.time() - 10 * H), "21", 1, "bid", 300, 0.5, 0.5, 0.5, 0.5])
-    w.writerow([2, iso_at(time.time() - 60), "22", 2, "bid", 600, 0.5, 0.5, 0.5, 0.5])
+    for k in range(84):                                  # a fill every 5 min for 7 h up to the restart
+        w.writerow([k, iso_at(time.time() - 60 - 300 * k), "22", k, "bid", 10, 0.5, 0.5, 0.5, 0.5])
 b2 = M.Bot(a, b.cfg)
 b2.cycle()
-check("seeded: judged at once, market 22 alive (600 in 6 h), 21 dead (0)", b2.turnover_flow.get("22", 0) >= 99
-      and b2.turnover_flow.get("21") == 0.0, b2.turnover_flow)
+check("seeded: judged at once, market 22 alive (~120 sh/h), 21 dead (0)", (b2.turnover_flow.get("22") or 0) >= 99
+      and b2.turnover_flow.get("21") == 0.0 and b2.turnover_state["21"][0] and not b2.turnover_state["22"][0],
+      (b2.turnover_flow, b2.turnover_state))
+
+print("--- hysteresis: dead below 50, alive again only above 75 sh/h, 30 min minimum state life")
+a, b = bot()
+b.cfg.turnover_min_state_minutes = 30.0
+judged(b)
+t0 = time.monotonic()
+flows = {"21": 0.0}
+b.turnover.per_hour = lambda e, now, w, tape=True: flows.get(e, 0.0)   # drive the flow directly
+
+
+def at(minutes, flow):
+    flows["21"] = flow
+    b.refresh_turnover(t0 + 60 * minutes, force=True)
+    return b.turnover_state["21"][0]
+
+
+check("first verdict at once: 0 sh/h -> dead", at(0, 0.0))
+check("60 sh/h at 40 min: above 50 but not above 75 -> still dead", at(40, 60.0))
+check("80 sh/h at 45 min: above 75 -> alive", not at(45, 80.0))
+check("49 sh/h at 50 min: dead again? not yet (alive only 5 min < 30)", not at(50, 49.0))
+check("60 sh/h at 70 min: between 50 and 75 while alive -> stays alive", not at(70, 60.0))
+check("49 sh/h at 80 min (alive 35 min): dead", at(80, 49.0))
+check("100 sh/h at 90 min: dead only 10 min -> stays dead", at(90, 100.0))
+check("100 sh/h at 111 min: 31 min dead -> alive", not at(111, 100.0))
+b.cfg.turnover_alive_shares_per_hour = 40.0              # set below the dead threshold: the dead one counts
+check("alive threshold below the dead one: dead below 50 still flips back only above 50",
+      at(150, 45.0) and at(190, 50.0) and not at(230, 50.5))
+flows["21"] = None
+b.refresh_turnover(t0 + 60 * 300, force=True)
+check("not judged any more (None): state dropped, alive", "21" not in b.turnover_state)
 
 print("--- analysis/turnover.py on synthetic data")
 spec = importlib.util.spec_from_file_location("turnover_an", os.path.join(HERE, "..", "analysis", "turnover.py"))
