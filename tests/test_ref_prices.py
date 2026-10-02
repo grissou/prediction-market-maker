@@ -115,6 +115,42 @@ while calls2["n"] < 3 and time.monotonic() < t_end:
     time.sleep(0.02)
 boom.stop()
 check("an error inside a refresh never kills the background thread (it keeps refreshing)", calls2["n"] >= 3, calls2)
+
+print("--- Polymarket downloads: one round trip, kept-open connections, partial failures")
+import threading as _th, time as _t
+calls, live, peak, lk = [], [0], [0], _th.Lock()
+def slow_get(url, params):
+    with lk:
+        live[0] += 1; peak[0] = max(peak[0], live[0])
+    _t.sleep(0.1)
+    ids = [v for k, v in params if k == "id"]
+    with lk:
+        live[0] -= 1; calls.append(ids)
+    if "bad" in ids:
+        raise RuntimeError("one batch failed")
+    return [{"id": i, "bestBid": "0.40", "bestAsk": "0.41"} for i in ids]
+real_get, R.http_get = R.http_get, slow_get
+t0 = _t.monotonic(); out = R.fetch_polymarket([str(i) for i in range(229)]); took = _t.monotonic() - t0
+check("229 ids = 5 requests sent side by side (one round trip, not five)", len(calls) == 5 and peak[0] >= 4 and took < 0.35,
+      (len(calls), peak[0], round(took, 2)))
+check("...every market priced", len(out) == 229)
+calls.clear()
+out = R.fetch_polymarket([str(i) for i in range(60)] + ["bad"])
+check("one failed batch: the other batches' prices still come through", len(out) == 50, len(out))
+try:
+    R.http_get = lambda url, params: (_ for _ in ()).throw(RuntimeError("all down"))
+    R.fetch_polymarket(["1", "2"]); raised = False
+except RuntimeError:
+    raised = True
+check("every batch failed: raises (the caller keeps the previous prices)", raised)
+R.http_get = real_get
+check("one shared session (connections kept open between refreshes)", R.session() is R.session())
+_rp = R.ReferencePrices.__new__(R.ReferencePrices)
+_rp.lock, _rp.prices = _th.Lock(), {"A|Republican": (0.5, time.monotonic() - 40)}
+check("ages(): seconds since each price was downloaded", 39 < _rp.ages()["A|Republican"] < 45, _rp.ages())
+_ad = R.session().get_adapter("https://gamma-api.polymarket.com")
+check("Polymarket session keeps a connection for every fetch thread plus the caller (no 'pool is full')",
+      _ad._pool_maxsize >= R.REF.parallel_fetches + 1 and not _ad._pool_block, _ad._pool_maxsize)
 R.FETCHERS.clear(); R.FETCHERS.update(real_fetchers)
 
 print("--- matching tournament races to Polymarket")

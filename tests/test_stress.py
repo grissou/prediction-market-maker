@@ -23,6 +23,8 @@ And once the faults stop:
   - no exchange is left stuck (paused / pending), and a quiet cycle changes nothing
 
 Run:  python tests/test_stress.py [steps_per_seed] [seeds]      (default 1500 x 5; exit code 0 = all passed)
+      STRESS_LADDER=1 python tests/test_stress.py ...   the same with the R3 ladder on (duplicates are then judged
+                                                         per side AND ladder level)
 """
 import random
 import sys
@@ -37,6 +39,7 @@ import tempfile
 
 RESULTS = []
 real_utcnow = M.utcnow
+LADDER = os.environ.get("STRESS_LADDER") == "1"
 
 
 def check(name, cond, extra=""):
@@ -158,9 +161,12 @@ def build(seed):
     d = tempfile.mkdtemp()
     cfg.fills_csv, cfg.status_file, cfg.order_notes_file, cfg.kill_file = (
         os.path.join(d, n) for n in ("fills.csv", "status.json", "notes.json", "kill.tripped"))
+    cfg.position_lots_file = os.path.join(d, "lots.json")
     cfg.record_file, cfg.ref_map_file, cfg.summary_every_hours, cfg.realtime_enabled = "", "", -1, False
     cfg.slow_poll_seconds, cfg.reserved_cash_mode = 30.0, "ignore"
     cfg.parallel_requests = 1             # one request thread: the random faults then fire in a repeatable order
+    if LADDER:                            # R3 ladder on every market; levels wide enough to sit behind the 8c house
+        cfg.ladder_enabled, cfg.ladder_markets, cfg.ladder_offsets = True, "headline,busy,quiet", (0.04, 0.05, 0.06)
     eids = {}
     for m in mk:
         x = M.RACE_TITLE.match(m["title"])
@@ -183,13 +189,26 @@ def build(seed):
     return rng, api, bot, truth, eids, house
 
 
-def our_orders_by_side(api):
+def our_orders_by_side(api, bot=None):
+    """{(eid, is_bid): [prices]}; with bot: {(eid, is_bid, ladder level): [prices]} (R3 ladder on)."""
     sides = {}
     api.expire()
-    for o in api.orders.values():
+    for oid, o in api.orders.items():
         is_bid, p = api.yes_view(o)
-        sides.setdefault((o["exchangeId"], is_bid), []).append(p)
+        key = (o["exchangeId"], is_bid) + ((order_level(bot, oid, o, is_bid, p),) if bot else ())
+        sides.setdefault(key, []).append(p)
     return sides
+
+
+def order_level(bot, oid, order, is_bid, price):
+    """The ladder level the bot gave this order: its notes, or (a batch whose response was lost, not adopted yet)
+    the notes of the order it sent there at that side, price and expiry (as Bot.match_unconfirmed matches them)."""
+    meta = bot.order_meta.get(oid)
+    if meta is None:
+        meta = next((m for o, m, _t in bot.unconfirmed.get(order["exchangeId"]) or []
+                     if (o["action"] == "buy") == is_bid and abs(o["price"] - price) < 1e-6
+                     and o["expirationDate"] == order["expirationDate"]), {})
+    return int(meta.get("level") or 0)
 
 
 def run_seed(seed, steps):
@@ -261,10 +280,10 @@ def run_seed(seed, steps):
             problems.append(f"step {cycles}: unexpected exception\n{traceback.format_exc()}")
         cycles += 1
         # --- invariants ---
-        sides = our_orders_by_side(api)
-        dup = {k: v for k, v in sides.items() if len(v) > 1}
+        dup = {k: v for k, v in our_orders_by_side(api, bot if LADDER else None).items() if len(v) > 1}
         if dup:
             problems.append(f"step {cycles}: duplicate quotes {dup}")
+        sides = our_orders_by_side(api)
         for eid in eids:
             bids, asks = sides.get((eid, True), []), sides.get((eid, False), [])
             if bids and asks and max(bids) >= min(asks) - 1e-9:
@@ -324,7 +343,10 @@ def run_seed(seed, steps):
     # Every exchange with a real two-sided book must be quoted. (Near 0 or 1 the house can't quote past
     # 0.5c / 99.5c, so a one-sided book has no fair value and is correctly left alone.)
     priceable = {e for e, ex in bot.ex.items() if M.fair_value(ex.book, bot.cfg) is not None}
-    unquoted = sorted(bot.ex[e].label for e in priceable - {o["exchangeId"] for o in api.orders.values()})
+    # ...unless the bot DECIDED not to quote it (risk limits blocking both sides, e.g. the national-swing cap on
+    # one side and a Kelly limit on the other): that's a choice, not a stuck exchange.
+    wanted = {e for e in priceable if bot.ex[e].quote.bid is not None or bot.ex[e].quote.ask is not None}
+    unquoted = sorted(bot.ex[e].label for e in wanted - {o["exchangeId"] for o in api.orders.values()})
     M.time, M.utcnow = real_time, real_utcnow
     return {"problems": problems, "record_ok": record == actual, "record": (record, actual), "stuck": stuck,
             "changes": changes, "unquoted": unquoted, "priceable": len(priceable), "cycles": cycles,
