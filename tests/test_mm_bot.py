@@ -743,9 +743,14 @@ a, b = unwind_bot({"11": 500, "12": 500}, unwind_books((0.595, 300), (0.40, 200)
 b.cycle()
 check("long pair, bids add up to 0.995 -> nothing sold", a.inv == {"11": 500, "12": 500} and b.unwinds_total == 0, a.inv)
 
-a, b = unwind_bot({"11": 500, "12": 500}, unwind_books((0.60, 300), (0.40, 200)))
+a, b = unwind_bot({"11": 500, "12": 500}, unwind_books((0.60, 300), (0.40, 200)), pair_unwind_min_profit=0.0)
 b.cycle()
 check("bids add up to exactly 1.000 with pair_unwind_min_profit 0 -> unwound at fair", a.inv == {"11": 300, "12": 300}, a.inv)
+a, b = unwind_bot({"11": 500, "12": 500}, unwind_books((0.60, 300), (0.40, 200)))
+b.cycle()
+check("...but the default pair_unwind_min_profit (0.5c) wants 1.005: a one-leg partial fill at 1.000 could be 2c offside",
+      a.inv == {"11": 500, "12": 500} and Config().pair_unwind_min_profit == 0.005 and Config().pair_unwind_max_frac == 0.01,
+      a.inv)
 a, b = unwind_bot({"11": 500, "12": 500}, unwind_books((0.605, 300), (0.40, 200)), pair_unwind_min_profit=0.01)
 b.cycle()
 check("pair_unwind_min_profit 0.01 -> 1.005 is not enough", a.inv == {"11": 500, "12": 500}, a.inv)
@@ -2412,7 +2417,10 @@ try:
           b.capital_in_positions({"summary": {"totalMarketValue": 90500}}, {"11": 1}, {}) == 90500)
 
     # End to end: over the ceiling, adding sides go, reducing sides stay; status and summary show it.
-    a, b = make_bot()
+    check("capital ceiling default: adding sides at a quarter size, not withdrawn (the account was 90% in positions on "
+          "2 Oct, so the ceiling is on at deploy: factor 0 would have blacked out every flat market)",
+          Config().capital_ceiling_adding_size_factor == 0.25)
+    a, b = make_bot(); b.cfg.capital_ceiling_adding_size_factor = 0.0
     a.inv = {"11": 500}                                   # long 500 Rep Ohio -> race +500 Rep / -500 Dem
     b.cfg.capital_in_positions_max_frac = 0.0005          # 500 x ~0.14 = ~70 of 100,000 -> over
     b.cycle()
