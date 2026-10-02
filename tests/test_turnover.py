@@ -266,7 +266,7 @@ check("adding factor 0: the adding side is withdrawn", dec(b, 300).bid is None)
 b.cfg.turnover_dead_adding_factor = 0.25
 b.capital_over = True
 q = dec(b, 300)
-check("with the capital ceiling (x0.25) too: factors multiply, 100 x 0.25 x 0.25 = 6", q.bid_size == 6, q)
+check("with the capital ceiling (x0.5 since Package 3) too: factors multiply, 100 x 0.5 x 0.25 = 12", q.bid_size == 12, q)
 b.capital_over = False
 for k in range(6):                                       # 600 sh traded over the window = 100 sh/h
     b.turnover.add("21", time.time() - (k + 0.5) * H, 100, tape=True)

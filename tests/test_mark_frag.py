@@ -144,11 +144,12 @@ def quote(bot, inv):
 
 a, b = make_bot()
 b.cfg.reduce_join_best = False
+b.cfg.mark_frag_enabled = False                           # ON by default since Package 3: test the off path explicitly
 b.ex["11"].book = a.books["11"]
 b.mark_sd = {"11": 0.10}
 b.cfg.mark_frag_max_step_cash = 95.0                      # -> limit 950 shares
 base = quote(b, 900)
-check("disabled (default): decide is today's (bid 100 at pos 900)", base.bid_size == 100, base)
+check("disabled: decide is today's (bid 100 at pos 900)", base.bid_size == 100, base)
 b.cfg.mark_frag_enabled = True
 q = quote(b, 900)
 check("enabled, sd 10c, 95 $/step -> limit 950: the adding bid shrinks to 50", q.bid_size == 50, q)
@@ -169,6 +170,7 @@ b.ex["11"].book = a.books["11"]
 b.mark_sd = {"11": 0.10, "21": 0.05}
 inv = {"11": 900.0, "21": -100.0}                         # 90 + 5 = 95 $/step
 b.cfg.mark_frag_total_max_cash = 90.0
+b.cfg.mark_frag_enabled = False                           # (ON by default since Package 3: test the off path)
 h = b.update_mark_frag(inv, b.cfg)
 check("disabled: total computed (95) but the cap never engages",
       near(h["mark_frag_total_cash"], 95.0, 1e-9) and not b.mark_frag_over, h)

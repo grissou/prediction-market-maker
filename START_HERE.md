@@ -1,9 +1,37 @@
 # START HERE (Team run, branch `claude/run-c-tournament-improvements-pycdet`)
 
-Status: **in progress** (started 2026-10-02 08:50 UTC). **Package 1 READY at 10:10 UTC, Package 2 READY at 11:05 UTC, hot-fix Package 2.1 READY at 12:05 UTC, hot-fix Package 2.2 READY at 12:40 UTC, Package 2.3 READY at 13:10 UTC (deploy this one)** (deploy-ready, cumulative). Package 2 is LIVE since 11:21:57. Base: `claude/live-2026-10-02b` (5c0463a), the code live since 08:34.
+Status: **complete** (Team complete at 14:45 UTC) (started 2026-10-02 08:50 UTC; credits nearly spent at 14:35 UTC). **Package 1 READY at 10:10 UTC, Package 2 READY at 11:05 UTC, hot-fix Package 2.1 READY at 12:05 UTC, hot-fix Package 2.2 READY at 12:40 UTC, Package 2.3 READY at 13:10 UTC, Package 3 READY at 14:45 UTC (deploy this one)** (deploy-ready, cumulative). Package 2 is LIVE since 11:21:57. Base: `claude/live-2026-10-02b` (5c0463a), the code live since 08:34.
 The Builder's previous START_HERE is kept as `START_HERE_BUILDER.md`; Run A's notes are `ENGINEERING_NOTES.md`.
 Plan: `PLAN.md`. Packages appear below as they become READY (commit messages start "READY: Package N").
 Deploy only commits whose message starts "READY"; the branch is cumulative.
+
+## HANDOFF (read this if you are picking the work up)
+**State at 14:35 UTC, 2 Oct.** Live: Package 2 (83f6d45) since 11:21:57 with settings_override `{"arb_two_sided": false, "worst_case_backstop_frac": 0.8}`
+plus the stop-gap keys below. Deploy candidate: **Package 3 (HEAD, "READY: Package 3")**; it includes 2.1-2.3.
+**Where everything is** (all on this branch, PR #5): `START_HERE.md` (this file: packages, parameter table, owner flags), `PLAN.md`, `deploy/RUNBOOK.md`
+(parameter-only, handover code deploy, rollback, emergency), `DATA_REPORT_2.md` + `analysis/*.py` (day-two analysis, valuation rule, outsider races,
+rival floors, turnover, mark fragility, mark rule, follow-ups), `ideas/IDEAS_ROUND1..3.md` + `analysis/explorer_r2/` (idea rounds with the data facts
+behind them), `SIM_NOTES.md` (simulator calibration and every sweep), `tests/strategy_sim.py` (crowded-book simulator), `tests/live_sim.py` +
+`tests/live_start.json` (simulator from the real book), `tests/scenario.py` (`ceiling` reproduces the 2-5 min cycle incident), the Builder's
+`START_HERE_BUILDER.md` and Run A's `ENGINEERING_NOTES.md`.
+**Stop-gap overrides to lift once 2.3 is live**: `never_defer_unsafe` true and `burst_protection` true are safe again; keep `writes_per_minute` 28-30 and
+`writes_per_minute_max` 30 unless `rate_limited_total` stays 0 for an hour (the exchange's write limit looks like ~30/min for the whole bot).
+**Owner decisions still open** (with the team's recommendation): (1) `worst_case_backstop_frac` 0.8 vs 0.69: keep 0.8 until the sum of maxima is below
+60k; (2) `arb_two_sided`: switch on after 2.3 (guard: liquid Polymarket on every leg, raw sum >= 0.99; expect 0 fills in outsider races); (3) election
+day (Run B W1): markets close 4 Nov 00:00 UTC, one hour after the first polls close and before returns, so there is no "take stale quotes on returns"
+window inside trading; the team recommends flattening from 24 h before, exempting complete sets only if SIG confirms settlement at the outcome, and no
+directional taking; (4) ask SIG: the write limit (30/min per account? a batch = 1?), Smart Score definition, end valuation of unresolved positions, whether a
+429 pauses reads; (5) Gamma rate limit before a Polymarket refresh below 5 s (not needed on the data: only 83 moves >= 1c in 16 h and adverse selection ~0,
+so the WebSocket idea is parked).
+**What is left (in value order, from ideas/IDEAS_ROUND3.md and the Strategist)**: no 0.5c chase when fair value and inventory are unchanged (24% of
+all quote changes were pure rival chases; fresh quotes earn less than resting ones); a quiet-tier cancel-less regime (wide, long-lived quotes: 68% of
+decisions for ~650 of edge); TTL refresh is a ~20% write tax (order_ttl 1800 / refresh 180; tiered TTL and expiry-as-cancel); headline re-quote only on a
+fair-value move or fill; a Gamma-outage guard for quoting; a daily scorecard from the recorder (positions' currentPrice, account marks: `analysis/mark_rule.py`
+pins the valuation rule once a day of data exists); run `analysis/rival_floor.py --mode sweep_only` on the server's market_data.sqlite to produce
+market_edge.json (the loader is ON and inert without the file); the ladder only after its write-churn fixes and a dry-run write count.
+**How the suites run**: `for t in test_mm_bot test_ref_prices test_strategy test_recorder_refill test_fast_unload test_turnover test_mark_frag
+test_behind_best test_stress; do python tests/$t.py | tail -1; done` (also `STRESS_LADDER=1 python tests/test_stress.py`); Python 3.10 is required on
+the server, everything here was run on 3.11 and a 3.10 venv.
 
 ## Carried over from the Builder and Run A (open items)
 - Owner decisions still open: R7 loosened reduce-only (live with the 69% backstop); rule questions for SIG (end valuation of
@@ -143,6 +171,49 @@ test_behind_best 36, test_stress 20; Python 3.11 and 3.10. Watch after deploy (R
 `last_cycle_seconds` median < 20 s; no run of "urgent writes capped" lines; `write_budget_wait_total` / `takes_skipped_budget` small; `orders_resting`
 and `locked_in_orders` steady under the ceiling; no WATCHDOG alert.
 
+### Package 3 (in preparation; merged on the branch, every feature OFF): inventory turnover and sweep capture
+Candidates (all live-overridable): `fast_unload_enabled` (after a quote fill with >= 2c edge, the reducing side quotes at fair ± 1c for 180 s at the
+filled size); `reduce_join_best` (the reducing side joins a rival resting inside our normal quote, never closer than 1c to fair);
+`turnover_control_enabled` (a market with < 50 sh/h of flow over 6 h where we hold >= 100 shares: adding side x0.25 and half its position limit,
+hysteresis 50/75, 30-min state life); `behind_best_size_enabled` (an adding quote 2+ ticks behind the best other price at half size: cuts cash
+locked in orders ~14% in the simulator, P&L neutral-to-slightly-negative); `mark_frag_enabled` (per-position cap = 100 cash / sd of the 10-min
+mid step; on the snapshot 3 positions would be capped: both RI Senate legs and Dem U.S. Senate; total noise 1,186 per step);
+`market_edge_enabled` (per-market min_edge from `analysis/rival_floor.py --mode sweep_only`, needs live recorder data); `ladder_enabled`
+(R3 resting depth ladder at 1.5/2.5/3.5c, sizes 1/2/3x, headline 2/4/6/8c; cash-gated at 10% free cash; writes gate 10; simulator +17 ± 15 quiet /
++37 ± 18 news per hour at 24 seeds, +46-51 ± 10 at 128 seeds in the prototype; writes 12 -> 27 per market-hour, so it needs the write budget
+headroom the exchange may not have). Defaults are decided after the Strategist's real-inventory runs and the Reviewer's second pass.
+Capital ceiling factor 0.25 -> 0.5 will be Package 3's default (Strategist: factor 0 was a cliff, 0.5 recovers ~70% of the lost P&L).
+
+### Simulator from the real book (Strategist round 3, owner's request): `tests/live_sim.py`
+Starts from the real positions and lot ages at 08:14 (`tests/live_start.json`, rebuilt by `tests/live_start_extract.py`; House legs set to the 09:45
+figures), 68 real markets (the races of the 40 biggest positions, both legs) plus 3 made-up races with an unlisted outsider, the other 163 markets as a
+fixed capital block (90% of the account in positions, ~10k free cash; adding orders need free cash), the real decide / arb_plan / fill hooks, a 30-min
+trade-average mark. Usage: `python tests/live_sim.py SEEDS HOURS quiet|news '{settings}' ...`. 16 seeds, 6 h quiet, everything off: P&L +2,990, capital
+0.90 -> 0.93 (peak 0.98), peak worst case 55k. Package 2 "all on" vs off: P&L -180 ± 160 (quiet) / -293 ± 110 (news) at Polymarket prices but
++219 ± 180 / +68 ± 97 at the trade-average mark (+597 ± 270 over 12 h), cash freed +8.5k / +9.7k (+13.8k over 12 h), worst case -7.3k / -8.1k
+(-10.6k), positions 0.6-2 h younger. Alone: race-netted limits +185 ± 150 (+407 ± 180 at the mark, worst case -5.3k); capital ceiling +251 ± 120;
+pair unwind +88 ± 76 (ages -0.85 h); age skew +5 ± 98; arbitrage -54 ± 90; refill cooldown -120 ± 97; fast unload (old 0.5c/300 s) -257 ± 94;
+reduce-join (old) -58 ± 61. The outsider races got 0 arbitrage fills. Limits: 68 of 237 markets simulated; buy-side chances ~2x real.
+
+### Package 3 (READY 14:45 UTC): defaults from the real-book simulator and the Reviewer; new features present, most OFF. Code deploy (handover restart). Commit "READY: Package 3".
+Includes 2.1-2.3. Changes against 2.3: `capital_ceiling_adding_size_factor` 0.25 -> 0.5 (the ceiling binds live; factor 0 was a cliff of -131/h, 0.5 recovers
+~70%); `mark_frag_enabled` OFF (round 3b: -29 ± 52, the cap rarely binds; switch on for rank stability if wanted); `market_edge_enabled` ON (inert until `market_edge.json` exists: run
+`python analysis/rival_floor.py --mode sweep_only` on the server's market_data.sqlite and copy the file next to mm_bot.py; the loader refuses bad
+entries); `refill_cooldown_enabled` OFF (real-book simulator -120 ± 97; the day-one losses it targeted were the old skew bug). OFF and awaiting evidence
+(switch on via settings_override only after a simulator or live A/B result): `fast_unload_enabled`, `reduce_join_best`, `turnover_control_enabled`,
+`behind_best_size_enabled`, `ladder_enabled` (the ladder also needs the Reviewer's write-churn fixes L1-L4, listed below, before any live use).
+Suites: test_mm_bot 588, test_strategy 114, test_ref_prices 37, test_recorder_refill 37, test_fast_unload 61, test_turnover 94, test_mark_frag 52,
+test_behind_best 36, test_stress 20 (and with STRESS_LADDER=1); Python 3.11 and 3.10.
+Watch in the first 10 minutes: as for 2.3, plus status.json `mark_frag_capped_markets` (expect ~3) and `mark_frag_top`; `market_edge_markets`
+(0 until the file exists); adding-side sizes at half under the ceiling (not a quarter).
+Round 3b (6 h quiet, 16 seeds, from the real book): ceiling factor 0.5 vs 0.25 +262 ± 100; arb_buy_min_ref_sum 0.99 vs 0.8: 0.8 would lose -898 ± 94
+buying 23.8k outsider shares; fast unload -165 ± 110; reduce-join -48 ± 81; behind-best -99 ± 83; mark cap -29 ± 52; ladder -5 ± 49 (idle at 10k cash);
+refill cooldown off -14 ± 94; turnover control untested. Unfinished at wrap-up (NOT merged): the ladder's Reviewer fixes L1-L4 (hair-trigger urgent pulls one tick
+behind the touch -> stale not urgent; ladder-only pulls excluded from the cancel-all count; 1-tick tolerance, re-anchor hysteresis at 2c and
+min_quote_life for ladder orders; per-order cash cap in ladder_caps) and the Strategist's round-3b runs (new fast unload, new reduce-join, turnover,
+behind-best, mark cap, the real ladder at 10k free cash, refill cooldown off vs on, ceiling 0.25 vs 0.5 on `tests/live_sim.py`). Both are specified
+above and in SIM_NOTES.md; a new session can redo them from this branch.
+
 ## Parameter changes (cumulative against live)
 | Setting | Live | New | Evidence | Expected effect |
 |---|---|---|---|---|
@@ -162,6 +233,10 @@ and `locked_in_orders` steady under the ceiling; no WATCHDOG alert.
 | ref_only_use_tops / startup_books_first (new) | - | on | coverage 30 -> 101 in 6 min after restart | ~190 priced within 2 min of a restart |
 | refill_cooldown_* (new) | - | on | -936 on 3rd+ same-side fills | fewer walks against us |
 | fl_bias_enabled (new) | - | off | §10c: a skew artefact | none |
+| capital_ceiling_adding_size_factor | 0.25 (P2) | 0.5 | real-book simulator: factor 0 a cliff, 0.5 recovers ~70% | adding sides at half size under the ceiling |
+| mark_frag_enabled (new) | - | off | round 3b -29 ± 52, rarely binds | none |
+| market_edge_enabled (new) | - | on (inert without market_edge.json) | Reviewer: only widens, cheap | per-market floors once the file exists |
+| refill_cooldown_enabled | on (P2) | off | real-book simulator -120 ± 97 | none expected |
 
 ## Packages
 
