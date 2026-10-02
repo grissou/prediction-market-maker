@@ -571,6 +571,22 @@ class Config:
     reduce_join_min_edge: float = 0.005    # closest the joining side may sit to fair value (0 = fv rounded away)
     reduce_join_min_shares: int = 100     # only while |race-netted position| is at least this
 
+    # --- TURNOVER CONTROL (adding side in markets whose position cannot turn) -----------------
+    # 11 of the 12 positions >= 1,000 sh had no reducing fill in 6 h; 52 markets trading < 2 fills/h held 28.6k of
+    # the 53k in positions. A market whose observed flow (shares traded in the last turnover_window_hours: our fills,
+    # or the realtime trade tape if larger - the tape includes ours) is below turnover_min_shares_per_hour is "dead";
+    # there, while we hold a position (|race-netted| >= min(quote size, 100)), the ADDING side quotes at
+    # turnover_dead_adding_factor of its size (times the capital ceiling's factor, if on) against a position limit
+    # of turnover_dead_max_position_frac of the normal one. The reducing side and flat markets are unchanged. Until
+    # ~turnover_window_hours of flow has been observed (this run plus what fills.csv / the recorder's trades table
+    # cover), every market counts as alive.
+    turnover_control_enabled: bool = True
+    turnover_window_hours: float = 6.0
+    turnover_min_shares_per_hour: float = 50.0
+    turnover_dead_adding_factor: float = 0.25    # 0 = adding side withdrawn in dead markets
+    turnover_dead_max_position_frac: float = 0.5
+    turnover_use_tape: bool = True        # count other traders' trades from the realtime feed (and its recording)
+
     # --- CONNECTION / ALERTS (from the environment: see top of file) ------------------------
     summary_every_hours: int = 2          # phone summary every N hours, on the hour UTC (2 = 00:00, 02:00, 04:00...),
                                           #   covering what happened since the previous one. 0 = off. Live only
@@ -666,6 +682,12 @@ OVERRIDABLE = {
     "reduce_join_min_shares": (0, 100000),
     "market_edge_enabled": (False, True),
     "market_edge_max": (0.005, 0.05),
+    "turnover_control_enabled": (False, True),
+    "turnover_window_hours": (0.5, 48.0),
+    "turnover_min_shares_per_hour": (0.0, 100000.0),
+    "turnover_dead_adding_factor": (0.0, 1.0),
+    "turnover_dead_max_position_frac": (0.0, 1.0),
+    "turnover_use_tape": (False, True),
 }
 
 
@@ -1172,6 +1194,7 @@ class RealtimeFeed:
         self.events = 0                   # messages received (shown in status.json)
         self.trade_counts = defaultdict(int)   # exchange -> tournament trades seen (all traders)
         self.trade_log = deque(maxlen=20000)   # (unix time, trade item) for the recorder (see take_trades)
+        self.flow_log = deque(maxlen=20000)    # (unix time, exchange id, quantity) for turnover control (take_flow)
         self.socket_error = False         # the library logged that the socket closed (see _SocketErrorWatch)
         self.thread = threading.Thread(target=lambda: asyncio.run(self._run()), name="realtime", daemon=True)
 
@@ -1192,6 +1215,13 @@ class RealtimeFeed:
         with self.lock:
             out = list(self.trade_log)
             self.trade_log.clear()
+        return out
+
+    def take_flow(self):
+        """Tournament trades since the last call, for turnover control: [(unix time, exchange id, quantity)]."""
+        with self.lock:
+            out = list(self.flow_log)
+            self.flow_log.clear()
         return out
 
     def take(self):
@@ -1235,6 +1265,7 @@ class RealtimeFeed:
                 if item.get("exchangeId") is not None and item.get("tournamentId") in (None, self.tid):
                     self.trade_counts[str(item["exchangeId"])] += 1
                     self.trade_log.append((time.time(), item))
+                    self.flow_log.append((time.time(), str(item["exchangeId"]), _num(item.get("quantity"))))
             if data.get("marketSettled"):
                 self.settled = True
         self.wake.set()
@@ -1652,7 +1683,7 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
                   bid_cap=None, ask_cap=None, kelly_p=None, bankroll=None, shift=0.0, order_size=None,
                   position_limit=None, min_edge=None, reduce_size=None, net_inv=None, age_hours=0.0,
                   adding_factor=1.0, bias_side=None, bias_edge=0.0, bias_size=1.0, unload_side=None,
-                  unload_edge=0.0, unload_size=None):
+                  unload_edge=0.0, unload_size=None, adding_limit_factor=1.0):
     """
     fv         fair YES probability
     inv        our net YES shares on THIS exchange (negative = net NO); drives the hard position limit
@@ -1682,6 +1713,8 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
     unload_side        "bid" / "ask" / None: fast unload window (see Bot.note_unloads). That side, if it shrinks this
                        exchange's position, quotes unload_edge from fv (or closer, if the skews already put it
                        there), never crossing the best other order, at unload_size shares capped by the position
+    adding_limit_factor  the position limit on the side that grows |net_inv| is this fraction of the normal one
+                       (turnover control: a market whose position cannot turn); 1 = no change
     """
     bankroll = bankroll or DEFAULT_BANKROLL
     max_order_cash = cfg.max_order_cash_frac * bankroll
@@ -1771,6 +1804,12 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
     elif kelly_p is not None:
         long_limit = kelly_position(kelly_p, bid, bankroll, cfg, yes=True)     # most YES we'd hold
         short_limit = kelly_position(kelly_p, ask, bankroll, cfg, yes=False)   # most NO we'd hold
+    net = eff_inv if net_inv is None else net_inv
+    if adding_limit_factor < 1.0:             # turnover control: a smaller limit on the side that grows |net|
+        if net > 0:
+            long_limit *= max(0.0, adding_limit_factor)
+        elif net < 0:
+            short_limit *= max(0.0, adding_limit_factor)
     bid_size = min(order_size, long_limit - inv)
     ask_size = min(order_size, short_limit + inv)
     if bias_side == "bid" and bias_size != 1.0:        # bad side: smaller, except the part that only unloads
@@ -1782,7 +1821,6 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
             bid_size = max(bid_size, min(reduce_size, -inv))   # buying back a short
         elif inv > 0:
             ask_size = max(ask_size, min(reduce_size, inv))    # selling down a long
-    net = eff_inv if net_inv is None else net_inv
     if cfg.limits_use_race_net:               # the race-netted position counts too, on the side that grows it
         if net > 0:
             bid_size = min(bid_size, long_limit - net)
@@ -1926,6 +1964,132 @@ def read_fills(path):
         return list(csv.DictReader(f))
 
 
+class TurnoverTracker:
+    """Shares traded per market over a trailing window (turnover control, see Config). Two sources per market:
+    our own fills and the realtime trade tape (every trader's trades, ours included), each a deque of
+    (unix time, shares). Observed flow = the larger of the two (the tape includes our fills, so adding them would
+    count ours twice; our fills are the floor when the tape has gaps), per hour of OBSERVED time in the window.
+
+    Observed time = the part of the window covered by this run (since `start`) or by the seeds read at start-up
+    (fills.csv, the recorder: [seed_from, seed_to]); a restart gap is not observed. Until it reaches
+    MIN_COVERAGE of the window nothing is judged (every market is alive): no false "dead" in the first hours
+    after a start without history."""
+    KEEP_HOURS = 48.0                     # retention (the largest turnover_window_hours allowed live)
+    MIN_COVERAGE = 0.9                    # share of the window that must be observed before judging
+
+    def __init__(self, start=None):
+        self.start = time.time() if start is None else float(start)
+        self.seed_from = self.seed_to = None   # what the start-up seeds cover (None = no seed)
+        self.ours, self.tape = defaultdict(deque), defaultdict(deque)
+
+    def _cover(self, t0, t1):
+        if self.seed_from is None:
+            self.seed_from, self.seed_to = t0, t1
+        else:
+            self.seed_from, self.seed_to = min(self.seed_from, t0), max(self.seed_to, t1)
+
+    def add(self, eid, t, qty, tape=False):
+        """One trade of |qty| shares at unix time t (ours, or from the tape)."""
+        q = abs(float(qty or 0))
+        if q > 0:
+            (self.tape if tape else self.ours)[str(eid)].append((float(t), q))
+
+    def prune(self, now):
+        cut = now - 3600 * self.KEEP_HOURS
+        for book in (self.ours, self.tape):
+            for dq in book.values():
+                while dq and dq[0][0] < cut:
+                    dq.popleft()
+
+    def observed_hours(self, now, window_hours):
+        """Hours of the window [now - window, now] covered by this run or by the seeds."""
+        lo = now - 3600 * window_hours
+        run = max(0.0, now - max(lo, self.start))
+        seed = 0.0
+        if self.seed_from is not None:
+            seed = max(0.0, min(self.seed_to, self.start, now) - max(self.seed_from, lo))
+        return min(window_hours, (run + seed) / 3600)
+
+    def judged(self, now, window_hours):
+        return self.observed_hours(now, window_hours) >= self.MIN_COVERAGE * window_hours - 1e-9
+
+    @staticmethod
+    def _sum(dq, lo, now):
+        return sum(q for t, q in dq if lo <= t <= now)
+
+    def shares(self, eid, now, window_hours, use_tape=True):
+        """Shares traded in the window: max(our fills, tape)."""
+        lo = now - 3600 * window_hours
+        ours = self._sum(self.ours.get(str(eid), ()), lo, now)
+        return max(ours, self._sum(self.tape.get(str(eid), ()), lo, now)) if use_tape else ours
+
+    def per_hour(self, eid, now, window_hours, use_tape=True):
+        """Observed flow in shares per hour, None while too little of the window has been observed."""
+        if not self.judged(now, window_hours):
+            return None
+        return self.shares(eid, now, window_hours, use_tape) / max(self.observed_hours(now, window_hours), 1e-9)
+
+    def seed_fills(self, rows, now):
+        """fills.csv rows (read_fills): those within KEEP_HOURS feed `ours`; the file's first and last fill
+        bound what it covers. Returns how many rows were used."""
+        pts = []
+        for r in rows:
+            try:
+                t = parse_ts(r.get("filled_at"))
+                q = float(r.get("qty") or 0)
+            except (TypeError, ValueError):
+                continue
+            if t is not None:
+                pts.append((t.timestamp(), str(r.get("exchange_id")), q))
+        if not pts:
+            return 0
+        pts.sort()
+        self._cover(min(pts[0][0], self.start), min(pts[-1][0], self.start))
+        cut, used = now - 3600 * self.KEEP_HOURS, 0
+        for t, eid, q in pts:
+            if cut <= t <= self.start:
+                self.add(eid, t, q)
+                used += 1
+        return used
+
+    def seed_tape(self, db_path, now):
+        """The recorder's trades table (read-only): rows within KEEP_HOURS feed `tape`; its first and last rows,
+        and the last snapshot row, bound what the recording covers. Returns rows used (0 = nothing to read)."""
+        if not db_path or not os.path.exists(db_path):
+            return 0
+        try:
+            db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        except sqlite3.Error:
+            return 0
+        try:
+            names = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if "trades" not in names:
+                return 0
+            first = db.execute("SELECT ts FROM trades ORDER BY rowid LIMIT 1").fetchone()
+            last = db.execute("SELECT ts FROM trades ORDER BY rowid DESC LIMIT 1").fetchone()
+            if not first or first[0] is None:
+                return 0
+            hi = float(last[0])
+            if "snapshots" in names:                    # the recording ran until its last snapshot
+                snap = db.execute("SELECT ts FROM snapshots ORDER BY rowid DESC LIMIT 1").fetchone()
+                st = parse_ts(snap[0]) if snap and isinstance(snap[0], str) else None
+                if st is not None:
+                    hi = max(hi, st.timestamp())
+            self._cover(min(float(first[0]), self.start), min(hi, self.start))
+            rows = db.execute("SELECT ts, eid, quantity FROM trades WHERE ts >= ? AND ts <= ? ORDER BY ts",
+                              (now - 3600 * self.KEEP_HOURS, self.start)).fetchall()
+        except (sqlite3.Error, TypeError, ValueError):
+            return 0
+        finally:
+            db.close()
+        used = 0
+        for t, eid, q in rows:
+            if t is not None and q is not None:
+                self.add(eid, t, q, tape=True)
+                used += 1
+        return used
+
+
 def fill_stats(rows):
     """Two numbers tell you whether the market making is working:
 
@@ -1999,6 +2163,9 @@ def build_summary(api, fills_path, initial_balance, value=None, value_prev=None,
                          f"> 3h, {health.get('positions_over_12h', 0)} > 12h), capital in positions "
                          + (f"{100 * frac:.0f}%" if frac is not None else "?")
                          + (" - CEILING: adding sides cut" if health.get("capital_ceiling_active") else ""))
+        if health.get("turnover_dead_markets") is not None:
+            lines.append(f"dead-turnover markets: {health['turnover_dead_markets']} holding "
+                         f"{health.get('turnover_dead_capital', 0) / 1000:.1f}k")
     return title, "\n".join(lines)
 
 
@@ -2185,6 +2352,8 @@ class Ex:
     take_until: float = 0.0               # after taking here, leave it alone until this time
     fl_side: str | None = None            # favourite-longshot bias side last cycle (for its hysteresis)
     fl_tag: str = ""                      # that bias for the quote log line ("" = none active)
+    turnover_dead: bool = False           # turnover control: holding a position in a market with too little flow
+    turnover_tag: str = ""                # " dead" on the quote log line while turnover control changes the quote
 
 
 def busy(ex, now_m):
@@ -2309,6 +2478,10 @@ class Bot:
         self.last_pnl_reply = (None, None)  # recorder: (latest P&L reply, wall time read)
         self.refills = defaultdict(deque)  # (eid, "bid"/"ask") -> (time, shares) of recent fills that added
         self.refill_until = {}            # (eid, side) -> monotonic time its refill cooldown ends
+        self.turnover = TurnoverTracker() # turnover control: shares traded per market (ours + the tape)
+        self.turnover_flow = {}           # eid -> observed shares/h (None = not judged yet), see refresh_turnover
+        self.turnover_refreshed = -1e9    # monotonic time of the last refresh
+        self.seed_turnover()
         self.last_summary_slot = None     # (date, hour) of the last phone summary
         self.value_at_last_summary = None
         self.counts_at_last_summary = {"arbs": 0, "takes": 0, "errors": 0, "rate_limits": 0}
@@ -2577,6 +2750,8 @@ class Bot:
             new_fills = self.log_fills(fvs)
             self.note_refills(new_fills, inv, now_m)
             self.note_unloads(new_fills, inv, now_m)
+        self.note_turnover(new_fills if read_fills else ())
+        self.refresh_turnover(now_m)
 
         # 5. Guaranteed arbitrage inside races (takes liquidity; our quotes there are pulled first) --
         arb_races = self.take_arbitrage(inv, fvs, mine_real, now_m) if self.running else set()
@@ -2677,6 +2852,7 @@ class Bot:
         self.health["fl_bias_markets"] = {k: sum(1 for x in self.ex.values() if x.fl_tag.startswith(f" fl:{k}"))
                                           for k in ("bid", "ask")}
         self.health["market_edge_markets"] = len(self.market_edge) if self.cfg.market_edge_enabled else 0
+        self.health.update(self.turnover_health(inv, fvs))
 
         # 8. Snapshot for later analysis (every record_seconds) -------------------------------------
         self.record(fvs, now_m)
@@ -3240,13 +3416,73 @@ class Bot:
                 total += worst_case_loss(legs)
         return total
 
+    # ------------------------------------------------------------------ turnover control
+    def seed_turnover(self):
+        """At start: the last hours of fills.csv and, if the recorder's file exists, its trades table, so a
+        restart neither forgets the flow nor judges markets on minutes of it."""
+        now = time.time()
+        try:
+            n_f = self.turnover.seed_fills(read_fills(bot_path(self.cfg.fills_csv)), now)
+        except (OSError, csv.Error) as e:
+            log.warning("turnover: could not read fills.csv: %s", e)
+            n_f = 0
+        n_t = self.turnover.seed_tape(bot_path(self.cfg.record_file) if self.cfg.record_file else "", now)
+        if n_f or n_t:
+            log.info("turnover: seeded %d fills and %d tape trades, %.1fh of the %gh window observed", n_f, n_t,
+                     self.turnover.observed_hours(now, self.cfg.turnover_window_hours), self.cfg.turnover_window_hours)
+
+    def note_turnover(self, new):
+        """Our new fills (log_fills) and the trades the realtime feed reported since the last call."""
+        wall = time.time()
+        for f in new or ():
+            try:
+                t = parse_ts(f.get("filledAt"))
+            except (TypeError, ValueError):
+                t = None
+            self.turnover.add(f.get("exchangeId"), min(t.timestamp(), wall) if t is not None else wall,
+                              f.get("quantity"))
+        if self.feed and hasattr(self.feed, "take_flow"):
+            for t, eid, q in self.feed.take_flow():
+                self.turnover.add(eid, t, q, tape=True)
+
+    def refresh_turnover(self, now_m, force=False):
+        """Each market's observed flow (shares/h over turnover_window_hours), at most once a minute."""
+        if not force and now_m - self.turnover_refreshed < 60.0:
+            return
+        self.turnover_refreshed, now, cfg = now_m, time.time(), self.cfg
+        self.turnover.prune(now)
+        self.turnover_flow = {e: self.turnover.per_hour(e, now, cfg.turnover_window_hours, cfg.turnover_use_tape)
+                              for e in self.ex}
+
+    def turnover_dead(self, ex, size, cfg):
+        """A dead market where we hold a position: observed flow below turnover_min_shares_per_hour (once judged)
+        and |race-netted position| at least min(one quote, 100 shares)."""
+        flow = self.turnover_flow.get(ex.eid)
+        if flow is None or flow >= cfg.turnover_min_shares_per_hour:
+            return False
+        return abs(ex.eff) >= max(1.0, min(size or 0.0, 100.0))
+
+    def turnover_health(self, inv, fvs):
+        """status.json: dead markets holding positions, the capital in them (at fair value) and the biggest."""
+        rows = []
+        for e, x in self.ex.items():
+            q = inv.get(e, 0.0)
+            if not x.turnover_dead or not q:
+                continue
+            p = fvs.get(e) or x.last_fv or 0.5
+            rows.append((abs(q) * (p if q > 0 else 1 - p), x.label, self.turnover_flow.get(e)))
+        rows.sort(reverse=True)
+        return {"turnover_dead_markets": len(rows), "turnover_dead_capital": round(sum(r[0] for r in rows)),
+                "turnover_dead_top": {lab: [round(c), round(f or 0.0, 1)] for c, lab, f in rows[:8]},
+                "turnover_judged": self.turnover.judged(time.time(), self.cfg.turnover_window_hours)}
+
     # ------------------------------------------------------------------------------ decide
     def decide(self, ex, fv, inv, eff, global_reduce, party_delta, now_m, ref=None, book_fv=None, ref_liquid=False):
         """What should be resting on this exchange right now? NO_QUOTE = nothing.
         fv is what we quote around; book_fv is the tournament book's own price (for the Polymarket guard);
         ref_liquid says whether the Polymarket price is reliable enough to size positions with Kelly."""
         cfg = self.burst_cfg if self.burst else self.cfg
-        ex.fl_tag = ""
+        ex.fl_tag, ex.turnover_tag, ex.turnover_dead = "", "", False
         ex.inv, ex.eff, ex.ref = inv.get(ex.eid, 0.0), eff.get(ex.eid, 0.0), ref
         hrs = self.hours_to_close(ex)
         if hrs * 60 <= cfg.stop_minutes_before_close:
@@ -3319,6 +3555,13 @@ class Bot:
             edge = own if edge is None else max(edge, own)
         ex.age = self.age_hours(ex)
         adding = cfg.capital_ceiling_adding_size_factor if self.capital_over else 1.0
+        adding_limit = 1.0
+        ex.turnover_dead = self.turnover_dead(ex, planned if planned is not None
+                                              else cfg.order_size_frac * self.bankroll(), cfg)
+        if ex.turnover_dead and cfg.turnover_control_enabled:   # factors multiply (both can apply)
+            adding *= cfg.turnover_dead_adding_factor
+            adding_limit = cfg.turnover_dead_max_position_frac
+            ex.turnover_tag = " dead"
         side, bias_edge, bias_size = fl_side(fv, ex.fl_side, cfg)
         ex.fl_side, tag = side, side
         side = "bid" if side == "mid" else side       # mid band: an optional extra edge on bids, full size
@@ -3331,7 +3574,8 @@ class Bot:
                              shift=self.party_shift(ex, party_delta), order_size=planned, position_limit=headline_limit,
                              min_edge=edge, reduce_size=reduce_size, net_inv=ex.eff, age_hours=ex.age,
                              adding_factor=adding, bias_side=side, bias_edge=bias_edge, bias_size=bias_size,
-                             unload_side=u_side, unload_edge=cfg.fast_unload_edge, unload_size=u_size)
+                             unload_side=u_side, unload_edge=cfg.fast_unload_edge, unload_size=u_size,
+                             adding_limit_factor=adding_limit)
 
     def update_size_plan(self, now_m, fvs):
         """Every size_plan_seconds: work out how many shares to quote in each market (see plan_sizes).
@@ -3473,7 +3717,7 @@ class Bot:
                  ex.label, f"{fv:.3f}" if fv is not None else "  -  ",
                  f" (ref {ex.ref:.3f})" if ex.ref is not None else "", ex.inv, ex.eff,
                  f" age {ex.age:.0f}h" if ex.inv and ex.age > self.cfg.skew_age_after_hours else "",
-                 fmt(q.bid, q.bid_size), fmt(q.ask, q.ask_size) + ex.fl_tag)
+                 fmt(q.bid, q.bid_size), fmt(q.ask, q.ask_size) + ex.fl_tag + ex.turnover_tag)
         if not doomed and not new:
             return None
         # An order that must not stay (unsafe) makes this change as urgent as a pull: never deferred by the budget.
