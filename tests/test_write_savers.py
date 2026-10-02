@@ -41,8 +41,12 @@ check("defaults: no-chase 2 ticks / 0.25c fv epsilon; TTL busy 60 min, quiet 100
       (c.no_chase_tolerance_ticks, c.no_chase_fv_epsilon, c.order_ttl_busy, c.order_ttl_quiet, c.ttl_jitter_frac,
        c.ttl_expire_grace_seconds) == (2, 0.0025, 3600.0, 6000.0, 0.2, 5.0))
 fields = list(M.Config.__dataclass_fields__)
-check("new settings are the LAST Config fields, in order", fields[-len(SAVER_KEYS):] == SAVER_KEYS, fields[-12:])
-check("...and the last OVERRIDABLE entries, in order", list(M.OVERRIDABLE)[-len(SAVER_KEYS):] == SAVER_KEYS)
+# (one block, in order, after every older field; later packages' settings may follow it)
+block = lambda xs: xs[xs.index(SAVER_KEYS[0]):xs.index(SAVER_KEYS[0]) + len(SAVER_KEYS)] if SAVER_KEYS[0] in xs else []
+check("new settings are one block at the end of Config (later packages after), in order",
+      block(fields) == SAVER_KEYS and fields.index("ttl_expire_grace_seconds") == fields.index(SAVER_KEYS[0])
+      + len(SAVER_KEYS) - 1, fields[-12:])
+check("...and one block of OVERRIDABLE entries, in order", block(list(M.OVERRIDABLE)) == SAVER_KEYS)
 good, bad = M.validate_overrides({"no_chase_enabled": True, "no_chase_tolerance_ticks": 3, "ttl_tiers_enabled": True,
                                   "order_ttl_quiet": 7200, "ttl_expire_as_cancel": True, "ttl_jitter_frac": 0.3}, c)
 check("valid saver overrides are accepted", not bad and good["order_ttl_quiet"] == 7200.0

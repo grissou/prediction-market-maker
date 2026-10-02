@@ -698,6 +698,17 @@ class Config:
     ttl_busy_size_frac: float = 0.01      # same split as the ladder's default "busy" (1,000 shares at 100k)
     ttl_expire_as_cancel: bool = False
     ttl_expire_grace_seconds: float = 5.0
+    # --- Package 5: T2.5 passive pair unwind ---
+    # The active pair unwind needs other traders' bids to add up to >= 1 + pair_unwind_min_profit, which a held set
+    # rarely sees (U.S. Senate, 2 Oct: bid sum ~0.990, 7,335 sets = 7.3k of capital earning 0). Passive: while a
+    # complete set is held in a 2-leg race, rest the ASK of one leg (the one whose ask sits best) at
+    # max(join the best other ask, 1 - best other bid of the other leg - pair_unwind_max_cost), one slice
+    # (pair_unwind_max_frac of the account in cash, at most the other leg's best bid size); when it fills, sell the
+    # same quantity of the other leg at its best bid at once (one take, cooldowns bypassed, write budget not).
+    # A set is then closed for >= 1 - pair_unwind_max_cost; the unmatched leg is never more than one slice.
+    # Short sets mirror it (rest a BID, take the other leg's ask). Selling both legs to others is not a self-trade.
+    pair_unwind_passive: bool = False
+    pair_unwind_max_cost: float = 0.003   # at most 0.3c per set below 1 (22 on 7,335 sets)
 
 
 CFG = Config()
@@ -826,6 +837,8 @@ OVERRIDABLE = {
     "ttl_busy_size_frac": (0.0, 0.20),
     "ttl_expire_as_cancel": (False, True),
     "ttl_expire_grace_seconds": (0.0, 60.0),
+    "pair_unwind_passive": (False, True),
+    "pair_unwind_max_cost": (0.0, 0.02),
 }
 MAX_ORDER_TTL = 7200.0    # no order of ours lives longer than this (dead-man's switch), whatever the TTL settings
 LADDER_MAX_LEVELS = 8
@@ -2543,8 +2556,32 @@ def fill_stats(rows):
             "edge_c": 100 * edge_tot / max(q_tot, 1), "markout_c": 100 * mk_tot / max(mk_q, 1)}
 
 
+def ops_summary_line(ops, account=None, tilt_s=None, tilt_exposure=None):
+    """The phone summary's ops line (Package 5), e.g. "Liquidation 101.1k (account 101.5k), realised +154, 76% of
+    capital toward Polymarket, 69% older than 6 h | tilt 5.1%, exposure +15.1k (-151 per point)". The tilt part only
+    when tilt_s is known (a fraction: 0.051 = 5.1%); per point = -exposure x 0.01. Unknown pieces show "?";
+    None when there is nothing to show."""
+    ops = ops or {}
+    if account is None and all(ops.get(k) is None for k in ("liquidation_value", "realised_pnl",
+                                                             "toward_ref_capital_frac", "capital_over_6h_frac")):
+        line = None
+    else:
+        k = lambda v: f"{v / 1000:.1f}k" if v is not None else "?"
+        pct = lambda v: f"{100 * v:.0f}%" if v is not None else "?"
+        real = ops.get("realised_pnl")
+        line = (f"Liquidation {k(ops.get('liquidation_value'))} (account {k(account)}), realised "
+                + (f"{real:+,.0f}" if real is not None else "?")
+                + f", {pct(ops.get('toward_ref_capital_frac'))} of capital toward Polymarket, "
+                f"{pct(ops.get('capital_over_6h_frac'))} older than 6 h")
+    if tilt_s is not None:
+        tilt = f"tilt {100 * tilt_s:.1f}%" + (f", exposure {tilt_exposure / 1000:+.1f}k ({-0.01 * tilt_exposure:+,.0f} "
+                                               f"per point)" if tilt_exposure is not None else "")
+        line = f"{line} | {tilt}" if line else tilt
+    return line
+
+
 def build_summary(api, fills_path, initial_balance, value=None, value_prev=None, arbs=None, health=None, takes=None,
-                  hours=24, status=None):
+                  hours=24, status=None, ops_line=None):
     """The phone summary as (title, message). Reads account value (unless given), rank and Smart Score
     from the API, and the last `hours` of fills from fills.csv. value_prev = account value at the previous
     summary. status = the bot's status line, shown first. Missing pieces show as "?" (e.g. no rank before
@@ -2574,7 +2611,7 @@ def build_summary(api, fills_path, initial_balance, value=None, value_prev=None,
     smart = (f"Smart Score {score.get('smartScoreDecayed', 0):.1f} (rank {score.get('rank', '?')} of "
              f"{score.get('totalTraders', '?')}{', ELITE' if score.get('isElite') else ''})"
              if score else "Smart Score: not scored yet")
-    lines = ([status] if status else []) + [account, f"{rank} | {smart}",
+    lines = ([status] if status else []) + [account] + ([ops_line] if ops_line else []) + [f"{rank} | {smart}",
              f"Last {hours:g}h: {day['fills']} fills, {day['shares']:,.0f} shares, edge {day['edge_c']:+.2f}c, "
              f"markout {day['markout_c']:+.2f}c" + (f", {arbs} arbitrages" if arbs is not None else "")
              + (f", {takes} takes" if takes is not None else "")]
@@ -2934,6 +2971,11 @@ class Bot:
         self.arb_cooldown = {}            # race -> time.monotonic() until which we leave it alone
         self.arbs_total = 0               # arbitrages / takes since start (summaries report the change)
         self.unwinds_total = 0            # pair unwinds since start (status.json pair_unwinds_total)
+        self.pp = {}                      # T2.5 passive pair unwind: race -> slice state (pair_passive_step)
+        self.pp_sets_total = 0            # ...complete sets closed by it since start (status.json)
+        self.ops_last = {}                # ops fields of the latest status write (ops_fields): recorder, summary
+        self.ops_cache = {}               # ops_fields: fills.csv-derived numbers, recomputed when the file changes
+        self.ops_warned = False           # ops_fields failed once (logged once)
         self.takes_total = 0
         self.takes_skipped_budget = self.arbs_skipped_budget = 0   # not sent: write budget busy (status.json)
         self.take_version_seen = 0        # last Polymarket reading the take logic has counted
@@ -3269,6 +3311,8 @@ class Bot:
 
         # 5. Guaranteed arbitrage inside races (takes liquidity; our quotes there are pulled first) --
         arb_races = self.take_arbitrage(inv, fvs, mine_real, now_m) if self.running else set()
+        if cfg.pair_unwind_passive or self.pp:    # T2.5: a passive slice filled -> the other leg is taken now
+            arb_races |= self.pair_passive_step(inv, fvs, now_m, skip=arb_races, mine_real=mine_real)
 
         # 6. Portfolio-level risk ------------------------------------------------------------------
         eff = self.effective_inventory(inv)
@@ -3354,6 +3398,8 @@ class Bot:
             try:
                 ex.quote = self.decide(ex, fvs.get(eid), inv, eff, global_reduce, party_delta, now_m,
                                        refs.get(eid), book_fvs.get(eid), eid in liquid)
+                if self.pp:                       # T2.5: the passive pair-unwind slice replaces this leg's ask
+                    ex.quote = self.pair_passive_quote(ex, ex.quote)
                 if cfg.parallel_writes > 1:
                     ch = self.plan_exchange(ex, ex.quote, resting.get(eid, []), fvs.get(eid), now, now_m)
                     if ch:
@@ -5507,6 +5553,195 @@ class Bot:
             return False
         return self.settlement_risk(after, fvs, after_pd) <= self.settlement_risk(inv, fvs, before_pd) + 1e-6
 
+    # ------------------------------------------------------------------------------ T2.5 passive pair unwind
+    def pp_candidate(self, x, y, sign, sets, bank):
+        """Passive pair unwind, leg x resting and leg y taken on a fill: (sort key, price, slice) or None.
+        Long set (sign +1): ask x at max(join the best other ask, 1 - best other bid of y - pair_unwind_max_cost),
+        never at/through the best other bid of x (a take, not a quote). Short set (-1): the mirror, a bid on x at
+        min(join the best other bid, 1 + max_cost - best other ask of y). Slice = min(sets, the size on y's top level,
+        pair_unwind_max_frac of the account in cash at that price). Key: how far behind the touch it sits, then
+        what the set fetches (long: most) or costs (short: least)."""
+        cfg = self.cfg
+        bx, by = self.ex[x].book or {}, self.ex[y].book or {}
+        side_y, side_x, opp_x = ("bids", "asks", "bids") if sign > 0 else ("asks", "bids", "asks")
+        if not by.get(side_y):
+            return None
+        py, sy = by[side_y][0]["price"], by[side_y][0]["quantity"]
+        touch = bx[side_x][0]["price"] if bx.get(side_x) else None
+        opp = bx[opp_x][0]["price"] if bx.get(opp_x) else None
+        if sign > 0:
+            price = ceil_tick(1 - py - cfg.pair_unwind_max_cost)
+            price = max(price, touch) if touch is not None else price
+            if opp is not None:
+                price = max(price, ceil_tick(opp + TICK))
+            gap = price - touch if touch is not None else 0.0
+        else:
+            price = floor_tick(1 + cfg.pair_unwind_max_cost - py)
+            price = min(price, touch) if touch is not None else price
+            if opp is not None:
+                price = min(price, floor_tick(opp - TICK))
+            gap = touch - price if touch is not None else 0.0
+        if not PMIN - 1e-9 <= price <= PMAX + 1e-9:
+            return None
+        qty = int(min(sets, sy, cfg.pair_unwind_max_frac * bank / max(price, TICK)))
+        if qty < 1:
+            return None
+        return (round(gap, 6), round(-sign * (price + py), 6)), price, qty
+
+    def pair_passive_plan(self, members, inv, fvs, prefer=None):
+        """A new passive slice for a 2-leg race holding a complete set (long or short both legs), or None.
+        prefer = the leg that rested last: kept on a tie of how far behind the touch (no needless leg swaps)."""
+        if len(members) != 2 or any(e not in self.ex for e in members):
+            return None
+        a, b = members
+        ha, hb = inv.get(a, 0.0), inv.get(b, 0.0)
+        sign = 1 if min(ha, hb) >= 1 else -1 if max(ha, hb) <= -1 else 0
+        if not sign:
+            return None
+        sets, bank = min(sign * ha, sign * hb), self.bankroll()
+        cands = [(c, x, y) for x, y in ((a, b), (b, a)) if (c := self.pp_candidate(x, y, sign, sets, bank))]
+        if not cands:
+            return None
+        (_, price, qty), x, y = min(cands, key=lambda c: (c[0][0][0], c[1] != prefer, c[0][0][1], c[1]))
+        if not self.unwind_is_safe(inv, fvs, members, -sign * qty):
+            return None
+        return {"leg": x, "other": y, "sign": sign, "base_x": inv.get(x, 0.0), "base_y": inv.get(y, 0.0),
+                "slice": qty, "left": qty, "price": price}
+
+    def pair_passive_step(self, inv, fvs, now_m, skip=(), mine_real=None, execute=None):
+        """T2.5 (pair_unwind_passive), once a cycle before quoting. Per 2-leg race at most one slice is open:
+          - its resting leg sold (bought back) s shares since the slice began and the other leg has not followed:
+            sell (buy back) the difference on the other leg at its best price NOW - one take, cooldowns bypassed,
+            only the write budget can defer it (next cycle, still urgent). Unmatched is never more than one slice.
+          - part filled: the rest keeps resting, re-priced on the current books;
+          - done (the whole slice matched) or nothing filled: a new slice is planned on the current books.
+        Fills are seen as position changes since the slice began (a fill of our ordinary bid on that leg in the
+        same cycle can hide one: the set is then still whole, nothing is unmatched). Returns the races traded.
+        execute(eid, buy, qty, price) -> shares done replaces the exchange take (simulator)."""
+        cfg, acted = self.cfg, set()
+        if not cfg.pair_unwind_passive:
+            self.pp.clear()
+            return acted
+        for race, members in self.groups.items():
+            if len(members) != 2 or race in skip or not self.running:
+                continue
+            st = self.pp.get(race)
+            if st is not None:
+                x, y, s = st["leg"], st["other"], st["sign"]
+                sold_x = max(0.0, s * (st["base_x"] - inv.get(x, 0.0)))
+                # (our own takes count even before a positions read shows them: never sold twice)
+                sold_y = max(0.0, s * (st["base_y"] - inv.get(y, 0.0)), st.get("taken", 0.0))
+                owed = int(round(min(sold_x, st["slice"]) - sold_y))
+                if owed >= 1:
+                    acted.add(race)
+                    st["left"] = max(0, int(st["slice"] - sold_x))
+                    st["taken"] = sold_y + self.pair_passive_take(race, st, owed, fvs, now_m, mine_real, execute)
+                    continue
+                if 0.5 <= sold_x < st["slice"] - 0.5:             # part filled and matched: the rest keeps resting
+                    c = self.pp_candidate(x, y, s, st["slice"] - sold_x, self.bankroll())
+                    st["left"] = int(st["slice"] - sold_x) if c else 0
+                    if c:
+                        st["price"] = c[1]
+                    continue
+                if sold_x >= st["slice"] - 0.5:
+                    self.pp_sets_total += int(round(min(sold_x, sold_y)))
+                    log.warning("PAIR UNWIND (passive) %s: slice of %d sets closed", race, st["slice"])
+                prefer = st["leg"]
+                del self.pp[race]
+            else:
+                prefer = None
+            closing = any(self.hours_to_close(self.ex[e]) <= cfg.flatten_hours_before_close
+                          for e in members if e in self.ex)
+            plan = None if closing else self.pair_passive_plan(members, inv, fvs, prefer)
+            if plan is not None:
+                self.pp[race] = plan
+        return acted
+
+    def pair_passive_take(self, race, st, qty, fvs, now_m, mine_real=None, execute=None):
+        """The urgent second leg: sell (long set) / buy back (short set) qty on the other leg at its best price."""
+        y, buy = st["other"], st["sign"] < 0
+        ex = self.ex[y]
+        if execute is None and self.api.live:
+            if not self.writes_ready(3):          # cancel + take + leftover cancel: deferred, still urgent
+                self.arbs_skipped_budget += 1
+                log.info("pair unwind second leg on %s deferred: write budget busy (next cycle)", race)
+                return 0.0
+            try:                                  # the cached book may be old
+                ex.book = strip_own(self.api.book(y, self.tid), (mine_real or {}).get(y, []))
+                ex.book_time = ex.verified = time.monotonic()
+            except ApiError as e:
+                log.warning("pair unwind second leg on %s: book download failed (%s) - cached book", race, e)
+        side = (ex.book or {}).get("asks" if buy else "bids") or []
+        if not side:
+            log.warning("pair unwind second leg on %s: no %s on %s - retrying next cycle", race,
+                        "ask" if buy else "bid", ex.label)
+            return 0.0
+        price = side[0]["price"]
+        log.warning("%sPAIR UNWIND (passive) %s: %s filled -> %s %d YES on %s at %.3f", "" if self.api.live or execute
+                    else "[dry] ", race, self.ex[st["leg"]].label, "buying" if buy else "selling", qty, ex.label, price)
+        if execute is not None:
+            return execute(y, buy, qty, price)
+        if not self.api.live:
+            return 0.0
+        if not self.cancel(y, [], whole_exchange=True):   # our own quotes there first: never trade with ourselves
+            return 0.0
+        order = {"exchangeId": y, "side": "yes", "action": "buy" if buy else "sell", "quantity": int(qty),
+                 "price": price, "tournamentId": self.tid,
+                 "expirationDate": iso(utcnow() + timedelta(seconds=self.cfg.arb_order_ttl))}
+        self.orders_stale = True
+        try:
+            results = self.api.place_batch([order])
+        except ApiError as e:
+            if e.code == "WRITE_BUDGET_WAIT":
+                self.arbs_skipped_budget += 1
+                return 0.0
+            ex.pending_until = now_m + self.cfg.pending_seconds
+            alert(f"pair unwind second leg on {race} failed ({e}) - check positions")
+            if e.code in FATAL_API_CODES:
+                fatal(f"orders rejected with {e.code}")
+            return 0.0
+        res = results[0] if results else {}
+        data = res.get("data") or {}
+        if res.get("ok"):
+            self.remember_order(order, data, now_m)
+        self.cancel(y, [], whole_exchange=True, quiet=True)
+        if data.get("orderId") is not None:
+            self.order_meta[data["orderId"]] = {"our_side": "bid" if buy else "ask", "price": price, "arb": True,
+                                                "fv": fvs.get(y), "t": time.time(), "eid": y}
+            self.notes_dirty = True
+        return float(data.get("quantityTraded") or 0)
+
+    def pair_passive_quote(self, ex, q):
+        """The passive slice replaces the resting leg's ask (long set) or bid (short set) in the normal quote:
+        exactly that price (a resting order of ours below/above it is replaced), the slice's open size, and our
+        own other side kept at least a tick away. A leg the decision left unquoted (no fair value, stop before
+        close...) stays unquoted. Applied to the quote decide() returned, before reconciling."""
+        st = next((v for v in self.pp.values() if v["leg"] == ex.eid), None)
+        if st is None or not self.cfg.pair_unwind_passive or (q.bid is None and q.ask is None):
+            return q
+        left, price = int(st.get("left", st["slice"])), st["price"]
+        if st["sign"] > 0:
+            if left < 1:
+                return replace(q, ask=None, ask_size=0, ask_limit=None, ask_max=None)
+            bid, bid_size, bid_limit = q.bid, q.bid_size, q.bid_limit
+            if bid is not None and bid >= price - 1e-9:
+                bid = floor_tick(price - TICK)
+                bid_limit = min(bid_limit, bid) if bid_limit is not None else bid
+                if bid < PMIN - 1e-9 or bid >= price - 1e-9:
+                    bid, bid_size, bid_limit = None, 0, None
+            return replace(q, bid=bid, bid_size=bid_size if bid is not None else 0, bid_limit=bid_limit,
+                           ask=price, ask_size=left, ask_limit=price, ask_max=left)
+        if left < 1:
+            return replace(q, bid=None, bid_size=0, bid_limit=None, bid_max=None)
+        ask, ask_size, ask_limit = q.ask, q.ask_size, q.ask_limit
+        if ask is not None and ask <= price + 1e-9:
+            ask = ceil_tick(price + TICK)
+            ask_limit = max(ask_limit, ask) if ask_limit is not None else ask
+            if ask > PMAX + 1e-9 or ask <= price + 1e-9:
+                ask, ask_size, ask_limit = None, 0, None
+        return replace(q, ask=ask, ask_size=ask_size if ask is not None else 0, ask_limit=ask_limit,
+                       bid=price, bid_size=left, bid_limit=price, bid_max=left)
+
     def writes_ready(self, n):
         """Main thread: True if n writes can go now without waiting for the write budget or a 429 pause."""
         if not self.api.live:
@@ -5888,7 +6123,16 @@ class Bot:
                           fair_value REAL, reference REAL, our_bid REAL, our_ask REAL, position REAL)""")
         db.execute("""CREATE TABLE IF NOT EXISTS account (
                           ts TEXT, mode TEXT, account_value REAL, locked_in_orders REAL,
-                          worst_case_loss REAL, party_delta REAL, orders_resting INTEGER)""")
+                          worst_case_loss REAL, party_delta REAL, orders_resting INTEGER,
+                          liquidation_value REAL)""")
+        # Older files: add the column (nullable; rows written before stay NULL).
+        self.acct_liq = True
+        try:
+            if "liquidation_value" not in {r[1] for r in db.execute("PRAGMA table_info(account)")}:
+                db.execute("ALTER TABLE account ADD COLUMN liquidation_value REAL")
+        except sqlite3.Error as e:
+            self.acct_liq = False
+            log.warning("recorder: could not add account.liquidation_value (%s) - not recorded", e)
         db.execute("CREATE INDEX IF NOT EXISTS snapshots_eid_ts ON snapshots (eid, ts)")
         # Other traders' book tops (our own orders removed), one row per change: bids/asks = JSON [[price, size]...]
         db.execute("CREATE TABLE IF NOT EXISTS books (ts REAL, eid TEXT, bids TEXT, asks TEXT)")
@@ -5987,9 +6231,15 @@ class Bot:
             self.db.executemany("INSERT INTO books VALUES (?,?,?,?)", book_rows)
             self.db.executemany("INSERT INTO trades VALUES (?,?,?,?,?)", trades)
             self.db.executemany("INSERT INTO snapshots VALUES (?,?,?,?,?,?,?,?,?,?,?)", rows)
-            self.db.execute("INSERT INTO account VALUES (?,?,?,?,?,?,?)",
-                            (ts, mode, h.get("account_value"), h.get("locked_in_orders"), h.get("worst_case_loss"),
-                             h.get("party_delta"), h.get("orders_resting")))
+            acct = (ts, mode, h.get("account_value"), h.get("locked_in_orders"), h.get("worst_case_loss"),
+                    h.get("party_delta"), h.get("orders_resting"))
+            if getattr(self, "acct_liq", False):  # (the latest status write's value: None until there is one)
+                self.db.execute("INSERT INTO account (ts, mode, account_value, locked_in_orders, worst_case_loss, "
+                                "party_delta, orders_resting, liquidation_value) VALUES (?,?,?,?,?,?,?,?)",
+                                acct + ((self.ops_last or {}).get("liquidation_value"),))
+            else:
+                self.db.execute("INSERT INTO account (ts, mode, account_value, locked_in_orders, worst_case_loss, "
+                                "party_delta, orders_resting) VALUES (?,?,?,?,?,?,?)", acct)
             self.db.commit()
         except sqlite3.Error as e:
             log.warning("could not record snapshot: %s", e)
@@ -6013,7 +6263,8 @@ class Bot:
             title, message = build_summary(self.api, bot_path(self.cfg.fills_csv), self.initial_balance, value=value,
                                            value_prev=self.value_at_last_summary,
                                            arbs=self.arbs_total - marks["arbs"], takes=self.takes_total - marks["takes"],
-                                           health=self.health, hours=every, status=status)
+                                           health=self.health, hours=every, status=status,
+                                           ops_line=self.summary_ops_line(value))
         except Exception as e:
             log.warning("phone summary failed (%s) - skipped", e)
             return
@@ -6025,6 +6276,15 @@ class Bot:
         self.value_at_last_summary = value
         self.counts_at_last_summary = {"arbs": self.arbs_total, "takes": self.takes_total,
                                        "errors": self.errors_total, "rate_limits": getattr(self.api, "rate_limited", 0)}
+
+    def summary_ops_line(self, value):
+        """ops_summary_line for this bot (latest ops fields; tilt_s / tilt_exposure when T2.1 set them). Never raises."""
+        try:
+            return ops_summary_line(self.ops_last or self.safe_ops_fields(), value,
+                                    getattr(self, "tilt_s", None), getattr(self, "tilt_exposure", None))
+        except Exception as e:                    # a report must never disturb trading
+            log.warning("summary ops line failed: %s", e)
+            return None
 
     def status_report(self):
         """(status line, problems) for the phone summary: what the bot is doing right now, and anything
@@ -6063,13 +6323,148 @@ class Bot:
                 phase += ", self-test passed"
         return ("Status: " + ("OK" if not problems else "ISSUES - " + "; ".join(problems)) + f" | {phase}"), problems
 
+    # ------------------------------------------------------------------------------ ops fields (Package 5, 3.3)
+    OPS_KEYS = ("liquidation_value", "liquidation_unpriced", "realised_pnl", "unrealised_pnl", "pnl_unreconciled",
+                "toward_ref_capital_frac", "capital_over_6h_frac", "exit_ratio_24h")
+    OPS_FILLS_MIN_SECONDS = 60.0          # fills.csv is re-read at most this often (and only when it changed)
+
+    def ops_fills(self, now):
+        """From fills.csv (cached; re-read when the file changed, at most every OPS_FILLS_MIN_SECONDS): FIFO lots with
+        prices {eid: [[signed shares, YES price], ...]}, realised P&L, and over the last 24 h the shares that
+        reduced |position| and the shares that added to it. Lots in position_lots_file carry no prices, so the fills
+        are replayed: each fill's YES price is its quote price (fill price when absent), sign from our side (bid =
+        bought YES); fills not matched to a quote of ours (our_side "?") are skipped."""
+        path = bot_path(self.cfg.fills_csv)
+        try:
+            st = os.stat(path)
+            sig = (st.st_mtime, st.st_size)
+        except OSError:
+            sig = None
+        c = self.ops_cache
+        if c and (c.get("sig") == sig or now - c.get("t", 0) < self.OPS_FILLS_MIN_SECONDS):
+            return c
+        lots, realised, red, add = defaultdict(deque), 0.0, 0.0, 0.0
+        since = now - 24 * 3600
+        for r in (read_fills(path) if sig else []):
+            side = r.get("our_side")
+            if side not in ("bid", "ask"):
+                continue
+            try:
+                qty = abs(float(r.get("qty") or 0))
+                price = float(r.get("quote_price") or r.get("fill_price") or 0)
+            except ValueError:
+                continue
+            if qty <= 0 or not 0 < price < 1:
+                continue
+            ts = parse_ts(r.get("filled_at"))
+            recent = ts is not None and ts.timestamp() >= since
+            book, rem = lots[str(r.get("exchange_id"))], qty if side == "bid" else -qty
+            while abs(rem) > 1e-9 and book and (book[0][0] > 0) != (rem > 0):
+                lot = book[0]
+                n = min(abs(rem), abs(lot[0]))
+                realised += n * (price - lot[1]) * (1 if lot[0] > 0 else -1)
+                lot[0] += n if lot[0] < 0 else -n
+                rem += n if rem < 0 else -n
+                red += n if recent else 0.0
+                if abs(lot[0]) <= 1e-9:
+                    book.popleft()
+            if abs(rem) > 1e-9:
+                book.append([rem, price])
+                add += abs(rem) if recent else 0.0
+        self.ops_cache = {"sig": sig, "t": now, "lots": {e: list(v) for e, v in lots.items() if v},
+                          "realised": realised, "reduced_24h": red, "added_24h": add}
+        return self.ops_cache
+
+    def ops_fields(self, now=None):
+        """Read-only reporting for status.json, the recorder and the phone summary (no requests; None = unknown):
+          liquidation_value       account value minus the haircut of selling every position to OTHER traders now:
+                                  longs at the best other bid, shorts at the best other ask, instead of the mark
+                                  (the exchange's valuation price, else the book's fair value). A market with no
+                                  quote on that side keeps its mark and is counted in liquidation_unpriced.
+          realised_pnl / unrealised_pnl   FIFO over fills.csv (ops_fills); unrealised at the mark, only over markets
+                                  whose replayed position equals the position held (the others: pnl_unreconciled)
+          toward_ref_capital_frac share of position capital on the side Polymarket favours (long with Polymarket
+                                  above the book's own fair value, or short with it below)
+          capital_over_6h_frac    share of position capital in lots older than 6 h (update_lots)
+          exit_ratio_24h          fill shares that reduced |position| / shares that added, last 24 h"""
+        cfg = self.cfg
+        now = time.time() if now is None else now
+        out = dict.fromkeys(self.OPS_KEYS)
+        inv = {e: float(q) for e, q in (self.held or {}).items() if e in self.ex and round(q)}
+        book_fv = {}
+        for members in self.groups.values():
+            if any(e in inv for e in members):
+                fv = {e: fair_value(self.ex[e].book, cfg) for e in members if e in self.ex}
+                book_fv.update(normalise(fv) if len(fv) > 1 else fv)
+        marks, cap, haircut, unpriced = {}, {}, 0.0, 0
+        for e, q in inv.items():
+            m = self.pos_marks.get(e)
+            m = m if m is not None else book_fv.get(e)
+            if m is None:
+                unpriced += 1
+                continue
+            marks[e] = m
+            cap[e] = abs(q) * (m if q > 0 else 1 - m)
+            b = self.ex[e].book or {}
+            lvl = b.get("bids" if q > 0 else "asks")
+            if not lvl:
+                unpriced += 1
+                continue
+            haircut += abs(q) * ((m - lvl[0]["price"]) if q > 0 else (lvl[0]["price"] - m))
+        acct = self.health.get("account_value")
+        out["liquidation_unpriced"] = unpriced
+        if acct is not None:
+            out["liquidation_value"] = round(float(acct) - haircut, 2)
+        total = sum(cap.values())
+        if total > 0:
+            toward = 0.0
+            for e, c in cap.items():
+                r, f = (self.cur_refs or {}).get(e), book_fv.get(e)
+                if r is not None and f is not None and ((inv[e] > 0 and r > f) or (inv[e] < 0 and r < f)):
+                    toward += c
+            out["toward_ref_capital_frac"] = round(toward / total, 4)
+            old = 0.0
+            for e, c in cap.items():
+                lots = self.lots.get(e) or []
+                n = sum(abs(x) for x, _ in lots)
+                if n:
+                    old += c * min(1.0, sum(abs(x) for x, t in lots if now - t > 6 * 3600) / n)
+            out["capital_over_6h_frac"] = round(old / total, 4)
+        fl = self.ops_fills(now)
+        out["realised_pnl"] = round(fl["realised"], 2)
+        unreal, bad = 0.0, 0
+        for e in set(inv) | set(fl["lots"]):
+            lots = fl["lots"].get(e, [])
+            if round(sum(x for x, _ in lots)) != round(inv.get(e, 0.0)) or (e in inv and e not in marks):
+                bad += 1
+                continue
+            unreal += sum(x * (marks[e] - p) for x, p in lots) if lots else 0.0
+        out["unrealised_pnl"], out["pnl_unreconciled"] = round(unreal, 2), bad
+        out["exit_ratio_24h"] = round(fl["reduced_24h"] / fl["added_24h"], 3) if fl["added_24h"] > 0 else None
+        if cfg.pair_unwind_passive or self.pp:
+            out["pair_passive_open"] = {r: {"leg": self.ex[v["leg"]].label, "price": v["price"], "left": v["left"]}
+                                        for r, v in self.pp.items() if v["leg"] in self.ex}
+            out["pair_passive_sets_total"] = self.pp_sets_total
+        return out
+
+    def safe_ops_fields(self):
+        """ops_fields that never raises: on any error every field is None (logged once)."""
+        try:
+            return self.ops_fields()
+        except Exception as e:                    # reporting must never disturb trading
+            if not self.ops_warned:
+                self.ops_warned = True
+                log.warning("ops fields unavailable (%s: %s) - reported as null", type(e).__name__, e)
+            return dict.fromkeys(self.OPS_KEYS)
+
     def write_status(self, ok):
         """status.json: a one-glance health check, e.g. `cat status.json` over ssh."""
+        self.ops_last = self.safe_ops_fields()
         try:
             write_json(bot_path(self.cfg.status_file), {
                 "updated": iso(utcnow()), "mode": "live" if self.api.live else "dry run",
                 "last_cycle_ok": ok, "failed_cycles_in_a_row": self.failed_cycles,
-                "quotes_pulled_after_errors": self.pulled_after_errors, **self.health,
+                "quotes_pulled_after_errors": self.pulled_after_errors, **self.health, **self.ops_last,
                 **(self.api.pause_state() if hasattr(self.api, "pause_state") else {}),
                 "seconds_since_cycle": round(time.monotonic() - self.last_cycle_done, 1)
                 if self.last_cycle_done is not None else None})
