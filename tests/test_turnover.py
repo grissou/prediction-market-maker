@@ -1,0 +1,374 @@
+"""
+Offline tests for turnover control (turnover_*): the TurnoverTracker (deques, window, seeds, start-up grace),
+compute_quote's adding-side limit, decide's dead-market rule, status.json / summary fields, the feed's tape copy,
+and analysis/turnover.py on synthetic data. No network.
+
+Run:  python tests/test_turnover.py      (exit code 0 = all passed)
+"""
+import csv
+import importlib.util
+import json
+import logging
+import os
+import sqlite3
+import sys
+import tempfile
+import time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+from fakes import FakeApi, make_bot                       # noqa: E402
+import mm_bot as M                                        # noqa: E402
+
+logging.basicConfig(level=logging.ERROR, format="    log %(levelname)s %(message)s")
+RESULTS = []
+H = 3600.0
+
+
+def check(name, cond, extra=""):
+    print(("PASS " if cond else "FAIL ") + name + (f"   [{extra}]" if extra and not cond else ""))
+    RESULTS.append(bool(cond))
+
+
+def iso_at(t):
+    return M.iso(M.datetime.fromtimestamp(t, M.timezone.utc))
+
+
+print("--- settings")
+c = M.Config()
+check("defaults: on, 6 h window, 50 sh/h, adding x0.25, limit x0.5, tape on",
+      (c.turnover_control_enabled, c.turnover_window_hours, c.turnover_min_shares_per_hour,
+       c.turnover_dead_adding_factor, c.turnover_dead_max_position_frac, c.turnover_use_tape)
+      == (True, 6.0, 50.0, 0.25, 0.5, True))
+good, bad = M.validate_overrides({"turnover_control_enabled": False, "turnover_window_hours": 3.0,
+                                  "turnover_min_shares_per_hour": 20.0, "turnover_dead_adding_factor": 0.0,
+                                  "turnover_dead_max_position_frac": 0.3, "turnover_use_tape": False}, c)
+check("all six settings are live-overridable", len(good) == 6 and not bad, bad)
+keys = list(M.OVERRIDABLE)
+check("...added at the end of OVERRIDABLE", keys[-6:] == ["turnover_control_enabled", "turnover_window_hours",
+                                                          "turnover_min_shares_per_hour", "turnover_dead_adding_factor",
+                                                          "turnover_dead_max_position_frac", "turnover_use_tape"])
+
+print("--- TurnoverTracker: deques and the window")
+now = 1_800_000_000.0
+tr = M.TurnoverTracker(start=now - 10 * H)               # running 10 h: the 6 h window is fully observed
+tr.add("1", now - 7 * H, 500)                            # outside the 6 h window
+tr.add("1", now - 5 * H, 120)
+tr.add("1", now - 1 * H, -60)                            # sign ignored (NO-side fills are negative)
+tr.add("1", now - 0.5 * H, 0)                            # nothing
+check("ours in the window: 180 (the 7 h-old 500 is outside)", tr.shares("1", now, 6.0) == 180, tr.shares("1", now, 6.0))
+check("a 0-share trade is not stored", len(tr.ours["1"]) == 3, list(tr.ours["1"]))
+check("a wider window counts it (8 h: 680)", tr.shares("1", now, 8.0) == 680)
+tr.add("1", now - 2 * H, 400, tape=True)
+check("tape bigger than ours: flow = tape (400; ours are in the tape, never added twice)",
+      tr.shares("1", now, 6.0) == 400)
+check("use_tape off: ours only (180)", tr.shares("1", now, 6.0, use_tape=False) == 180)
+tr.add("2", now - 3 * H, 50, tape=True)
+tr.add("2", now - 3 * H, 90)
+check("tape smaller than ours (a gap in the feed): ours are the floor (90)", tr.shares("2", now, 6.0) == 90)
+check("per hour = shares / 6 h observed", abs(tr.per_hour("1", now, 6.0) - 400 / 6) < 1e-9, tr.per_hour("1", now, 6.0))
+check("unknown market: 0 sh/h (judged)", tr.per_hour("9", now, 6.0) == 0.0)
+tr.prune(now + 46.5 * H)                                 # 48 h retention from now + 46.5 h: older than now - 1.5 h go
+check("prune keeps KEEP_HOURS (48 h): only trades newer than the cut remain",
+      [t for t, _ in tr.ours["1"]] == [now - 1 * H] and not tr.tape["1"], (list(tr.ours["1"]), list(tr.tape["1"])))
+
+print("--- start-up grace")
+tr = M.TurnoverTracker(start=now - 1 * H)                # started an hour ago, no seed
+check("1 h after a start without history: not judged (every market alive)", tr.per_hour("1", now, 6.0) is None
+      and not tr.judged(now, 6.0))
+check("observed 1 h", abs(tr.observed_hours(now, 6.0) - 1.0) < 1e-9)
+check("5.3 h: still not (needs 90% of the window = 5.4 h)", not tr.judged(now + 4.3 * H, 6.0))
+check("5.4 h: judged", tr.judged(now + 4.4 * H, 6.0))
+check("judged after 6 h, 0 sh/h for a silent market", tr.per_hour("1", now + 5 * H, 6.0) == 0.0)
+
+print("--- seeding from fills.csv")
+d = tempfile.mkdtemp()
+fpath = os.path.join(d, "fills.csv")
+with open(fpath, "w", newline="") as f:
+    w = csv.writer(f)
+    w.writerow(M.FillLogger.COLUMNS)
+    for i, (age, eid, q) in enumerate([(30, "1", 1000), (5, "1", 200), (2, "1", 100), (1, "2", 300), (0.2, "1", 50)]):
+        w.writerow([i, iso_at(now - age * H), eid, i, "bid", q, 0.5, 0.5, 0.5, 0.5])
+tr = M.TurnoverTracker(start=now)
+n = tr.seed_fills(M.read_fills(fpath), now)
+check("all 5 rows used (within the 48 h kept, even the 30 h-old one)", n == 5, n)
+check("seed covers the file's first..last fill: judged at once after a restart", tr.judged(now, 6.0)
+      and abs(tr.observed_hours(now, 6.0) - 5.8) < 1e-6, tr.observed_hours(now, 6.0))
+check("market 1: 350 shares in 6 h, over 5.8 observed h", abs(tr.per_hour("1", now, 6.0) - 350 / 5.8) < 1e-6,
+      tr.per_hour("1", now, 6.0))
+tr = M.TurnoverTracker(start=now)
+with open(fpath, "w", newline="") as f:
+    w = csv.writer(f)
+    w.writerow(M.FillLogger.COLUMNS)
+    w.writerow([1, iso_at(now - 4 * H), "1", 1, "bid", 100, 0.5, 0.5, 0.5, 0.5])
+    w.writerow([2, iso_at(now - 3 * H), "1", 2, "ask", 100, 0.5, 0.5, 0.5, 0.5])
+tr.seed_fills(M.read_fills(fpath), now)
+check("a short seed (fills only 4..3 h ago, a 3 h gap before the restart): 1 h observed, not judged",
+      abs(tr.observed_hours(now, 6.0) - 1.0) < 1e-6 and not tr.judged(now, 6.0))
+check("an empty / missing fills.csv seeds nothing", M.TurnoverTracker(start=now).seed_fills([], now) == 0)
+
+print("--- seeding from the recorder's trades table")
+dbp = os.path.join(d, "market_data.sqlite")
+db = sqlite3.connect(dbp)
+db.execute("CREATE TABLE trades (ts REAL, eid TEXT, price REAL, quantity REAL, item TEXT)")
+db.execute("""CREATE TABLE snapshots (ts TEXT, mode TEXT, eid TEXT, label TEXT, best_bid REAL, best_ask REAL,
+              fair_value REAL, reference REAL, our_bid REAL, our_ask REAL, position REAL)""")
+db.executemany("INSERT INTO trades VALUES (?,?,?,?,?)", [(now - 8 * H, "1", 0.5, 70, "{}"),
+                                                         (now - 2 * H, "1", 0.5, 400, "{}"),
+                                                         (now - 1 * H, "2", 0.5, -30, "{}"),
+                                                         (now - 0.9 * H, "2", 0.5, None, "{}")])
+db.execute("INSERT INTO snapshots VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+           (iso_at(now - 60), "live", "1", "Rep X", 0.4, 0.5, 0.45, None, None, None, 0))
+db.commit()
+db.close()
+tr = M.TurnoverTracker(start=now)
+n = tr.seed_tape(dbp, now)
+check("3 tape rows with a quantity used (the None one skipped)", n == 3, n)
+check("covered from the first trade to the last snapshot (1 min before the start): judged at once",
+      tr.judged(now, 6.0) and abs(tr.observed_hours(now, 6.0) - (6 - 1 / 60)) < 1e-6, tr.observed_hours(now, 6.0))
+check("market 1 flow from the tape: 400 in the window", tr.shares("1", now, 6.0) == 400)
+check("|negative| quantity counts (market 2: 30)", tr.shares("2", now, 6.0) == 30)
+check("no file: 0, nothing seeded", M.TurnoverTracker(start=now).seed_tape(os.path.join(d, "none.sqlite"), now) == 0)
+db = sqlite3.connect(os.path.join(d, "notrades.sqlite"))
+db.execute("CREATE TABLE snapshots (ts TEXT)")
+db.commit()
+db.close()
+tr = M.TurnoverTracker(start=now)
+check("a recording without a trades table: 0, no coverage claimed",
+      tr.seed_tape(os.path.join(d, "notrades.sqlite"), now) == 0 and tr.seed_from is None)
+
+print("--- compute_quote: adding-side position limit")
+cfg = M.Config()
+cfg.skew_per_quote = 0.0
+cfg.skew_age_enabled = False
+kw = dict(bankroll=100000, order_size=100, position_limit=1000)
+base = M.compute_quote(0.50, 300, 300, 0.45, 0.55, cfg, **kw)
+q = M.compute_quote(0.50, 300, 300, 0.45, 0.55, cfg, adding_limit_factor=0.5, **kw)
+check("long 300, limit 1,000 x0.5 = 500: bid still 100 (room 200)", q.bid_size == 100 and q == base, (q, base))
+q = M.compute_quote(0.50, 450, 450, 0.45, 0.55, cfg, adding_limit_factor=0.5, **kw)
+check("long 450: bid 50 (room to 500)", q.bid_size == 50, q)
+q = M.compute_quote(0.50, 600, 600, 0.45, 0.55, cfg, adding_limit_factor=0.5, **kw)
+b0 = M.compute_quote(0.50, 600, 600, 0.45, 0.55, cfg, **kw)
+check("long 600 > 500: bid withdrawn, ask (reducing) unchanged", q.bid is None and (q.ask, q.ask_size)
+      == (b0.ask, b0.ask_size) and b0.bid_size == 100, (q, b0))
+q = M.compute_quote(0.50, -600, -600, 0.45, 0.55, cfg, adding_limit_factor=0.5, **kw)
+b0 = M.compute_quote(0.50, -600, -600, 0.45, 0.55, cfg, **kw)
+check("short 600: ask withdrawn, bid unchanged", q.ask is None and (q.bid, q.bid_size) == (b0.bid, b0.bid_size), q)
+check("flat: no side is adding, unchanged", M.compute_quote(0.50, 0, 0, 0.45, 0.55, cfg, adding_limit_factor=0.5, **kw)
+      == M.compute_quote(0.50, 0, 0, 0.45, 0.55, cfg, **kw))
+
+print("--- decide: dead markets")
+FV = 0.52                                                # market 21 (Rep Utah): book 0.48 / 0.56
+
+
+def bot(**kw):
+    a, b = make_bot()
+    for k, v in kw.items():
+        setattr(b.cfg, k, v)
+    b.cycle()
+    return a, b
+
+
+def judged(b, start_hours_ago=7.0):
+    b.turnover.start = time.time() - start_hours_ago * H
+    b.refresh_turnover(time.monotonic(), force=True)
+
+
+def dec(b, pos, eid="21"):
+    return b.decide(b.ex[eid], FV, {eid: float(pos)}, {eid: float(pos)}, False, 0.0, time.monotonic())
+
+
+a, b = bot()
+grace = dec(b, 300)
+check("fresh start, no history: not judged -> unchanged quote", b.turnover_flow.get("21") is None
+      and not b.ex["21"].turnover_dead and grace.bid_size == 100, (b.turnover_flow, grace))
+a0, b0 = bot(turnover_control_enabled=False)
+judged(b0)
+ref300, ref600, ref_flat = dec(b0, 300), dec(b0, 600), dec(b0, 0)
+check("disabled = today (no flow, 7 h observed): unchanged sizes", ref300 == grace and ref300.bid_size == 100, ref300)
+dec(b0, 300)
+check("...but still classified (counted in status.json), with no log tag", b0.ex["21"].turnover_dead is True
+      and b0.ex["21"].turnover_tag == "", b0.ex["21"])
+judged(b)
+q = dec(b, 300)
+check("dead (0 sh/h) holding 300: adding bid 100 x0.25 = 25, reducing ask unchanged",
+      q.bid_size == 25 and (q.ask, q.ask_size) == (ref300.ask, ref300.ask_size) and q.bid == ref300.bid, (q, ref300))
+check("...tagged dead for the quote log", b.ex["21"].turnover_dead and b.ex["21"].turnover_tag == " dead")
+q = dec(b, 600)
+check("dead holding 600 > 0.5 x 1,000 limit: adding bid withdrawn, ask unchanged",
+      q.bid is None and (q.ask, q.ask_size) == (ref600.ask, ref600.ask_size) and ref600.bid_size == 100, (q, ref600))
+q = dec(b, -300)
+check("dead short 300: the ask (adding) at 25, bid unchanged", q.ask_size == 25, q)
+q = dec(b, 0)
+check("dead but flat: unchanged (coverage and the first fill)", q == ref_flat and not b.ex["21"].turnover_dead, q)
+q = dec(b, 60)
+check("a 60-share position (< min(quote 100, 100)): not 'holding', unchanged", q == dec(b0, 60), q)
+b.cfg.turnover_dead_adding_factor = 0.0
+check("adding factor 0: the adding side is withdrawn", dec(b, 300).bid is None)
+b.cfg.turnover_dead_adding_factor = 0.25
+b.capital_over = True
+q = dec(b, 300)
+check("with the capital ceiling (x0.25) too: factors multiply, 100 x 0.25 x 0.25 = 6", q.bid_size == 6, q)
+b.capital_over = False
+for k in range(6):                                       # 600 sh traded over the window = 100 sh/h
+    b.turnover.add("21", time.time() - (k + 0.5) * H, 100, tape=True)
+b.refresh_turnover(time.monotonic(), force=True)
+q = dec(b, 300)
+check("alive (100 sh/h on the tape): unchanged", q == ref300 and not b.ex["21"].turnover_dead, (q, b.turnover_flow))
+b.cfg.turnover_use_tape = False
+b.refresh_turnover(time.monotonic(), force=True)
+check("...turnover_use_tape off: the tape is ignored -> dead again", dec(b, 300).bid_size == 25)
+b.cfg.turnover_use_tape = True
+b.cfg.turnover_min_shares_per_hour = 150
+b.refresh_turnover(time.monotonic(), force=True)
+check("threshold raised live to 150 sh/h: 100 sh/h is dead", dec(b, 300).bid_size == 25)
+
+print("--- the bot: cycle, log line, status.json, summary")
+
+
+class Grab(logging.Handler):
+    def __init__(self):
+        super().__init__(); self.msgs = []
+
+    def emit(self, r): self.msgs.append(r.getMessage())
+
+
+a, b = bot()
+a.inv["21"] = 300.0
+judged(b)
+g = Grab()
+M.log.addHandler(g)
+old_level, old_prop = M.log.level, M.log.propagate
+M.log.setLevel(logging.INFO)
+M.log.propagate = False
+b.cycle()
+M.log.removeHandler(g)
+M.log.setLevel(old_level)
+M.log.propagate = old_prop
+bids = [o for o in a.ours("21") if o[0] == "bid"]
+check("cycle: the resting bid on the dead market is 25", bids and bids[0][2] == 25, a.ours("21"))
+line = [m for m in g.msgs if "Utah" in m and "bid" in m and "fv" in m]
+check("quote log line ends ' dead'", line and line[-1].endswith(" dead"), line[-1:] if line else g.msgs[:3])
+other = [m for m in g.msgs if "fv" in m and "| bid" in m and "Utah" not in m]
+check("...no other market's line is tagged", not any(m.endswith(" dead") for m in other), other[:2])
+h = b.health
+check("status: 1 dead market holding ~300 x price", h.get("turnover_dead_markets") == 1
+      and 140 <= h.get("turnover_dead_capital", 0) <= 170 and h.get("turnover_judged") is True,
+      {k: v for k, v in h.items() if k.startswith("turnover")})
+check("...top list names it with [capital, sh/h]", list(h.get("turnover_dead_top", {}).values())[0][1] == 0.0,
+      h.get("turnover_dead_top"))
+b.write_status(True)
+st = json.load(open(b.cfg.status_file))
+check("status.json carries turnover_dead_markets / _capital", st.get("turnover_dead_markets") == 1
+      and "turnover_dead_capital" in st)
+_t, msg = M.build_summary(FakeApi(), "/nonexistent/fills.csv", 100_000, value=100_000,
+                          health={"turnover_dead_markets": 52, "turnover_dead_capital": 28600})
+check("summary line: 'dead-turnover markets: 52 holding 28.6k'", "dead-turnover markets: 52 holding 28.6k" in msg, msg)
+_t, msg = M.build_summary(FakeApi(), "/nonexistent/fills.csv", 100_000, value=100_000, health={"orders_resting": 3})
+check("...absent without the field", "dead-turnover" not in msg)
+
+print("--- fills and the tape reach the tracker")
+a, b = bot()
+b.note_turnover([{"exchangeId": 21, "quantity": -250, "filledAt": M.iso(M.utcnow())},
+                 {"exchangeId": 21, "quantity": 40, "filledAt": None}])
+check("note_turnover: our fills (|qty|, by exchange id as text)", b.turnover.shares("21", time.time() + 1, 6.0) == 290,
+      list(b.turnover.ours["21"]))
+a.fill("22", True, 100)                                  # a fill through the cycle (log_fills)
+b.cycle()
+check("a fill read by the cycle is counted", b.turnover.shares("22", time.time() + 1, 6.0, use_tape=False) == 100,
+      list(b.turnover.ours.get("22", [])))
+
+
+class TapeFeed:
+    def __init__(self, rows): self.rows = rows
+    def take_flow(self):
+        out, self.rows = self.rows, []
+        return out
+
+
+b.feed = TapeFeed([(time.time(), "12", 500.0), (time.time(), "12", None)])
+b.note_turnover(())
+check("the feed's tape (take_flow) goes to the tape deque", b.turnover.shares("12", time.time() + 1, 6.0) == 500)
+b.feed = None
+feed = M.RealtimeFeed(None, "T", M.Config())
+feed._on_market("tournament:T", {"payload": {"trades": [{"exchangeId": 21, "tournamentId": "T", "quantity": 75},
+                                                        {"exchangeId": 22, "tournamentId": "X", "quantity": 9}]}})
+fl = feed.take_flow()
+check("RealtimeFeed keeps a tape copy for turnover (other tournaments ignored)", len(fl) == 1 and fl[0][1:] == ("21", 75.0),
+      fl)
+check("...take_flow drains it, the recorder's trade_log is untouched", feed.take_flow() == [] and len(feed.trade_log) == 1)
+
+print("--- a restart seeds from fills.csv")
+a, b = make_bot()
+with open(b.cfg.fills_csv, "w", newline="") as f:
+    w = csv.writer(f)
+    w.writerow(M.FillLogger.COLUMNS)
+    w.writerow([1, iso_at(time.time() - 10 * H), "21", 1, "bid", 300, 0.5, 0.5, 0.5, 0.5])
+    w.writerow([2, iso_at(time.time() - 60), "22", 2, "bid", 600, 0.5, 0.5, 0.5, 0.5])
+b2 = M.Bot(a, b.cfg)
+b2.cycle()
+check("seeded: judged at once, market 22 alive (600 in 6 h), 21 dead (0)", b2.turnover_flow.get("22", 0) >= 99
+      and b2.turnover_flow.get("21") == 0.0, b2.turnover_flow)
+
+print("--- analysis/turnover.py on synthetic data")
+spec = importlib.util.spec_from_file_location("turnover_an", os.path.join(HERE, "..", "analysis", "turnover.py"))
+an = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(an)
+d = tempfile.mkdtemp()
+fpath, dbp = os.path.join(d, "fills.csv"), os.path.join(d, "market_data.sqlite")
+with open(fpath, "w", newline="") as f:
+    w = csv.writer(f)
+    w.writerow(M.FillLogger.COLUMNS)
+    for i in range(12):                                  # market 21: 12 fills of 100 in the last 6 h = 2 fills/h
+        w.writerow([i, iso_at(now - (i * 0.5 + 0.1) * H), "21", i, "bid", 100, 0.5, 0.5, 0.5, 0.5])
+    w.writerow([99, iso_at(now - 7 * H), "11", 99, "bid", 900, 0.5, 0.5, 0.5, 0.5])   # outside the window
+db = sqlite3.connect(dbp)
+db.execute("CREATE TABLE trades (ts REAL, eid TEXT, price REAL, quantity REAL, item TEXT)")
+db.execute("""CREATE TABLE snapshots (ts TEXT, mode TEXT, eid TEXT, label TEXT, best_bid REAL, best_ask REAL,
+              fair_value REAL, reference REAL, our_bid REAL, our_ask REAL, position REAL)""")
+db.executemany("INSERT INTO trades VALUES (?,?,?,?,?)", [(now - 1 * H, "21", 0.5, 3000, "{}"),
+                                                         (now - 1 * H, "12", 0.5, 120, "{}")])
+old = [(iso_at(now - 600), "live", e, lab, 0.1, 0.2, 0.15, None, None, None, 99) for e, lab in (("11", "Rep Ohio"),)]
+cur = [(iso_at(now), "live", "11", "Rep Ohio", 0.10, 0.18, 0.14, None, None, None, 2000.0),
+       (iso_at(now), "live", "12", "Dem Ohio", 0.82, 0.90, 0.86, None, None, None, -500.0),
+       (iso_at(now), "live", "21", "Rep Utah", 0.48, 0.56, 0.52, None, None, None, 1000.0),
+       (iso_at(now), "live", "22", "Dem Utah", 0.44, 0.52, 0.48, None, None, None, 0.0)]
+db.executemany("INSERT INTO snapshots VALUES (?,?,?,?,?,?,?,?,?,?,?)", old + cur)
+db.commit()
+db.close()
+rows, hi = an.table(fpath, dbp, hours=6.0, dead=50.0)
+by = {r["eid"]: r for r in rows}
+check("window ends at the latest snapshot", abs(hi - now) < 1e-3, hi - now)
+check("3 markets (22: flat, no flow -> left out)", sorted(by) == ["11", "12", "21"], sorted(by))
+r = by["11"]
+check("Rep Ohio: 2,000 long at mid 0.14 = 280 capital, no flow in 6 h -> dead, h-flat inf",
+      abs(r["capital"] - 280) < 1e-6 and r["dead"] and r["h_flat"] == float("inf") and r["ours_h"] == 0, r)
+r = by["12"]
+check("Dem Ohio: short 500 (NO at 1 - 0.86 = 0.14): capital 70, tape 20 sh/h -> dead, h-flat 500/10 = 50",
+      abs(r["capital"] - 70) < 1e-6 and r["tape_h"] == 20 and r["dead"] and abs(r["h_flat"] - 50) < 1e-9, r)
+r = by["21"]
+check("Rep Utah: 2 fills/h, 200 sh/h ours, 500 sh/h tape -> flow 500, alive, h-flat 1000/250 = 4",
+      abs(r["fills_h"] - 2) < 1e-9 and abs(r["ours_h"] - 200) < 1e-9 and r["flow_h"] == 500 and not r["dead"]
+      and abs(r["h_flat"] - 4) < 1e-9, r)
+check("sorted by capital (Rep Utah 520 first)", rows[0]["eid"] == "21", [x["eid"] for x in rows])
+lines = an.summary(rows, 50.0)
+check("summary: dead markets 2 holding 0.4k (280 + 70)", "dead-turnover markets (< 50 sh/h): 2 holding 0.3k" in lines[1]
+      or "2 holding 0.4k" in lines[1], lines[1])
+check("summary: > 24 h capital 0.4k in 2 markets", "0.3k in 2 markets" in lines[3] or "0.4k in 2 markets" in lines[3],
+      lines[3])
+rows2, _ = an.table(fpath, os.path.join(d, "missing.sqlite"), hours=6.0, now=now)
+check("no sqlite: fills only (Rep Utah 200 sh/h, no positions known)", len(rows2) == 1 and rows2[0]["ours_h"] == 200,
+      rows2)
+check("parse_ts: 7-digit and 2-digit fractions (Python 3.10 safe)",
+      an.parse_ts("2026-10-02T10:00:00.7844565Z") is not None and an.parse_ts("2026-10-02T10:00:00.12+00:00") is not None)
+import io                                                 # noqa: E402
+import contextlib                                         # noqa: E402
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    rc = an.main(["--dir", d, "--top", "5"])
+out = buf.getvalue()
+check("main() prints the table and totals", rc == 0 and "Rep Utah" in out and "dead-turnover markets" in out
+      and out.count("\n") < 20, out[:300])
+
+print(f"\n{sum(RESULTS)} of {len(RESULTS)} passed")
+sys.exit(0 if all(RESULTS) else 1)
