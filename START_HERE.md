@@ -197,8 +197,7 @@ reduce-join (old) -58 ± 61. The outsider races got 0 arbitrage fills. Limits: 6
 
 ### Package 3 (READY 14:45 UTC): defaults from the real-book simulator and the Reviewer; new features present, most OFF. Code deploy (handover restart). Commit "READY: Package 3".
 Includes 2.1-2.3. Changes against 2.3: `capital_ceiling_adding_size_factor` 0.25 -> 0.5 (the ceiling binds live; factor 0 was a cliff of -131/h, 0.5 recovers
-~70%); `mark_frag_enabled` ON (per-position cap: a position may add at most 100 cash of mark noise per 10-min step; on the snapshot 3 positions would be
-capped: both RI Senate legs and Dem U.S. Senate; the total cap stays off); `market_edge_enabled` ON (inert until `market_edge.json` exists: run
+~70%); `mark_frag_enabled` OFF (round 3b: -29 ± 52, the cap rarely binds; switch on for rank stability if wanted); `market_edge_enabled` ON (inert until `market_edge.json` exists: run
 `python analysis/rival_floor.py --mode sweep_only` on the server's market_data.sqlite and copy the file next to mm_bot.py; the loader refuses bad
 entries); `refill_cooldown_enabled` OFF (real-book simulator -120 ± 97; the day-one losses it targeted were the old skew bug). OFF and awaiting evidence
 (switch on via settings_override only after a simulator or live A/B result): `fast_unload_enabled`, `reduce_join_best`, `turnover_control_enabled`,
@@ -207,7 +206,9 @@ Suites: test_mm_bot 588, test_strategy 114, test_ref_prices 37, test_recorder_re
 test_behind_best 36, test_stress 20 (and with STRESS_LADDER=1); Python 3.11 and 3.10.
 Watch in the first 10 minutes: as for 2.3, plus status.json `mark_frag_capped_markets` (expect ~3) and `mark_frag_top`; `market_edge_markets`
 (0 until the file exists); adding-side sizes at half under the ceiling (not a quarter).
-Unfinished at wrap-up (work in progress in sub-agent worktrees, NOT merged): the ladder's Reviewer fixes L1-L4 (hair-trigger urgent pulls one tick
+Round 3b (6 h quiet, 16 seeds, from the real book): ceiling factor 0.5 vs 0.25 +262 ± 100; arb_buy_min_ref_sum 0.99 vs 0.8: 0.8 would lose -898 ± 94
+buying 23.8k outsider shares; fast unload -165 ± 110; reduce-join -48 ± 81; behind-best -99 ± 83; mark cap -29 ± 52; ladder -5 ± 49 (idle at 10k cash);
+refill cooldown off -14 ± 94; turnover control untested. Unfinished at wrap-up (NOT merged): the ladder's Reviewer fixes L1-L4 (hair-trigger urgent pulls one tick
 behind the touch -> stale not urgent; ladder-only pulls excluded from the cancel-all count; 1-tick tolerance, re-anchor hysteresis at 2c and
 min_quote_life for ladder orders; per-order cash cap in ladder_caps) and the Strategist's round-3b runs (new fast unload, new reduce-join, turnover,
 behind-best, mark cap, the real ladder at 10k free cash, refill cooldown off vs on, ceiling 0.25 vs 0.5 on `tests/live_sim.py`). Both are specified
@@ -233,7 +234,7 @@ above and in SIM_NOTES.md; a new session can redo them from this branch.
 | refill_cooldown_* (new) | - | on | -936 on 3rd+ same-side fills | fewer walks against us |
 | fl_bias_enabled (new) | - | off | §10c: a skew artefact | none |
 | capital_ceiling_adding_size_factor | 0.25 (P2) | 0.5 | real-book simulator: factor 0 a cliff, 0.5 recovers ~70% | adding sides at half size under the ceiling |
-| mark_frag_enabled (new) | - | on (per-position cap 100/step) | Reviewer second pass; 3 positions capped on the snapshot | less mark noise in thin markets |
+| mark_frag_enabled (new) | - | off | round 3b -29 ± 52, rarely binds | none |
 | market_edge_enabled (new) | - | on (inert without market_edge.json) | Reviewer: only widens, cheap | per-market floors once the file exists |
 | refill_cooldown_enabled | on (P2) | off | real-book simulator -120 ± 97 | none expected |
 

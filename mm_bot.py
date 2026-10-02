@@ -159,7 +159,7 @@ class Config:
                                           #   usual, until it is back below this - 0.05. 2 Oct: 90.5k of 101k sat in
                                           #   positions, 11k cash left to quote with. 0 = off
     capital_ceiling_adding_size_factor: float = 0.5   # ...0 = adding side not quoted at all, 0.5 = half size
-    mark_frag_enabled: bool = True        # mark-fragility cap (sizing only): a position's mark noise = |position| x sd
+    mark_frag_enabled: bool = False       # mark-fragility cap (sizing only): a position's mark noise = |position| x sd
                                           #   of the 10-min change of the tournament mid (recorder snapshots). The
                                           #   ADDING side's position limit = max(one quote, mark_frag_max_step_cash / sd).
                                           #   1 Oct snapshot: 1,186 $ per 10-min step over 159 positions, RI Senate legs
