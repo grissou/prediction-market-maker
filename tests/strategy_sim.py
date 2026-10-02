@@ -348,7 +348,8 @@ class Sim:
         ref = m.ref_seen
         bref = ref                                   # T2.1 mirror of mm_bot blend_fv: the blend alone sees r'
         if cfg.ref_tilt_enabled and (cfg.ref_tilt_headline or not m.headline):
-            bref = M.tilted_ref(ref, self.tilt.s, getattr(self, "legs_of", lambda m: 2)(m))
+            self.tilt_s_applied = self.tilt.s * M.rampin_factor(t, self.tilt_on_at, cfg.ref_tilt_rampin_min)  # ramp-in
+            bref = M.tilted_ref(ref, self.tilt_s_applied, getattr(self, "legs_of", lambda m: 2)(m))
         fv = (1 - cfg.ref_weight) * bfv + cfg.ref_weight * bref if bfv is not None else None
         m.state["fv"] = fv
         if self.bias_hl and bfv is not None:
@@ -384,6 +385,8 @@ class Sim:
         if self.cfg.ref_tilt_enabled:                # T2.1 mirror: mm_bot's estimator, once per cycle, before the plans
             if getattr(self, "tilt", None) is None:
                 self.tilt = M.TiltEstimator(self.cfg)
+            if getattr(self, "tilt_on_at", None) is None:
+                self.tilt_on_at = t                  # T2.1 ramp-in mirror: the first cycle the flag is on
             legs_of, samples = getattr(self, "legs_of", lambda m: 2), []
             for m, p, c in paths:
                 bfv = fair_value(self.book_dict(m), self.cfg) if m.ref_seen is not None else None
