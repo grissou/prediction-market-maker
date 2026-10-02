@@ -540,6 +540,18 @@ class Config:
     refill_cooldown_min_shares: int = 200  # ...totalling at least this many shares (1-share probes don't count)
     refill_cooldown_seconds: float = 30.0  # how long that side stays withheld
 
+    # --- FAST UNLOAD AFTER SWEEP FILLS ---------------------------------------------------------
+    # Data: fills with > 3c edge made +1,704 on 109 fills (DATA_REPORT_2 s5); the mid reverts toward Polymarket with
+    # a 5-13 min half-life, positions are held a median 7.2 h. After a sweep fill, offer the shares back near fair
+    # value for a few minutes (realised P&L) instead of carrying them at the normal skewed quote.
+    fast_unload_enabled: bool = True      # a quote fill that ADDED to a position opens an "unload window" there
+    fast_unload_min_edge: float = 0.02    # ...if it had at least this edge at the quote (vs fv when quoted)...
+    fast_unload_min_shares: int = 100     # ...and at least this many shares
+    fast_unload_seconds: float = 300.0    # how long the window stays open
+    fast_unload_edge: float = 0.005       # the reducing side quotes this far from fair value (not min_edge / the
+                                          #   ref_only edge, not pennying), never through fair; 0 = fv rounded away
+    fast_unload_size_mult: float = 1.0    # reducing size = shares still to unload x this, capped by the position
+
     # --- CONNECTION / ALERTS (from the environment: see top of file) ------------------------
     summary_every_hours: int = 2          # phone summary every N hours, on the hour UTC (2 = 00:00, 02:00, 04:00...),
                                           #   covering what happened since the previous one. 0 = off. Live only
@@ -624,6 +636,12 @@ OVERRIDABLE = {
     "refill_cooldown_window_seconds": (1.0, 600.0),
     "refill_cooldown_min_shares": (0, 100000),
     "refill_cooldown_seconds": (0.0, 600.0),
+    "fast_unload_enabled": (False, True),
+    "fast_unload_min_edge": (0.0, 0.20),
+    "fast_unload_min_shares": (0, 100000),
+    "fast_unload_seconds": (0.0, 3600.0),
+    "fast_unload_edge": (0.0, 0.05),
+    "fast_unload_size_mult": (0.0, 10.0),
 }
 
 
@@ -1583,7 +1601,8 @@ def fl_side(fv, prev, cfg=CFG):
 def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=False, no_bid=False, no_ask=False,
                   bid_cap=None, ask_cap=None, kelly_p=None, bankroll=None, shift=0.0, order_size=None,
                   position_limit=None, min_edge=None, reduce_size=None, net_inv=None, age_hours=0.0,
-                  adding_factor=1.0, bias_side=None, bias_edge=0.0, bias_size=1.0):
+                  adding_factor=1.0, bias_side=None, bias_edge=0.0, bias_size=1.0, unload_side=None,
+                  unload_edge=0.0, unload_size=None):
     """
     fv         fair YES probability
     inv        our net YES shares on THIS exchange (negative = net NO); drives the hard position limit
@@ -1610,6 +1629,9 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
                        max_half_spread) and at bias_size times its size (favourite-longshot bias, see fl_side).
                        Ignored on a side that shrinks this exchange's position: that side quotes normally
                        (its size beyond the position itself still gets bias_size)
+    unload_side        "bid" / "ask" / None: fast unload window (see Bot.note_unloads). That side, if it shrinks this
+                       exchange's position, quotes unload_edge from fv (or closer, if the skews already put it
+                       there), never crossing the best other order, at unload_size shares capped by the position
     """
     bankroll = bankroll or DEFAULT_BANKROLL
     max_order_cash = cfg.max_order_cash_frac * bankroll
@@ -1665,6 +1687,18 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
     if best_bid is not None:
         ask = max(ask, ceil_tick(best_bid + TICK))
 
+    # 4b. Fast unload window: the reducing side quotes near fair value (no pennying, never through fair).
+    unload_bid = unload_side == "bid" and inv <= -1 and not reduce_only
+    unload_ask = unload_side == "ask" and inv >= 1 and not reduce_only
+    if unload_bid:
+        bid = max(bid, min(floor_tick(fv - unload_edge), floor_tick(best_ask - TICK) if best_ask is not None else 1.0))
+        bid_hi = max(bid_hi, bid)                  # (the keep limit: an order there is safe)
+        ask = max(ask, ceil_tick(bid + TICK))
+    if unload_ask:
+        ask = min(ask, max(ceil_tick(fv + unload_edge), ceil_tick(best_bid + TICK) if best_bid is not None else 0.0))
+        ask_lo = min(ask_lo, ask)
+        bid = min(bid, floor_tick(ask - TICK))
+
     # 5. Size: shrink toward the position limit on each side, and cap the cash tied up per order.
     #    Limits: Kelly sizing when we have a liquid Polymarket price, else max_position_frac of the account.
     long_limit = short_limit = cfg.max_position_frac * bankroll
@@ -1692,6 +1726,10 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
             ask_size = min(ask_size, short_limit + net)
     bid_size = min(bid_size, max_order_cash / bid)          # buying YES costs `bid` a share
     ask_size = min(ask_size, max_order_cash / (1 - ask))    # selling YES = buying NO at 1-ask
+    if unload_bid and unload_size is not None:              # only what it holds: never flips the position
+        bid_size = min(max(1, unload_size), -inv)
+    if unload_ask and unload_size is not None:
+        ask_size = min(max(1, unload_size), inv)
 
     # 6. Risk overrides.
     if reduce_only:
@@ -2146,6 +2184,7 @@ class Bot:
         self.trading_since = None         # monotonic time the trading loop started (burst_startup_grace_seconds)
         self.global_reduce = False
         self.ref_moved = set()            # eids whose Polymarket price moved >= urgent_ref_move at the latest reading
+        self.unloads = {}                 # eid -> {"until", "side", "left"}: fast unload windows (note_unloads)
         self.ref_version_urgent = 0
         self.refs = self.load_reference_prices()
         self.ref_version_seen = 0         # last Polymarket reading the jump guard has looked at
@@ -2432,7 +2471,9 @@ class Bot:
 
         # 4. Fills (every slow_poll_seconds, and straight after a fill) --------------------------------
         if read_fills:
-            self.note_refills(self.log_fills(fvs), inv, now_m)
+            new_fills = self.log_fills(fvs)
+            self.note_refills(new_fills, inv, now_m)
+            self.note_unloads(new_fills, inv, now_m)
 
         # 5. Guaranteed arbitrage inside races (takes liquidity; our quotes there are pulled first) --
         arb_races = self.take_arbitrage(inv, fvs, mine_real, now_m) if self.running else set()
@@ -2528,6 +2569,8 @@ class Bot:
                 self.place(new_orders, now_m)
         # Orders resting NOW, after this cycle's changes (the health snapshot above was taken before them).
         self.health["orders_resting"] = len(self.my_orders) if self.api.live else len(self.sim)
+        self.health["fast_unload_windows"] = sum(1 for e in list(self.unloads)
+                                                 if e in self.ex and self.unload_side(self.ex[e], now_m))
         self.health["fl_bias_markets"] = {k: sum(1 for x in self.ex.values() if x.fl_tag.startswith(f" fl:{k}"))
                                           for k in ("bid", "ask")}
 
@@ -3173,11 +3216,14 @@ class Bot:
         side = "bid" if side == "mid" else side       # mid band: an optional extra edge on bids, full size
         ex.fl_tag = (f" fl:{tag}+{100 * bias_edge:g}c" if side and (ex.inv > -1 if side == "bid" else ex.inv < 1)
                      else "")                         # (shown only while it changes the quote: not when unloading)
+        u_side = None if reduce_only else self.unload_side(ex, now_m)   # reduce-only / flatten: stricter anyway
+        u_size = int(self.unloads[ex.eid]["left"] * cfg.fast_unload_size_mult) if u_side else None
         return compute_quote(fv, ex.inv, inv_for_quote, best_bid, best_ask, cfg, reduce_only, no_bid, no_ask,
                              bid_cap, ask_cap, kelly_p=kelly_p, bankroll=self.bankroll(),
                              shift=self.party_shift(ex, party_delta), order_size=planned, position_limit=headline_limit,
                              min_edge=edge, reduce_size=reduce_size, net_inv=ex.eff, age_hours=ex.age,
-                             adding_factor=adding, bias_side=side, bias_edge=bias_edge, bias_size=bias_size)
+                             adding_factor=adding, bias_side=side, bias_edge=bias_edge, bias_size=bias_size,
+                             unload_side=u_side, unload_edge=cfg.fast_unload_edge, unload_size=u_size)
 
     def update_size_plan(self, now_m, fvs):
         """Every size_plan_seconds: work out how many shares to quote in each market (see plan_sizes).
@@ -3345,6 +3391,8 @@ class Bot:
             return False
         if ex.eid in self.ref_moved or now_m - ex.ref_moved_at < 15:
             return False                                  # Polymarket moved here lately: follow it now
+        if self.unload_side(ex, now_m) == ("bid" if is_bid else "ask"):
+            return False                                  # fast unload window: place the unload quote now
         young = o.order_id in self.recent_orders and now_m - self.recent_orders[o.order_id][1] < cfg.min_quote_life_seconds
         hist = ex.reprices.get("bid" if is_bid else "ask") or deque()
         while hist and now_m - hist[0] > cfg.churn_window_seconds:
@@ -3360,7 +3408,8 @@ class Bot:
     def change_key(self, ex, pull, reprice=False):
         """Sending order: pulls first, then the party-control markets, then quotes for empty sides (cheap: a
         share of one batch), then reprices (a cancel each), biggest quotes first within each."""
-        return (0 if pull else 0.5 if ex.eid in self.ref_moved else 1, 0 if ex.group in self.cfg.headline_races else 1,
+        urgent = ex.eid in self.ref_moved or ex.eid in self.unloads      # (fast unload: first batch too)
+        return (0 if pull else 0.5 if urgent else 1, 0 if ex.group in self.cfg.headline_races else 1,
                 1 if reprice else 0,
                 -self.size_plan.get(ex.eid, 0))
 
@@ -4229,6 +4278,60 @@ class Bot:
         if not self.cfg.refill_cooldown_enabled or self.refill_until.get((ex.eid, "bid" if is_bid else "ask"), -1e9) <= now_m:
             return False
         return ex.inv >= 0 if is_bid else ex.inv <= 0   # a side that would reduce the position is exempt
+
+    def note_unloads(self, new, inv, now_m):
+        """Fast unload: a fill of one of our quotes (not a take or arbitrage leg) that ADDED to the position, with at
+        least fast_unload_min_edge at the quote (quote price vs fv when quoted) and fast_unload_min_shares, opens (or
+        extends) a window of fast_unload_seconds in which the reducing side quotes near fair value (decide,
+        compute_quote). Shares to unload = the position increase; fills on the reducing side count them down."""
+        cfg = self.cfg
+        if not new or not cfg.fast_unload_enabled:
+            return
+        wall = utcnow().timestamp()
+        for f in reversed(new):                   # oldest first
+            meta = self.order_meta.get(f.get("orderId")) or {}
+            side, eid = meta.get("our_side"), str(f.get("exchangeId"))
+            if side not in ("bid", "ask") or meta.get("take") or meta.get("arb") or eid not in self.ex:
+                continue
+            qty = abs(float(f.get("quantity") or 0))
+            w = self.unloads.get(eid)
+            if w and w["side"] == side:           # the reducing side traded: fewer shares left to unload
+                w["left"] -= qty
+                continue
+            try:
+                t = parse_ts(f.get("filledAt"))
+            except (TypeError, ValueError):
+                t = None
+            if t is not None and wall - t.timestamp() > cfg.fast_unload_seconds:
+                continue                          # an old fill seen late (e.g. after a restart)
+            pos = float(inv.get(eid, self.ex[eid].inv) if inv is not None else self.ex[eid].inv)
+            if (pos <= 0) if side == "bid" else (pos >= 0):
+                continue                          # it reduced (or closed) the position
+            price, fv = meta.get("price"), meta.get("fv")
+            if fv is None or price is None:
+                continue
+            edge = (float(fv) - float(price)) if side == "bid" else (float(price) - float(fv))
+            if edge < cfg.fast_unload_min_edge - 1e-9 or qty < cfg.fast_unload_min_shares:
+                continue
+            red = "ask" if side == "bid" else "bid"
+            left = min(qty, abs(pos)) + (w["left"] if w and w["side"] == red else 0.0)
+            self.unloads[eid] = {"until": now_m + cfg.fast_unload_seconds, "side": red, "left": min(left, abs(pos))}
+            log.info("fast unload %s: %s %s at %+.1fc, %s %gc %s fair for %.0f s", self.ex[eid].label,
+                     "bought" if side == "bid" else "sold", f"{qty:,.0f}", 100 * edge,
+                     "offering" if red == "ask" else "bidding", 100 * cfg.fast_unload_edge,
+                     "over" if red == "ask" else "under", cfg.fast_unload_seconds)
+
+    def unload_side(self, ex, now_m):
+        """The reducing side ("bid"/"ask") of this exchange's open fast unload window, or None. A window closes once
+        it has expired, its shares are unloaded, or the position in that direction is gone."""
+        w = self.unloads.get(ex.eid)
+        if w is None:
+            return None
+        if (not self.cfg.fast_unload_enabled or now_m >= w["until"] or w["left"] < 1
+                or (ex.inv < 1 if w["side"] == "ask" else ex.inv > -1)):
+            del self.unloads[ex.eid]
+            return None
+        return w["side"]
 
     def load_order_notes(self):
         """Order notes saved by a previous run (so fills that land around a restart get attributed)."""
