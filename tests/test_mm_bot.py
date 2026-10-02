@@ -1672,6 +1672,24 @@ finally:
 check("an outage with a failing cancel-all alerts once, not every cycle", n_outage == 1, sent)
 check("recovery alerts once, and only after an alerted outage", n_back == 1 and n_quiet == 0, sent)
 
+# F11: a partial cancel-all (207, orders left) must not count as "pulled": the next failed cycle tries again.
+a, b = make_bot()
+answers, calls = [False, False, True], []
+b.cancel_everything = lambda: (calls.append(1), answers.pop(0))[1]
+real_alert, M.alert = M.alert, (lambda m: None)
+logging.disable(logging.CRITICAL)
+try:
+    b.on_cycle_error("unexpected error", pull_now=True)
+    first = b.pulled_after_errors
+    b.on_cycle_error("unexpected error", pull_now=True)
+    b.on_cycle_error("unexpected error", pull_now=True)
+    b.on_cycle_error("unexpected error", pull_now=True)
+finally:
+    logging.disable(logging.NOTSET)
+    M.alert = real_alert
+check("F11: a cancel-all that left orders resting is retried each failed cycle until it reports none left",
+      first is False and len(calls) == 3 and b.pulled_after_errors and not answers, (first, calls))
+
 # F7: a method defined twice in a class silently shadows the first (thin_book_prices was): none may be.
 import ast
 _dups = []

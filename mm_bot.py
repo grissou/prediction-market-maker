@@ -3898,8 +3898,12 @@ class Bot:
                 alert(f"{what} - pulling all quotes until cycles succeed again")
                 self.error_alerted = True
             try:
-                self.cancel_everything()
-                self.pulled_after_errors = True
+                # Only "pulled" once the cancel-all reports nothing left: a partial one (207 with orders still
+                # resting) is tried again on the next failed cycle instead of giving up for the whole outage.
+                if self.cancel_everything():
+                    self.pulled_after_errors = True
+                else:
+                    log.error("cancel-all left orders resting - trying again on the next failed cycle")
             except Exception as e:        # never let the error handler itself crash the bot
                 log.error("cancel-all failed too (%s) - orders expire within %.0f min anyway", e, self.cfg.order_ttl / 60)
 
