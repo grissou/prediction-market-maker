@@ -34,7 +34,9 @@ check("defaults: OFF, 2 ticks, x0.5, min 100 sh",
 good, bad = M.validate_overrides({"behind_best_size_enabled": True, "behind_best_ticks": 3,
                                   "behind_best_size_factor": 0.25, "behind_best_min_size": 50}, c)
 check("all four settings are live-overridable", len(good) == 4 and not bad, bad)
-check("...and they are the last OVERRIDABLE keys", list(M.OVERRIDABLE)[-4:] == [
+_ov = list(M.OVERRIDABLE)   # (Round 4's write-saver keys were added after them, at the end)
+_i = _ov.index("behind_best_size_enabled")
+check("...and they are one block of OVERRIDABLE keys, in order", _ov[_i:_i + 4] == [
       "behind_best_size_enabled", "behind_best_ticks", "behind_best_size_factor", "behind_best_min_size"])
 
 print("--- compute_quote")
