@@ -429,6 +429,10 @@ class Config:
     startup_prime_books: int = 60         # book downloads per cycle while priming (instead of max_books_per_cycle)
     startup_prime_reserve: int = 8        # requests per minute book downloads leave free while priming
     startup_prime_books_per_min: int = 45 # ...but at most this many downloads in any 60 s, the rest for order writes
+    startup_prime_held_max_seconds: float = 900.0  # ...except: priming never ends while a market we HOLD a position in
+                                          #   has no downloaded book, up to this hard maximum (s) after the start
+    unpriced_held_warn_cycles: int = 5    # a held market without a fair value this many cycles in a row: one WARNING
+                                          #   with the reason (no book / tops blanked / gap / guard); 0 = off
 
     # --- TIMING / NETWORK --------------------------------------------------------------------
     loop_seconds: float = 10.0            # target time between cycle starts
@@ -643,6 +647,8 @@ OVERRIDABLE = {
     "startup_prime_books": (1, 100),
     "startup_prime_reserve": (0, 60),
     "startup_prime_books_per_min": (1, 100),
+    "startup_prime_held_max_seconds": (0.0, 3600.0),
+    "unpriced_held_warn_cycles": (0, 1000),
     "fl_bias_enabled": (False, True),
     "fl_low": (0.0, 0.50),
     "fl_high": (0.50, 1.0),
@@ -2298,6 +2304,9 @@ class Bot:
         self.ref_tops = {}                # eid -> (best bid, best ask): R5 priced it from other_tops this cycle
         self.trading_since = None         # time.monotonic() when the trading loop started (startup priming)
         self.book_reqs = deque()          # times of recent book downloads (startup priming's per-minute cap)
+        self.held = {}                    # eid -> signed shares held (latest positions read; books_to_fetch, priming)
+        self.unpriced_held = {}           # eid -> cycles in a row a held market had no fair value
+        self.unpriced_warned = set()      # ...those already warned about (once per unpriced spell)
         self.arb_cooldown = {}            # race -> time.monotonic() until which we leave it alone
         self.arbs_total = 0               # arbitrages / takes since start (summaries report the change)
         self.unwinds_total = 0            # pair unwinds since start (status.json pair_unwinds_total)
@@ -2519,6 +2528,7 @@ class Bot:
                           and any(p.get(k) is not None for k in Bot.POS_PRICE_KEYS)} if isinstance(pos, dict) else {}
         inv = {str(p["exchangeId"]): float(p.get("quantity") or 0)
                for p in pos.get("positions", []) if not p.get("settled")}
+        self.held = {e: q for e, q in inv.items() if q and e in self.ex}
         reserved = reserved_cash(raw_orders)
         self.update_lots(inv, time.time())
         if self.db and cfg.record_positions and read_positions and not pos_failed:
@@ -2567,6 +2577,7 @@ class Bot:
         self.reference_jump_guard(now_m)
         fvs = dict(book_fvs)
         self.ref_only = self.thin_book_prices(fvs, refs, liquid, now_m) if cfg.ref_only_enabled else set()
+        self.warn_unpriced_held(fvs, book_fvs, refs, liquid, now_m)
         if cfg.ref_weight > 0 and refs:
             for eid, r in refs.items():
                 if fvs.get(eid) is not None and eid in liquid and eid not in self.ref_only:   # liquid only
@@ -2765,6 +2776,57 @@ class Bot:
                 self.ref_tops[eid] = (bb, ba)
         return out
 
+    def warn_unpriced_held(self, fvs, book_fvs, refs, liquid, now_m):
+        """A market we hold a position in with no fair value for unpriced_held_warn_cycles cycles in a row gets
+        ONE warning with the reason (it is then neither quoted nor reduced); again only after it was priced."""
+        n = self.cfg.unpriced_held_warn_cycles
+        for eid in list(self.unpriced_held):
+            if eid not in self.held or fvs.get(eid) is not None:
+                self.unpriced_held.pop(eid, None)
+                self.unpriced_warned.discard(eid)
+        if n <= 0:
+            return
+        for eid in self.held:
+            if fvs.get(eid) is not None:
+                continue
+            k = self.unpriced_held[eid] = self.unpriced_held.get(eid, 0) + 1
+            if k >= n and eid not in self.unpriced_warned:
+                self.unpriced_warned.add(eid)
+                ex = self.ex[eid]
+                log.warning("UNPRICED held market %s (inv %+.0f) for %d cycles: %s", ex.label, self.held[eid], k,
+                            self.unpriced_reason(ex, book_fvs, refs, liquid, now_m))
+
+    def unpriced_reason(self, ex, book_fvs, refs, liquid, now_m):
+        """Why a market has no fair value (for warn_unpriced_held)."""
+        cfg, eid = self.cfg, ex.eid
+        has_book = ex.book is not None and now_m - ex.verified < cfg.book_stale
+        if has_book and fair_value(ex.book, cfg) is not None and book_fvs.get(eid) is None:
+            return "a race leg has no price (normalise needs all legs)"
+        if eid not in refs:
+            return ("no book downloaded" if ex.book is None else "book stale" if not has_book
+                    else "book too thin/wide") + ", no Polymarket price (or rejected by ref_max_plausible_gap)"
+        if eid not in liquid:
+            return "book thin/missing and Polymarket not liquid"
+        if not cfg.ref_only_enabled:
+            return "book thin/missing and ref_only_enabled off"
+        top = self.r5_top(ex, now_m)
+        if top is None:
+            if has_book:
+                return "book one-sided (other traders)"
+            t = self.other_tops.get(eid)
+            if not cfg.ref_only_use_tops:
+                return "no book downloaded and ref_only_use_tops off"
+            if t is None or now_m - t[2] > cfg.tops_max_age:
+                return "no book downloaded, no fresh bulk tops"
+            side = 0 if t[0] is None else 1
+            raw = self.last_tops.get(eid, (None, None))[side]
+            return "no book downloaded, bulk tops one-sided (%s)" % (
+                ("bid", "ask")[side] + (" blanked by our own order at the best" if raw is not None else " empty"))
+        bb, ba, _ = top
+        if ba <= bb or ba - bb > cfg.max_spread_for_fv:
+            return f"spread {bb:.3f}/{ba:.3f} wider than max_spread_for_fv"
+        return f"mid {(bb + ba) / 2:.3f} more than ref_only_max_gap (Polymarket {refs[eid]:.3f})"
+
     def r5_top(self, ex, now_m):
         """(other traders' best bid, best ask, from_tops) for R5, or None (one-sided, or nothing current).
         A book confirmed within book_stale is used as before. Without one (after a restart every book is None;
@@ -2904,11 +2966,28 @@ class Bot:
         At most max_books_per_cycle, and never more than the request budget has spare after keeping
         budget_reserve back for orders. The rest wait for a later cycle (reported books stay pending)."""
         candidates = [(0, self.ex[e].book_time, e) for e in self.pending_dirty if e in self.ex]
-        # Never-downloaded books where we have orders resting (e.g. adopted at a handover restart) come first,
-        # then the ones we quote from the bulk tops: their real book matters most.
+        # Never-downloaded books of markets we HOLD a position in come before everything (even feed-reported
+        # changes): without a book a held market can go unpriced (R5 can't see the side our own reducing order
+        # tops, see others_top), and then it is neither quoted nor reduced. Biggest exposure first (held_weights).
+        # Then never-downloaded books where we have orders resting (e.g. adopted at a handover restart), then
+        # the ones we quote from the bulk tops, then the rest, busiest (Polymarket volume) first.
         live = {o.eid for o in self.my_orders.values()}
-        candidates += [(1, -2.0 if eid in live else -1.0 if eid in self.ref_tops else 0.0, eid)
-                       for eid, ex in self.ex.items() if ex.book is None]
+        held = self.held_weights()
+        vols = {}
+        if self.refs and hasattr(self.refs, "volumes"):
+            try:
+                vols = self.refs.volumes() or {}
+            except Exception:             # ordering only: never let it stop the books
+                vols = {}
+        for eid, ex in self.ex.items():
+            if ex.book is not None:
+                continue
+            if eid in held:
+                candidates.append((-1, -held[eid], eid))
+            else:
+                v = float(vols.get(f"{ex.group}|{ex.party}") or 0.0)
+                candidates.append((1, -2.0 if eid in live else -1.0 if eid in self.ref_tops
+                                   else -0.5 * v / (v + 1e5), eid))     # -0.5..0: busiest first
         candidates += extra
         todo = []
         for _, _, eid in sorted(candidates):
@@ -2916,10 +2995,27 @@ class Bot:
                 todo.append(eid)
         cap, reserve = self.cfg.max_books_per_cycle, self.cfg.budget_reserve
         if self.priming():                # after a (re)start: books first (see startup_books_first)
-            cap = min(max(cap, self.cfg.startup_prime_books), self.prime_allowance())
+            cap = min(max(cap, min(self.cfg.startup_prime_books, self.prime_need())), self.prime_allowance())
             reserve = min(reserve, self.cfg.startup_prime_reserve)
         spare = getattr(self.api, "budget_left", lambda: 10 ** 6)() - reserve
         return todo[:max(0, min(cap, spare))]
+
+    def held_weights(self):
+        """{eid: shares held x the price of the shares held} (p for YES, 1 - p for NO; p = last fair value,
+        else Polymarket, else 0.5) for every market we hold a position in: the priming order (books_to_fetch)."""
+        out = {}
+        for eid, q in self.held.items():
+            ex = self.ex.get(eid)
+            if ex is None or not q:
+                continue
+            p = next((x for x in (ex.last_fv, ex.ref) if x is not None), 0.5)
+            out[eid] = abs(q) * (p if q > 0 else 1 - p)
+        return out
+
+    def held_missing(self):
+        """Markets we hold a position in whose book has never been downloaded, biggest exposure first."""
+        w = self.held_weights()
+        return sorted((e for e in w if self.ex[e].book is None), key=lambda e: -w[e])
 
     def books_loaded(self):
         return sum(ex.book is not None for ex in self.ex.values())
@@ -2941,24 +3037,46 @@ class Bot:
         For send_changes' `spare` (Engineer 1's region): budget_left() - self.write_reserve()."""
         r = self.cfg.write_read_reserve
         if self.priming():
-            r += min(self.prime_allowance(), len(self.ex) - self.books_loaded())
+            r += min(self.prime_allowance(), self.prime_need())
         return r
 
     def priming(self):
         """Startup priming is on: within startup_prime_seconds of the trading loop starting (fresh start or
-        handover restart alike), and more than startup_prime_missing_frac of the books not downloaded yet."""
+        handover restart alike), and more than startup_prime_missing_frac of the books not downloaded yet.
+        It never ends while a market we hold a position in has no downloaded book (held_missing), up to
+        startup_prime_held_max_seconds after the start (a hard cap: a book that keeps failing can't hold it on)."""
         cfg = self.cfg
         if not cfg.startup_books_first or self.trading_since is None or not self.ex:
             return False
-        if time.monotonic() - self.trading_since > cfg.startup_prime_seconds:
+        elapsed = time.monotonic() - self.trading_since
+        if elapsed <= cfg.startup_prime_held_max_seconds and self.held_missing():
+            return True
+        return self.prime_full()
+
+    def prime_full(self):
+        """The ordinary priming condition (startup_prime_seconds, startup_prime_missing_frac), without the
+        held-market extension. Assumes startup_books_first and a trading start (see priming)."""
+        cfg = self.cfg
+        if self.trading_since is None or time.monotonic() - self.trading_since > cfg.startup_prime_seconds:
             return False
         return len(self.ex) - self.books_loaded() > cfg.startup_prime_missing_frac * len(self.ex)
+
+    def prime_need(self):
+        """Books priming still wants: every missing one, or once only the held-market extension keeps it on,
+        just the held markets' (so the extension doesn't take the order writes' budget for other books)."""
+        return len(self.ex) - self.books_loaded() if self.prime_full() else len(self.held_missing())
 
     def log_priming(self):
         """One line per cycle while priming the books, and one when it's over."""
         if self.priming():
             self.primed_logged = False
-            log.info("priming books: %d of %d loaded", self.books_loaded(), len(self.ex))
+            missing = self.held_missing()
+            if missing and time.monotonic() - self.trading_since > self.cfg.startup_prime_seconds:
+                log.info("priming books: %d of %d loaded - extended (max %.0f s) for %d held market(s) without a "
+                         "book: %s", self.books_loaded(), len(self.ex), self.cfg.startup_prime_held_max_seconds,
+                         len(missing), ", ".join(self.ex[e].label for e in missing[:8]))
+            else:
+                log.info("priming books: %d of %d loaded", self.books_loaded(), len(self.ex))
         elif self.trading_since is not None and not getattr(self, "primed_logged", True):
             self.primed_logged = True
             log.info("priming books done: %d of %d loaded after %.0f s", self.books_loaded(), len(self.ex),
