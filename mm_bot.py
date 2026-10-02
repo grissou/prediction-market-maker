@@ -15,6 +15,7 @@ COMMANDS
     python mm_bot.py run --live       trade for real
     python mm_bot.py cancel           cancel every open order in the tournament
     python mm_bot.py report           spread-capture stats from fills.csv
+    python mm_bot.py analyze [hours]  per-market edge, markouts, P&L, time at the top, undercuts (local files only)
     python mm_bot.py summary          build the phone summary now and send it (test your ALERT_URL)
 
 ENVIRONMENT (set by `source .venv/bin/activate` on the Mac, or by a .env file next to this script)
@@ -365,6 +366,15 @@ class Config:
     realtime_session_max_seconds: float = 3600.0   # ...and at least this often anyway: a long-lived socket can die
                                                    #   without the library noticing (it happened on 29 Sep)
 
+    # --- LIVE SETTINGS (change settings without a restart) -----------------------------------
+    overrides_file: str = "settings_override.json"   # {"min_edge": 0.015, ...}: re-read every overrides_seconds;
+                                          #   only OVERRIDABLE settings, each checked; a removed key goes back to
+                                          #   its default. Every change is logged. "" = off
+    overrides_seconds: float = 30.0
+    analyze_daily_hour: int = -1          # send the first lines of `analyze` (last 24 h) to your phone daily at this
+                                          #   hour UTC (-1 = off)
+    slow_cycle_alert_seconds: float = 120.0   # a cycle running this long: status.json says so and one alert is sent
+
     # --- FILES (relative names are kept in the bot's own folder) -----------------------------
     fills_csv: str = "fills.csv"
     log_file: str = "mm_bot.log"          # "" = log to the terminal only
@@ -373,6 +383,9 @@ class Config:
     status_file: str = "status.json"      # health snapshot rewritten after every cycle
     order_notes_file: str = "order_notes.json"  # survives restarts, so fills can still be attributed
     kill_file: str = "kill_switch.tripped"      # the kill switch creates it; delete it to allow trading again
+    handover_file: str = "handover.json"        # written by a handover stop (SIGUSR1): the next start adopts the
+    handover_max_age: float = 300.0             #   orders left resting instead of cancelling them, if within this
+                                                #   many seconds (else: clean slate as usual)
     record_file: str = "market_data.sqlite"     # snapshots for tuning later ("" = off)
     record_seconds: float = 60.0          # one snapshot of every market this often (~15 MB a day)
 
@@ -387,6 +400,60 @@ class Config:
 
 
 CFG = Config()
+
+# Settings that may be changed while the bot runs (settings_override.json), with their allowed range. Never
+# secrets, URLs, file names, the kill switch or anything read only at start-up.
+OVERRIDABLE = {
+    "min_edge": (0.0, 0.10), "max_half_spread": (0.005, 0.20), "skew_per_share": (0.0, 0.001),
+    "reprice_tolerance_ticks": (0, 10), "keep_fraction": (0.0, 1.0),
+    "order_size_frac": (0.0, 0.05), "size_min_frac": (0.0, 0.05), "size_max_frac": (0.0, 0.10),
+    "headline_size_frac": (0.0, 0.20), "headline_position_frac": (0.0, 0.30), "quote_capital_frac": (0.0, 1.0),
+    "max_position_frac": (0.0, 0.10), "max_party_delta_frac": (0.0, 0.50), "party_skew_at_cap": (0.0, 0.05),
+    "max_worst_case_frac": (0.05, 0.60), "kelly_fraction": (0.0, 1.0), "kelly_max_market_frac": (0.0, 0.10),
+    "ref_weight": (0.0, 1.0), "ref_guard_gap": (0.02, 0.30), "ref_jump_threshold": (0.005, 0.30),
+    "ref_jump_cooldown_seconds": (0.0, 3600.0), "jump_threshold": (0.01, 0.50), "jump_cooldown_seconds": (0.0, 3600.0),
+    "arb_enabled": (False, True), "arb_min_profit": (0.005, 0.20), "take_enabled": (False, True),
+    "take_edge": (0.02, 0.30), "tail_low": (0.0, 0.20), "tail_high": (0.80, 1.0),
+    "requests_per_minute": (10, 100), "writes_per_minute": (5, 100), "budget_reserve": (0, 60),
+    "max_books_per_cycle": (1, 100), "book_stale": (60.0, 3600.0), "book_reverify_seconds": (10.0, 1800.0),
+    "parallel_writes": (1, 8), "write_wait_seconds": (0.0, 30.0),
+    "churn_control": (False, True), "min_quote_life_seconds": (0.0, 120.0), "churn_max_reprices": (1, 100),
+    "churn_window_seconds": (5.0, 3600.0), "urgent_ref_move": (0.0, 0.10),
+    "burst_protection": (False, True), "burst_write_seconds": (0.5, 60.0), "burst_cycle_seconds": (2.0, 600.0),
+    "burst_timeouts": (1, 100), "burst_calm_seconds": (0.0, 3600.0), "burst_markets": (1, 300),
+    "burst_size_factor": (0.05, 1.0), "burst_extra_edge": (0.0, 0.05),
+    "slow_cycle_alert_seconds": (10.0, 3600.0), "summary_every_hours": (0, 24),
+}
+
+
+def validate_overrides(raw, cfg):
+    """{name: value} from the overrides file -> ({name: checked value}, [problems]). Unknown names, wrong types
+    and out-of-range values are refused (and reported), never applied."""
+    good, bad = {}, []
+    if not isinstance(raw, dict):
+        return good, ["the file must hold one JSON object, e.g. {\"min_edge\": 0.015}"]
+    for k, v in raw.items():
+        if k not in OVERRIDABLE:
+            bad.append(f"{k}: not a live setting")
+            continue
+        lo, hi = OVERRIDABLE[k]
+        cur = getattr(cfg, k)
+        if isinstance(cur, bool):
+            if not isinstance(v, bool):
+                bad.append(f"{k}: must be true or false")
+                continue
+        elif isinstance(cur, int):
+            if isinstance(v, bool) or not isinstance(v, int):
+                bad.append(f"{k}: must be a whole number")
+                continue
+        elif isinstance(v, bool) or not isinstance(v, (int, float)):
+            bad.append(f"{k}: must be a number")
+            continue
+        if not isinstance(cur, bool) and not (lo <= v <= hi):
+            bad.append(f"{k}: {v} is outside {lo}..{hi}")
+            continue
+        good[k] = float(v) if isinstance(cur, float) else v
+    return good, bad
 
 # =============================================================================================
 # FIXED FACTS - set by the exchange and the markets themselves. Not tuning knobs.
@@ -1482,6 +1549,104 @@ def report(path):
     print(f"  edge    {s['edge_c']:+.2f} c/share   total {s['edge_total']:+.0f} SUSQies")
     print(f"  markout {s['markout_c']:+.2f} c/share   (fair value ~1 cycle after the fill)")
 
+MARKOUT_MINUTES = (1, 5, 30)
+
+
+def analyze(fills_path, db_path, hours=None, top=15):
+    """The `analyze` command: from fills.csv and market_data.sqlite only (no API requests). Lines of text:
+      - per market: fills, shares, edge at the quote (c/share: how far inside fair value we traded), markout
+        after 1/5/30 min (fair value then vs our price, c/share: negative = picked off), P&L marked at the
+        latest fair value;
+      - per market from the snapshots: share of the time our bid/ask was the best price ("at top"), and how
+        often a quote that was at the top was beaten by the next snapshot ("undercut", per hour quoted).
+    hours: only the last N hours."""
+    out = []
+    since = (utcnow() - timedelta(hours=hours)) if hours else None
+    fvs = defaultdict(list)                                  # eid -> [(time, fv)] from the snapshots
+    tops = defaultdict(list)                                 # eid -> [(time, bid at top, ask at top, quoted)]
+    labels = {}
+    if db_path and os.path.exists(db_path):
+        db = sqlite3.connect(db_path)
+        try:
+            for ts, eid, label, bb, ba, fv, ob, oa in db.execute(
+                    "SELECT ts, eid, label, best_bid, best_ask, fair_value, our_bid, our_ask FROM snapshots ORDER BY ts"):
+                t = parse_ts(ts)
+                if t is None or (since and t < since):
+                    continue
+                labels[eid] = label
+                if fv is not None:
+                    fvs[eid].append((t, fv))
+                tops[eid].append((t, ob is not None and bb is not None and abs(ob - bb) < 1e-9,
+                                  oa is not None and ba is not None and abs(oa - ba) < 1e-9, ob is not None or oa is not None))
+        except sqlite3.Error as e:
+            out.append(f"(snapshots unreadable: {e})")
+        finally:
+            db.close()
+
+    def fv_at(eid, t):
+        series = fvs.get(eid) or []
+        for tt, v in series:                                 # first snapshot at or after t
+            if tt >= t:
+                return v
+        return None
+
+    per = defaultdict(lambda: {"fills": 0, "shares": 0.0, "edge": 0.0, "edge_n": 0.0, "pnl": 0.0,
+                               **{f"m{m}": 0.0 for m in MARKOUT_MINUTES}, **{f"m{m}_n": 0.0 for m in MARKOUT_MINUTES}})
+    unmatched = 0
+    for r in read_fills(fills_path):
+        t = parse_ts(r.get("filled_at"))
+        if since and (t is None or t < since):
+            continue
+        eid, side = str(r.get("exchange_id")), r.get("our_side")
+        try:
+            qty = float(r.get("qty") or 0)
+            price = float(r.get("quote_price") or r.get("fill_price") or 0)
+        except ValueError:
+            continue
+        if side not in ("bid", "ask"):
+            unmatched += 1
+            continue
+        sign = 1 if side == "bid" else -1                    # +1 = we bought YES
+        m = per[eid]
+        m["fills"] += 1
+        m["shares"] += qty
+        if r.get("fv_at_quote") not in ("", None):
+            m["edge"] += sign * (float(r["fv_at_quote"]) - price) * qty
+            m["edge_n"] += qty
+        for mins in MARKOUT_MINUTES:
+            v = fv_at(eid, t + timedelta(minutes=mins)) if t else None
+            if v is not None:
+                m[f"m{mins}"] += sign * (v - price) * qty
+                m[f"m{mins}_n"] += qty
+        last = fvs[eid][-1][1] if fvs.get(eid) else None
+        if last is not None:
+            m["pnl"] += sign * (last - price) * qty
+    c = lambda m, k: f"{100 * m[k] / m[k + '_n']:+6.2f}" if m.get(k + "_n") else "    - "
+    out.append(f"fills: {sum(m['fills'] for m in per.values())} matched, {unmatched} not matched to a bot quote"
+               + (f" (last {hours:g} h)" if hours else ""))
+    tot = {k: sum(m[k] for m in per.values()) for k in ("shares", "edge", "edge_n", "pnl",
+                                                        *[f"m{x}" for x in MARKOUT_MINUTES], *[f"m{x}_n" for x in MARKOUT_MINUTES])}
+    out.append(f"all markets: {tot['shares']:.0f} shares, edge {c(tot, 'edge')}c, markout "
+               + " / ".join(f"{x}m {c(tot, f'm{x}')}c" for x in MARKOUT_MINUTES) + f", P&L at latest fair value {tot['pnl']:+.0f}")
+    out.append(f"{'market':26} {'fills':>5} {'shares':>8} {'edge c':>7} " + " ".join(f"{f'mk{x}m':>7}" for x in MARKOUT_MINUTES)
+               + f" {'P&L':>8} {'top bid':>7} {'top ask':>7} {'undercut/h':>10}")
+    rows = []
+    for eid in set(per) | set(tops):
+        m, snaps = per[eid], tops.get(eid, [])
+        quoted = [x for x in snaps if x[3]]
+        top_b = sum(x[1] for x in quoted) / len(quoted) if quoted else None
+        top_a = sum(x[2] for x in quoted) / len(quoted) if quoted else None
+        under = sum(1 for p, q in zip(snaps, snaps[1:]) if (p[1] and q[3] and not q[1]) or (p[2] and q[3] and not q[2]))
+        span_h = (quoted[-1][0] - quoted[0][0]).total_seconds() / 3600 if len(quoted) > 1 else 0
+        rows.append((m["pnl"], eid, m, top_b, top_a, under / span_h if span_h else None))
+    for pnl, eid, m, tb, ta, uh in sorted(rows, key=lambda r: r[0])[:top] + (
+            sorted(rows, key=lambda r: r[0])[-top:] if len(rows) > 2 * top else sorted(rows, key=lambda r: r[0])[top:]):
+        pct = lambda v: f"{100 * v:6.0f}%" if v is not None else "     - "
+        out.append(f"{labels.get(eid, eid)[:26]:26} {m['fills']:5d} {m['shares']:8.0f} {c(m, 'edge'):>7} "
+                   + " ".join(f"{c(m, f'm{x}'):>7}" for x in MARKOUT_MINUTES)
+                   + f" {m['pnl']:+8.0f} {pct(tb)} {pct(ta)} {uh if uh is None else round(uh, 1)!s:>10}")
+    return out
+
 # =============================================================================================
 # BOT - state, the cycle, risk, order management, main loop
 # =============================================================================================
@@ -1507,6 +1672,7 @@ class Ex:
     unconfirmed_hold: float = -1.0        # the pending_until set for orders whose batch outcome was unknown
     writes: int = 0                       # our writes (cancels / batches) touching it still in flight
     reprices: dict = field(default_factory=dict)   # side -> times we repriced it lately (churn control)
+    ref_moved_at: float = -1e9            # last time its Polymarket price moved >= urgent_ref_move
     cancelling: bool = False              # ...one of them is a cancel
     inv: float = 0.0                      # for logging / recording
     eff: float = 0.0                      # for logging
@@ -1617,6 +1783,12 @@ class Bot:
         self.errors_total = 0             # failed cycles since start (summaries report new ones)
         self.phase = "starting"           # what the bot is doing, for the status line
         self.selftest_passed = False
+        self.cycle_started, self.cycle_alerted = None, False
+        self.last_analysis_day = None
+        self.handover = False             # SIGUSR1: stop without cancelling (see request_handover)
+        self.last_progress_write, self.last_slow_alert = -1e9, -1e9
+        self.defaults = {k: getattr(cfg, k) for k in OVERRIDABLE}   # what a removed override goes back to
+        self.overrides, self.overrides_mtime, self.last_overrides_check = {}, None, -1e9
         self.selftest_future = None       # the self-test running in the background (see selftest_tick)
         self.selftest_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="selftest")
         self.selftest_eid = None
@@ -1724,10 +1896,29 @@ class Bot:
     def cycle(self):
         cfg = self.cfg
         now, now_m = utcnow(), time.monotonic()
+        self.cycle_started, self.cycle_alerted = now_m, False
         try:
             self.cycle_body(cfg, now, now_m)
         finally:
             self.last_cycle_seconds = time.monotonic() - now_m
+            self.cycle_started = None
+
+    def progress(self, phase):
+        """Inside a cycle: if it's running long, keep status.json fresh (it's otherwise written only after a
+        cycle, so a 4-minute cycle looked like a dead bot) and alert once when it passes slow_cycle_alert_seconds."""
+        if self.cycle_started is None:
+            return
+        now_m = time.monotonic()
+        running = now_m - self.cycle_started
+        if running < 10 or now_m - self.last_progress_write < 5:
+            return
+        self.last_progress_write = now_m
+        self.health["cycle_running_seconds"], self.health["cycle_phase"] = round(running), phase
+        self.write_status(ok=True)
+        if running >= self.cfg.slow_cycle_alert_seconds and not self.cycle_alerted \
+                and now_m - self.last_slow_alert >= 900:
+            self.cycle_alerted, self.last_slow_alert = True, now_m
+            alert(f"slow cycle: {running:.0f} s so far ({phase}) - the exchange may be slow")
 
     def cycle_body(self, cfg, now, now_m):
 
@@ -1763,11 +1954,22 @@ class Bot:
         f_pos = self.pool.submit(self.api.positions) if read_positions else None
         f_orders = self.pool.submit(self.api.open_orders, self.tid) if read_orders else None
         f_pnl = self.pool.submit(self.api.pnl) if slow_poll else None
-        if read_positions:                        # if a read fails, the cycle fails
-            self.cached_pos = f_pos.result()
+        pos_failed = False
+        if read_positions:                        # if a read fails, the cycle fails...
+            try:
+                self.cached_pos = f_pos.result()
+            except ApiError as e:
+                # ...except day one's 409 "holdings cannot be valued" (a market without a valuation price):
+                # positions only change through fills, so the last good read is fine for this cycle.
+                if e.status != 409 or self.cached_pos is None:
+                    raise
+                log.warning("positions unavailable (%s) - using the last read for this cycle", e)
+                pos_failed = True
         if read_orders:
             self.cached_orders = f_orders.result()
             self.orders_stale = False
+        if pos_failed:
+            self.orders_stale = True              # read positions (and orders) again next cycle
         pos, raw_orders = self.cached_pos, self.cached_orders
         # position.quantity is already signed by the API: + YES shares, - NO shares.
         inv = {str(p["exchangeId"]): float(p.get("quantity") or 0)
@@ -1797,6 +1999,8 @@ class Bot:
         else:
             self.download_books(self.books_to_fetch([]), mine_real)   # just the few the feed reported
             self.reverify_books(mine_real, now_m)  # books unconfirmed for a while: cheap bulk check first
+
+        self.progress("books")
 
         # 3. Fair values ---------------------------------------------------------------------------
         # book_fvs: the tournament book's own price (parties in a race scaled to sum to 1).
@@ -1898,6 +2102,7 @@ class Bot:
                     new_orders += self.reconcile(ex, ex.quote, resting.get(eid, []), fvs.get(eid), now, now_m)
             except ApiError as e:         # one exchange failing must not stop the others
                 log.error("exchange %s (%s): %s", eid, ex.label, e)
+        self.progress("sending orders")
         if self.running:
             if cfg.parallel_writes > 1:
                 self.send_changes(changes)
@@ -1971,6 +2176,8 @@ class Bot:
         self.ref_version_urgent = version
         moved = {k for k, m in getattr(self.refs, "last_moves", {}).items() if m >= self.cfg.urgent_ref_move}
         self.ref_moved = {e for e, ex in self.ex.items() if f"{ex.group}|{ex.party}" in moved}
+        for e in self.ref_moved:
+            self.ex[e].ref_moved_at = time.monotonic()
 
     def reference_jump_guard(self, now_m):
         """After each new Polymarket reading, pull quotes on any market whose Polymarket price moved
@@ -2365,14 +2572,21 @@ class Bot:
                 ex.reprices.setdefault(side, deque()).append(now_m)
 
         if self.burst and ex.eid not in self.burst_set and not critical:
-            # Burst mode, not a top market: keep what rests while it's still safe (price inside the limit, size not
-            # above what's wanted); pull what isn't; place nothing.
-            fix_bid = fix_bid and (q.bid is None or any(
+            # Burst mode, not a top market: no reprices. Keep what rests while it's still safe (price inside the
+            # limit, size not above what's wanted) and pull what isn't; an EMPTY side still gets a (smaller) quote,
+            # which costs only a share of one batch.
+            fix_bid = fix_bid and (q.bid is None or not bids or any(
                 o.price > (q.bid_limit if q.bid_limit is not None else q.bid) + 1e-9 or o.qty > q.bid_size + 1e-9 for o in bids))
-            fix_ask = fix_ask and (q.ask is None or any(
+            fix_ask = fix_ask and (q.ask is None or not asks or any(
                 o.price < (q.ask_limit if q.ask_limit is not None else q.ask) - 1e-9 or o.qty > q.ask_size + 1e-9 for o in asks))
             doomed = (bids if fix_bid else []) + (asks if fix_ask else [])
-            return Change(ex, doomed, False, [], self.change_key(ex, pull=True, reprice=True)) if doomed else None
+            k = self.cfg.burst_size_factor
+            new = [] if now_m < ex.pause_until else (
+                ([self.new_order(ex, True, q.bid, max(1, int(q.bid_size * k)), fv, now)] if fix_bid and q.bid is not None and not bids else [])
+                + ([self.new_order(ex, False, q.ask, max(1, int(q.ask_size * k)), fv, now)] if fix_ask and q.ask is not None and not asks else []))
+            if not doomed and not new:
+                return None
+            return Change(ex, doomed, False, new, self.change_key(ex, pull=bool(doomed) or not new, reprice=bool(doomed)))
         # Cancel the wrong side(s). Both wrong -> one cancel-all for the exchange; else per order.
         doomed = (bids if fix_bid else []) + (asks if fix_ask else [])
         new = []
@@ -2404,8 +2618,8 @@ class Bot:
             return False                                  # bigger than now allowed (limits tightened): must shrink
         if o.expires and (o.expires - now).total_seconds() < cfg.refresh_before_expiry:
             return False
-        if ex.eid in self.ref_moved:
-            return False                                  # Polymarket just moved here: follow it now
+        if ex.eid in self.ref_moved or now_m - ex.ref_moved_at < 15:
+            return False                                  # Polymarket moved here lately: follow it now
         young = o.order_id in self.recent_orders and now_m - self.recent_orders[o.order_id][1] < cfg.min_quote_life_seconds
         hist = ex.reprices.get("bid" if is_bid else "ask") or deque()
         while hist and now_m - hist[0] > cfg.churn_window_seconds:
@@ -2506,6 +2720,7 @@ class Bot:
             if left <= 0 or not self.writes:
                 break
             wait([w.future for w in self.writes], timeout=left, return_when=FIRST_COMPLETED)
+            self.progress("waiting for order writes")
         self.harvest_writes()
 
     def send_orders(self, changes):
@@ -3221,6 +3436,61 @@ class Bot:
         except OSError as e:
             log.warning("could not write status file: %s", e)
 
+    def maybe_daily_analysis(self):
+        """Optional daily phone message: the headline lines of `analyze` over the last 24 h (local files only)."""
+        hour, now = self.cfg.analyze_daily_hour, utcnow()
+        if hour < 0 or not self.api.live or now.hour != hour or self.last_analysis_day == now.date():
+            return
+        self.last_analysis_day = now.date()
+        try:
+            lines = analyze(bot_path(self.cfg.fills_csv), bot_path(self.cfg.record_file) if self.cfg.record_file else "",
+                            hours=24, top=3)
+            notify("\n".join(lines[:2] + [l[:60] for l in lines[3:]]), title="mm_bot daily analysis", tags="bar_chart")
+        except Exception as e:                # a report must never disturb trading
+            log.warning("daily analysis failed: %s", e)
+
+    # ------------------------------------------------------------------------------ live settings
+    def check_overrides(self, force=False):
+        """Every overrides_seconds: re-read settings_override.json if it changed, apply what's valid, put back
+        the default of anything removed, log every change and alert on anything refused."""
+        cfg = self.cfg
+        now_m = time.monotonic()
+        if not cfg.overrides_file or (not force and now_m - self.last_overrides_check < cfg.overrides_seconds):
+            return
+        self.last_overrides_check = now_m
+        path = bot_path(cfg.overrides_file)
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            mtime = None
+        if mtime == self.overrides_mtime:
+            return
+        self.overrides_mtime = mtime
+        raw = {}
+        if mtime is not None:
+            try:
+                with open(path) as f:
+                    raw = json.load(f)
+            except (OSError, ValueError) as e:
+                alert(f"{cfg.overrides_file} unreadable ({e}) - keeping the current settings")
+                return
+        good, bad = validate_overrides(raw, cfg)
+        if bad:
+            alert(f"{cfg.overrides_file}: ignored " + "; ".join(bad))
+        wanted = {**{k: self.defaults[k] for k in self.overrides if k not in good}, **good}
+        for k, v in wanted.items():
+            if getattr(cfg, k) != v:
+                log.warning("SETTING %s: %s -> %s%s", k, getattr(cfg, k), v, "" if k in good else " (default again)")
+                setattr(cfg, k, v)
+                if k == "requests_per_minute":
+                    self.api.budget = min(getattr(self.api, "budget", v), v)
+                if k == "writes_per_minute":
+                    self.api.wbudget = min(getattr(self.api, "wbudget", v), v)
+                if k in ("size_min_frac", "size_max_frac", "headline_size_frac", "quote_capital_frac"):
+                    self.size_plan_time = -1e9                 # re-plan sizes now
+        self.overrides = good
+        self.health["overrides"] = dict(good)
+
     # ------------------------------------------------------------------------------ dry-run helpers
     def sim_by_eid(self):
         out = defaultdict(list)
@@ -3239,10 +3509,49 @@ class Bot:
         """Ctrl+C / kill only raises a flag. The loop stops touching the book, then shutdown()
         cancels everything. Cancelling inside the handler would race the cycle, which could post
         fresh orders right after the cancel. A second Ctrl+C forces an immediate exit."""
-        if not self.running:
+        if not self.running and not self.handover:
             raise KeyboardInterrupt
+        self.handover = False             # a plain stop always cancels, even after a handover request
         log.info("stop requested - finishing the current request, then cancelling all orders (Ctrl+C again to force)")
         self.running = False
+
+    def request_handover(self, *_):
+        """SIGUSR1 (deploy): stop like Ctrl+C but leave our quotes resting, so the new version can adopt them
+        (see adopt_handover) instead of the market going unquoted for the restart. They expire within order_ttl
+        anyway, so a new version that never starts leaves nothing behind for long."""
+        log.info("handover requested - stopping without cancelling; the next start adopts the resting orders")
+        self.handover = True
+        self.running = False
+
+    def adopt_handover(self):
+        """At start: True if the previous run handed over recently (its orders are ours to manage, not cancel)."""
+        path = bot_path(self.cfg.handover_file)
+        try:
+            with open(path) as f:
+                info = json.load(f)
+            os.remove(path)
+        except (OSError, ValueError):
+            return False
+        age = time.time() - float(info.get("t", 0))
+        if not 0 <= age <= self.cfg.handover_max_age:
+            log.info("handover file is %.0f s old - too old, starting from a clean slate", age)
+            return False
+        log.info("handover: adopting the %s orders the previous run left resting", info.get("orders", "?"))
+        now_m = time.monotonic()
+        for r in info.get("resting") or []:
+            try:
+                o = Resting(int(r["id"]), str(r["eid"]), bool(r["bid"]), float(r["price"]), float(r["qty"]),
+                            parse_ts(r.get("expires")))
+            except (KeyError, TypeError, ValueError):
+                continue
+            self.my_orders[o.order_id] = o
+            self.recent_orders[o.order_id] = (o, now_m)      # trusted over a lagging list for the grace period
+            if r.get("placed"):
+                self.placed_qty[o.order_id], self.filled_qty[o.order_id] = float(r["placed"]), float(r["placed"]) - o.qty
+        for oid in info.get("recent_cancels") or []:
+            self.recent_cancels[int(oid)] = now_m
+        self.orders_stale = True                  # first cycle reads the list; sync_orders takes them over
+        return True
 
     def sleep_until(self, t):
         while self.running and time.monotonic() < t:
@@ -3521,6 +3830,8 @@ class Bot:
     def run(self):
         signal.signal(signal.SIGINT, self.request_stop)
         signal.signal(signal.SIGTERM, self.request_stop)   # `systemctl stop` sends this
+        if hasattr(signal, "SIGUSR1"):                     # handover restart (deploy): stop WITHOUT cancelling
+            signal.signal(signal.SIGUSR1, self.request_handover)
         kill_file = bot_path(self.cfg.kill_file)
         if self.api.live and os.path.exists(kill_file):
             log.critical("the kill switch fired earlier (%s). Check what happened, then delete that file to trade again.",
@@ -3536,10 +3847,21 @@ class Bot:
             if self.api.live:
                 alert("bot starting (live)")
                 self.wait_for_trading()
-                if self.running:
-                    log.info("clean slate: cancelling any orders left over from before")
+                if self.running and self.adopt_handover():
+                    pass                                  # keep the previous run's quotes (see request_handover)
+                elif self.running:
                     try:
-                        self.cancel_everything()
+                        left = [o for o in self.api.open_orders(self.tid) if str(o.get("exchangeId")) in self.ex]
+                    except ApiError as e:
+                        left = None                       # can't tell: cancel to be safe
+                        log.warning("open-orders read failed (%s) - cancelling to be safe", e)
+                    try:
+                        if left == []:
+                            log.info("clean slate: no orders resting - nothing to cancel")
+                        else:
+                            log.info("clean slate: cancelling %s orders left over from before",
+                                     len(left) if left is not None else "any")
+                            self.cancel_everything()
                     except ApiError as e:
                         # Day one's open: every write timed out. Crashing here (exit 1, restart, same again) helps
                         # nobody: anything left over shows up in the first open-orders read and is managed (or
@@ -3550,6 +3872,8 @@ class Bot:
             while self.running:
                 t0 = time.monotonic()
                 try:
+                    self.check_overrides()
+                    self.maybe_daily_analysis()
                     if t0 - self.last_reload > self.cfg.market_reload_seconds:
                         self.load_markets()
                     self.cycle()
@@ -3593,8 +3917,26 @@ class Bot:
             return
         # An order write still in flight could land after the cancel-all and be left resting: drop the queued
         # ones, wait for those already sent, and cancel again below if any are still running after that.
-        self.writer.shutdown(wait=False, cancel_futures=True)
-        self.drain_writes(timeout=2 * self.cfg.request_timeout)
+        handover = self.handover and self.exit_code == 0
+        # On a handover queued writes still go out (a queued pull must not be lost: the quotes stay resting).
+        self.writer.shutdown(wait=False, cancel_futures=not handover)
+        self.drain_writes(timeout=(4 if handover else 2) * self.cfg.request_timeout)
+        if handover:
+            self.notes_dirty = True
+            self.save_order_notes()                   # the next run attributes their fills
+            now_m = time.monotonic()
+            write_json(bot_path(self.cfg.handover_file), {
+                "t": time.time(), "orders": len(self.my_orders),
+                # Our own record: the new run trusts it like its own for recent_order_grace_seconds, so an order
+                # placed moments ago that the open-orders list doesn't show yet is never placed twice.
+                "resting": [{"id": o.order_id, "eid": o.eid, "bid": o.is_bid, "price": o.price, "qty": o.qty,
+                             "placed": self.placed_qty.get(oid), "expires": iso(o.expires) if o.expires else None}
+                            for oid, o in self.my_orders.items()],
+                "recent_cancels": [oid for oid, t in self.recent_cancels.items()
+                                   if now_m - t <= self.cfg.recent_order_grace_seconds]})
+            log.info("handover: %d orders left resting for the next run (they expire within %.0f min)",
+                     len(self.my_orders), self.cfg.order_ttl / 60)
+            return
         self.notes_dirty = True
         self.save_order_notes()
         for attempt in range(self.cfg.shutdown_cancel_attempts):
@@ -3660,6 +4002,10 @@ def main():
         print(json.dumps(orders[:20], indent=2))
     elif cmd == "cancel":
         print("done" if api.cancel_all(api.tournament()["id"]) else "some orders may remain - check UI")
+    elif cmd == "analyze":
+        hours = float(sys.argv[2]) if len(sys.argv) > 2 else None
+        print("\n".join(analyze(bot_path(CFG.fills_csv), bot_path(CFG.record_file), hours)))
+        return
     elif cmd == "summary":
         t = api.tournament()
         title, message = build_summary(api, bot_path(CFG.fills_csv), float(t.get("initialBalance") or DEFAULT_BANKROLL))

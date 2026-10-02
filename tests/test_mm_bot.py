@@ -1360,6 +1360,10 @@ new21 = [x for x in a.ours("21") if x not in before["21"]]
 check("...e.g. Utah: no new orders there", not new21, (before["21"], a.ours("21")))
 moved = [x for x in a.ours("11") if x not in before["11"]]
 check("burst: top markets repriced at half size", moved and all(n == 50 for _, _, n in moved), (before["11"], a.ours("11")))
+b.cancel("22", [o for o in b.my_orders.values() if o.eid == "22"], whole_exchange=True)
+b.feed.push(dirty={"22"}); b.cycle()
+check("burst: outside the top markets an EMPTY side still gets a quote, at reduced size",
+      len(a.ours("22")) == 2 and all(n == 50 for _, _, n in a.ours("22")), a.ours("22"))
 b.update_burst = real_ub
 b.write_log.clear(); b.burst_calm_since = time.monotonic() - 121
 b.update_burst(time.monotonic())
@@ -1429,6 +1433,145 @@ th = threading.Thread(target=lambda: wapi2.throttle(write=True)); th.start()   #
 time.sleep(0.05); t0 = time.monotonic(); wapi2.throttle(); waited = time.monotonic() - t0
 th.join()
 check("a write waiting on the write budget doesn't hold up reads", waited < 0.3, f"{waited:.2f}s")
+
+print("--- live settings (settings_override.json, re-read every 30 s)")
+a, b = make_bot()
+alerts = []
+real_alert, M.alert = M.alert, lambda m: alerts.append(m)
+with open(b.cfg.overrides_file, "w") as f:
+    json.dump({"min_edge": 0.015, "burst_markets": 25, "api_key": "x", "max_half_spread": 5, "churn_control": "yes"}, f)
+logging.disable(logging.CRITICAL); b.check_overrides(force=True); logging.disable(logging.NOTSET)
+check("valid overrides applied", b.cfg.min_edge == 0.015 and b.cfg.burst_markets == 25, (b.cfg.min_edge, b.cfg.burst_markets))
+check("secrets, out-of-range values and wrong types refused (and reported), never applied",
+      b.cfg.api_key == "test-key" and b.cfg.max_half_spread == 0.04 and b.cfg.churn_control is False
+      and alerts and all(k in alerts[0] for k in ("api_key", "max_half_spread", "churn_control")), alerts)
+with open(b.cfg.overrides_file, "w") as f:
+    json.dump({"burst_markets": 25}, f)
+os.utime(b.cfg.overrides_file, (time.time() + 5, time.time() + 5))
+logging.disable(logging.CRITICAL); b.check_overrides(force=True); logging.disable(logging.NOTSET)
+check("a setting removed from the file goes back to its default", b.cfg.min_edge == 0.01 and b.cfg.burst_markets == 25)
+with open(b.cfg.overrides_file, "w") as f:
+    f.write("{broken")
+os.utime(b.cfg.overrides_file, (time.time() + 10, time.time() + 10))
+alerts.clear(); logging.disable(logging.CRITICAL); b.check_overrides(force=True); logging.disable(logging.NOTSET)
+check("an unreadable file keeps the current settings (and alerts)", b.cfg.burst_markets == 25 and alerts, alerts)
+M.alert = real_alert
+check("never overridable: secrets, URLs, files, the kill switch", not {"api_key", "base_url", "slug", "alert_url",
+      "max_drawdown_pct", "fills_csv", "overrides_file"} & set(M.OVERRIDABLE))
+check("every overridable name is a real setting", all(hasattr(Config(), k) for k in M.OVERRIDABLE))
+
+print("--- start-up clean slate only when needed; status during long cycles")
+a, b = make_bot(); b.cfg.selftest_enabled = False
+run_cycles(b, 1)
+check("start-up: no orders resting -> no clean-slate cancel (one fewer write at a slow open)",
+      a.calls.index(("cancel_all", None)) > min(i for i, c in enumerate(a.calls) if c[0] == "batch"), a.calls[:6])
+a, b = make_bot(); b.cfg.selftest_enabled = False
+a.orders[999] = {"id": 999, "exchangeId": "11", "side": "yes", "action": "buy", "priceLimit": 0.05, "quantity": 5,
+                 "open": True, "expirationDate": iso(utcnow() + timedelta(minutes=20))}
+run_cycles(b, 1)
+check("start-up: orders left over -> cancelled first",
+      a.calls.index(("cancel_all", None)) < min(i for i, c in enumerate(a.calls) if c[0] == "batch"), a.calls[:4])
+a, b = make_bot()
+alerts = []
+real_alert, M.alert = M.alert, lambda m: alerts.append(m)
+b.cfg.slow_cycle_alert_seconds = 10
+b.cycle_started = time.monotonic() - 30
+b.progress("sending orders")
+st = json.load(open(b.cfg.status_file))
+M.alert = real_alert
+check("a long cycle keeps status.json fresh (running seconds + phase) and alerts once",
+      st.get("cycle_running_seconds") == 30 and st.get("cycle_phase") == "sending orders" and len(alerts) == 1, (st.get("cycle_phase"), alerts))
+
+print("--- analyze (local files only)")
+d = tempfile.mkdtemp()
+dbp, fp = os.path.join(d, "m.sqlite"), os.path.join(d, "f.csv")
+db = sqlite3.connect(dbp)
+db.execute("CREATE TABLE snapshots (ts TEXT, mode TEXT, eid TEXT, label TEXT, best_bid REAL, best_ask REAL, fair_value REAL, "
+           "reference REAL, our_bid REAL, our_ask REAL, position REAL)")
+t0 = utcnow() - timedelta(hours=1)
+for k in range(40):                                        # fv 0.50 -> 0.54 over 40 min; our bid at the top half the time
+    db.execute("INSERT INTO snapshots VALUES (?,?,?,?,?,?,?,?,?,?,?)", (iso(t0 + timedelta(minutes=k)), "live", "11", "Rep Ohio",
+               0.49, 0.52, 0.50 + 0.001 * k, None, 0.49 if k % 2 else 0.48, 0.52, 0))
+db.commit(); db.close()
+with open(fp, "w", newline="") as f:
+    w = csv.writer(f); w.writerow(FillLogger.COLUMNS)
+    w.writerow([1, iso(t0), "11", 5, "bid", 100, 0.49, 0.49, 0.50, ""])
+    w.writerow([2, iso(t0), "11", 6, "?", 100, 0.49, "", "", ""])
+lines = analyze(fp, dbp)
+check("analyze: edge at quote (+1c), 5-min markout (+1.5c), P&L at latest fair value (+4.9), unmatched count",
+      "1 matched, 1 not matched" in lines[0] and "+1.00" in lines[1] and "5m  +1.50c" in lines[1] and "+5" in lines[1], lines[:2])
+check("analyze: time at the top of the book per market", "50%" in lines[3] and "Rep Ohio" in lines[3], lines[3:4])
+check("analyze runs without a snapshot file", analyze(fp, "")[0].startswith("fills: 1 matched"))
+
+print("--- handover restart (deploy without pulling quotes)")
+a, b = make_bot(); b.cfg.selftest_enabled = False
+real_cycle = b.cycle
+n = {"k": 0}
+def then_handover():
+    n["k"] += 1
+    real_cycle()
+    if n["k"] == 2:
+        b.request_handover()
+b.cycle, b.cfg.loop_seconds = then_handover, 0
+b.run()
+resting = dict(a.orders)
+check("SIGUSR1 handover: the bot exits WITHOUT cancelling, and leaves a handover note",
+      len(resting) == 8 and os.path.exists(b.cfg.handover_file), (len(resting), a.calls[-3:]))
+b2 = Bot(a, b.cfg)
+a.calls.clear()
+seen = []
+real_c2 = b2.cycle
+b2.cycle = lambda: (real_c2(), seen.append(set(b2.my_orders)))[0]
+run_cycles(b2, 2)
+calls_before_stop = a.calls[:a.calls.index(("cancel_all", None))] if ("cancel_all", None) in a.calls else a.calls
+check("the next start adopts those orders: no clean-slate cancel, nothing placed twice, nothing replaced",
+      not [c for c in calls_before_stop if c[0] in ("batch", "cancel_order")] and seen and set(resting) <= seen[-1]
+      and not os.path.exists(b.cfg.handover_file), (calls_before_stop[:6], list(b2.my_orders)))
+a, b = make_bot()
+with open(b.cfg.handover_file, "w") as f:
+    json.dump({"t": time.time() - 3600, "orders": 3}, f)
+check("a handover note older than handover_max_age is ignored (clean slate as usual)", not b.adopt_handover())
+a, b = make_bot(); b.cfg.selftest_enabled = False
+n2 = {"k": 0}
+real_cycle3 = b.cycle
+def then_handover2():
+    n2["k"] += 1
+    real_cycle3()
+    if n2["k"] == 1:
+        b.request_handover()
+b.cycle, b.cfg.loop_seconds = then_handover2, 0
+b.run()
+real_oo2 = a.open_orders
+a.open_orders = lambda tid, eid=None: []                  # the list lags: shows none of them yet
+b3 = Bot(a, b.cfg)
+a.calls.clear()
+b3.running = True
+b3.adopt_handover()
+b3.cycle()
+a.open_orders = real_oo2
+check("handover: orders the lagging list doesn't show yet are taken from the note, never placed twice",
+      not a.sent("batch") and len(b3.my_orders) == 8, (a.sent("batch"), len(b3.my_orders)))
+a, b = make_bot()
+b.request_handover(); b.request_stop()
+check("a normal stop after a handover request cancels as usual", b.handover is False)
+a, b = make_bot()
+b.handover, b.exit_code = True, EXIT_KILLED
+a.orders[1] = {"id": 1, "exchangeId": "11", "side": "yes", "action": "buy", "priceLimit": 0.05, "quantity": 5, "open": True,
+               "expirationDate": iso(utcnow() + timedelta(minutes=20))}
+b.shutdown()
+check("kill switch / fatal exits always cancel, even after a handover request", not a.orders)
+a, b = make_bot(); b.cycle()
+real_pos = a.positions
+a.positions = lambda: (_ for _ in ()).throw(ApiError(409, "CONFLICT", "Tournament holdings cannot be valued"))
+b.orders_stale = True
+logging.disable(logging.CRITICAL)
+try:
+    b.cycle(); ok = True
+except ApiError:
+    ok = False
+logging.disable(logging.NOTSET)
+a.positions = real_pos
+check("positions 409 'holdings cannot be valued' (day one 16:30): the cycle goes on with the last read", ok and b.orders_stale)
 
 print("--- parallel requests")
 a, b = make_bot()
