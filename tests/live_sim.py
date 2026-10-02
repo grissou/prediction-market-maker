@@ -24,7 +24,10 @@ Run:  python tests/live_sim.py SEEDS HOURS REGIME '{overrides}' ['{variant}' ...
       from Polymarket; 1 = from the tournament consensus without its noise: Polymarket + bias + tilt term),
       "_world_tilt" s0 and "_world_tilt_growth" g per hour: consensus = Polymarket - s_t (Polymarket - 0.5) + bias +
       noise, s_t = s0 + g x hours. The real starting gap already holds the live tilt, so the per-market bias becomes
-      the residual (bias + s0 (p0 - 0.5)): the start matches the real book either way. All three 0 = as before.
+      the residual (bias + s0 (p0 - 0.5)): the start matches the real book either way, and s0 only names the part of
+      the real gap that is the tilt (the part that grows). "_world_tilt_add" a (default 0) ADDS a x (0.5 - Polymarket)
+      on top, with no residual compensation: a world more tilted than the real book (the ref_tilt_max test). All 0 =
+      as before.
       Liquidation-marked fields: pnl_mid, pnl_liq, mk15_mid, exit_ratio, hold_med (see LiveSim.metrics).
       Env LIVE_SIM_CACHE=file: per-(seed, hours, regime, config, LIVE_SIM_TAG) results cached, never run twice.
       "_bg_wc" W (default 0 = as before): the rest of the account's sum-of-maxima worst case, so the live reduce-only
@@ -73,8 +76,9 @@ def all_off():
 
 class LiveSim(Sim):
     def __init__(self, seed, hours, regime, cfg, n=40, start_cap=0.90, house="0945", outsiders=3,
-                 rival_anchor=0.0, world_tilt=0.0, world_tilt_growth=0.0, bg_wc=0.0):
+                 rival_anchor=0.0, world_tilt=0.0, world_tilt_growth=0.0, bg_wc=0.0, world_tilt_add=0.0):
         super().__init__(seed, hours, regime, cfg, share=SHARE)
+        self.tilt_add = float(world_tilt_add)
         self.bg_wc, self.global_reduce, self.ro_cycles, self.n_cycles, self.wc_start = float(bg_wc), False, 0, 0, None
         self.anchor, self.tilt0, self.tilt_g = float(rival_anchor), float(world_tilt), float(world_tilt_growth)
         data = json.load(open(START))
@@ -227,7 +231,7 @@ class LiveSim(Sim):
         self.rp = {}
         for m in self.mkts:
             p, c = self.paths_by[id(m)]
-            if self.tilt0 or self.tilt_g:
+            if self.tilt0 or self.tilt_g or self.tilt_add:
                 for t in range(len(c)):
                     c[t] = min(0.99, max(0.01, c[t] + self.tilt_term(t, p[t])))
             if self.anchor:
@@ -237,7 +241,7 @@ class LiveSim(Sim):
 
     def tilt_term(self, t, p):
         """The world's favourite-longshot tilt at second t: consensus - Polymarket from the tilt alone."""
-        return -(self.tilt0 + self.tilt_g * t / 3600.0) * (p - 0.5)
+        return -(self.tilt0 + self.tilt_add + self.tilt_g * t / 3600.0) * (p - 0.5)
 
     def rival_step(self, m, rv, t, p):
         return super().rival_step(m, rv, t, self.rp.get(id(m), p))
@@ -740,7 +744,7 @@ def _one(args):
     kw = dict(n=int(ov.pop("_n", 40)), start_cap=float(ov.pop("_start_cap", 0.90)), house=str(ov.pop("_house", "0945")),
               outsiders=int(ov.pop("_outsiders", 3)), rival_anchor=float(ov.pop("_rival_anchor", 0.0)),
               world_tilt=float(ov.pop("_world_tilt", 0.0)), world_tilt_growth=float(ov.pop("_world_tilt_growth", 0.0)),
-              bg_wc=float(ov.pop("_bg_wc", 0.0)))
+              bg_wc=float(ov.pop("_bg_wc", 0.0)), world_tilt_add=float(ov.pop("_world_tilt_add", 0.0)))
     sim = LiveSim(seed, hours, regime, S.make_cfg(ov), **kw)
     return sim.run()
 

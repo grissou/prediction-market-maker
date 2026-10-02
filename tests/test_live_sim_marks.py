@@ -53,6 +53,9 @@ b = L.LiveSim(3, 0.02, "quiet", S.make_cfg({}), rival_anchor=1, world_tilt=0.05,
 for ma, mb in zip(a.mkts, b.mkts):
     check("residual bias", abs((mb.bias - 0.05 * (mb.p0 - 0.5)) - ma.bias) < 1e-12)
 check("tilt term", abs(b.tilt_term(3600, 0.9) - (-0.052 * 0.4)) < 1e-12)
+b2 = L.LiveSim(3, 0.02, "quiet", S.make_cfg({}), rival_anchor=1, world_tilt=0.05, world_tilt_add=0.08)
+check("_world_tilt_add: same residual bias, more tilt", all(abs(x.bias - y.bias) < 1e-12 for x, y in zip(b.mkts, b2.mkts))
+      and abs(b2.tilt_term(0, 0.9) - (-0.13 * 0.4)) < 1e-12)
 b.run()
 m = b.mkts[0]
 p, c = b.paths_by[id(m)]
