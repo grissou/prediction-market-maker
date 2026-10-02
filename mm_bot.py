@@ -726,8 +726,10 @@ class Config:
     # complete set is held in a 2-leg race, rest the ASK of one leg (the one whose ask sits best) at
     # max(join the best other ask, 1 - best other bid of the other leg - pair_unwind_max_cost), one slice
     # (pair_unwind_max_frac of the account in cash, at most the other leg's best bid size); when it fills, sell the
-    # same quantity of the other leg at its best bid at once (one take, cooldowns bypassed, write budget not).
-    # A set is then closed for >= 1 - pair_unwind_max_cost; the unmatched leg is never more than one slice.
+    # same quantity of the other leg at its best bid at once (one take, cooldowns bypassed, write budget not) if
+    # that bid is >= 1 - the resting leg's price - pair_unwind_max_cost - 0.5c (else the take waits, retried each
+    # cycle, one alert). A set is closed for >= 1 - max_cost - 0.5c, or the owed leg waits; the unmatched leg is
+    # never more than one slice. Switched off live: owed second legs are still finished, nothing new rests.
     # Short sets mirror it (rest a BID, take the other leg's ask). Selling both legs to others is not a self-trade.
     pair_unwind_passive: bool = False
     pair_unwind_max_cost: float = 0.003   # at most 0.3c per set below 1 (22 on 7,335 sets)
@@ -747,7 +749,11 @@ class Config:
     # (long) / ask (short), immediate-or-cancel, one order <= max_order_cash_frac of the account and the best level,
     # never more than 1c through the book's price, at most hold_take_max_per_min takes a minute (bot-wide) and
     # hold_unload_budget_frac of the account (notional) per rolling hour (take_aged). The hourly budget starts
-    # fully used: no take in the first hour after start (or after turning it on), so a restart can never dump.
+    # fully used: no take in the first hour after start or after turning it on (any cycle with hold_target_hours
+    # <= 0 resets the hold-off), so a restart can never dump. Neither half acts in a market during its jump
+    # cooldown, within reduce_from_book_pause_s of a Polymarket jump, or when Polymarket is more than
+    # ref_guard_gap on the other side of the book's price (it says the exit is the wrong trade); the joined
+    # reducing side is never larger than the position (a hold exit never flips it).
     hold_target_hours: float = 0.0        # 0 = off (try 4)
     hold_unload_budget_frac: float = 0.02  # notional of takes per rolling hour, fraction of the account value
     hold_take_max_per_min: int = 2        # takes per minute, bot-wide
@@ -757,7 +763,7 @@ class Config:
     # outcome (not marked at the last trades). > 0 (with ref_tilt_enabled): inside the last N days before a market's
     # close the tilt s applied in blend_fv ramps linearly to 0 at the close (carry_ramp), so quotes lean back to raw
     # Polymarket and the book takes the favourite-longshot carry late. The estimator itself is untouched.
-    ref_tilt_carry_days: float = 0.0
+    ref_tilt_carry_days: float = 0.0      # NOT live-overridable (not in OVERRIDABLE): code change + restart
 
 
 CFG = Config()
@@ -908,8 +914,8 @@ OVERRIDABLE = {
     "hold_unload_budget_frac": (0.0, 0.10),
     "hold_take_max_per_min": (0, 10),
     "hold_target_headline": (False, True),
-    # --- Package 5: T2.3 carry ramp (HARD GATE: keep 0 until SIG confirms settlement at the outcome) ---
-    "ref_tilt_carry_days": (0.0, 30.0),
+    # (Package 5 T2.3 ref_tilt_carry_days is a HARD GATE and deliberately NOT here: changing it from 0 needs a code
+    #  change and a restart, never a live override.)
 }
 MAX_ORDER_TTL = 7200.0    # no order of ours lives longer than this (dead-man's switch), whatever the TTL settings
 LADDER_MAX_LEVELS = 8
@@ -3581,6 +3587,8 @@ class Bot:
         # 6b. Take tournament quotes that Polymarket says are clearly stale (confirmed over 2 readings) ---
         taken = (self.take_stale_quotes(refs, liquid, fvs, inv, mine_real, global_reduce, party_delta, now_m)
                  if self.running else set())
+        if cfg.hold_target_hours <= 0:                     # C off (or switched off live): turning it back on
+            self.hold_open_at = None                        #   restarts the 1-hour hold-off
         if cfg.hold_target_hours > 0 and self.running:      # C hold target: aged lots taken within the hourly budget
             taken |= self.take_aged(inv, book_fvs, mine_real, now_m)
 
@@ -4617,7 +4625,7 @@ class Bot:
         ex.bb_tag = " bb" if q.behind else ""
         ex.lad_ctx = (adding, adding_limit, frag_limit)   # (R3 ladder: the same factors and limits)
         if cfg.hold_target_hours > 0 and not reduce_only:   # C hold target: aged lots' reducing side joins the best
-            q = self.hold_quote(ex, q, best_bid, best_ask, book_fv if book_fv is not None else fv, cfg)
+            q = self.hold_quote(ex, q, best_bid, best_ask, book_fv if book_fv is not None else fv, cfg, ref, now_m)
         return q
 
     def update_size_plan(self, now_m, fvs):
@@ -5877,31 +5885,36 @@ class Bot:
         same cycle can hide one: the set is then still whole, nothing is unmatched). Returns the races traded.
         execute(eid, buy, qty, price) -> shares done replaces the exchange take (simulator)."""
         cfg, acted = self.cfg, set()
-        if not cfg.pair_unwind_passive:
-            self.pp.clear()
-            return acted
+        off = not cfg.pair_unwind_passive         # switched off live: only owed second legs are finished
         for race, members in self.groups.items():
             if len(members) != 2 or race in skip or not self.running:
                 continue
             st = self.pp.get(race)
+            if off and st is None:
+                continue
             if st is not None:
                 x, y, s = st["leg"], st["other"], st["sign"]
                 sold_x = max(0.0, s * (st["base_x"] - inv.get(x, 0.0)))
                 # (our own takes count even before a positions read shows them: never sold twice)
                 sold_y = max(0.0, s * (st["base_y"] - inv.get(y, 0.0)), st.get("taken", 0.0))
-                owed = int(round(min(sold_x, st["slice"]) - sold_y))
+                if off:                           # what the slice had sold when switched off: later fills of the
+                    st.setdefault("off_cap", sold_x)  # normal ask on this leg are not the slice's
+                owed = int(round(min(sold_x, st["slice"], st.get("off_cap", sold_x)) - sold_y))
                 if owed >= 1:
                     acted.add(race)
                     st["left"] = max(0, int(st["slice"] - sold_x))
                     st["taken"] = sold_y + self.pair_passive_take(race, st, owed, fvs, now_m, mine_real, execute)
                     continue
-                if 0.5 <= sold_x < st["slice"] - 0.5:             # part filled and matched: the rest keeps resting
-                    c = self.pp_candidate(x, y, s, st["slice"] - sold_x, self.bankroll())
+                if off:                                           # nothing owed: the slice state is dropped
+                    del self.pp[race]
+                    continue
+                if "off_cap" not in st and 0.5 <= sold_x < st["slice"] - 0.5:   # part filled and matched:
+                    c = self.pp_candidate(x, y, s, st["slice"] - sold_x, self.bankroll())   # the rest keeps resting
                     st["left"] = int(st["slice"] - sold_x) if c else 0
                     if c:
                         st["price"] = c[1]
                     continue
-                if sold_x >= st["slice"] - 0.5:
+                if sold_x >= st["slice"] - 0.5 or "off_cap" in st:   # (back on after a hot off: a fresh slice)
                     self.pp_sets_total += int(round(min(sold_x, sold_y)))
                     log.warning("PAIR UNWIND (passive) %s: slice of %d sets closed", race, st["slice"])
                 prefer = st["leg"]
@@ -5935,6 +5948,17 @@ class Bot:
                         "ask" if buy else "bid", ex.label)
             return 0.0
         price = side[0]["price"]
+        # Floor (long set) / ceiling (short set): the set closes for >= 1 - max_cost - 0.5c, or the owed leg waits
+        px, slack = st["price"], self.cfg.pair_unwind_max_cost + 0.005
+        if (price < 1 - px - slack - 1e-9) if not buy else (price > 1 + slack - px + 1e-9):
+            log.warning("pair unwind second leg on %s deferred: best %s %.3f on %s is past the %s %.3f (retrying)",
+                        race, "ask" if buy else "bid", price, ex.label, "ceiling" if buy else "floor",
+                        (1 + slack - px) if buy else (1 - px - slack))
+            if not st.get("floor_alerted"):
+                st["floor_alerted"] = True
+                alert(f"pair unwind {race}: {qty} of {ex.label} owed but its best {'ask' if buy else 'bid'} "
+                      f"{price:.3f} is past the {'ceiling' if buy else 'floor'} - waiting (unmatched leg held)")
+            return 0.0
         log.warning("%sPAIR UNWIND (passive) %s: %s filled -> %s %d YES on %s at %.3f", "" if self.api.live or execute
                     else "[dry] ", race, self.ex[st["leg"]].label, "buying" if buy else "selling", qty, ex.label, price)
         if execute is not None:
@@ -5973,15 +5997,18 @@ class Bot:
         """The passive slice replaces the resting leg's ask (long set) or bid (short set) in the normal quote:
         exactly that price (a resting order of ours below/above it is replaced), the slice's open size, and our
         own other side kept at least a tick away. A leg the decision left unquoted (no fair value, stop before
-        close...) stays unquoted. Applied to the quote decide() returned, before reconciling."""
+        close...) stays unquoted, and so does a slice side decide() blocked (long set: no ask; short set: no bid).
+        Applied to the quote decide() returned, before reconciling."""
         st = next((v for v in self.pp.values() if v["leg"] == ex.eid), None)
-        if st is None or not self.cfg.pair_unwind_passive or (q.bid is None and q.ask is None):
-            return q
+        if st is None or not self.cfg.pair_unwind_passive or (q.ask is None if st["sign"] > 0 else q.bid is None):
+            return q                              # decide() blocked the slice's side: it stays blocked
         left, price = int(st.get("left", st["slice"])), st["price"]
         if st["sign"] > 0:
             if left < 1:
                 return replace(q, ask=None, ask_size=0, ask_limit=None, ask_max=None)
             bid, bid_size, bid_limit = q.bid, q.bid_size, q.bid_limit
+            if bid_limit is not None:             # an older resting bid at/above the slice ask is never kept
+                bid_limit = min(bid_limit, floor_tick(price - TICK))
             if bid is not None and bid >= price - 1e-9:
                 bid = floor_tick(price - TICK)
                 bid_limit = min(bid_limit, bid) if bid_limit is not None else bid
@@ -5992,6 +6019,8 @@ class Bot:
         if left < 1:
             return replace(q, bid=None, bid_size=0, bid_limit=None, bid_max=None)
         ask, ask_size, ask_limit = q.ask, q.ask_size, q.ask_limit
+        if ask_limit is not None:                 # an older resting ask at/below the slice bid is never kept
+            ask_limit = max(ask_limit, ceil_tick(price + TICK))
         if ask is not None and ask <= price + 1e-9:
             ask = ceil_tick(price + TICK)
             ask_limit = max(ask_limit, ask) if ask_limit is not None else ask
@@ -6212,14 +6241,20 @@ class Bot:
         return (cfg.hold_target_hours > 0 and ex.eid not in self.ref_only
                 and (cfg.hold_target_headline or ex.group not in cfg.headline_races))
 
-    def hold_quote(self, ex, q, best_bid, best_ask, price, cfg):
+    def hold_quote(self, ex, q, best_bid, best_ask, price, cfg, ref=None, now_m=None):
         """C quote half: lots aged >= hold_target_hours -> the reducing side joins the best other price on its side
         (long: ask = best other ask, short: bid = best other bid), never more than HOLD_FLOOR through `price` (the
         book's own price) and never crossing the best other bid / ask; only ever moves in, never out. Our own
         adding side is pulled back to a tick behind it (own bid < own ask). A side the decision left out (a guard,
-        reduce-only...) stays out. The adding side is otherwise unchanged."""
+        reduce-only...) stays out. The adding side is otherwise unchanged. Not during the jump cooldown, within
+        reduce_from_book_pause_s of a Polymarket jump, or with Polymarket (ref) more than ref_guard_gap on the other
+        side of `price`; the joined side is never larger than the position."""
         if (price is None or not self.hold_gate(ex, cfg) or getattr(ex, "age", 0.0) < cfg.hold_target_hours
                 or abs(ex.inv) < 1):
+            return q
+        if now_m is not None and (now_m < ex.cooldown_until or now_m - ex.ref_jump_at < cfg.reduce_from_book_pause_s):
+            return q
+        if ref is not None and ((ref - price) if ex.inv > 0 else (price - ref)) > cfg.ref_guard_gap:
             return q
         if ex.inv >= 1 and q.ask is not None and q.ask_size >= 1 and best_ask is not None:
             ask = max(ceil_tick(best_ask), ceil_tick(price - self.HOLD_FLOOR - 1e-9))
@@ -6236,6 +6271,8 @@ class Bot:
             if bid is not None and bid < PMIN - 1e-9:
                 bid, bid_size, bid_limit = None, 0, None
             return replace(q, ask=ask, ask_limit=min(q.ask_limit, ask) if q.ask_limit is not None else None,
+                           ask_size=min(q.ask_size, int(ex.inv)),
+                           ask_max=min(q.ask_max, int(ex.inv)) if q.ask_max is not None else None,
                            bid=bid, bid_size=bid_size if bid is not None else 0, bid_limit=bid_limit)
         if ex.inv <= -1 and q.bid is not None and q.bid_size >= 1 and best_bid is not None:
             bid = min(floor_tick(best_bid), floor_tick(price + self.HOLD_FLOOR + 1e-9))
@@ -6252,6 +6289,8 @@ class Bot:
             if ask is not None and ask > PMAX + 1e-9:
                 ask, ask_size, ask_limit = None, 0, None
             return replace(q, bid=bid, bid_limit=max(q.bid_limit, bid) if q.bid_limit is not None else None,
+                           bid_size=min(q.bid_size, int(-ex.inv)),
+                           bid_max=min(q.bid_max, int(-ex.inv)) if q.bid_max is not None else None,
                            ask=ask, ask_size=ask_size if ask is not None else 0, ask_limit=ask_limit)
         return q
 
@@ -6278,6 +6317,8 @@ class Bot:
                 continue
             if self.hours_to_close(ex) <= cfg.flatten_hours_before_close:
                 continue                          # the flatten / exit windows have their own rules
+            if now_m < ex.cooldown_until or now_m - ex.ref_jump_at < cfg.reduce_from_book_pause_s:
+                continue                          # jump guard / just after a Polymarket jump: not now
             age = self.age_hours(ex)
             if age >= 2 * cfg.hold_target_hours:
                 cands.append((-age, eid))
@@ -6293,6 +6334,9 @@ class Bot:
             price = level["price"]
             if (price > bfv + self.HOLD_FLOOR + 1e-9) if buy else (price < bfv - self.HOLD_FLOOR - 1e-9):
                 continue                          # more than 1c through the book's price: not at any size
+            ref = (self.cur_refs or {}).get(eid)
+            if ref is not None and ((bfv - ref) if buy else (ref - bfv)) > cfg.ref_guard_gap:
+                continue                          # Polymarket says the exit is the wrong side (ref guard)
             unit = max(1 - price if buy else price, TICK)
             qty = int(min(abs(pos), level["quantity"], cfg.max_order_cash_frac * bank / unit, left / unit))
             if qty < 1:
@@ -6309,6 +6353,7 @@ class Bot:
         Returns the exchanges traded (skipped by quoting this cycle)."""
         cfg, taken = self.cfg, set()
         if cfg.hold_target_hours <= 0:
+            self.hold_open_at = None              # re-enabling restarts the 1-hour hold-off
             return taken
         if self.hold_open_at is None:             # restart-safe: the budget starts fully used for an hour
             self.hold_open_at = now_m + 3600
@@ -6762,51 +6807,75 @@ class Bot:
     OPS_FILLS_MIN_SECONDS = 60.0          # fills.csv is re-read at most this often (and only when it changed)
 
     def ops_fills(self, now):
-        """From fills.csv (cached; re-read when the file changed, at most every OPS_FILLS_MIN_SECONDS): FIFO lots with
+        """From fills.csv (cached; read when the file changed, at most every OPS_FILLS_MIN_SECONDS): FIFO lots with
         prices {eid: [[signed shares, YES price], ...]}, realised P&L, and over the last 24 h the shares that
         reduced |position| and the shares that added to it. Lots in position_lots_file carry no prices, so the fills
         are replayed: each fill's YES price is its quote price (fill price when absent), sign from our side (bid =
-        bought YES); fills not matched to a quote of ours (our_side "?") are skipped."""
+        bought YES); fills not matched to a quote of ours (our_side "?": arbitrage, takes) are skipped, so the
+        realised figure covers maker fills only. Incremental: only the bytes appended since the saved offset are
+        read (complete lines only); the replay restarts from 0 if the file shrank or was replaced."""
         path = bot_path(self.cfg.fills_csv)
         try:
             st = os.stat(path)
             sig = (st.st_mtime, st.st_size)
         except OSError:
-            sig = None
+            st, sig = None, None
         c = self.ops_cache
         if c and (c.get("sig") == sig or now - c.get("t", 0) < self.OPS_FILLS_MIN_SECONDS):
             return c
-        lots, realised, red, add = defaultdict(deque), 0.0, 0.0, 0.0
+        if (not c or st is None or st.st_size < c.get("off", 0) or c.get("ino") != st.st_ino):
+            c = {"off": 0, "ino": st.st_ino if st is not None else None, "fields": None, "book": defaultdict(deque),
+                 "realised": 0.0, "events": deque()}
+        if st is not None and st.st_size > c["off"]:
+            with open(path, "rb") as f:
+                f.seek(c["off"])
+                data = f.read(st.st_size - c["off"])
+            done = data.rfind(b"\n") + 1                # complete lines only: a half-written row waits
+            c["off"] += done
+            lines = data[:done].decode("utf-8", "replace").splitlines()
+            rows = list(csv.reader(lines))
+            if c["fields"] is None and rows:
+                c["fields"] = rows.pop(0)
+            for vals in rows:
+                self.ops_replay(c, dict(zip(c["fields"] or (), vals)))
         since = now - 24 * 3600
-        for r in (read_fills(path) if sig else []):
-            side = r.get("our_side")
-            if side not in ("bid", "ask"):
-                continue
-            try:
-                qty = abs(float(r.get("qty") or 0))
-                price = float(r.get("quote_price") or r.get("fill_price") or 0)
-            except ValueError:
-                continue
-            if qty <= 0 or not 0 < price < 1:
-                continue
-            ts = parse_ts(r.get("filled_at"))
-            recent = ts is not None and ts.timestamp() >= since
-            book, rem = lots[str(r.get("exchange_id"))], qty if side == "bid" else -qty
-            while abs(rem) > 1e-9 and book and (book[0][0] > 0) != (rem > 0):
-                lot = book[0]
-                n = min(abs(rem), abs(lot[0]))
-                realised += n * (price - lot[1]) * (1 if lot[0] > 0 else -1)
-                lot[0] += n if lot[0] < 0 else -n
-                rem += n if rem < 0 else -n
-                red += n if recent else 0.0
-                if abs(lot[0]) <= 1e-9:
-                    book.popleft()
-            if abs(rem) > 1e-9:
-                book.append([rem, price])
-                add += abs(rem) if recent else 0.0
-        self.ops_cache = {"sig": sig, "t": now, "lots": {e: list(v) for e, v in lots.items() if v},
-                          "realised": realised, "reduced_24h": red, "added_24h": add}
-        return self.ops_cache
+        ev = c["events"]
+        while ev and ev[0][0] < since:
+            ev.popleft()
+        c.update(sig=sig, t=now, lots={e: [list(x) for x in v] for e, v in c["book"].items() if v},
+                 reduced_24h=sum(r for t, r, _ in ev if t >= since), added_24h=sum(a for t, _, a in ev if t >= since))
+        self.ops_cache = c
+        return c
+
+    @staticmethod
+    def ops_replay(c, r):
+        """One fills.csv row into the ops_fills state c (FIFO lots, realised, 24-h events)."""
+        side = r.get("our_side")
+        if side not in ("bid", "ask"):
+            return
+        try:
+            qty = abs(float(r.get("qty") or 0))
+            price = float(r.get("quote_price") or r.get("fill_price") or 0)
+        except ValueError:
+            return
+        if qty <= 0 or not 0 < price < 1:
+            return
+        ts = parse_ts(r.get("filled_at"))
+        book, rem, red, add = c["book"][str(r.get("exchange_id"))], qty if side == "bid" else -qty, 0.0, 0.0
+        while abs(rem) > 1e-9 and book and (book[0][0] > 0) != (rem > 0):
+            lot = book[0]
+            n = min(abs(rem), abs(lot[0]))
+            c["realised"] += n * (price - lot[1]) * (1 if lot[0] > 0 else -1)
+            lot[0] += n if lot[0] < 0 else -n
+            rem += n if rem < 0 else -n
+            red += n
+            if abs(lot[0]) <= 1e-9:
+                book.popleft()
+        if abs(rem) > 1e-9:
+            book.append([rem, price])
+            add += abs(rem)
+        if ts is not None:
+            c["events"].append((ts.timestamp(), red, add))
 
     def ops_fields(self, now=None):
         """Read-only reporting for status.json, the recorder and the phone summary (no requests; None = unknown):
@@ -6814,7 +6883,8 @@ class Bot:
                                   longs at the best other bid, shorts at the best other ask, instead of the mark
                                   (the exchange's valuation price, else the book's fair value). A market with no
                                   quote on that side keeps its mark and is counted in liquidation_unpriced.
-          realised_pnl / unrealised_pnl   FIFO over fills.csv (ops_fills); unrealised at the mark, only over markets
+          realised_pnl / unrealised_pnl   FIFO over fills.csv maker fills only (ops_fills; status.json says so in
+                                  realised_pnl_scope); unrealised at the mark, only over markets
                                   whose replayed position equals the position held (the others: pnl_unreconciled)
           toward_ref_capital_frac share of position capital on the side Polymarket favours (long with Polymarket
                                   above the book's own fair value, or short with it below)
@@ -6898,6 +6968,7 @@ class Bot:
                 "updated": iso(utcnow()), "mode": "live" if self.api.live else "dry run",
                 "last_cycle_ok": ok, "failed_cycles_in_a_row": self.failed_cycles,
                 "quotes_pulled_after_errors": self.pulled_after_errors, **self.health, **self.ops_last,
+                "realised_pnl_scope": "maker fills only",   # arb / take fills (our_side '?') are not in realised_pnl
                 **(self.api.pause_state() if hasattr(self.api, "pause_state") else {}),
                 # T2.1: the tilt estimate (also restored from here at start) and the position's exposure to it
                 "tilt_s": round(self.tilt_s, 4), "tilt_exposure": round(self.tilt_exposure),

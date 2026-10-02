@@ -246,9 +246,69 @@ b.take_aged({e: 3000.0 for e in books}, BF, {}, T0 + 3600, execute=lambda *a: do
 check("...from the hour on, the normal caps (2 takes)", len(done) == 2, done)
 b.cfg.hold_target_hours = 0.0
 b.take_aged({e: 3000.0 for e in books}, BF, {}, T0 + 3700, execute=lambda *a: done.append(a) or a[2])
+check("turning it off clears hold_open_at (takes still remembered)", b.hold_open_at is None and len(b.hold_takes) == 2,
+      b.hold_open_at)
 b.cfg.hold_target_hours = 2.0
-check("turning it off and on keeps the budget state (no reset: hold_open_at kept, takes remembered)",
-      b.hold_open_at == T0 + 3600 and len(b.hold_takes) == 2)
+n0 = len(done)
+b.take_aged({e: 3000.0 for e in books}, BF, {}, T0 + 3800, execute=lambda *a: done.append(a) or a[2])
+check("...back on: the 1-hour hold-off restarts (no take, opens at +1 h)", len(done) == n0
+      and b.hold_open_at == T0 + 3800 + 3600, b.hold_open_at)
+api, b = make_bot(books=books)
+b.cycle()
+b.cfg.hold_target_hours = 2.0
+b.hold_open_at = 123.0
+b.cfg.hold_target_hours = 0.0
+b.cycle()
+check("a cycle with the flag off clears hold_open_at (take_aged not called)", b.hold_open_at is None, b.hold_open_at)
+
+print("--- red team: no take / join during the jump guard, a Polymarket jump pause, or against Polymarket")
+api, b = tbot()
+age(b, "21", 5000, 4.1)
+inv, BFV = {"21": 5000.0}, {"21": 0.485}
+check("(setup) aged long: a take is planned", plan(b, inv, BFV) != [])
+b.ex["21"].cooldown_until = NOW + 10
+check("jump cooldown running: no take", plan(b, inv, BFV) == [])
+b.ex["21"].cooldown_until = 0.0
+b.ex["21"].ref_jump_at = NOW - 60                       # within reduce_from_book_pause_s (120 s)
+check("60 s after a Polymarket jump: no take", plan(b, inv, BFV) == [])
+check("...past the pause: taken again", plan(b, inv, BFV, NOW + 61) != [])
+b.ex["21"].ref_jump_at = -1e9
+b.cur_refs = {"21": 0.485 + b.cfg.ref_guard_gap + 0.01}
+check("Polymarket > book + ref_guard_gap: selling the long is the wrong side, no take", plan(b, inv, BFV) == [])
+b.cur_refs = {"21": 0.485 - 0.10}
+check("...Polymarket below the book: the sell is fine", plan(b, inv, BFV) != [])
+age(b, "22", -5000, 4.1)
+b.cur_refs = {"22": 0.515 - b.cfg.ref_guard_gap - 0.01}
+check("short: Polymarket < book - gap: buying back is the wrong side, no take",
+      plan(b, {"22": -5000.0}, {"22": 0.515}) == [])
+b.cur_refs = {}
+api, b = bot(hold_target_hours=4.0)
+age(b, "21", 500, 5.0)
+b.ex["21"].inv, b.ex["21"].age = 500.0, 5.0
+q0 = M.Quote(bid=0.45, bid_size=100, ask=0.60, ask_size=100, bid_limit=0.45, ask_limit=0.60)
+T = time.monotonic()
+check("(setup) hold_quote joins 0.56", b.hold_quote(b.ex["21"], q0, 0.48, 0.56, 0.52, b.cfg, None, T).ask == 0.56)
+b.ex["21"].cooldown_until = T + 10
+check("jump cooldown: no join", b.hold_quote(b.ex["21"], q0, 0.48, 0.56, 0.52, b.cfg, None, T) == q0)
+b.ex["21"].cooldown_until, b.ex["21"].ref_jump_at = 0.0, T - 30
+check("30 s after a Polymarket jump: no join", b.hold_quote(b.ex["21"], q0, 0.48, 0.56, 0.52, b.cfg, None, T) == q0)
+b.ex["21"].ref_jump_at = -1e9
+check("Polymarket 0.52 + gap + 1c over the book: no join",
+      b.hold_quote(b.ex["21"], q0, 0.48, 0.56, 0.52, b.cfg, 0.52 + b.cfg.ref_guard_gap + 0.01, T) == q0)
+b.ex["21"].inv = -500.0
+s0 = M.Quote(bid=0.40, bid_size=100, ask=0.60, ask_size=100, bid_limit=0.40, ask_limit=0.60)
+check("short: Polymarket under the book by > gap: no join",
+      b.hold_quote(b.ex["21"], s0, 0.48, 0.56, 0.52, b.cfg, 0.52 - b.cfg.ref_guard_gap - 0.01, T) == s0)
+
+print("--- red team: the joined reducing side never exceeds the position")
+b.ex["21"].inv = 30.0
+q = b.hold_quote(b.ex["21"], replace(q0, ask_size=100, ask_max=150), 0.48, 0.56, 0.52, b.cfg, None, T)
+check("long 30, ask 100: joined ask sized 30 (never flips)", q.ask == 0.56 and q.ask_size == 30
+      and (q.ask_max is None or q.ask_max <= 30), q)
+b.ex["21"].inv = -30.0
+q = b.hold_quote(b.ex["21"], replace(s0, bid_size=100, bid_max=150), 0.48, 0.56, 0.52, b.cfg, None, T)
+check("short 30, bid 100: joined bid sized 30", q.bid == 0.48 and q.bid_size == 30
+      and (q.bid_max is None or q.bid_max <= 30), q)
 
 print("--- take half: headline gate")
 api, b = tbot(books=books, headline_races=("Utah Senate",))

@@ -99,6 +99,39 @@ b.ops_fields(NOW + 1)
 check("unchanged file: not re-read", not calls, calls)
 M.read_fills = real
 
+print("--- red team: fills.csv read incrementally from a saved offset; realised_pnl scope named")
+api, b = scripted()
+o1 = b.ops_fields(NOW)
+size1 = os.path.getsize(b.cfg.fills_csv)
+check("first read: the offset saved at the end of the file", b.ops_cache.get("off") == size1, b.ops_cache.get("off"))
+raw = open(b.cfg.fills_csv, "rb").read()
+assert raw.count(b",0.12,0.12,") == 1
+with open(b.cfg.fills_csv, "wb") as f:                     # an already-read row edited in place (same length)
+    f.write(raw.replace(b",0.12,0.12,", b",0.11,0.11,"))
+with open(b.cfg.fills_csv, "a", newline="") as f:          # ...and one new maker fill appended: Rep sells 100 at 0.20
+    csv.writer(f).writerow([99, M.iso(M.datetime.fromtimestamp(NOW - 0.1 * H, M.timezone.utc)), "11", "o99", "ask",
+                            100, 0.20, 0.20, "", "", 0])
+with open(b.cfg.fills_csv, "a") as f:                      # ...and a half-written row (no newline yet)
+    f.write("100,2026")
+o2 = b.ops_fields(NOW + 120)
+check("only the appended complete row is read: realised 37 + 100 x (0.20 - 0.12) = 45 (the edited old row unseen)",
+      close(o2["realised_pnl"], 45.0), o2["realised_pnl"])
+check("...offset stops before the half-written row", b.ops_cache.get("off") == os.path.getsize(b.cfg.fills_csv) - 8,
+      (b.ops_cache.get("off"), os.path.getsize(b.cfg.fills_csv)))
+with open(b.cfg.fills_csv, "w", newline="") as f:          # the file shrank (rotated): re-read from 0
+    w = csv.writer(f)
+    w.writerow(M.FillLogger.COLUMNS)
+    w.writerow([1, M.iso(M.datetime.fromtimestamp(NOW - H, M.timezone.utc)), "22", "o1", "bid", 10, 0.40, 0.40, "",
+                "", 0])
+    w.writerow([2, M.iso(M.datetime.fromtimestamp(NOW - H, M.timezone.utc)), "22", "o2", "ask", 10, 0.45, 0.45, "",
+                "", 0])
+o3 = b.ops_fields(NOW + 240)
+check("file shrank: replayed from 0 (realised 10 x 0.05 = 0.5)", close(o3["realised_pnl"], 0.5), o3["realised_pnl"])
+b.write_status(True)
+st = json.load(open(b.cfg.status_file))
+check("status.json: realised_pnl_scope = 'maker fills only'", st.get("realised_pnl_scope") == "maker fills only",
+      st.get("realised_pnl_scope"))
+
 print("--- None-safety")
 api, b = make_bot()
 o = b.ops_fields(NOW)
