@@ -16,6 +16,7 @@ could not attribute to its own quotes; duplicate quotes; whether the self-test k
 
 Run:  python tests/scenario.py [slow|crowded|both] [seeds] [minutes]      (prints one line per run)
       SCENARIO_SET="key=value,..." overrides bot settings (e.g. to compare old and new behaviour).
+      SCENARIO_COLD=1 starts with no order book downloaded (a restart mid-session, not the open).
 """
 import json
 import os
@@ -429,8 +430,9 @@ class World:
         # Before the open: every book downloaded (as on day one), rivals already quoting.
         self.rivals_requote()
         # (Set directly, not downloaded, so the session starts at the open. Day one: the last pre-open
-        # downloads were >= open_quiet_seconds before it.)
-        for eid, x in self.bot.ex.items():
+        # downloads were >= open_quiet_seconds before it.) SCENARIO_COLD=1: a restart mid-session instead,
+        # with no book downloaded yet (every ex.book is None).
+        for eid, x in ([] if os.environ.get("SCENARIO_COLD") == "1" else self.bot.ex.items()):
             x.book = M.strip_own(self.eng.full_book(eid), [])
             x.book_time = x.verified = self.clock.monotonic() - self.cfg.open_quiet_seconds
         self.t_open = self.clock.now()

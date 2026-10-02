@@ -243,6 +243,12 @@ class Config:
     ref_only_size_frac: float = 0.001     # ...and small: 100 shares at 100k on the side that adds to a position...
     ref_only_reduce_full: bool = True     # ...while the side that shrinks one quotes the market's normal size (day one:
                                           #   Rep U.S. Senate +7,585 would otherwise leave 100 shares at a time)
+    # 2026-10-02 08:08 restart: every ex.book was None and the books came in at 12-14 a minute, so R5 priced
+    # 30 -> 101 markets in 6 min (162-171 before the restart). The bulk best bid/ask (3 requests for all 237)
+    # is enough for R5's checks, which only look at the top of the book. The depth-checked fair value never
+    # uses it (it needs fv_min_depth shares, i.e. a downloaded book).
+    ref_only_use_tops: bool = True        # R5 may use the bulk best bid/ask when the book is missing or stale...
+    tops_max_age: float = 120.0           # ...if that bulk reading is at most this old (s) and two-sided (others')
 
     # --- REFERENCE PRICES (Polymarket via ref_prices.py; only active if ref_map_file exists) ---
     # Polymarket is treated as the better estimate of the true price: the tournament book is seeded
@@ -396,6 +402,17 @@ class Config:
                                           #   bites when the exchange can't be read at all
     book_reverify_seconds: float = 120.0  # a book unconfirmed for this long gets a bulk best-price check (one request
                                           #   per 100 books) on the next cycle, even between full checks
+    # After a (re)start every book is missing. Order writes keep only write_read_reserve (3) requests free while
+    # book downloads keep budget_reserve (20) free for writes, so writes win the shared per-minute budget and
+    # books trickled in at 12-14 a minute (2026-10-02 08:08). While priming: more books per cycle, and books
+    # (downloaded before this cycle's writes) only leave startup_prime_reserve requests for the writes, up to
+    # startup_prime_books_per_min; Bot.write_reserve() is what order writes should then leave free for them.
+    startup_books_first: bool = True      # prime the books after a start or handover restart...
+    startup_prime_seconds: float = 180.0  # ...for at most this long after trading starts...
+    startup_prime_missing_frac: float = 0.10   # ...and only while more than this share of books is missing
+    startup_prime_books: int = 60         # book downloads per cycle while priming (instead of max_books_per_cycle)
+    startup_prime_reserve: int = 8        # requests per minute book downloads leave free while priming
+    startup_prime_books_per_min: int = 45 # ...but at most this many downloads in any 60 s, the rest for order writes
 
     # --- TIMING / NETWORK --------------------------------------------------------------------
     loop_seconds: float = 10.0            # target time between cycle starts
@@ -553,6 +570,14 @@ OVERRIDABLE = {
     "skew_age_max": (0.0, 0.1),
     "capital_in_positions_max_frac": (0.0, 1.0),
     "capital_ceiling_adding_size_factor": (0.0, 1.0),
+    "ref_only_use_tops": (False, True),
+    "tops_max_age": (5.0, 900.0),
+    "startup_books_first": (False, True),
+    "startup_prime_seconds": (0.0, 1800.0),
+    "startup_prime_missing_frac": (0.0, 1.0),
+    "startup_prime_books": (1, 100),
+    "startup_prime_reserve": (0, 60),
+    "startup_prime_books_per_min": (1, 100),
 }
 
 
@@ -1272,6 +1297,18 @@ def predicted_top(book, mine):
     bids = [l["price"] for l in book.get("bids") or []] + [o.price for o in mine if o.is_bid]
     asks = [l["price"] for l in book.get("asks") or []] + [o.price for o in mine if not o.is_bid]
     return (rnd(max(bids)) if bids else None, rnd(min(asks)) if asks else None)
+
+
+def others_top(top, mine):
+    """Other traders' (best bid, best ask) from a bulk-price reading `top`, which includes our own orders.
+    A side is None when it is empty, or when one of our orders sits at or better than that price: then the
+    reading can't tell whether anybody else is there (and where), so nothing is assumed about it."""
+    bid, ask = top
+    if bid is not None and any(o.is_bid and o.price >= bid - 1e-9 for o in mine):
+        bid = None
+    if ask is not None and any(not o.is_bid and o.price <= ask + 1e-9 for o in mine):
+        ask = None
+    return bid, ask
 
 
 def depth_price(levels, min_depth):
@@ -2016,6 +2053,10 @@ class Bot:
         self.refs = self.load_reference_prices()
         self.ref_version_seen = 0         # last Polymarket reading the jump guard has looked at
         self.last_tops = {}               # latest bulk best bid/ask per exchange (for recording)
+        self.other_tops = {}              # eid -> (other traders' best bid, best ask, time read) from bulk prices
+        self.ref_tops = {}                # eid -> (best bid, best ask): R5 priced it from other_tops this cycle
+        self.trading_since = None         # time.monotonic() when the trading loop started (startup priming)
+        self.book_reqs = deque()          # times of recent book downloads (startup priming's per-minute cap)
         self.arb_cooldown = {}            # race -> time.monotonic() until which we leave it alone
         self.arbs_total = 0               # arbitrages / takes since start (summaries report the change)
         self.unwinds_total = 0            # pair unwinds since start (status.json pair_unwinds_total)
@@ -2254,6 +2295,7 @@ class Bot:
             self.download_books(self.books_to_fetch([]), mine_real)   # just the few the feed reported
             self.reverify_books(mine_real, now_m)  # books unconfirmed for a while: cheap bulk check first
 
+        self.log_priming()
         self.progress("books")
 
         # 3. Fair values ---------------------------------------------------------------------------
@@ -2348,6 +2390,8 @@ class Bot:
                        "positions_over_12h": ages[2],
                        "positions": {self.ex[e].label: q for e, q in inv.items() if q and e in self.ex}}
 
+        self.health.update(books_loaded=self.books_loaded(), markets_priced_from_tops=len(self.ref_tops))
+
         # 6b. Take tournament quotes that Polymarket says are clearly stale (confirmed over 2 readings) ---
         taken = (self.take_stale_quotes(refs, liquid, fvs, inv, mine_real, global_reduce, party_delta, now_m)
                  if self.running else set())
@@ -2440,22 +2484,60 @@ class Bot:
         """R5: markets whose book is too thin for a depth-checked price (fair_value None) but that have a
         liquid Polymarket price get fv = Polymarket, if the tournament's raw best bid/ask (other traders,
         any size, verified recently) are two-sided, not wider than max_spread_for_fv, and their mid is
-        within ref_only_max_gap of Polymarket. Fills fvs in place; returns the set of those eids."""
+        within ref_only_max_gap of Polymarket. Fills fvs in place; returns the set of those eids.
+        The best bid/ask come from the downloaded book, or (ref_only_use_tops) from a fresh bulk reading when
+        there is no current book; those eids are also in self.ref_tops, for decide (see r5_top)."""
         cfg, out = self.cfg, set()
+        self.ref_tops = {}
         for eid, ex in self.ex.items():
-            if fvs.get(eid) is not None or eid not in liquid or eid not in refs or not ex.book:
+            if fvs.get(eid) is not None or eid not in liquid or eid not in refs:
                 continue
-            if now_m - ex.verified >= cfg.book_stale:
+            top = self.r5_top(ex, now_m)
+            if top is None:
                 continue
-            b = ex.book
-            if not b.get("bids") or not b.get("asks"):
-                continue
-            bb, ba = b["bids"][0]["price"], b["asks"][0]["price"]
+            bb, ba, from_tops = top
             if ba <= bb or ba - bb > cfg.max_spread_for_fv or abs((bb + ba) / 2 - refs[eid]) > cfg.ref_only_max_gap:
                 continue
             fvs[eid] = refs[eid]
             out.add(eid)
+            if from_tops:
+                self.ref_tops[eid] = (bb, ba)
         return out
+
+    def r5_top(self, ex, now_m):
+        """(other traders' best bid, best ask, from_tops) for R5, or None (one-sided, or nothing current).
+        A book confirmed within book_stale is used as before. Without one (after a restart every book is None;
+        downloading 237 takes minutes of request budget) and with ref_only_use_tops: the bulk best bid/ask, if
+        read within tops_max_age and two-sided once our own orders are discounted (see others_top)."""
+        cfg = self.cfg
+        if ex.book is not None and now_m - ex.verified < cfg.book_stale:
+            b = ex.book
+            if not b.get("bids") or not b.get("asks"):
+                return None
+            return b["bids"][0]["price"], b["asks"][0]["price"], False
+        if cfg.ref_only_use_tops:
+            t = self.other_tops.get(ex.eid)
+            if t and t[0] is not None and t[1] is not None and now_m - t[2] <= cfg.tops_max_age:
+                return t[0], t[1], True
+        return None
+
+    def note_other_tops(self, tops, mine_real, now_m):
+        """Remember the bulk best bid/ask as OTHER traders' best prices (see others_top), with the time read.
+        Once our own quote is the best price, a reading can't see the others behind it: that side keeps the
+        others' price seen before (if not better than ours), as long as that one was still within tops_max_age.
+        The fresh reading confirms nobody is better than us, so the entry's time moves on; a stale carried side
+        can only be off for pennying (others are behind us: nothing to cross), and the downloaded book, which
+        books_to_fetch fetches first for these markets, takes over soon anyway.
+        """
+        for eid, top in tops.items():
+            bid, ask = others_top(top, mine_real.get(eid, []))
+            prev = self.other_tops.get(eid)
+            if prev is not None and now_m - prev[2] <= self.cfg.tops_max_age:
+                if bid is None and top[0] is not None and prev[0] is not None and prev[0] <= top[0] + 1e-9:
+                    bid = prev[0]
+                if ask is None and top[1] is not None and prev[1] is not None and prev[1] >= top[1] - 1e-9:
+                    ask = prev[1]
+            self.other_tops[eid] = (bid, ask, now_m)
 
     def mark_ref_moves(self):
         """Which markets' Polymarket price just moved (urgent: see urgent_ref_move). Cleared once handled."""
@@ -2502,6 +2584,7 @@ class Bot:
             else:
                 tops.update(res)
         self.last_tops = tops
+        self.note_other_tops(tops, mine_real, now_m)
 
         extra = []
         for eid, ex in self.ex.items():
@@ -2541,6 +2624,7 @@ class Bot:
                 log.warning("bulk re-check failed for %d books (%s)", len(chunk), res)
                 continue
             self.last_tops.update(res)
+            self.note_other_tops(res, mine_real, now_m)
             for eid in chunk:
                 ex = self.ex.get(eid)
                 if ex is None or eid not in res:
@@ -2558,17 +2642,69 @@ class Bot:
         At most max_books_per_cycle, and never more than the request budget has spare after keeping
         budget_reserve back for orders. The rest wait for a later cycle (reported books stay pending)."""
         candidates = [(0, self.ex[e].book_time, e) for e in self.pending_dirty if e in self.ex]
-        candidates += [(1, 0.0, eid) for eid, ex in self.ex.items() if ex.book is None]
+        # Never-downloaded books where we have orders resting (e.g. adopted at a handover restart) come first,
+        # then the ones we quote from the bulk tops: their real book matters most.
+        live = {o.eid for o in self.my_orders.values()}
+        candidates += [(1, -2.0 if eid in live else -1.0 if eid in self.ref_tops else 0.0, eid)
+                       for eid, ex in self.ex.items() if ex.book is None]
         candidates += extra
         todo = []
         for _, _, eid in sorted(candidates):
             if eid not in todo:
                 todo.append(eid)
-        spare = getattr(self.api, "budget_left", lambda: 10 ** 6)() - self.cfg.budget_reserve
-        return todo[:max(0, min(self.cfg.max_books_per_cycle, spare))]
+        cap, reserve = self.cfg.max_books_per_cycle, self.cfg.budget_reserve
+        if self.priming():                # after a (re)start: books first (see startup_books_first)
+            cap = min(max(cap, self.cfg.startup_prime_books), self.prime_allowance())
+            reserve = min(reserve, self.cfg.startup_prime_reserve)
+        spare = getattr(self.api, "budget_left", lambda: 10 ** 6)() - reserve
+        return todo[:max(0, min(cap, spare))]
+
+    def books_loaded(self):
+        return sum(ex.book is not None for ex in self.ex.values())
+
+    def books_last_minute(self):
+        now = time.monotonic()
+        while self.book_reqs and now - self.book_reqs[0] >= 60.0:
+            self.book_reqs.popleft()
+        return len(self.book_reqs)
+
+    def prime_allowance(self):
+        """Book downloads still allowed in the current 60 s while priming (startup_prime_books_per_min)."""
+        return max(0, self.cfg.startup_prime_books_per_min - self.books_last_minute())
+
+    def write_reserve(self):
+        """Requests order writes should leave free in the shared budget: write_read_reserve, plus while priming
+        what the book downloads may still use this minute (capped by the books still missing). Without it the
+        writes, which keep only 3 free, take every slot the book downloads (which keep 20 free) would need.
+        For send_changes' `spare` (Engineer 1's region): budget_left() - self.write_reserve()."""
+        r = self.cfg.write_read_reserve
+        if self.priming():
+            r += min(self.prime_allowance(), len(self.ex) - self.books_loaded())
+        return r
+
+    def priming(self):
+        """Startup priming is on: within startup_prime_seconds of the trading loop starting (fresh start or
+        handover restart alike), and more than startup_prime_missing_frac of the books not downloaded yet."""
+        cfg = self.cfg
+        if not cfg.startup_books_first or self.trading_since is None or not self.ex:
+            return False
+        if time.monotonic() - self.trading_since > cfg.startup_prime_seconds:
+            return False
+        return len(self.ex) - self.books_loaded() > cfg.startup_prime_missing_frac * len(self.ex)
+
+    def log_priming(self):
+        """One line per cycle while priming the books, and one when it's over."""
+        if self.priming():
+            self.primed_logged = False
+            log.info("priming books: %d of %d loaded", self.books_loaded(), len(self.ex))
+        elif self.trading_since is not None and not getattr(self, "primed_logged", True):
+            self.primed_logged = True
+            log.info("priming books done: %d of %d loaded after %.0f s", self.books_loaded(), len(self.ex),
+                     time.monotonic() - self.trading_since)
 
     def download_books(self, eids, mine_real):
         """Download books (in parallel), remove our own orders from them, and cache them on the Ex."""
+        self.book_reqs.extend([time.monotonic()] * len(eids))     # for startup priming's per-minute cap
         for eid, book in self.in_parallel(lambda e: self.api.book(e, self.tid), eids).items():
             if isinstance(book, Exception):   # keep the old copy; it stops being used after book_stale
                 log.warning("book %s failed: %s", eid, book)
@@ -2862,6 +2998,8 @@ class Bot:
         b = ex.book or {}
         best_bid = b["bids"][0]["price"] if b.get("bids") else None
         best_ask = b["asks"][0]["price"] if b.get("asks") else None
+        if ex.eid in self.ref_only and ex.eid in self.ref_tops:   # R5 from bulk tops: no current book
+            best_bid, best_ask = self.ref_tops[ex.eid]           # (other traders' best prices, see r5_top)
 
         # Election night, final hours: only get flat, even by trading against other orders (exit_quote).
         # This comes before every other guard on purpose: getting out must never be blocked. If the book
@@ -4530,7 +4668,7 @@ class Bot:
                         log.warning("clean-slate cancel failed (%s) - going on; leftovers get re-read and managed", e)
                         self.orders_stale = True
             self.phase = "trading"
-            self.trading_since = time.monotonic()
+            self.trading_since = time.monotonic()     # startup priming (books first) runs from here
             while self.running:
                 t0 = time.monotonic()
                 try:
