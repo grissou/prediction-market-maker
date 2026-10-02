@@ -208,6 +208,12 @@ class LiveSim(Sim):
         fvs = {m.eid: m.state.get("fv") or pnow[m.eid] for m in self.mkts}
         capital = self.bg_cap + sum(abs(q) * (pnow[e] if q > 0 else 1 - pnow[e]) for e, q in inv.items())
         self.cap_frac = capital / ACCOUNT
+        # Cash: account value now (start + P&L at Polymarket) - positions - what our resting orders lock. An order
+        # only locks cash for the part that ADDS to a position (selling YES we hold, or buying back a short, frees it).
+        equity = ACCOUNT + sum(m.cash + m.inv * pnow[m.eid] for m in self.mkts)
+        locked = sum(order_lock(o, m.inv) for m in self.mkts for o in m.orders if o.owner == "us")
+        self.free = equity - capital - locked
+        self.free_min = min(getattr(self, "free_min", 1e18), self.free)
         bot.update_capital_ceiling(self.cap_frac, cfg)
         self.party_delta = self.bg_party + sum(M.PARTY_SIGN.get(bot.ex[e].party, 0) * q for e, q in inv.items())
         self.eff = bot.effective_inventory(inv)
@@ -255,6 +261,11 @@ class LiveSim(Sim):
             if qty < 1:
                 bot.arb_cooldown[race] = t + cfg_cd
                 continue
+            if not (kind == "unwind"):                    # arbitrage adds positions: it needs the cash
+                lock = sum((p if action == "buy" else 1 - p) for p, _ in levels.values())
+                qty = int(min(qty, max(0.0, self.free) / max(lock, 0.01)))
+                if qty < 1:
+                    continue
             for m in ms:                                  # pull our quotes in the race first
                 m.orders = [o for o in m.orders if o.owner != "us"]
             got = [self.take(m, t, action == "buy", qty, levels[m.eid][0]) for m in ms]
@@ -340,7 +351,8 @@ class LiveSim(Sim):
                    bidsum_ge103=round(sum(1 for x in self.bidsum.get("all", []) if x >= 1.03) / max(1, len(self.bidsum.get("all", []))), 4),
                    outsider_asksum_le0985=round(self.bidsum.get("out_lo", 0) / max(1, self.bidsum.get("out_n", 0)), 3),
                    asksum_lt098=round(self.bidsum["asksum_lo"] / max(1, self.bidsum["race_min"]), 3),
-                   gross_sh=round(sum(abs(m.inv) for m in self.mkts)), n_mkts=len(self.mkts))
+                   gross_sh=round(sum(abs(m.inv) for m in self.mkts)), n_mkts=len(self.mkts),
+                   free_min=round(getattr(self, "free_min", 0)), clipped=getattr(self, "clipped", 0))
         return out
 
 
@@ -353,7 +365,7 @@ def bot_strategy(sim, m, t, fv, bfv, ref, book):
     ex.book = book
     inv = {x.eid: x.inv for x in sim.mkts}
     q = bot.decide(ex, fv, inv, sim.eff, False, sim.party_delta, t, ref=ref, book_fv=bfv, ref_liquid=True)
-    want = S.quote_to_want(q)
+    want = cash_clip(sim, m, S.quote_to_want(q))
     out = []
     for w in want:
         if bot.refill_cooling(ex, w[0], t):        # withheld: what rests there stays (if any), nothing new
@@ -361,6 +373,33 @@ def bot_strategy(sim, m, t, fv, bfv, ref, book):
             out += [(o.is_bid, o.price, o.qty, 0, None) for o in cur[:1]]
         else:
             out.append(w)
+    return out
+
+
+def order_lock(o, inv):
+    """Cash an order of ours locks: only its part that adds to the position."""
+    if o.is_bid:
+        return o.price * max(0.0, o.qty - max(0.0, -inv))
+    return (1 - o.price) * max(0.0, o.qty - max(0.0, inv))
+
+
+def cash_clip(sim, m, want):
+    """The exchange takes an order only if the cash it locks is there: clip each adding side to the free cash
+    (the order it replaces gives its lock back). Reducing shares need none."""
+    out = []
+    for w in want:
+        is_bid, price, qty = w[0], w[1], w[2]
+        lock_ps = price if is_bid else 1 - price
+        reduce = max(0.0, -m.inv) if is_bid else max(0.0, m.inv)
+        back = sum(order_lock(o, m.inv) for o in m.orders if o.owner == "us" and o.is_bid == is_bid and o.level == w[3])
+        room = max(0.0, sim.free + back)
+        allowed = reduce + room / max(lock_ps, 0.005)
+        if qty > allowed:
+            qty = int(allowed)
+            sim.clipped = getattr(sim, "clipped", 0) + 1
+        if qty >= 1:
+            sim.free -= lock_ps * max(0.0, qty - reduce) - back
+            out.append((is_bid, price, qty) + tuple(w[3:]))
     return out
 
 
@@ -383,7 +422,7 @@ def run_many(seeds, hours, regime, ov):
     return [_one(j) for j in jobs]
 
 
-KEYS = ("pnl", "pnl_lag", "cap_end", "cap_peak", "freed", "age_end", "unwind_sh", "arb_sh", "outsider_arb_sh",
+KEYS = ("pnl", "pnl_lag", "free_min", "clipped", "cap_end", "cap_peak", "freed", "age_end", "unwind_sh", "arb_sh", "outsider_arb_sh",
         "arb_pnl", "wc_peak", "shares")
 
 
