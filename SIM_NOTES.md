@@ -187,3 +187,87 @@ Simulator-suggested parameters: offsets 1.5/2.5/3.5c (2/3.5/5c is as good: +46 v
 `_share` (share of writes_per_minute), `_rival_inv` (0 = rivals without inventory caps), `_ladder` (1 or a dict of
 LADDER changes), `_rival_aware` (step, price units). `SIM_CAL=day1` = the Builder's calibration.
 Runtime: ~1.5 s per seed-hour per core. Use >= 32 seeds; 128 when |Δ| < 2 se.
+
+# Round 2: inventory turnover and capital (on 21523e8: age skew, capital ceiling, race-net limits, fl-bias)
+
+## What changed in the simulator
+- `compute_quote` now gets `net_inv` (= inv), `age_hours` (share-weighted age of FIFO lots of our fills, as
+  `Bot.age_hours`) and `adding_factor` (`capital_ceiling_adding_size_factor` while the capital fraction is over
+  `capital_in_positions_max_frac`).
+- Capital fraction = (`_bg_cap` + our positions here) / 100k. `_bg_cap` stands for the other ~225 markets'
+  positions (default 60k). At 60k, free cash = 100k − 60k − positions (~9k) − cash in level-0 orders (~20k) ≈ 11k,
+  the live figure. Live positions are 90k, but at bg 70k+ the 0.75 ceiling already binds, see (d).
+- **Lagged mark** (`pnl_lag`) = cash + inventory × VWAP of every trade in that market over the last 30 min (last trade
+  if none): a proxy for the exchange's `currentPrice`. **Position age**: share-weighted median age of held shares
+  at the end. "cap" = peak cash in our positions here / peak capital fraction.
+- Prototypes: `_fast_unload` (after our fill with >= 2c edge, the reducing side at fv −/+ 0.5c for 300 s, size = the
+  fill, only if better than the normal quote), `_lad_gate` (ladder only while free cash >= x × account).
+- Note: the age skew cannot act in 1 h runs (it starts after 1 h): use the 3 h table for (c).
+
+## 1 h, 32 seeds (ΔP&L/h vs live defaults; base quiet +501 ± 39 (lagged mark +329), news +419 ± 27 (+221); cap 9.2k / 0.69; age 0.5 h)
+
+| Variant | ΔP&L q | Δlag q | ΔP&L n | Δlag n | cap q | age q | Verdict |
+|---|---|---|---|---|---|---|---|
+| (a) headline 0.05 | **-56 ± 18** | **-56 ± 16** | -33 ± 17 | -19 ± 15 | 7.8k | 0.49 | real loss; -1.4k capital |
+| headline 0.03 | **-115 ± 22** | **-96 ± 21** | **-70 ± 22** | -40 ± 18 | 6.7k | 0.46 | real loss |
+| size_max 0.01 | -14 ± 13 | -12 ± 14 | +22 ± 19 | +20 ± 16 | 8.7k | 0.46 | noise |
+| headline 0.05 + size_max 0.01 | -68 ± 18 | -57 ± 19 | +1 ± 19 | +5 ± 15 | 7.5k | 0.44 | loss (quiet) |
+| headline 0.03 + size_max 0.01 | -121 ± 20 | -99 ± 22 | -58 ± 21 | -26 ± 19 | 6.2k | 0.41 | real loss |
+| (b) skew_per_quote 0.0075 | -16 ± 11 | -22 ± 13 | -1 ± 14 | -2 ± 10 | 8.7k | 0.46 | noise |
+| skew_per_quote 0.01 | -35 ± 12 | -25 ± 15 | -3 ± 13 | -4 ± 13 | 8.1k | 0.48 | slight loss (quiet) |
+| (c) age skew off / 0.005 per hour | 0 | 0 | 0 | 0 | | | no positions older than 1 h in 1 h runs |
+| (e) fast unload | -10 ± 9 | -9 ± 12 | +1 ± 8 | 0 ± 9 | 9.2k | 0.48 | noise |
+| (f) ref_weight 0.8 | +17 ± 13 | +15 ± 15 | **+52 ± 19** | **+41 ± 15** | 9.9k | 0.49 | gain in news only (1 h) |
+| ref_weight 0.85 | +22 ± 17 | +16 ± 21 | +31 ± 15 | +21 ± 11 | 9.5k | 0.50 | weak gain (1 h), but see 3 h |
+| (d) bg 60k: ceiling off / 0.90 | 0 | 0 | 0 | +1 ± 1 | 9.2k / 0.69 | | 0.75 never binds at bg 60k |
+| bg 60k: ceiling 0.60 (factor 0) | **-459 ± 38** | **-301 ± 38** | **-356 ± 26** | **-175 ± 30** | 0.8k / 0.61 | 0.74 | stops all adding quotes: -90% volume |
+| bg 60k: ceiling 0.60, factor 0.5 | -69 ± 15 | -51 ± 14 | -17 ± 13 | -7 ± 14 | 7.9k / 0.68 | 0.50 | half size on the adding side costs far less |
+| bg 70k base (ceiling 0.75 binds) | (+370 ± 33, lag +248) | | (+286 ± 22, lag +155) | | 6.6k / 0.77 | | the live default is a cliff |
+| bg 70k: ceiling off / 0.90 | **+131 ± 21** | **+80 ± 21** | **+134 ± 21** | **+67 ± 18** | 9.2k / 0.79 | | the 0.75 ceiling costs ~26% of P&L when it binds |
+| bg 70k: factor 0.5 | **+92 ± 17** | **+49 ± 15** | **+102 ± 19** | **+60 ± 16** | 8.4k / 0.78 | | recovers ~70% of that |
+| bg 70k: ceiling 0.60 | -370 | -248 | -286 | -155 | 0 | | no quoting at all |
+| (g) ladder 1.5/2.5/3.5c, no gate | +17 ± 14 | +9 ± 18 | **+43 ± 15** | **+29 ± 14** | 9.7k | 0.51 | gain in news; ~+14k in orders |
+| ladder, gate 10% free cash | +18 ± 15 | +9 ± 18 | +42 ± 15 | +29 ± 14 | 9.7k | 0.51 | gate rarely shuts (free cash ~11k) |
+| ladder, gate 20% free cash | 0 ± 14 | +5 ± 16 | +19 ± 13 | +20 ± 13 | 9.4k | 0.48 | ladder mostly off at 11k free cash |
+
+## 3 h, 32 seeds (Δ per 3 h; base quiet +1,205 ± 55 (lag +887), news +1,008 ± 83 (lag +672); cap 13.5k / 0.73; age 1.2 h)
+
+| Variant | ΔP&L q | Δlag q | ΔP&L n | Δlag n | cap q / frac | age q / n | Verdict |
+|---|---|---|---|---|---|---|---|
+| age skew off | -5 ± 11 | -13 ± 11 | -6 ± 9 | -6 ± 15 | 13.6k / 0.74 | 1.28 / 1.25 | age skew: noise in P&L, ages ~6% lower |
+| skew_age_per_hour 0.005 | +2 ± 11 | -3 ± 14 | -12 ± 18 | -4 ± 19 | 13.5k / 0.73 | 1.16 / 1.18 | noise |
+| skew_per_quote 0.0075 | +6 ± 22 | -2 ± 27 | +36 ± 29 | +46 ± 34 | 12.8k / 0.73 | 1.17 / 0.99 | noise; -5% capital, -16% age (news) |
+| skew_per_quote 0.01 | -11 ± 29 | -8 ± 29 | -11 ± 35 | +1 ± 37 | 12.5k / 0.73 | 1.08 / 0.96 | noise; -7% capital |
+| 0.0075 + age 0.005 | -1 ± 23 | -8 ± 26 | +11 ± 28 | +37 ± 30 | 12.6k / 0.73 | 1.10 / 0.93 | noise; youngest inventory |
+| fast unload | -18 ± 17 | -24 ± 22 | -2 ± 22 | -8 ± 22 | 13.7k / 0.74 | 1.18 / 1.14 | noise-to-negative |
+| headline 0.05 | **-94 ± 31** | **-117 ± 28** | -28 ± 35 | -26 ± 43 | 12.4k / 0.72 | 1.17 / 0.99 | real loss |
+| ceiling off (bg 60k) | **+21 ± 9** | +11 ± 9 | +9 ± 7 | +4 ± 8 | 13.7k / 0.74 | | the ceiling starts to bind after 2-3 h |
+| ref_weight 0.85 | -23 ± 24 | **-46 ± 28** | -15 ± 27 | +5 ± 26 | 13.9k / 0.74 | 1.30 / 1.33 | **the 1 h gain does not hold over 3 h**; older inventory |
+
+## Ranking: Δ P&L at the lagged mark (quiet + news, per hour), capital fraction <= 0.75 (bg 60k)
+1. ref_weight 0.8: +15 / +41 (1 h), but ref_weight 0.85 is -46 / +5 per 3 h. Unproven.
+2. R3 ladder ungated or gated at 10%: +9 / +29 (1 h), with ~14k more cash in orders.
+3. Live defaults: 0.
+4. Ceiling off: +11 / +4 per 3 h. Peak fraction 0.74 here; it would exceed 0.75 live.
+5. Fast unload: -9 / 0. Age skew 0.005: -3 / -4 per 3 h. Skew 0.0075: -22 / -2 (1 h), -2 / +46 per 3 h.
+6. Last: headline 0.05 (-56 / -19), headline 0.03 (-96 / -40), any ceiling at 0.60 with factor 0 (-301 / -175).
+
+None of the inventory levers (skew strength, age skew, fast unload) changes P&L by more than about 2 se. The only
+large effects are the size of the headline quotes and whether the capital ceiling shuts the adding side.
+
+## Recommended defaults (round 2)
+| Setting | Recommend | Confidence | Why |
+|---|---|---|---|
+| headline_size_frac | 0.10 (keep) | high | 0.05 costs -56 ± 18 / -94 ± 31 per 3 h, and only saves ~1.4k of capital here |
+| size_max_frac | 0.02 (keep) | medium | 0.01 is noise |
+| skew_per_quote | 0.005, or 0.0075 if capital is the binding problem | low | P&L neutral; 0.0075 gives -5% capital and -16% age over 3 h in news |
+| skew_age_* | on, 0.0025 per hour (as merged) | low | P&L neutral; ages ~6% lower than with it off |
+| capital_in_positions_max_frac | 0.75 with **capital_ceiling_adding_size_factor 0.5** (not 0) | medium | factor 0 is a cliff: -131 / -134 per hour once the ceiling binds; 0.5 keeps ~70% of that P&L |
+| fast unload | do not ship it as tested | low | noise-to-negative; in the sim the normal skewed quote already sits near fair |
+| kelly_fraction | 0.25 | high | round 1: 0.15 is -22 / -23 |
+| ref_weight | 0.7 (keep) | medium | the 1 h gain (+15 to +52) does not hold over 3 h (-23 / -15; lagged mark -46) |
+| ladder | build; gate at ladder_min_cash_frac 0.1 | low-medium | +9 / +29 at the lagged mark; a 20% gate turns it off at today's 11k free cash |
+
+Limits: the sim does not value freed cash (no opportunity cost of capital), so it understates what a ceiling or a
+faster unload is worth to a capital-starved account. `_bg_cap` is an assumption: say which background level you
+believe and rerun (d).

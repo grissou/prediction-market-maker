@@ -153,6 +153,10 @@ class Sim:
         self.fills, self.writes, self.dups, self.quoted_s, self.alive_s = [], 0, 0, 0, 0
         self.side_s, self.best_s = 0, 0          # our quoted side-seconds, and those at/inside the best other price
         self.locked_s = 0.0                      # cash locked in our resting orders, summed over seconds
+        # Round 2: the rest of the account (other ~225 markets) holds bg_cap in positions; capital fraction =
+        # (bg_cap + our positions here) / account. Fast unload and the ladder's free-cash gate are prototypes.
+        self.bg_cap, self.cap_frac, self.fast_unload, self.lad_gate = 60_000.0, 0.0, None, 0.0
+        self.age_samples, self.free_cash = [], 1e9
         self.ladder, self.rival_aware = None, 0.0    # R3 / rival-aware prototypes (see ladder_want)
         self.pnl_curve, self.worst_peak = [], 0.0
         self.mkts, self.paths = [], []
@@ -240,8 +244,12 @@ class Sim:
             done += q
             if o.owner.startswith("r"):
                 self.rival(m, o.owner).inv += q if o.is_bid else -q
+            m.state.setdefault("prints", []).append((t, o.price, q))
             if o.owner == "us":
                 side = 1 if o.is_bid else -1
+                add_lot(m.state.setdefault("lots", []), side * q, t)
+                if self.fast_unload and side * (o.fv - o.price) >= self.fast_unload["edge"]:
+                    m.state["fu"] = (t + self.fast_unload["secs"], side, q)
                 m.inv += side * q
                 m.cash -= side * q * o.price
                 self.fills.append((t, m, side, q, o.price, o.fv, o.level, taker))
@@ -355,6 +363,11 @@ class Sim:
     def our_cycle(self, t, paths):
         """One bot cycle over all markets: plan each, then send in priority order within the write budget."""
         self.wlog = [x for x in self.wlog if t - x[0] < 60]
+        pos = sum(m.inv * p[t] if m.inv > 0 else -m.inv * (1 - p[t]) for m, p, c in paths)
+        self.cap_frac = (self.bg_cap + pos) / 100_000.0
+        self.free_cash = 100_000.0 - self.bg_cap - pos - sum(
+            o.qty * (o.price if o.is_bid else 1 - o.price) for m in self.mkts for o in m.orders
+            if o.owner == "us" and o.level == 0)
         spare = self.wcap - sum(c for _, c in self.wlog)
         plans = sorted((x for x in (self.our_step(m, t, p) for m, p, c in paths) if x),
                        key=lambda x: x[0])
@@ -448,6 +461,9 @@ class Sim:
                                          for o in m.orders if o.owner == "us")
                 self.alive_s += 1
                 if t % 60 == 0:
+                    lots = m.state.get("lots")
+                    if lots:
+                        self.age_samples.append(lot_age(lots, t))
                     marked[t] += m.cash + m.inv * p[t]
                     worst[t] += m.inv * p[t] if m.inv > 0 else -m.inv * (1 - p[t])
         peak, dd = -1e18, 0.0
@@ -470,6 +486,19 @@ class Sim:
         mk = sum(f[2] * f[3] * (pathp[id(f[1])][min(T, int(f[0]) + 900)] - f[4]) for f in self.fills)
         pnl = sum(m.cash + m.inv * pend[id(m)] for m in self.mkts)
         pnl_mid = sum(m.cash + m.inv * mids[id(m)] for m in self.mkts)
+        lag = {}                                  # exchange-style mark: VWAP of all trades in the last 30 min
+        for m, p, c in self.paths:
+            pr = [x for x in m.state.get("prints", []) if x[0] >= T - 1800]
+            v = sum(x[2] for x in pr)
+            lag[id(m)] = sum(x[1] * x[2] for x in pr) / v if v else (m.state["prints"][-1][1] if m.state.get("prints") else p[T])
+        pnl_lag = sum(m.cash + m.inv * lag[id(m)] for m in self.mkts)
+        held = sorted((lot_age([x], T), abs(x[0])) for m in self.mkts for x in m.state.get("lots", []))
+        tot_h, acc, age_med = sum(w for _, w in held), 0.0, 0.0
+        for a, w in held:
+            acc += w
+            if acc >= tot_h / 2:
+                age_med = a
+                break
         fpnl = [f[2] * f[3] * (pend[id(f[1])] - f[4]) for f in self.fills]
         big = [i for i, f in enumerate(self.fills) if f[2] * (f[5] - f[4]) > 0.03]
         big_sh = sum(self.fills[i][3] for i in big)
@@ -489,7 +518,10 @@ class Sim:
                     big_vol=round(big_sh / sh, 3) if sh else 0.0,
                     big_pnl=round(sum(fpnl[i] for i in big) / tot, 2) if tot > 0 else 0.0,
                     locked=round(self.locked_s / (T + 1)), lvl_sh=round(sum(self.fills[i][3] for i in lvl)),
-                    lvl_pnl=round(sum(fpnl[i] for i in lvl)), pick_cost=round(pick_cost))
+                    lvl_pnl=round(sum(fpnl[i] for i in lvl)), pick_cost=round(pick_cost),
+                    pnl_lag=round(pnl_lag), age_med=round(age_med, 2),
+                    age_mean=round(sum(self.age_samples) / len(self.age_samples), 2) if self.age_samples else 0.0,
+                    cap_frac=round((self.bg_cap + self.worst_peak) / 100_000.0, 3))
 
 
 def hold(cfg, m, cur, w, t):
@@ -547,10 +579,26 @@ def baseline_strategy(sim, m, t, fv, bfv, ref, book):
     no_bid = bfv - ref > cfg.ref_guard_gap
     side, bias_edge, bias_size = M.fl_side(fv, m.state.get("fl"), cfg)     # favourite-longshot side bias
     m.state["fl"] = side
+    over = cfg.capital_in_positions_max_frac < 1.0 and sim.cap_frac > cfg.capital_in_positions_max_frac
     q = M.compute_quote(fv, m.inv, m.inv, bb, ba, cfg, no_bid=no_bid, no_ask=no_ask,
                         kelly_p=None if m.headline else ref, order_size=size, position_limit=plimit,
-                        bias_side="bid" if side == "mid" else side, bias_edge=bias_edge, bias_size=bias_size)
+                        bias_side="bid" if side == "mid" else side, bias_edge=bias_edge, bias_size=bias_size,
+                        net_inv=m.inv, age_hours=lot_age(m.state.get("lots"), t),
+                        adding_factor=cfg.capital_ceiling_adding_size_factor if over else 1.0)
     want = quote_to_want(q)
+    fu = m.state.get("fu")
+    if fu and t < fu[0] and fu[1] * m.inv > 0:
+        # fast unload prototype: the reducing side at fair -/+ offset (never crossing), size = the sweep fill
+        is_bid = fu[1] < 0
+        px = floor_tick(fv - sim.fast_unload["off"]) if is_bid else ceil_tick(fv + sim.fast_unload["off"])
+        px = min(px, floor_tick(ba - TICK)) if is_bid and ba is not None else px
+        px = max(px, ceil_tick(bb + TICK)) if not is_bid and bb is not None else px
+        cur = next((w for w in want if w[0] == is_bid), None)
+        if cur is None or (px > cur[1] if is_bid else px < cur[1]):
+            qty = int(min(abs(m.inv), max(fu[2], cur[2] if cur else 0)))
+            want = [w for w in want if w[0] != is_bid] + ([(is_bid, px, qty, 0, None)] if qty >= 1 else [])
+    if sim.ladder and sim.lad_gate and sim.free_cash < sim.lad_gate * 100_000.0:
+        return want                                   # R3 gate: no ladder while free cash is short
     if sim.ladder or sim.rival_aware:
         want = ladder_want(sim, m, t, fv, ref, q, want, bb, ba, size, plimit)
     return want
@@ -603,6 +651,24 @@ def ladder_want(sim, m, t, fv, ref, q, want, bb, ba, size, plimit):
     return want
 
 
+def add_lot(lots, x, t):
+    """FIFO lots [signed shares, time]: same sign adds a lot, opposite sign closes the oldest first."""
+    while x and lots and lots[0][0] * x < 0:
+        take = min(abs(x), abs(lots[0][0]))
+        lots[0][0] += take if lots[0][0] < 0 else -take
+        x += -take if x > 0 else take
+        if abs(lots[0][0]) < 1e-9:
+            lots.pop(0)
+    if abs(x) > 1e-9:
+        lots.append([x, t])
+
+
+def lot_age(lots, t):
+    """Share-weighted age of the held lots, hours (Bot.age_hours)."""
+    n = sum(abs(x) for x, _ in lots) if lots else 0.0
+    return sum(abs(x) * (t - u) for x, u in lots) / n / 3600 if n else 0.0
+
+
 def quote_to_want(q):
     out = []
     if q.bid is not None and q.bid_size > 0:
@@ -629,8 +695,15 @@ def _one(args):
     bias_hl = float(ov.pop("_bias_hl", 0))                     # T1 prototype: fair value = Polymarket + EMA gap
     ladder = ov.pop("_ladder", None)                           # R3 prototype: 1 = LADDER, or a dict of changes
     rival_aware = float(ov.pop("_rival_aware", 0))             # rival-aware: step behind (price units) or 0
+    ov_bg = ov.pop("_bg_cap", None)                            # positions held in the other markets (default 60k)
+    lad_gate = float(ov.pop("_lad_gate", 0))                   # ladder only while free cash >= this x account
+    fast_unload = ov.pop("_fast_unload", None)                 # 1 or dict(edge, off, secs)
     sim = Sim(s, hours, regime, make_cfg(ov), strategy, share=share, rival_inv=rival_inv)
     sim.bias_hl, sim.rival_aware = bias_hl, rival_aware
+    sim.bg_cap = float(ov_bg) if ov_bg is not None else sim.bg_cap
+    sim.lad_gate = lad_gate
+    if fast_unload:
+        sim.fast_unload = {**dict(edge=0.02, off=0.005, secs=300), **(fast_unload if isinstance(fast_unload, dict) else {})}
     if ladder:
         sim.ladder = {**LADDER, **(ladder if isinstance(ladder, dict) else {})}
     return sim.run()
