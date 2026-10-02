@@ -1454,6 +1454,28 @@ check("never overridable: secrets, URLs, files, the kill switch", not {"api_key"
       "max_drawdown_pct", "fills_csv", "overrides_file"} & set(M.OVERRIDABLE))
 check("every overridable name is a real setting", all(hasattr(Config(), k) for k in M.OVERRIDABLE))
 
+print("--- start-up clean slate only when needed; status during long cycles")
+a, b = make_bot(); b.cfg.selftest_enabled = False
+run_cycles(b, 1)
+check("start-up: no orders resting -> no clean-slate cancel (one fewer write at a slow open)",
+      a.calls.index(("cancel_all", None)) > min(i for i, c in enumerate(a.calls) if c[0] == "batch"), a.calls[:6])
+a, b = make_bot(); b.cfg.selftest_enabled = False
+a.orders[999] = {"id": 999, "exchangeId": "11", "side": "yes", "action": "buy", "priceLimit": 0.05, "quantity": 5,
+                 "open": True, "expirationDate": iso(utcnow() + timedelta(minutes=20))}
+run_cycles(b, 1)
+check("start-up: orders left over -> cancelled first",
+      a.calls.index(("cancel_all", None)) < min(i for i, c in enumerate(a.calls) if c[0] == "batch"), a.calls[:4])
+a, b = make_bot()
+alerts = []
+real_alert, M.alert = M.alert, lambda m: alerts.append(m)
+b.cfg.slow_cycle_alert_seconds = 10
+b.cycle_started = time.monotonic() - 30
+b.progress("sending orders")
+st = json.load(open(b.cfg.status_file))
+M.alert = real_alert
+check("a long cycle keeps status.json fresh (running seconds + phase) and alerts once",
+      st.get("cycle_running_seconds") == 30 and st.get("cycle_phase") == "sending orders" and len(alerts) == 1, (st.get("cycle_phase"), alerts))
+
 print("--- parallel requests")
 a, b = make_bot()
 res = b.in_parallel(lambda x: 1 / x, [1, 0, 2])

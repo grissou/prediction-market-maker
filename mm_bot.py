@@ -1615,6 +1615,8 @@ class Bot:
         self.errors_total = 0             # failed cycles since start (summaries report new ones)
         self.phase = "starting"           # what the bot is doing, for the status line
         self.selftest_passed = False
+        self.cycle_started, self.cycle_alerted = None, False
+        self.last_progress_write, self.last_slow_alert = -1e9, -1e9
         self.defaults = {k: getattr(cfg, k) for k in OVERRIDABLE}   # what a removed override goes back to
         self.overrides, self.overrides_mtime, self.last_overrides_check = {}, None, -1e9
         self.selftest_future = None       # the self-test running in the background (see selftest_tick)
@@ -1724,10 +1726,29 @@ class Bot:
     def cycle(self):
         cfg = self.cfg
         now, now_m = utcnow(), time.monotonic()
+        self.cycle_started, self.cycle_alerted = now_m, False
         try:
             self.cycle_body(cfg, now, now_m)
         finally:
             self.last_cycle_seconds = time.monotonic() - now_m
+            self.cycle_started = None
+
+    def progress(self, phase):
+        """Inside a cycle: if it's running long, keep status.json fresh (it's otherwise written only after a
+        cycle, so a 4-minute cycle looked like a dead bot) and alert once when it passes slow_cycle_alert_seconds."""
+        if self.cycle_started is None:
+            return
+        now_m = time.monotonic()
+        running = now_m - self.cycle_started
+        if running < 10 or now_m - self.last_progress_write < 5:
+            return
+        self.last_progress_write = now_m
+        self.health["cycle_running_seconds"], self.health["cycle_phase"] = round(running), phase
+        self.write_status(ok=True)
+        if running >= self.cfg.slow_cycle_alert_seconds and not self.cycle_alerted \
+                and now_m - self.last_slow_alert >= 900:
+            self.cycle_alerted, self.last_slow_alert = True, now_m
+            alert(f"slow cycle: {running:.0f} s so far ({phase}) - the exchange may be slow")
 
     def cycle_body(self, cfg, now, now_m):
 
@@ -1797,6 +1818,8 @@ class Bot:
         else:
             self.download_books(self.books_to_fetch([]), mine_real)   # just the few the feed reported
             self.reverify_books(mine_real, now_m)  # books unconfirmed for a while: cheap bulk check first
+
+        self.progress("books")
 
         # 3. Fair values ---------------------------------------------------------------------------
         # book_fvs: the tournament book's own price (parties in a race scaled to sum to 1).
@@ -1889,6 +1912,7 @@ class Bot:
                     new_orders += self.reconcile(ex, ex.quote, resting.get(eid, []), fvs.get(eid), now, now_m)
             except ApiError as e:         # one exchange failing must not stop the others
                 log.error("exchange %s (%s): %s", eid, ex.label, e)
+        self.progress("sending orders")
         if self.running:
             if cfg.parallel_writes > 1:
                 self.send_changes(changes)
@@ -2459,6 +2483,7 @@ class Bot:
             if left <= 0 or not self.writes:
                 break
             wait([w.future for w in self.writes], timeout=left, return_when=FIRST_COMPLETED)
+            self.progress("waiting for order writes")
         self.harvest_writes()
 
     def send_orders(self, changes):
@@ -3521,9 +3546,18 @@ class Bot:
                 alert("bot starting (live)")
                 self.wait_for_trading()
                 if self.running:
-                    log.info("clean slate: cancelling any orders left over from before")
                     try:
-                        self.cancel_everything()
+                        left = [o for o in self.api.open_orders(self.tid) if str(o.get("exchangeId")) in self.ex]
+                    except ApiError as e:
+                        left = None                       # can't tell: cancel to be safe
+                        log.warning("open-orders read failed (%s) - cancelling to be safe", e)
+                    try:
+                        if left == []:
+                            log.info("clean slate: no orders resting - nothing to cancel")
+                        else:
+                            log.info("clean slate: cancelling %s orders left over from before",
+                                     len(left) if left is not None else "any")
+                            self.cancel_everything()
                     except ApiError as e:
                         # Day one's open: every write timed out. Crashing here (exit 1, restart, same again) helps
                         # nobody: anything left over shows up in the first open-orders read and is managed (or
