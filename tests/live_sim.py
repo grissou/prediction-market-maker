@@ -587,7 +587,6 @@ class LiveSim(Sim):
                       for k, v in self.lg.items()},
                    dead=sum(1 for e in self.bot.ex.values() if e.turnover_dead),
                    tx_bind_frac=round(self.tx_bind / max(1, self.tx_quoted), 3),   # Package 5 T2.4
-
                    hold_take_sh=round(getattr(self, "hold_take_sh", 0.0)))
         return out
 
