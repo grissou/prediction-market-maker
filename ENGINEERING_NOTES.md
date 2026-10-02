@@ -14,8 +14,9 @@ Numbers are simulated seconds from `tests/scenario.py` (see "Scenarios"). Update
 | 4 | Recover unconfirmed orders + metadata (fill attribution) | done |
 | 5 | Realtime reconnect backoff resets after a healthy session | done |
 | 6 | Faster Polymarket | done (no WebSocket, refresh stays 5 s) |
-| 7 | Burst protection | todo |
-| 8 | Churn control for a crowded book | todo |
+| 7 | Burst protection (+ writes fail fast, separate 30/min write budget) | done |
+| 8 | Churn control for a crowded book | done |
+| + | Positions 409 'cannot be valued' no longer fails the cycle; clean-slate cancel can't crash start-up | done |
 
 ## Scenarios (`python tests/scenario.py [slow|crowded|both] [seeds] [minutes]`)
 
@@ -99,6 +100,38 @@ then try 2 s.** WebSocket (CLOB market channel, sub-second): not built - needs c
 ref_map change) and a second socket to keep alive; worth it only if markouts show we're picked off within 5 s of
 Polymarket moves (Run B/C data). Estimate: ~150 lines + tests.
 
+## Item 7 - burst protection (done)
+
+Burst mode when the median write on the wire >= 5 s, >= 2 write timeouts in a minute, or a cycle >= 20 s; off after
+120 s calm. Top 40 markets (House/Senate first) quote normally at half size and +0.5c; elsewhere no reprices
+(safe orders stay, unsafe ones are pulled, empty sides get a half-size quote). Never in reduce-only / flatten /
+exit windows. Writes timing out after being sent are not retried with the same key (that only ever got 409);
+item 4 recovers them. Separate write budget `writes_per_minute` = 30 (Run B found a copy of the platform docs
+saying "100 reads and 30 writes per minute"; day one peaked near 45 cancels/min with no 429, so a batch
+probably counts once - **owner: confirm with SIG**). Reviewer fixes: exit window never blocked, oversized
+orders never kept, write waits don't hold reads, timing on the wire, Polymarket-move changes respect the budget.
+Known: entering burst widens the limit, so some resting orders become "unsafe" and are repriced once.
+
+## Item 8 - churn control (done)
+
+`hold_side`: a single safe resting order (price inside the limit, size not above wanted, not expiring) is kept
+instead of repriced when younger than `min_quote_life_seconds` (5) or its side was repriced
+`churn_max_reprices` (4) times in `churn_window_seconds` (60). Never within 15 s of a Polymarket move of
+>= `urgent_ref_move` (0.5c); those markets' changes go right after pulls. `churn_control=False` = off. Unit
+test fixtures pin it off (they reprice instantly); the stress test runs it on.
+
+## Scenario summary (10 min; seeds 1-3 unless noted; final numbers in the PR body)
+
+| | main slow | PR1 slow | main crowded | PR1 crowded |
+|---|---|---|---|---|
+| 80% of markets quoted (s) | 339-361 | ~104 | 42-53 | 42-50 |
+| quoted at 2 min / 10 min | 17-21% / 44-75% | 88% / 54% | 93-97% / 36-59% | 97% / 58-87% |
+| longest cycle (s) | 314-338 | ~51 | 256-508 | 57-105 |
+| fills unattributed | 54-69% | <1% | 0-5% | <1% |
+| duplicate quotes (max) | 0-1 | 0 | 1-2 | 0 |
+| self-test exit 3 | 1-2 of 3 | 0 | 0 | 0 |
+| write requests/min | 4.5-6.3 | ~19 | 28-34 | ~29 (cap 30) |
+
 ## Code review findings (main a49587c)
 
 Severity: H = costs money or can stop the bot, M = degrades quoting, L = minor.
@@ -112,7 +145,8 @@ Severity: H = costs money or can stop the bot, M = degrades quoting, L = minor.
   (in flight) and the batch is given up: orders land unknown to the bot (pending 90 s), fills unattributed. Item 4.
 - H `mm_bot.py:2806-2810` run(): the clean-slate `cancel_everything()` at the open is outside the loop's try: if
   every write times out (6 tries x 15 s) the ApiError crashes the bot (exit 1; systemd restarts it 60 s later and
-  the restart does the same). Seen in the slow scenario with all writes > 15 s. Item 4/pr3 (skip when no orders).
+  the restart does the same). Seen in the slow scenario with all writes > 15 s. **Fixed** (item 7 commit; pr3 also
+  skips it when no orders rest).
 - M `mm_bot.py:1660` cycle: book_fvs is None once `now - ex.verified >= book_stale` (300 s): during a long cycle
   every book goes stale and quotes are pulled. Item 3.
 - M `mm_bot.py:1768` books_to_fetch: at most 10 books per cycle (max_books_per_cycle). Item 3.
@@ -120,7 +154,7 @@ Severity: H = costs money or can stop the bot, M = degrades quoting, L = minor.
   day one. Item 5.
 - M `ref_prices.py:122` fetch_polymarket: 5 sequential requests on new connections each refresh. Item 6.
 - M `mm_bot.py:1805` account_value fallback: positions read failing with 409 "holdings cannot be valued"
-  (16:30:05 on day one) fails the whole cycle (`cycle()` step 1 reads positions unguarded). Not yet fixed.
+  (16:30:05 on day one) fails the whole cycle (`cycle()` step 1 reads positions unguarded). **Fixed** (last read reused).
 - M Rate limit: four 429s on day one with the bot's budget at 80/min (server says ~100/min). The server may count
   differently (in-flight retries, other endpoints) - the self-tuning cut handles it; noted for the owner.
 - L `mm_bot.py:2502` load_order_notes keys are int(): fine today (order ids are integers on day one).
@@ -131,3 +165,29 @@ Severity: H = costs money or can stop the bot, M = degrades quoting, L = minor.
 
 - Pennying to a 1c floor against bots that do the same is what the crowded scenario shows; item 8 adds churn
   control (engineering side). Strategy questions (floor width, join vs improve) are yours.
+- PR1 makes the bot spend its writes better, but the crowded scenario still shows pick-offs of 1c-floor quotes
+  after Polymarket moves (81-94 per 10 min vs 127-129 before churn/burst). The remaining lever is strategic:
+  wider floors / join-don't-improve (Run B R4) and a resting ladder behind the touch (R3).
+- Settings you'll likely touch: `min_edge`, `burst_*`, `churn_*`, `writes_per_minute`. On pr3 they are all
+  live-overridable (settings_override.json), so the owner can tune without a restart.
+- `tests/scenario.py` can serve as your simulator's day-one harness: `SCENARIO_SET="key=val,..."` overrides any
+  setting; `crowded` has rival bots with configurable delay/floor (class Rival).
+- The fake exchange's NO-side fill price is the YES price, but day one reported NO-side fills at 1 - price (fills.csv:
+  an ask at 0.62 filled "at 0.38"); fill analysis must use quote_price or flip it (pr3 `analyze` uses quote_price).
+
+## Ideas from Run B (IDEAS.md) - engineering view
+
+| Idea | Buildable? | Status |
+|---|---|---|
+| R6 adopt orphaned orders after 409s; split write budget; cancels first | yes | **built** (items 2, 4, 7) |
+| R1 equity base `reserved_cash_mode="ignore"` | one setting; verify with status.json first | Run C (risk); trivial |
+| R2 liquidity-scaled skew, never cross own fair value | yes, ~30 lines in compute_quote | Run C |
+| R3 resting ladder behind the touch | yes, but needs multi-order-per-side support in reconcile/side_needs_change and capital accounting (~150 lines + tests); writes: few if ladders stay put | Run C; I'd build it on top of plan_change |
+| R4 join or step back, never penny at the floor | yes, small in compute_quote; complements item 8 | Run C |
+| R5 price thin books from Polymarket | yes, in fair-value step (~20 lines) | Run C |
+| R7 correlated risk measure | yes (math only) | Run C |
+| R8 smaller headline quotes | one setting (`headline_size_frac`), live-overridable on pr3 | owner / Run C |
+| T4 pull-first on Polymarket moves | built (item 8 urgent ordering + burst pulls) | done |
+| T5 realtime book logger / competitor fingerprints | yes: log feed events (no extra reads) to sqlite, ~80 lines | not built (time) |
+| T11 markout-driven auto-widen | yes once `analyze` markouts are trusted (pr3) | Run C |
+| W1 election-night taking | risky, policy decision | owner |
