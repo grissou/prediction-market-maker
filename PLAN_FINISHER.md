@@ -59,3 +59,10 @@ Base results are cached per (seed, hours, regime, config) in the scratchpad (LIV
 | Total | | 120 |
 Split: Tier 1 ~ 54 (45%), Tier 2 ~ 63 (55%). Early stop: a variant whose first 4 seeds put d pnl_liq below -3 SE stops.
 Deviation from the brief (nproc 1): sub-agents build and unit-test only; all simulations run here, serially, under this one budget.
+
+## Package 5 actuals (2 Oct 18:25 -> 3 Oct; the owner lifted the 120 CPU-min cap at 20:30 UTC and extended the session to ~08:00 UTC)
+- Measured cost: ~7 CPU-min per 8 x 3 configuration (wall = CPU, 1 core), i.e. ~17.5 CPU-s per seed-hour.
+- Spent before the cap was lifted: re-score 30 + old-world base 6 + T2.1/T2.2 24 + A/B 24 + T2.1+A, T2.1+T2.4 ~9 (early stop) = ~93.
+- After: old-world T2.1 6, pinned world 36, news 6 x 6 x 2 = 18, flat 6 x 3 x 2 = 9, C/T2.5/T2.4@0.25 ~18, 16 x 6 confirm 48,
+  ramp-in / first-2-hour / high-tilt / calibrated / X5 / X11 / ladder screens ~60, pinned 16 x 6 x 4 = 96 (see SIM_NOTES Round 5 for each).
+- Every configuration ran once: results are cached per (seed, hours, regime, settings) in the scratchpad and re-read for every table.
