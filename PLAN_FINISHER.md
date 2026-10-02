@@ -42,3 +42,20 @@ Never re-run a configuration; every result into SIM_NOTES.md "Round 4"; runs in 
 - Item 3: gate diagnosis ~2 CPU-min; P&L runs not run (ladder idle at 0.90 and 0.80, nothing to measure).
 - Item 4: 0 CPU-min; the 16 x 6 news run was refused by the session's permission classifier ("Interfere With Workloads").
   At the real cost it would have been ~70 CPU-min, over the 30 cap anyway.
+
+# Package 5 (Finisher 2b, executor, 2 Oct 18:25 UTC): costed run plan (PLAN_POLY_BIAS.md v2 section 5)
+Machine: nproc = 1, so CPU-min = wall-min; SIM_PROCS=1. Cost 15 CPU-s per seed-hour: 8 x 3 quiet = 6 CPU-min per configuration.
+Judging world ("tilt world"): `_rival_anchor` 1, `_world_tilt` 0.05, `_world_tilt_growth` 0.002; Package 4 defaults + live overrides as BASE.
+Base results are cached per (seed, hours, regime, config) in the scratchpad (LIVE_SIM_CACHE), so no configuration runs twice.
+| Block | Runs (8 x 3 quiet unless noted) | CPU-min |
+|---|---|---|
+| Tier 1 re-score, tilt world | base, fast_unload_enabled, reduce_join_best, turnover_control_enabled, ceiling factor 0.25 | 30 |
+| Old world base (`_rival_anchor` 0, no tilt; brief: anchor 0 at least for base; also T2.1's old-world comparator) | base | 6 |
+| T2.1 / T2.2 | ref_tilt; ref_tilt in old world; ref_tilt + ref_weight 0.5; + 0.35 | 24 |
+| Tier 1 A / B | A; B; T2.1 + B; A + B (or T2.1 + A) | 24 |
+| T2.4 | on top of the best so far | 6 |
+| Confirm best ONE vs base | 6 x 6 news (9 each side) + 6 x 3 quiet tilt growth 0 (4.5 each side) | 27 |
+| Reserve | | 3 |
+| Total | | 120 |
+Split: Tier 1 ~ 54 (45%), Tier 2 ~ 63 (55%). Early stop: a variant whose first 4 seeds put d pnl_liq below -3 SE stops.
+Deviation from the brief (nproc 1): sub-agents build and unit-test only; all simulations run here, serially, under this one budget.

@@ -5,6 +5,10 @@ The Builder's previous START_HERE is kept as `START_HERE_BUILDER.md`; Run A's no
 Plan: `PLAN.md`. Packages appear below as they become READY (commit messages start "READY: Package N").
 Deploy only commits whose message starts "READY"; the branch is cumulative.
 
+## Package 5 (IN PROGRESS, Finisher 2b executor, 2 Oct evening; branch `claude/finisher-package5` from Package 4 c29f762/fd28b0a)
+Plan: PLAN_POLY_BIAS.md v2 (branch claude/finisher-plan-v2, 6e727dd; merged here, docs and analysis/ only). Run plan: PLAN_FINISHER.md "Package 5".
+Status: step 1 (run plan) done. Nothing below is deployable until this section says READY.
+
 ## Package 4 (READY, Finisher, 2 Oct evening; branch `claude/finisher-package4`, draft PR #6): Package 3 final + 28/60 defaults + ladder fixes + write savers (all new features OFF). Code deploy (handover restart).
 **What changed against Package 3 final (439ac54):**
 - Defaults `writes_per_minute` 28, `writes_per_minute_max` 28, `burst_cycle_seconds` 60 (were 45 / 50 / 20): the owner's live overrides become the code
