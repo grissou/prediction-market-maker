@@ -1539,10 +1539,13 @@ def unsafe_order(o, price, size, limit, is_bid):
     return (o.price > lim + 1e-9 if is_bid else o.price < lim - 1e-9) or o.qty > size + 1e-9
 
 
-def side_needs_change(resting, price, size, cfg, now, limit=None, is_bid=True):
+def side_needs_change(resting, price, size, cfg, now, limit=None, is_bid=True, max_size=None):
     """True if what's resting on ONE side of an exchange doesn't match what we want there.
     Leaving a good order alone keeps its place in the queue, which is worth money. So an order a tick
-    (reprice_tolerance_ticks) off the target is kept, as long as it's inside `limit` (see Quote)."""
+    (reprice_tolerance_ticks) off the target is kept, as long as it's inside `limit` (see Quote).
+    max_size: the biggest order still acceptable (default: size). Burst mode passes the normal size here while
+    `size` is the burst size, so a full-size order placed before the burst stays and a half-size one placed
+    during it stays too - neither is cancelled and re-placed when the exchange is slow."""
     if price is None:
         return bool(resting)                                    # want nothing: anything there must go
     if len(resting) != 1:
@@ -1553,7 +1556,7 @@ def side_needs_change(resting, price, size, cfg, now, limit=None, is_bid=True):
         safe = limit is not None and (o.price <= limit + 1e-9 if is_bid else o.price >= limit - 1e-9)
         if not (close and safe):
             return True                                         # wrong price
-    if not (size * cfg.keep_fraction <= o.qty <= size):
+    if not (size * cfg.keep_fraction <= o.qty <= (max_size if max_size is not None else size)):
         return True                                             # mostly filled, or bigger than we now want
     if o.expires and (o.expires - now).total_seconds() < cfg.refresh_before_expiry:
         return True                                             # about to expire
@@ -2751,16 +2754,19 @@ class Bot:
                 return Change(ex, resting, True, [], self.change_key(ex, pull=True, reprice=True), count=False)
             return None
 
+        full_bid, full_ask = q.bid_size, q.ask_size      # the normal sizes: still the ceiling in burst mode
         if self.burst and self.cfg.burst_size_factor != 1.0:
             # Burst mode places burst_size_factor of each size: compare what rests with THAT size, or a half-size
-            # order fails keep_fraction (187 of 375 < 50%) and is cancelled and replaced every cycle.
+            # order fails keep_fraction (187 of 375 < 50%) and is cancelled and replaced every cycle. A full-size
+            # order placed before the burst is NOT oversized though (ceiling = the normal size), or entering burst
+            # mode would pull and re-place every resting quote while the exchange is slow.
             k = self.cfg.burst_size_factor
             q = replace(q, bid_size=max(1, int(q.bid_size * k)) if q.bid_size else 0,
                         ask_size=max(1, int(q.ask_size * k)) if q.ask_size else 0)
         bids = [o for o in resting if o.is_bid]
         asks = [o for o in resting if not o.is_bid]
-        fix_bid = side_needs_change(bids, q.bid, q.bid_size, self.cfg, now, q.bid_limit, is_bid=True)
-        fix_ask = side_needs_change(asks, q.ask, q.ask_size, self.cfg, now, q.ask_limit, is_bid=False)
+        fix_bid = side_needs_change(bids, q.bid, q.bid_size, self.cfg, now, q.bid_limit, is_bid=True, max_size=full_bid)
+        fix_ask = side_needs_change(asks, q.ask, q.ask_size, self.cfg, now, q.ask_limit, is_bid=False, max_size=full_ask)
         # Reduce-only, flatten and exit windows: always do exactly what the risk logic asks (no holding, no
         # burst-mode skipping), or a position could be left to grow or never be exited.
         critical = self.global_reduce or self.hours_to_close(ex) <= self.cfg.flatten_hours_before_close
@@ -2781,9 +2787,9 @@ class Bot:
             # limit, size not above what's wanted) and pull what isn't; an EMPTY side still gets a (smaller) quote,
             # which costs only a share of one batch.
             fix_bid = fix_bid and (q.bid is None or not bids or any(
-                o.price > (q.bid_limit if q.bid_limit is not None else q.bid) + 1e-9 or o.qty > q.bid_size + 1e-9 for o in bids))
+                o.price > (q.bid_limit if q.bid_limit is not None else q.bid) + 1e-9 or o.qty > full_bid + 1e-9 for o in bids))
             fix_ask = fix_ask and (q.ask is None or not asks or any(
-                o.price < (q.ask_limit if q.ask_limit is not None else q.ask) - 1e-9 or o.qty > q.ask_size + 1e-9 for o in asks))
+                o.price < (q.ask_limit if q.ask_limit is not None else q.ask) - 1e-9 or o.qty > full_ask + 1e-9 for o in asks))
             doomed = (bids if fix_bid else []) + (asks if fix_ask else [])
             new = [] if now_m < ex.pause_until else (
                 ([self.new_order(ex, True, q.bid, q.bid_size, fv, now)] if fix_bid and q.bid is not None and not bids else [])
@@ -2807,8 +2813,8 @@ class Bot:
             return None
         # An order that must not stay (unsafe) makes this change as urgent as a pull: never deferred by the budget.
         urgent = self.cfg.never_defer_unsafe and (
-            (fix_bid and any(unsafe_order(o, q.bid, q.bid_size, q.bid_limit, True) for o in bids))
-            or (fix_ask and any(unsafe_order(o, q.ask, q.ask_size, q.ask_limit, False) for o in asks)))
+            (fix_bid and any(unsafe_order(o, q.bid, full_bid, q.bid_limit, True) for o in bids))
+            or (fix_ask and any(unsafe_order(o, q.ask, full_ask, q.ask_limit, False) for o in asks)))
         return Change(ex, doomed, fix_bid and fix_ask, new,
                       self.change_key(ex, pull=not new or urgent, reprice=bool(doomed)))
 

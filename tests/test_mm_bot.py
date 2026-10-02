@@ -1502,6 +1502,23 @@ b.burst = False
 ch = b.plan_change(b.ex["11"], q375, o11, 0.14, now, now_m)
 check("out of burst mode, the 187 is below keep_fraction of 375 and is replaced at full size",
       ch is not None and sorted(o["quantity"] for o, _ in ch.new) == [375, 375], ch and ch.new)
+# Entering burst mode must NOT pull the full-size orders placed before it (they are not "oversized": the normal
+# size stays the ceiling), in a top market and in a non-top market alike - or every resting quote would be
+# cancelled and re-placed at half size exactly when the exchange is slow.
+b.burst = True
+bid11.qty = ask11.qty = 375
+ch = b.plan_change(b.ex["11"], q375, o11, 0.14, now, now_m)
+check("entering burst: a resting full-size (375) order in a top market stays (not cancelled for being 'oversized')",
+      ch is None, ch and (ch.doomed, ch.new))
+b.burst_set = set()                                   # market 11 is not a top market in this burst
+ch = b.plan_change(b.ex["11"], q375, o11, 0.14, now, now_m)
+check("entering burst: ...and in a non-top market too (safe orders stay)", ch is None, ch and (ch.doomed, ch.new))
+q_big = Quote(bid11.price, 400, ask11.price, 400, bid11.price, ask11.price)
+bid11.qty = ask11.qty = 450
+ch = b.plan_change(b.ex["11"], q_big, o11, 0.14, now, now_m)
+check("entering burst: an order bigger than the NORMAL size is still pulled", ch is not None and len(ch.doomed) == 2,
+      ch and (ch.doomed, ch.new))
+b.burst, b.burst_set = False, set()
 
 a, b = make_bot()
 a.cancel_all = lambda tid, eid=None: (_ for _ in ()).throw(ApiError(0, "NETWORK", "read timed out"))
