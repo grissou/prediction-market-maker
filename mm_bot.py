@@ -779,6 +779,12 @@ class Config:
     # side keeps the plain quote: in active markets the book-priced exit is picked off by informed takers.
     reduce_from_book_dead_only: bool = False
     reduce_from_book_max_turnover: float = 0.0   # shares/h; 0 = only the turnover_dead flag
+    # --- Package 5: X12 takes measured from the tilted reference ---
+    # take_tilted_ref True (with ref_tilt_enabled): take_stale_quotes measures the gap, confirms it, re-checks it
+    # and sizes the take (Kelly p) from the tilt-corrected Polymarket price (Bot.tilted_ref_for: same s, carry ramp
+    # and headline gate as the blend) instead of the raw one. Arbitrage, the reference guard and ref_only pricing
+    # stay on the raw price. Off (or ref_tilt_enabled off): unchanged.
+    take_tilted_ref: bool = False
 
 
 CFG = Config()
@@ -937,6 +943,8 @@ OVERRIDABLE = {
     # --- Package 5: X11 reduce_from_book scope ---
     "reduce_from_book_dead_only": (False, True),
     "reduce_from_book_max_turnover": (0.0, 100000.0),
+    # --- Package 5: X12 takes measured from the tilted reference ---
+    "take_tilted_ref": (False, True),
 }
 MAX_ORDER_TTL = 7200.0    # no order of ours lives longer than this (dead-man's switch), whatever the TTL settings
 LADDER_MAX_LEVELS = 8
@@ -1847,7 +1855,9 @@ def blend_fv(book_fv, r, cfg, s=0.0, legs=2, headline=False, hours_to_close=floa
     headline market, ref_tilt_headline) toward the tilt-corrected Polymarket price instead of the raw one; with
     ref_tilt_carry_days > 0 the tilt applied fades to 0 over the last N days before the close (carry_ramp)."""
     if cfg.ref_tilt_enabled and (cfg.ref_tilt_headline or not headline):
-        r = tilted_ref(r, carry_ramp(s, hours_to_close, getattr(cfg, "ref_tilt_carry_days", 0.0)), legs)
+        s = carry_ramp(s, hours_to_close, getattr(cfg, "ref_tilt_carry_days", 0.0))
+        if s:                                     # s 0 (or ramped to 0): the raw r exactly
+            r = tilted_ref(r, s, legs)
     return (1 - cfg.ref_weight) * book_fv + cfg.ref_weight * r
 
 
@@ -3522,8 +3532,7 @@ class Bot:
             for eid, r in refs.items():
                 if fvs.get(eid) is not None and eid in liquid and eid not in self.ref_only:   # liquid only
                     ex = self.ex[eid]
-                    fvs[eid] = blend_fv(fvs[eid], r, cfg, self.tilt_s, self.legs(ex), ex.group in cfg.headline_races,
-                                        self.hours_to_close(ex))
+                    fvs[eid] = blend_fv(fvs[eid], self.tilted_ref_for(ex, r), cfg)   # tilt applied once, there
             for members in self.groups.values():
                 if len(members) > 1:
                     fvs.update(normalise({e: fvs[e] for e in members}))
@@ -3844,6 +3853,21 @@ class Bot:
         self.ref_moved = {e for e, ex in self.ex.items() if f"{ex.group}|{ex.party}" in moved}
         for e in self.ref_moved:
             self.ex[e].ref_moved_at = time.monotonic()
+
+    def tilted_ref_for(self, ex, r):
+        """The Polymarket price r as this market's quotes see it: with ref_tilt_enabled (and, in a headline market,
+        ref_tilt_headline) the tilt-corrected r' = tilted_ref(r, s, legs) with s = self.tilt_s faded by carry_ramp
+        near the close; otherwise (or s 0) r unchanged. Shared by the blend and (take_tilted_ref) the takes."""
+        cfg = self.cfg
+        if r is None or not cfg.ref_tilt_enabled or (ex.group in cfg.headline_races and not cfg.ref_tilt_headline):
+            return r
+        s = carry_ramp(self.tilt_s, self.hours_to_close(ex), getattr(cfg, "ref_tilt_carry_days", 0.0))
+        return tilted_ref(r, s, self.legs(ex)) if s else r
+
+    def take_ref(self, ex, r):
+        """X12: the Polymarket price the stale-quote takes compare with the book and size from: tilted_ref_for with
+        take_tilted_ref, the raw r otherwise."""
+        return self.tilted_ref_for(ex, r) if getattr(self.cfg, "take_tilted_ref", False) else r
 
     def legs(self, ex):
         """Number of markets in this market's race (1 for a lone market)."""
@@ -6167,6 +6191,7 @@ class Bot:
             p = refs.get(eid)
             if p is not None and 0 < cfg.take_ref_max_age_seconds < ages.get(f"{ex.group}|{ex.party}", 0.0):
                 p = None                                  # an old price, kept through failed downloads: not evidence
+            p = self.take_ref(ex, p)                      # X12: the tilted r' with take_tilted_ref
             direction = self.take_direction(ex, p) if (p is not None and eid in liquid) else 0
             if direction != ex.take_dir:
                 ex.take_since = now_m                     # new direction (or none): the clock starts again
@@ -6189,10 +6214,11 @@ class Bot:
             except ApiError as e:
                 log.warning("take on %s skipped: book download failed (%s)", ex.label, e)
                 continue
-            if self.take_direction(ex, refs[eid]) != ex.take_dir:
+            p = self.take_ref(ex, refs[eid])              # X12: the tilted r' with take_tilted_ref
+            if self.take_direction(ex, p) != ex.take_dir:
                 ex.take_dir = 0                           # the gap has closed: nothing to take
                 continue
-            if self.execute_take(ex, refs[eid], inv.get(eid, 0.0), fvs.get(eid), now_m):
+            if self.execute_take(ex, p, inv.get(eid, 0.0), fvs.get(eid), now_m):
                 taken.add(eid)
         return taken
 
