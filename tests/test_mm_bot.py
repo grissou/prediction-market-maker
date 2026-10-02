@@ -3097,6 +3097,58 @@ try:
           not {oid for oid in lad_ids(a, b) if a.orders[oid]["exchangeId"] == "21"}, lad(a, b, "21"))
     a.writes_left = lambda: 10 ** 6
 
+    # Round 4 review (Finisher). R4a: a level is never placed bigger than a resting order there may keep (allowed
+    # counts level 0 at its unscaled size bid_max; with the position limit binding the old code placed level 3
+    # at 150 with 100 allowed: placed, pulled as too big next cycle, placed again - a write loop).
+    a, b = ladder_bot()
+    b.cycle(); b.cycle()
+    ex21 = b.ex["21"]
+    _q = ex21.quote
+    b.ladder_caps = lambda ex, fv, quote, factors=True: {True: lambda px: 5 * quote, False: lambda px: 5 * quote}
+    b.lad_cash_left = 10 ** 9
+    _w, _al, _ = b.ladder_targets(ex21, replace(_q, bid_size=_q.bid_size // 2, bid_max=_q.bid_size), ex21.lad_fv,
+                                  time.monotonic())
+    check("R4a: no ladder level is placed above what may rest there (level 0 shrunk below bid_max, limit binding)",
+          _w and all(_w[k][1] <= _al[k] for k in _w) and _w[(True, 3)][1] == 100, (_w, _al))
+    del b.ladder_caps
+    # R4b: the per-order cash cap is a sizing rule, not a keep limit: when it shrinks under a resting order (the
+    # account value or the quote size moved) that order is no urgent pull (it was: on every market at once).
+    a, b = ladder_bot()
+    b.cycle(); b.cycle()
+    ex21 = b.ex["21"]
+    b.cfg.max_order_cash_frac = 1e-6                     # cash cap now one quote's worth: 100 / 0.485 = 206 < 300
+    b.lad_cash_left = 10 ** 9
+    _w, _al, _ = b.ladder_targets(ex21, ex21.quote, ex21.lad_fv, time.monotonic())
+    b.lad_cash_left = 10 ** 9
+    ch = b.plan_exchange(ex21, ex21.quote, b.orders_by_eid(utcnow())["21"], ex21.lad_fv, utcnow(), time.monotonic())
+    check("R4b: cash cap shrinks under resting level 3 (300 sh, cap now 206) -> no urgent pull, it stays",
+          ("bid", 0.485, 300, 3) in lad(a, b, "21") and _w.get((True, 3), (0, 0))[1] == 206
+          and (ch is None or (ch.key[0] == LADDER_TIER and not any(b.order_level(o) == 3 for o in ch.doomed))),
+          (_w, ch and (ch.key, [(o.price, o.qty, b.order_level(o)) for o in ch.doomed])))
+    # R4c: min_quote_life never keeps a DUPLICATE of a kept level (two orders at one level = a duplicate quote).
+    a, b = ladder_bot(churn_control=True, min_quote_life_seconds=1e9)
+    b.cycle(); b.cycle()
+    ex21, _now_m = b.ex["21"], time.monotonic()
+    rest21 = b.orders_by_eid(utcnow())["21"]
+    _l1 = next(o for o in rest21 if o.is_bid and b.order_level(o) == 1)
+    _dup = Resting(99999, "21", True, _l1.price, _l1.qty, None)
+    b.order_meta[99999] = {"level": 1, "eid": "21"}
+    b.lad_placed[99999] = _now_m
+    ch = b.plan_exchange(ex21, ex21.quote, rest21 + [_dup], ex21.lad_fv, utcnow(), _now_m)
+    check("R4c: a young duplicate at a kept ladder level still goes",
+          ch is not None and len([o for o in ch.doomed if o.is_bid and b.order_level(o) == 1]) == 1
+          and not ch.new, ch and [(o.order_id, o.price, b.order_level(o)) for o in ch.doomed])
+    # R4d: a ladder-only cancel-all of one exchange (whole=True) is a ladder-only pull: 30 of them are no
+    # tournament-wide cancel-all (pulls_cancel_all_over 25).
+    _lad_pulls = []
+    for k in range(30):
+        _os = [Resting(9100 + 2 * k + j, "21", True, 0.4 - 0.01 * j, 100, None) for j in range(2)]
+        _lad_pulls.append(Change(ex21, _os, True, [], b.change_key(ex21, pull=True), count=False, unsafe=True,
+                                 ladder={o.order_id for o in _os}))
+    a.calls.clear()
+    check("R4d: 30 whole-exchange ladder-only pulls never become a tournament-wide cancel-all",
+          b.pull_storm(_lad_pulls) is False and not a.sent("cancel_all"), a.calls)
+
     # Turning the ladder off pulls it; level 0 stays.
     a, b = ladder_bot()
     b.cycle(); b.cycle()

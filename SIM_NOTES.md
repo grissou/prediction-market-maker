@@ -418,3 +418,70 @@ of arbitrage (+314). 0 outsider fills.
   checking its live dead-market list.
 - **ladder_enabled off at today's cash.** At 10% minimum free cash it barely places anything and adds 2 writes/min.
 - **refill cooldown:** either (no effect).
+
+## Round 4 (Finisher): item 3, ladder review and gate diagnosis
+
+Base 42bf407 (team HEAD 58adcac plus the plan). The ladder is still OFF by default. Commit 67f2d58 holds the fixes, the tests and the sim counters.
+
+### Review of a77c8cb (L1-L4) against the spec
+| # | Severity | Finding | Fix |
+|---|---|---|---|
+| R4a | **High** (write loop) | `want` was sized against level 0's *factored* size, but `allowed` (the keep limit) against `bid_max`. With a position limit binding, level 3 was placed at 150 shares with only 100 allowed. It was then pulled the next cycle as too big (an urgent pull, outside the write budget) and placed again, every cycle. | ladder_targets clips every wanted level to `allowed` before charging cash |
+| R4b | **High** (pull storm, when on) | L4's per-order cash cap was also applied to `allowed`. The cap is `max(max_order_cash_frac x account, quote)`, so any dip in account value or quote size made every cash-capped level 2/3 an *urgent* pull, on every ladder market in the same cycle. | the cash cap now sizes new levels only; the keep limit is the position limits alone (as hot-fix 2.2 does for level 0) |
+| R4c | Medium (duplicate quotes) | L3's min_quote_life exemption also kept a young *duplicate* at a level that was already kept, so two orders sat on one level for up to 5 s. | the exemption applies only to a level that isn't kept, and to at most one order per level |
+| R4d | Medium | L2: a ladder-only Change with `whole=True` (exchange cancel-all, level 0 absent) still counted 1 toward `pulls_cancel_all_over`. 26 such markets would trigger a tournament-wide cancel-all. | it now counts only its non-ladder orders |
+| - | ok | L1 (stale, not urgent, one tick behind the resting touch; urgent beyond level 0's limit), L2 (the non-whole case) and L3 (1-tick tolerance via reprice_tolerance_ticks, 2c ladder_move, ladder_min_writes left after the ladder's own writes in send_changes) all match the spec. | - |
+| - | Low, not changed | A young order whose level is no longer wanted (cash ran out) stays up to min_quote_life without being charged to lad_cash_left. Any change in quote size makes L1/L2 orders bigger than wanted, so they are re-placed as stale (tier 2, budget-gated). strategy_sim's `ladder_unsafe` judges against the *wanted* level 0, not the resting touch, so the sim pulls slightly more eagerly than the bot. Fixing that needs the `our_step` call site, which is outside this item's scope. | - |
+
+Tests R4a-R4d are added to tests/test_mm_bot.py. All four FAIL on 42bf407 and pass now. Suites: test_mm_bot 600/600,
+behind_best 36/36, fast_unload 61/61, mark_frag 52/52, recorder_refill 37/37, ref_prices 37/37, strategy 114/114,
+stress 20/20, turnover 94/94. `STRESS_LADDER=1 python tests/test_stress.py`: 20/20, with 0 duplicate or self-crossing quotes.
+
+### Gate diagnosis (2 seeds x 0.5 h quiet, ladder on in BASE, Round 3 BASE_JSON + `_start_cap`)
+The sim has a new output, `lg_*` (tests/live_sim.py). It counts per market-cycle where level 0 quotes. `wgate` is
+counted on its own; the other buckets are exclusive, in this order. A counter bug, fixed after this run, made the
+run's own `lg_cash` too low. So the `cash` column is computed as calls - mkt - geo - caps - ok. With early = 0, that
+remainder is exactly the cash bucket.
+
+| start_cap | market-cycles | write gate shut | not a ladder market | geometry | limits | **cash** | ok (any level) | ok and writes open | lad_cash_left avg | ladder fills |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 0.90 | 61.1k | 46.5k (76%) | 44.6k (73%) | 0.65k | 1.79k | **14.1k (85% of ladder markets)** | 1 | 1 | 0 | 0 |
+| 0.80 | 61.6k | 40.3k (65%) | 45.2k (73%) | 0.56k | 2.48k | **13.3k (81%)** | 93 | 50 | 32 | 0 |
+| 0.70 | 61.7k | 44.4k (72%) | 45.2k (73%) | 0.55k | 0.71k | **14.2k (86%)** | 1,030 | 232 | 451 | 8 sh |
+
+The per-order cash cap never cut a level (lg_cap1 = 0). Short probes (1 seed x 0.03 h) measured the free cash as
+ladder_setup counts it (equity - positions - level-0 locks): on average 0.8k, 8.5k and 5.0k at 0.90, 0.80 and 0.70.
+
+**What binds, in order:**
+1. **Cash (lad_cash_left) binds on ~85% of ladder-market cycles at every start_cap.** The ladder gets
+   `free - ladder_min_cash_frac x equity`, where free is measured after *level-0 resting orders* (~12-25k locked in the sim).
+   Lowering the capital in positions does not help. Level 0 is planned first and its orders take the freed cash, so
+   free cash after level 0 stays below the 10.15k floor (0.1 x 101.5k).
+2. **The write gate (ladder_min_writes 10) is shut in 65-76% of cycles** at 28 writes/min. The bot uses ~21-23 writes/min,
+   so fewer than 10 are left most of the time. Of the cycles where some level fits the cash, only 23-54% have writes left.
+3. **ladder_markets "headline,busy": 73% of market-cycles are quiet markets**, which never get a ladder (by design).
+   Position limits (1-4%) and geometry (1%) matter little.
+
+**Free cash the ladder needs:** to place anything, free cash after positions AND level-0 locks must exceed
+0.1 x equity (~10.15k) plus the cheapest wanted level. That level measured 190-230. A busy market's level 1 is one
+quote, ~1,015 sh x price (~250-500). A headline level 1 is 2,500 sh x price (~1,250). A full ladder costs ~5k per busy
+market (levels 2/3 capped at ~1,015 cash each, both sides) and ~15k per headline market. Live, ~90% of capital is in
+positions and ~10k is free before level-0 locks, which is already below the floor before level 0 locks anything. To
+place one level, capital in positions must be <= ~78-80% of equity, with the level-0 locks also covered.
+
+### Commands for the lead's P&L runs (item 3, 8 x 3 quiet, after the write savers are merged; paired variant form)
+```
+BASE='{"arb_two_sided": false, "worst_case_backstop_frac": 0.8, "capital_ceiling_adding_size_factor": 0.5, "writes_per_minute": 28, "writes_per_minute_max": 28, "burst_cycle_seconds": 60, "_start_cap": 0.90}'
+SIM_PROCS=4 python tests/live_sim.py 8 3 quiet "$BASE" '{"ladder_enabled": true}' > r4_ladder_090.txt 2>&1
+BASE='{"arb_two_sided": false, "worst_case_backstop_frac": 0.8, "capital_ceiling_adding_size_factor": 0.5, "writes_per_minute": 28, "writes_per_minute_max": 28, "burst_cycle_seconds": 60, "_start_cap": 0.80}'
+SIM_PROCS=4 python tests/live_sim.py 8 3 quiet "$BASE" '{"ladder_enabled": true}' > r4_ladder_080.txt 2>&1
+```
+If the merged savers' settings are not Config defaults, add them to BASE. The variant line now also shows `dlg_ok_w`
+and `dlg_sh` (ladder activity). For the spare slot, if the lead wants to test the gates rather than the defaults,
+append `'{"ladder_enabled": true, "ladder_min_cash_frac": 0.05, "ladder_min_writes": 5}'` as a second variant to the
+0.80 command (+2 CPU-min). Expect the defaults at 0.90 to do nothing (the ladder places almost nothing).
+
+Sim behaviour change: live_sim now runs ladder_targets in write-gated cycles too, as Bot.plan_exchange does (anchor and
+cash bookkeeping). In these runs P&L was identical before and after the change.
+
+CPU: gate diagnosis 47 s + 56 s (re-run after adding counters) + ~15 s probes = ~2 CPU-min.

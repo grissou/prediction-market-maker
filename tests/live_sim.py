@@ -171,6 +171,17 @@ class LiveSim(Sim):
                 bot.turnover.add(m.eid, self.epoch0 + t, q)
         bot.turnover._cover(pts)
         self.np, self.lad_gate_hits, self.lad_cycles, self.lad_writes_ok = {}, 0, 0, True
+        # Ladder gate counters (lg_*), per market-cycle where level 0 quotes (see bot_strategy), each gate counted
+        # on its own (they overlap): calls; wgate = the write gate (ladder_min_writes) shuts; of the rest, exclusive:
+        # mkt = not a ladder market (ladder_markets), early = pulled / no fair value / ref-only, geo = no level fits
+        # behind level 0 and the book, caps = the position limits leave no level, cash = lad_cash_left drops every
+        # level, ok = some level wanted (ok_w: and the write gate open); cash_lv = levels lad_cash_left drops, cap1 =
+        # levels the per-order cash cap cuts, clip = cash_clip cut the ladder, sh = ladder share-cycles wanted
+        # after every gate (resting ones re-wanted each cycle); cash_avg = lad_cash_left at a cycle's start, average;
+        # free_avg = free cash as Bot.ladder_setup counts it (equity - positions - level-0 locks), average; lv_cash
+        # = the cash the cheapest wanted level needed where lad_cash_left dropped every level, average.
+        self.lg = dict(calls=0, wgate=0, mkt=0, early=0, geo=0, caps=0, cap1=0, cash=0, cash_lv=0, ok=0, ok_w=0,
+                       clip=0, sh=0, lv_cash=0.0, cash_avg=0.0, free_avg=0.0)
         if self.cfg.ladder_enabled:
             self.ladder = {"real": True}      # strategy_sim: mm_bot.plan_exchange ordering of ladder writes
         bot.age_hours = lambda ex, now=None, b=bot: M.Bot.age_hours(b, ex, self.epoch0 + self.t_now)
@@ -248,6 +259,8 @@ class LiveSim(Sim):
             self.lad_writes_ok = (self.wcap - sum(c for _, c in self.wlog if t - _ < 60)
                                   >= cfg.ladder_min_writes * SHARE)
             self.lad_cycles += 1
+            self.lg["cash_avg"] += bot.lad_cash_left
+            self.lg["free_avg"] += eq - capital - other
             self.lad_gate_hits += not self.lad_writes_ok
         if t % 10 == 0:
             self.arbitrage(t, inv, fvs)
@@ -387,6 +400,9 @@ class LiveSim(Sim):
                    free_min=round(getattr(self, "free_min", 0)), clipped=getattr(self, "clipped", 0),
                    writes_pm=round(self.writes / (T / 60), 2), deferred_h=round(self.deferred / (T / 3600)),
                    lad_gate=round(self.lad_gate_hits / max(1, self.lad_cycles), 3),
+                   **{f"lg_{k}": (round(v / max(1, self.lad_cycles)) if k.endswith("_avg")
+                                         else round(v / max(1, self.lg["cash"])) if k == "lv_cash" else round(v))
+                      for k, v in self.lg.items()},
                    dead=sum(1 for e in self.bot.ex.values() if e.turnover_dead))
         return out
 
@@ -402,12 +418,49 @@ def bot_strategy(sim, m, t, fv, bfv, ref, book):
     q = bot.decide(ex, fv, inv, sim.eff, False, sim.party_delta, t, ref=ref, book_fv=bfv, ref_liquid=True)
     want = S.quote_to_want(q)
     if sim.cfg.ladder_enabled:                     # R3: mm_bot's ladder_targets (anchor, pulls, caps, cash)
-        if sim.lad_writes_ok:
+        lg, quoted = sim.lg, q.bid is not None or q.ask is not None
+        lg["calls"] += quoted
+        seen = []                                  # ladder_targets' first ladder_levels call (before the cash)
+        real = M.ladder_levels
+
+        def spy(*a, **k):
+            r = real(*a, **k)
+            if not seen:
+                big = {True: lambda px: 1e12, False: lambda px: 1e12}
+                seen.append((dict(r[0]), real(*a[:7], big)[0],    # (a copy: ladder_targets then drops levels)
+                             real(*a[:8])[0] if len(a) > 8 and a[8] is not None else dict(r[0])))
+            return r
+        M.ladder_levels = spy                      # (as Bot.plan_exchange: ladder_targets runs every cycle - anchor,
+        try:                                       #  cash - and the write gate then only stops new writes)
             lw, _, _ = bot.ladder_targets(ex, q, fv, t)
+        finally:
+            M.ladder_levels = real
+        if quoted:
+            lg["wgate"] += not sim.lad_writes_ok
+            if bot.ladder_market(ex) is None:
+                lg["mkt"] += 1
+            elif not seen:
+                lg["early"] += 1                   # pulled after a Polymarket jump, no fair value, ref-only
+            else:
+                pre, geo, uncapped = seen[0]
+                lg["geo"] += not geo               # every level at/inside level 0, crossing the book or at the edge
+                lg["caps"] += bool(geo) and not uncapped   # the position limits leave no level
+                lg["cap1"] += sum(1 for kk in pre if pre[kk][1] < uncapped.get(kk, (0, 0))[1])
+                lg["cash"] += bool(pre) and not lw
+                if pre and not lw:                 # the cheapest level it wanted: the cash it would need
+                    lg["lv_cash"] += min(sz * (px if kk[0] else 1 - px) for kk, (px, sz) in pre.items())
+                lg["cash_lv"] += len(pre) - len(lw)
+                lg["ok"] += bool(lw)
+                lg["ok_w"] += bool(lw) and sim.lad_writes_ok
+        if sim.lad_writes_ok:
             want += [(k[0], px, sz, k[1], None) for k, (px, sz) in sorted(lw.items(), key=lambda kv: kv[0][1])]
         else:                                      # write gate: what rests stays, nothing new
             want += [(o.is_bid, o.price, o.qty, o.level, None) for o in m.orders if o.owner == "us" and o.level > 0]
+    n_lad = sum(w[2] for w in want if w[3] > 0)
     want = cash_clip(sim, m, want)
+    if sim.cfg.ladder_enabled:
+        sim.lg["sh"] += sum(w[2] for w in want if w[3] > 0)
+        sim.lg["clip"] += n_lad > sum(w[2] for w in want if w[3] > 0)
     out = []
     for w in want:
         if bot.refill_cooling(ex, w[0], t):        # withheld: what rests there stays (if any), nothing new
@@ -476,7 +529,7 @@ def run_many(seeds, hours, regime, ov):
     return [_one(j) for j in jobs]
 
 
-KEYS = ("pnl", "pnl_lag", "writes_pm", "deferred_h", "lvl_sh", "lvl_pnl", "lad_gate", "dead", "free_min", "clipped", "cap_end", "cap_peak", "freed", "age_end", "unwind_sh", "arb_sh", "outsider_arb_sh",
+KEYS = ("pnl", "pnl_lag", "writes_pm", "deferred_h", "lvl_sh", "lvl_pnl", "lad_gate", "lg_ok_w", "lg_sh", "dead", "free_min", "clipped", "cap_end", "cap_peak", "freed", "age_end", "unwind_sh", "arb_sh", "outsider_arb_sh",
         "arb_pnl", "wc_peak", "shares")
 
 
@@ -493,7 +546,7 @@ def main(argv):
     rb = run_many(seeds, hours, regime, base)
     agg = {k: sum(r[k] for r in rb) / len(rb) for k in rb[0]}
     print(f"BASE {json.dumps(base)[:60]} | " + " ".join(f"{k} {agg[k]:.3g}" for k in
-          KEYS + ("cap_start", "bidsum_ge1", "bidsum_ge1005", "bidsum_ge103", "sen_bidsum_ge1", "sen_bidsum_max", "asksum_lt098", "outsider_asksum_le0985", "n_mkts")), flush=True)
+          KEYS + tuple(k for k in rb[0] if k.startswith("lg_") and k not in KEYS) + ("cap_start", "bidsum_ge1", "bidsum_ge1005", "bidsum_ge103", "sen_bidsum_ge1", "sen_bidsum_max", "asksum_lt098", "outsider_asksum_le0985", "n_mkts")), flush=True)
     for v in variants:
         rv = run_many(seeds, hours, regime, {**base, **v})
         parts = []
