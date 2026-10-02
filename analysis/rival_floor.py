@@ -11,7 +11,13 @@ Per market:
                        snapshot fair value, else the mid), both sides pooled, in cents
   top_change_rate      share of the 60-s intervals in which the best bid or best ask price changed
   samples              intervals (books) or snapshots with at least one rival side
-  min_edge             clip(rival_half_spread + margin, lo, hi) rounded (half up) to the 0.5c grid, in dollars
+  min_edge_follow      clip(rival_half_spread + margin, lo, hi) rounded (half up) to the 0.5c grid, in dollars:
+                       sit just behind the rivals
+  min_edge_sweep_only  1.0c where rivals are wide (half >= 1.25c: own the top at 1c), 1.5c for 0.75-1.25c,
+                       2.0c where they are tight (< 0.75c: pennying at 1c only fills on sweeps, so wait for those
+                       wider and save the writes)
+  min_edge             the one chosen with --mode (default sweep_only; written to _meta.mode), the value the bot
+                       reads. Both are kept, so switching needs no re-run.
 Markets with fewer than --min-samples samples get no entry.
 
 Standard library only (copy this one file to the server):
@@ -50,6 +56,16 @@ def recommend(half_spread, margin=0.0025, lo=0.01, hi=0.02):
     return round(int(x / TICK + 0.5 + EPS) * TICK, 4)
 
 
+def recommend_sweep_only(half_spread):
+    """1c where the rivals are wide (>= 1.25c), 1.5c for 0.75-1.25c, 2c where they are tight (< 0.75c)."""
+    if half_spread >= 0.0125 - EPS:
+        return 0.01
+    return 0.015 if half_spread >= 0.0075 - EPS else 0.02
+
+
+MODES = ("sweep_only", "follow")
+
+
 def has_rows(db, table):
     try:
         return db.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone() is not None
@@ -84,7 +100,9 @@ def _new():
     return {"d": [], "samples": 0, "iv": 0, "chg": 0}
 
 
-def _summarise(per, labels, min_samples, margin, lo, hi):
+def _summarise(per, labels, min_samples, margin, lo, hi, mode="sweep_only"):
+    if mode not in MODES:
+        raise ValueError(f"mode must be one of {MODES}")
     out = {}
     for eid, m in per.items():
         if m["samples"] < min_samples or not m["d"]:
@@ -92,11 +110,14 @@ def _summarise(per, labels, min_samples, margin, lo, hi):
         hs = statistics.median(m["d"])
         out[eid] = {"label": labels.get(eid, eid), "rival_half_spread_c": round(100 * hs, 3),
                     "top_change_rate": round(m["chg"] / m["iv"], 3) if m["iv"] else None,
-                    "samples": m["samples"], "min_edge": recommend(hs, margin, lo, hi)}
+                    "samples": m["samples"], "min_edge_follow": recommend(hs, margin, lo, hi),
+                    "min_edge_sweep_only": recommend_sweep_only(hs)}
+        out[eid]["min_edge"] = out[eid]["min_edge_" + mode]
     return out
 
 
-def stats_from_snapshots(db, since=None, min_samples=30, margin=0.0025, lo=0.01, hi=0.02, max_gap=150.0):
+def stats_from_snapshots(db, since=None, min_samples=30, margin=0.0025, lo=0.01, hi=0.02, max_gap=150.0,
+                         mode="sweep_only"):
     """Per eid from the snapshots: only sides where our own quote was not at the best count. An interval is two
     consecutive snapshots at most max_gap apart with a rival side in both; it changed if that side's price did."""
     per, labels, prev = defaultdict(_new), {}, {}
@@ -116,7 +137,7 @@ def stats_from_snapshots(db, since=None, min_samples=30, margin=0.0025, lo=0.01,
                 m["iv"] += 1
                 m["chg"] += any(abs(x - y) > EPS for x, y in sides)
         prev[eid] = (t, rb, ra)
-    return _summarise(per, labels, min_samples, margin, lo, hi)
+    return _summarise(per, labels, min_samples, margin, lo, hi, mode)
 
 
 def best_price(levels_json):
@@ -128,7 +149,8 @@ def best_price(levels_json):
         return None
 
 
-def stats_from_books(db, since=None, min_samples=30, margin=0.0025, lo=0.01, hi=0.02, step=60.0):
+def stats_from_books(db, since=None, min_samples=30, margin=0.0025, lo=0.01, hi=0.02, step=60.0,
+                     mode="sweep_only"):
     """Per eid from the books table (one row per change of the other traders' top levels), sampled every `step`
     seconds from the market's first row to its last (the state in force = the latest row; a long stretch without
     rows reads as "unchanged", so time the bot was down counts as quiet). The fair value is the latest
@@ -163,7 +185,7 @@ def stats_from_books(db, since=None, min_samples=30, margin=0.0025, lo=0.01, hi=
                 m["chg"] += prev != (bb, ba)
             prev = (bb, ba)
             t += step
-    return _summarise(per, labels, min_samples, margin, lo, hi)
+    return _summarise(per, labels, min_samples, margin, lo, hi, mode)
 
 
 def rival_floor(db, since=None, **kw):
@@ -180,7 +202,8 @@ def main(argv=None):
     ap.add_argument("-o", "--out", default="market_edge.json")
     ap.add_argument("--hours", type=float, help="only the last H hours")
     ap.add_argument("--min-samples", type=int, default=30)
-    ap.add_argument("--margin-c", type=float, default=0.25)
+    ap.add_argument("--margin-c", type=float, default=0.25, help="follow mode: cents behind the rivals")
+    ap.add_argument("--mode", choices=MODES, default="sweep_only", help="which recommendation becomes min_edge")
     ap.add_argument("--top", type=int, default=12, help="widest markets printed")
     a = ap.parse_args(argv)
     db = sqlite3.connect(":memory:" if a.sql else a.db)
@@ -188,15 +211,15 @@ def main(argv=None):
         with open(a.sql) as f:
             db.executescript(f.read())
     since = time.time() - a.hours * 3600 if a.hours else None
-    src, st = rival_floor(db, since, min_samples=a.min_samples, margin=a.margin_c / 100)
+    src, st = rival_floor(db, since, min_samples=a.min_samples, margin=a.margin_c / 100, mode=a.mode)
     meta = {"source": src, "generated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "min_samples": a.min_samples, "margin_c": a.margin_c, "markets": len(st)}
+            "mode": a.mode, "min_samples": a.min_samples, "margin_c": a.margin_c, "markets": len(st)}
     with open(a.out, "w") as f:
         json.dump({"_meta": meta, **dict(sorted(st.items()))}, f, indent=1)
     dist = defaultdict(int)
     for v in st.values():
         dist[v["min_edge"]] += 1
-    print(f"{len(st)} markets from {src} -> {a.out}; min_edge: "
+    print(f"{len(st)} markets from {src} -> {a.out}; min_edge ({a.mode}): "
           + ", ".join(f"{100 * k:g}c x{n}" for k, n in sorted(dist.items())))
     hs = sorted(v["rival_half_spread_c"] for v in st.values())
     if hs:

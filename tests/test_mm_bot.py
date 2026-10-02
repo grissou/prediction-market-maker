@@ -2580,9 +2580,16 @@ _c.commit()
 _src, _st = RF.rival_floor(_c, min_samples=30)
 check("rival floor (snapshots): source, half-spreads, change rate, min_edge, too-few-samples dropped",
       _src == "snapshots" and set(_st) == {"A", "B"} and _st["A"]["rival_half_spread_c"] == 0.5
-      and _st["A"]["min_edge"] == 0.01 and abs(_st["A"]["top_change_rate"] - 1.0) < 1e-9
-      and _st["B"]["rival_half_spread_c"] == 1.5 and _st["B"]["min_edge"] == 0.02 and _st["B"]["top_change_rate"] == 0
+      and _st["A"]["min_edge_follow"] == 0.01 and abs(_st["A"]["top_change_rate"] - 1.0) < 1e-9
+      and _st["B"]["rival_half_spread_c"] == 1.5 and _st["B"]["min_edge_follow"] == 0.02 and _st["B"]["top_change_rate"] == 0
       and _st["A"]["label"] == "Mkt A" and _st["A"]["samples"] == 40, _st)
+check("rival floor modes: sweep_only (default) is 2c on tight books, 1c on wide ones; follow the reverse",
+      _st["A"]["min_edge_sweep_only"] == _st["A"]["min_edge"] == 0.02 and _st["B"]["min_edge_sweep_only"] == 0.01
+      and RF.rival_floor(_c, min_samples=30, mode="follow")[1]["A"]["min_edge"] == 0.01
+      and RF.rival_floor(_c, min_samples=30, mode="follow")[1]["B"]["min_edge"] == 0.02, _st)
+check("rival floor sweep_only bands: <0.75c -> 2c, 0.75-1.25c -> 1.5c, >=1.25c -> 1c",
+      [RF.recommend_sweep_only(x) for x in (0.0, 0.005, 0.0074, 0.0075, 0.01, 0.0124, 0.0125, 0.03)]
+      == [0.02, 0.02, 0.02, 0.015, 0.015, 0.015, 0.01, 0.01])
 _c.execute("CREATE TABLE books (ts REAL, eid TEXT, bids TEXT, asks TEXT)")
 # A: one row per change: 0.49/0.51 for 40 min, then 0.48/0.52 for 20 min (one change in 60 intervals)
 _c.execute("INSERT INTO books VALUES (?,?,?,?)", (_t0, "A", "[[0.49, 100]]", "[[0.51, 100]]"))
@@ -2592,14 +2599,20 @@ _c.commit()
 _src, _st = RF.rival_floor(_c, min_samples=30)
 check("rival floor (books): preferred over snapshots, sampled every 60 s, fair value from the snapshots",
       _src == "books" and set(_st) == {"A"} and _st["A"]["samples"] == 61 and _st["A"]["label"] == "Mkt A"
-      and abs(_st["A"]["top_change_rate"] - 1 / 60) < 1e-3 and _st["A"]["min_edge"] == 0.015, _st)
+      and abs(_st["A"]["top_change_rate"] - 1 / 60) < 1e-3 and _st["A"]["min_edge"] == 0.015
+      and _st["A"]["min_edge_follow"] == _st["A"]["min_edge_sweep_only"] == 0.015, _st)
 _out = os.path.join(_d, "market_edge.json")
 import io, contextlib   # noqa: E401,E402
 with contextlib.redirect_stdout(io.StringIO()):
     RF.main([_db, "-o", _out, "--min-samples", "30"])
 _j = json.load(open(_out))
-check("rival floor: writes market_edge.json the bot accepts",
-      _j["_meta"]["source"] == "books" and validate_market_edge(_j, {"A": 1})[0] == {"A": 0.015}, _j)
+check("rival floor: writes market_edge.json the bot accepts, mode in _meta, both recommendations kept",
+      _j["_meta"]["source"] == "books" and _j["_meta"]["mode"] == "sweep_only"
+      and validate_market_edge(_j, {"A": 1})[0] == {"A": 0.015}
+      and {"min_edge_follow", "min_edge_sweep_only"} <= set(_j["A"]), _j)
+with contextlib.redirect_stdout(io.StringIO()):
+    RF.main([_db, "-o", _out, "--mode", "follow"])
+check("rival floor: --mode follow is written to _meta", json.load(open(_out))["_meta"]["mode"] == "follow")
 _c.close()
 _lines = rival_floor_lines(_db, None, 5)
 check("analyze: a rival-floor table from the books table",
