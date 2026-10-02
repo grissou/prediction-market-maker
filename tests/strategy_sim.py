@@ -142,7 +142,7 @@ class Sim:
         self.cfg = cfg or Config()
         self.strategy = strategy or baseline_strategy
         self.nrng = random.Random(seed * 15485863 + 4)
-        self.cycle, self.wcap, self.wlog = cycle, self.cfg.writes_per_minute * share, []
+        self.cycle, self.wcap, self.wlog, self.share = cycle, self.cfg.writes_per_minute * share, [], share
         self.deferred = 0
         self.news = {}                              # common news: second -> direction
         reg = self.reg
@@ -345,11 +345,16 @@ class Sim:
         want = [] if t < m.cooldown_until else self.strategy(self, m, t, fv, bfv, ref, book)
         mine = [o for o in m.orders if o.owner == "us"]
         cancels, places = plan_changes(cfg, mine, want, t, m)
+        real = bool(self.ladder and self.ladder.get("real"))
+        if real:
+            cancels, places = real_ladder_rules(want, cancels, places)
         if not cancels and not places:
             return None
         urgent = t - m.state.get("ref_moved_at", -99) < 15
         key = (0 if not places else 0.5 if urgent else 1, 0 if m.headline else 1, 1 if cancels else 0,
                -max([w[2] for w in places] or [0]))
+        if real and all(o.level > 0 for o in cancels) and all(w[3] > 0 for w in places):
+            key = (0 if not places and any(ladder_unsafe(o, want) for o in cancels) else 2,) + key[1:]
         return key, m, cancels, places, fv, len(cancels) == len(mine)
 
     def our_cycle(self, t, paths):
@@ -364,6 +369,9 @@ class Sim:
             c += len(places) / bs                    # batches are shared with ~225 other markets: amortised
             if used + c > spare and key[0] != 0:
                 self.deferred += len(plans) - i          # everything after the first misfit waits
+                break
+            if key[0] == 2 and spare - used - c < self.cfg.ladder_min_writes * self.share:
+                self.deferred += len(plans) - i          # R3 (real): the ladder only with ladder_min_writes to spare
                 break
             used, n = used + c, n + len(places)
             lc = self.lat()
@@ -588,6 +596,19 @@ def ladder_want(sim, m, t, fv, ref, q, want, bb, ba, size, plimit):
         return want
     offs, mults = (L["head_offs"], L["head_mults"]) if m.headline else (L["offs"], L["mults"])
     bank = 100_000.0
+    if L.get("real"):
+        # mm_bot's own planner: ladder_levels with the same caps the bot uses (headline flat limit, else Kelly at
+        # the level's price), and ladder_max_inv_quotes (no adding-side ladder beyond 3 quote sizes)
+        def cap(is_bid):
+            def f(px):
+                lim = plimit if plimit is not None else M.kelly_position(ref, px, bank, cfg, yes=is_bid)
+                c = lim - m.inv if is_bid else lim + m.inv
+                if size > 0 and abs(m.inv) > cfg.ladder_max_inv_quotes * size and (m.inv > 0) == is_bid:
+                    c = 0
+                return c
+            return f
+        lw, _ = M.ladder_levels(a, q, bb, ba, offs, mults, size, {True: cap(True), False: cap(False)})
+        return want + [(k[0], px, sz, k[1], None) for k, (px, sz) in sorted(lw.items(), key=lambda kv: kv[0][1])]
     cum = {True: m.inv + (q.bid_size if q.bid is not None else 0), False: -m.inv + (q.ask_size if q.ask is not None else 0)}
     for i, (d, k) in enumerate(zip(offs, mults), start=1):
         for is_bid in (True, False):
@@ -603,6 +624,21 @@ def ladder_want(sim, m, t, fv, ref, q, want, bb, ba, size, plimit):
                 cum[is_bid] += qty
                 want.append((is_bid, px, qty, i, None))
     return want
+
+
+def ladder_unsafe(o, want):
+    """R3 (real): a resting ladder order that must go now - level 0 no longer quotes its side, or it sits at or
+    inside level 0's price (mm_bot.plan_exchange's urgent pulls)."""
+    l0 = next((w for w in want if w[0] == o.is_bid and w[3] == 0), None)
+    return l0 is None or (o.price >= l0[1] - 1e-9 if o.is_bid else o.price <= l0[1] + 1e-9)
+
+
+def real_ladder_rules(want, cancels, places):
+    """R3 (real): mm_bot.plan_exchange's ordering - while level 0 changes in a market, only unsafe ladder pulls go
+    with it; other ladder work waits for a cycle where level 0 needs no write."""
+    if any(o.level == 0 for o in cancels) or any(w[3] == 0 for w in places):
+        return ([o for o in cancels if o.level == 0 or ladder_unsafe(o, want)], [w for w in places if w[3] == 0])
+    return cancels, places
 
 
 def unload_window(sim, m, t):
