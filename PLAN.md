@@ -17,6 +17,10 @@ Packages every 2-3 h, cumulative, commit "READY: Package N". Everything behaviou
 | G | Ops and runbooks | Lead / Engineer | extend the override whitelist where safe (ref_only_*, skew_*, size tiers, improve_ticks, undercut_step_back); settings_override.json snippets for parameter packages; code-deploy runbook around deploy/handover-restart.sh |
 | H | Open questions | Analyst / Engineer | fee or valuation gap; Polymarket refresh below 5 s; WebSocket prices only if markouts show pick-offs within 5 s of a Polymarket move |
 
+## Priority change at 09:45 UTC (owner's live data)
+Inventory turnover and capital use are now the top strategy workstream: race-netted limits, age-based skew, capital ceiling,
+pair unwinder, R8/R2 retune, fast unload after sweep fills; plus the exchange's valuation rule for risk and rank accounting.
+
 ## Package plan (target)
 1. **Package 1 (by ~11:00):** audit fixes + ops fixes (B) + whitelist extension + runbooks. Small, safe, high value.
 2. **Package 2 (by ~14:00):** parameter retune from the calibrated simulator (settings_override snippet + defaults), first strategy build (R3 ladder, off by default unless the simulator is strong).
