@@ -157,13 +157,13 @@ check("R5c: our bid behind the top -> the top is someone else's", others_top((0.
 a, b = make_bot(books=thin)
 b.other_tops = {"11": (0.29, 0.31, 100.0)}
 b.note_other_tops({"11": (0.295, 0.31)}, {"11": mine}, 130.0)
-check("R5c: once our bid is the top, the others' bid seen before (still fresh) is kept",
-      b.other_tops["11"] == (0.29, 0.31, 130.0), b.other_tops["11"])
+check("R5c: once our bid is the top, the others' bid seen before (still fresh) is kept, with the time it was SEEN",
+      b.other_tops["11"] == (0.29, 0.31, 100.0), b.other_tops["11"])
 b.note_other_tops({"11": (0.295, 0.31)}, {"11": mine}, 200.0)
-check("R5c: ...and carried on while every reading comes within tops_max_age", b.other_tops["11"] == (0.29, 0.31, 200.0))
-b.note_other_tops({"11": (0.295, 0.31)}, {"11": mine}, 321.0)
-check("R5c: ...but not after a gap longer than tops_max_age (bid unknown -> R5 can't use it)",
-      b.other_tops["11"] == (None, 0.31, 321.0), b.other_tops["11"])
+check("R5c: ...and carried on while that observation is within tops_max_age", b.other_tops["11"] == (0.29, 0.31, 100.0))
+b.note_other_tops({"11": (0.295, 0.31)}, {"11": mine}, 225.0)
+check("R5c: ...but not once the observation is older than tops_max_age (a side we can't see is not carried for ever)",
+      b.other_tops["11"] == (None, 0.31, 225.0), b.other_tops["11"])
 b.other_tops = {"11": (0.30, 0.31, 100.0)}
 b.note_other_tops({"11": (0.295, 0.31)}, {"11": mine}, 130.0)
 check("R5c: never carried when the old others' bid is better than the top now (it must have gone)",

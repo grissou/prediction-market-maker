@@ -157,7 +157,7 @@ class Config:
                                           #   sized by capital_ceiling_adding_size_factor, the reducing side quotes as
                                           #   usual, until it is back below this - 0.05. 2 Oct: 90.5k of 101k sat in
                                           #   positions, 11k cash left to quote with. 0 = off
-    capital_ceiling_adding_size_factor: float = 0.0   # ...0 = adding side not quoted at all, 0.5 = half size
+    capital_ceiling_adding_size_factor: float = 0.25  # ...0 = adding side not quoted at all, 0.5 = half size
     max_order_cash_frac: float = 0.01     # max cash tied up in a single order: 1,000 at 100k
     tail_low: float = 0.05                # fair value below this: don't SELL YES (risks ~95c a share to earn ~1c)...
     tail_high: float = 0.95               # ...above this: don't BUY YES. Either side still allowed to shrink a position
@@ -322,8 +322,8 @@ class Config:
     # buy back. Reduces positions, so it also runs in reduce-only and in the pre-close window. A race with an
     # independent leg is only a set if that leg is held too (min over ALL legs).
     pair_unwind_enabled: bool = True
-    pair_unwind_min_profit: float = 0.0   # 0 = unwind at exactly fair (bids sum to 1.000)
-    pair_unwind_max_frac: float = 0.02    # at most this much cash per unwind order: 2,000 at 100k
+    pair_unwind_min_profit: float = 0.005  # 0 = unwind at exactly fair (bids sum to 1.000)
+    pair_unwind_max_frac: float = 0.01    # at most this much cash per unwind order: 2,000 at 100k
     pair_unwind_cooldown_seconds: float = 30.0
 
     # --- TAKING STALE HOUSE QUOTES (liquid Polymarket prices only) -----------------------------
@@ -2639,12 +2639,13 @@ class Bot:
         for eid, top in tops.items():
             bid, ask = others_top(top, mine_real.get(eid, []))
             prev = self.other_tops.get(eid)
+            t = now_m
             if prev is not None and now_m - prev[2] <= self.cfg.tops_max_age:
                 if bid is None and top[0] is not None and prev[0] is not None and prev[0] <= top[0] + 1e-9:
-                    bid = prev[0]
+                    bid, t = prev[0], prev[2]             # carried: keeps the time it was really seen, so a
                 if ask is None and top[1] is not None and prev[1] is not None and prev[1] >= top[1] - 1e-9:
-                    ask = prev[1]
-            self.other_tops[eid] = (bid, ask, now_m)
+                    ask, t = prev[1], prev[2]             #   side we can't see expires after tops_max_age
+            self.other_tops[eid] = (bid, ask, t)
 
     def mark_ref_moves(self):
         """Which markets' Polymarket price just moved (urgent: see urgent_ref_move). Cleared once handled."""
@@ -3445,7 +3446,7 @@ class Bot:
             # budget, so writes stay at the old 30/min until every book is in (pulls and unsafe orders still go).
             used = int(getattr(self.api, "wbudget", 0)) - writes_left
             writes_left = min(writes_left, cfg.startup_writes_per_minute - used)
-        spare = min(getattr(self.api, "budget_left", lambda: 10 ** 6)() - cfg.write_read_reserve, writes_left)
+        spare = min(getattr(self.api, "budget_left", lambda: 10 ** 6)() - self.write_reserve(), writes_left)
         kept, cost, orders = [], 0.0, 0
         for ch in changes:
             n = orders + len(ch.new)
@@ -3892,7 +3893,10 @@ class Bot:
             self.arb_cooldown[race] = now_m + (cfg.pair_unwind_cooldown_seconds if kind == "unwind"
                                                else cfg.arb_cooldown_seconds)
             if qty >= 1:
-                self.execute_arbitrage(race, members, levels, qty, fvs, now_m, action=action, kind=kind)
+                traded = self.execute_arbitrage(race, members, levels, qty, fvs, now_m, action=action, kind=kind)
+                if traded is not None and not any(traded):      # nothing filled: the prices were gone. 4x cooldown
+                    self.arb_cooldown[race] = now_m + 4 * (cfg.pair_unwind_cooldown_seconds if kind == "unwind"
+                                                           else cfg.arb_cooldown_seconds)
                 done.add(race)
         return done
 
@@ -3926,7 +3930,7 @@ class Bot:
                     continue
                 total = sum(p for p, _ in levels.values())
                 edge = total - 1 if sign > 0 else 1 - total
-                if edge < cfg.pair_unwind_min_profit - 1e-9 or (sign < 0 and total < cfg.arb_buy_min_sum):
+                if edge < cfg.pair_unwind_min_profit - 1e-9:   # (buying back a short set below 0.90 only cuts risk)
                     continue
                 qty = int(min([sets] + [size for _, size in levels.values()] +
                               [cfg.pair_unwind_max_frac * bank / max(p, TICK) for p, _ in levels.values()]))
@@ -3940,8 +3944,12 @@ class Bot:
                           [cfg.max_position_frac * bank + inv.get(e, 0.0) for e in members] +   # selling lowers position
                           [cfg.max_order_cash_frac * bank / max(1 - p, TICK) for p, _ in bids.values()]))  # cash per order
             return "arb", "sell", bids, qty
+        fv_sum = sum(fvs.get(e) or 0.0 for e in members) if all(fvs.get(e) is not None for e in members) else None
         if (cfg.arb_two_sided and asks and not self.global_reduce
-                and cfg.arb_buy_min_sum - 1e-9 <= sum(p for p, _ in asks.values()) <= 1 - cfg.arb_min_profit_buy + 1e-9):
+                and cfg.arb_buy_min_sum - 1e-9 <= sum(p for p, _ in asks.values()) <= 1 - cfg.arb_min_profit_buy + 1e-9
+                # the set pays 1 only if a LISTED party wins: our fair values (70% Polymarket) must add up to
+                # about 1 too, or the cheap asks price an unlisted outsider (110 of 113 races list Dem + Rep only)
+                and fv_sum is not None and fv_sum >= 1 - cfg.arb_min_profit_buy / 2 - 1e-9):
             qty = int(min([cfg.arb_max_frac * bank] +
                           [size for _, size in asks.values()] +                            # only what's offered there
                           [cfg.max_position_frac * bank - inv.get(e, 0.0) for e in members] +   # buying raises position
@@ -4025,6 +4033,7 @@ class Bot:
                   f"inventory, which the quoting will work off")
         else:
             log.info("arbitrage on %s: every leg filled %.0f", race, traded[0] if traded else 0)
+        return traded
 
     # ------------------------------------------------------------------------------ taking stale quotes
     def take_stale_quotes(self, refs, liquid, fvs, inv, mine_real, global_reduce, party_delta, now_m):
@@ -4308,8 +4317,8 @@ class Bot:
                 qty = nums.pop("quantity", None)
                 vals = (qty, price, json.dumps(nums, sort_keys=True, separators=(",", ":")))
                 old = self.pos_seen.get(eid)
-                if full or old is None or old[0] != vals:
-                    rows.append((ts, old[1] if old else None, eid, *vals))
+                if full or old is None or old[0][:2] != vals[:2]:   # quantity or the mark changed (P&L ticks
+                    rows.append((ts, old[1] if old else None, eid, *vals))   # alone would write every position every minute)
                 self.pos_seen[eid] = (vals, ts)
             for eid in [e for e in self.pos_seen if e not in seen]:   # closed (or settled): one row saying so
                 rows.append((ts, self.pos_seen.pop(eid)[1], eid, 0.0, None, "{}"))
