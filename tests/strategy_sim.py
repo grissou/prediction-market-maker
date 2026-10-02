@@ -342,7 +342,10 @@ class Sim:
         book = self.book_dict(m)
         bfv = fair_value(book, cfg)
         ref = m.ref_seen
-        fv = (1 - cfg.ref_weight) * bfv + cfg.ref_weight * ref if bfv is not None else None
+        bref = ref                                   # T2.1 mirror of mm_bot blend_fv: the blend alone sees r'
+        if cfg.ref_tilt_enabled and (cfg.ref_tilt_headline or not m.headline):
+            bref = M.tilted_ref(ref, self.tilt.s, getattr(self, "legs_of", lambda m: 2)(m))
+        fv = (1 - cfg.ref_weight) * bfv + cfg.ref_weight * bref if bfv is not None else None
         m.state["fv"] = fv
         if self.bias_hl and bfv is not None:
             # T1 prototype: Polymarket + exponentially weighted average of (book price - Polymarket)
@@ -374,6 +377,15 @@ class Sim:
             o.qty * (o.price if o.is_bid else 1 - o.price) for m in self.mkts for o in m.orders
             if o.owner == "us" and o.level == 0)
         spare = self.wcap - sum(c for _, c in self.wlog)
+        if self.cfg.ref_tilt_enabled:                # T2.1 mirror: mm_bot's estimator, once per cycle, before the plans
+            if getattr(self, "tilt", None) is None:
+                self.tilt = M.TiltEstimator(self.cfg)
+            legs_of, samples = getattr(self, "legs_of", lambda m: 2), []
+            for m, p, c in paths:
+                bfv = fair_value(self.book_dict(m), self.cfg) if m.ref_seen is not None else None
+                if bfv is not None and not m.headline and not t < m.cooldown_until:
+                    samples.append((m.ref_seen, bfv, legs_of(m)))
+            self.tilt.update(samples, t)
         plans = sorted((x for x in (self.our_step(m, t, p) for m, p, c in paths) if x),
                        key=lambda x: x[0])
         bs, n, used = self.cfg.batch_size, 0, 0.0
