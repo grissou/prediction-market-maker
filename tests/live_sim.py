@@ -414,6 +414,9 @@ def bot_strategy(sim, m, t, fv, bfv, ref, book):
     bot = sim.bot
     ex = bot.ex[m.eid]
     ex.book = book
+    if sim.cfg.reduce_from_book and m.cooldown_until >= 0:   # A's pause reads ex.ref_jump_at, which only mm_bot's
+        # reference_jump_guard sets: feed it the sim's Polymarket jump (see_ref sets cooldown_until = jump + cooldown)
+        ex.ref_jump_at = max(ex.ref_jump_at, m.cooldown_until - sim.cfg.ref_jump_cooldown_seconds)
     inv = {x.eid: x.inv for x in sim.mkts}
     q = bot.decide(ex, fv, inv, sim.eff, False, sim.party_delta, t, ref=ref, book_fv=bfv, ref_liquid=True)
     want = S.quote_to_want(q)

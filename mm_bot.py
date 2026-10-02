@@ -698,6 +698,18 @@ class Config:
     ttl_busy_size_frac: float = 0.01      # same split as the ladder's default "busy" (1,000 shares at 100k)
     ttl_expire_as_cancel: bool = False
     ttl_expire_grace_seconds: float = 5.0
+    # --- Package 5: B kelly_edge_cap, A reduce_from_book ---
+    # B: Kelly sizes on at most this much edge (0 = off; try 0.015 / 0.01): size on the spread, not on a persistent
+    #   tournament-vs-Polymarket gap (otherwise the bet is biggest exactly where the tournament disagrees most).
+    kelly_edge_cap: float = 0.0
+    # A: the REDUCING side only (long -> ask, short -> bid, size <= this market's position) measures min_edge from the
+    #   tournament book's own price instead of the Polymarket-leaned fair value, never further toward Polymarket than
+    #   the blend (the more aggressive of the two). The adding side keeps the blend, capped 2 x min_edge behind the
+    #   reducing price (we never meet our own order). Off in ref-only markets, without a book price, and for
+    #   reduce_from_book_pause_s after a Polymarket jump (>= ref_jump_threshold) in that market.
+    reduce_from_book: bool = False
+    reduce_from_book_pause_s: float = 120.0
+    reduce_from_book_headline: bool = False   # False = not in headline_races markets (staging gate)
 
 
 CFG = Config()
@@ -826,6 +838,11 @@ OVERRIDABLE = {
     "ttl_busy_size_frac": (0.0, 0.20),
     "ttl_expire_as_cancel": (False, True),
     "ttl_expire_grace_seconds": (0.0, 60.0),
+    # --- Package 5: B kelly_edge_cap, A reduce_from_book ---
+    "kelly_edge_cap": (0.0, 0.10),
+    "reduce_from_book": (False, True),
+    "reduce_from_book_pause_s": (0.0, 3600.0),
+    "reduce_from_book_headline": (False, True),
 }
 MAX_ORDER_TTL = 7200.0    # no order of ours lives longer than this (dead-man's switch), whatever the TTL settings
 LADDER_MAX_LEVELS = 8
@@ -1797,12 +1814,15 @@ def kelly_position(p, price, bankroll, cfg=CFG, yes=True):
         f = (win - cost) / (1 - cost) = edge / (1 - cost)       (as a fraction of the bankroll)
     e.g. Polymarket 0.20, buying YES at 0.14: f = 0.06 / 0.86 = 7%; quarter Kelly = 1.7% of the account (capped at 2%).
     The stake is capped at kelly_max_market_frac of the account, then turned into shares (stake / cost).
-    No edge (or a negative one) -> just the small kelly_no_edge_frac allowance.
+    No edge (or a negative one) -> just the small kelly_no_edge_frac allowance. kelly_edge_cap > 0 caps the edge
+    sized on (B: a persistent gap to Polymarket is not all edge).
     """
     allowance = int(cfg.kelly_no_edge_frac * bankroll)
     edge, cost = (p - price, price) if yes else (price - p, 1 - price)
     if edge <= 0 or cost <= 0:
         return allowance
+    if cfg.kelly_edge_cap > 0:                    # B: size on the spread, not the gap (0 = off)
+        edge = min(edge, cfg.kelly_edge_cap)
     stake = min(cfg.kelly_fraction * edge / (1 - cost), cfg.kelly_max_market_frac) * bankroll
     return max(allowance, int(stake / cost))
 
@@ -1935,7 +1955,8 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
                   bid_cap=None, ask_cap=None, kelly_p=None, bankroll=None, shift=0.0, order_size=None,
                   position_limit=None, min_edge=None, reduce_size=None, net_inv=None, age_hours=0.0,
                   adding_factor=1.0, bias_side=None, bias_edge=0.0, bias_size=1.0, unload_side=None,
-                  unload_edge=0.0, unload_size=None, adding_limit_factor=1.0, frag_limit=None, behind_best=True):
+                  unload_edge=0.0, unload_size=None, adding_limit_factor=1.0, frag_limit=None, behind_best=True,
+                  reduce_fv=None):
     """
     fv         fair YES probability
     inv        our net YES shares on THIS exchange (negative = net NO); drives the hard position limit
@@ -1972,6 +1993,12 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
                        that GROWS it only (bid when inv >= 0, ask when inv <= 0); the shrinking side is untouched
     behind_best        False = no behind-the-best sizing here (ref-only markets: already small); see
                        cfg.behind_best_size_enabled
+    reduce_fv          reduce_from_book (A): the tournament book's own price, or None = off. The side that shrinks
+                       THIS exchange's position (long -> ask, short -> bid) measures its band from it (same skew and
+                       shift) when that is more aggressive than fv, never less; that side then quotes at most the
+                       position. The adding side is capped 2 x min_edge behind the lowest reducing price that may
+                       rest (bid <= ask keep limit - 2 x min_edge when long, mirror when short), so we never meet
+                       our own order
     """
     bankroll = bankroll or DEFAULT_BANKROLL
     max_order_cash = cfg.max_order_cash_frac * bankroll
@@ -1988,6 +2015,16 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
     skew = max(-cfg.skew_max, min(cfg.skew_max, skew))
     skew += age_skew(age_hours, eff_inv, cfg)              # capped on its own, so skew_max stays the inventory cap
     r = fv - skew - shift
+    # 1a. reduce_from_book (A): the reducing side's own reservation price, from the book when that is closer to it.
+    r_bid = r_ask = r
+    fv_bid = fv_ask = fv
+    a_bid = a_ask = False
+    if reduce_fv is not None:
+        r_book = reduce_fv - skew - shift
+        if inv >= 1 and r_book < r:               # long: the ask sells down toward the book's price
+            r_ask, fv_ask, a_ask = r_book, min(fv, reduce_fv), True
+        elif inv <= -1 and r_book > r:            # short: the bid buys back toward it
+            r_bid, fv_bid, a_bid = r_book, max(fv, reduce_fv), True
 
     # 2. Allowed band for each side: at least min_edge, at most max_half_spread away from r.
     edge = cfg.min_edge if min_edge is None else min_edge
@@ -1996,8 +2033,8 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
     bias_ask = bias_side == "ask" and inv < 1
     bid_edge = min(widest, edge + bias_edge) if bias_bid else edge
     ask_edge = min(widest, edge + bias_edge) if bias_ask else edge
-    bid_lo, bid_hi = floor_tick(r - widest), floor_tick(r - bid_edge)
-    ask_lo, ask_hi = ceil_tick(r + ask_edge), ceil_tick(r + widest)
+    bid_lo, bid_hi = floor_tick(r_bid - widest), floor_tick(r_bid - bid_edge)
+    ask_lo, ask_hi = ceil_tick(r_ask + ask_edge), ceil_tick(r_ask + widest)
 
     # 3. Penny: one tick better than the best other trader, so we're first in the queue while
     #    keeping the widest spread possible. Then clamp into the band. That clamp is what stops a
@@ -2009,16 +2046,16 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
     ask = ceil_tick(best_ask - imp) if best_ask is not None else ask_hi
     if cfg.undercut_step_back > 0:
         if best_bid is not None and best_bid > bid_hi + 1e-9:
-            bid = floor_tick(r - max(bid_edge, cfg.undercut_step_back))
+            bid = floor_tick(r_bid - max(bid_edge, cfg.undercut_step_back))
         if best_ask is not None and best_ask < ask_lo - 1e-9:
-            ask = ceil_tick(r + max(ask_edge, cfg.undercut_step_back))
+            ask = ceil_tick(r_ask + max(ask_edge, cfg.undercut_step_back))
     bid = min(max(bid, bid_lo), bid_hi)
     ask = max(min(ask, ask_hi), ask_lo)
     if not reduce_only and cfg.max_skew_through < 1.0:
         # Skew sheds inventory by quoting less greedily, never by paying through our own fair value
         # (day one: fills at <= -1c edge lost -804 at the 60-min mid; rival bots pick those quotes off).
-        bid_hi = min(bid_hi, floor_tick(fv + cfg.max_skew_through))
-        ask_lo = max(ask_lo, ceil_tick(fv - cfg.max_skew_through))
+        bid_hi = min(bid_hi, floor_tick(fv_bid + cfg.max_skew_through))   # (fv_bid / fv_ask = fv unless A)
+        ask_lo = max(ask_lo, ceil_tick(fv_ask - cfg.max_skew_through))
         bid, ask = min(bid, bid_hi), max(ask, ask_lo)
 
     # 4. Never cross another trader's order (that would trade instantly, as a taker).
@@ -2052,6 +2089,22 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
         ask = min(ask, max(ceil_tick(fv + unload_edge), ceil_tick(best_bid + TICK) if best_bid is not None else 0.0))
         ask_lo = min(ask_lo, ask)
         bid = min(bid, floor_tick(ask - TICK))
+    # 4c. reduce_from_book self-cross rule: the adding side stays 2 x min_edge behind the lowest (highest) reducing
+    #     price that may rest (the keep limit), so our own bid never meets our own ask.
+    if a_ask:
+        keep = max(ask_lo, ceil_tick(best_bid + TICK)) if best_bid is not None else ask_lo
+        cap = min(ask, keep) - 2 * edge
+        if cap < PMIN - 1e-9:
+            no_bid = True                         # no room for an adding bid under the reducing ask
+        else:
+            bid, bid_hi = min(bid, floor_tick(cap)), min(bid_hi, floor_tick(cap))
+    if a_bid:
+        keep = min(bid_hi, floor_tick(best_ask - TICK)) if best_ask is not None else bid_hi
+        cap = max(bid, keep) + 2 * edge
+        if cap > PMAX + 1e-9:
+            no_ask = True
+        else:
+            ask, ask_lo = max(ask, ceil_tick(cap)), max(ask_lo, ceil_tick(cap))
 
     # 5. Size: shrink toward the position limit on each side, and cap the cash tied up per order.
     #    Limits: Kelly sizing when we have a liquid Polymarket price, else max_position_frac of the account.
@@ -2087,6 +2140,10 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
             bid_size = min(max(1, unload_size), -inv)
         if unload_ask and unload_size is not None:
             ask_size = min(max(1, unload_size), inv)
+        if a_bid:                                 # reduce_from_book: the book-priced side never flips the position
+            bid_size = min(bid_size, -inv)
+        if a_ask:
+            ask_size = min(ask_size, inv)
 
         # 6. Risk overrides.
         if reduce_only:
@@ -2782,6 +2839,8 @@ class Ex:
     writes: int = 0                       # our writes (cancels / batches) touching it still in flight
     reprices: dict = field(default_factory=dict)   # side -> times we repriced it lately (churn control)
     ref_moved_at: float = -1e9            # last time its Polymarket price moved >= urgent_ref_move
+    ref_jump_at: float = -1e9             # last time its Polymarket price moved >= ref_jump_threshold (monotonic;
+                                          #   reduce_from_book pauses after it)
     cancelling: bool = False              # ...one of them is a cancel
     inv: float = 0.0                      # for logging / recording
     eff: float = 0.0                      # for logging
@@ -3577,6 +3636,7 @@ class Bot:
             key = f"{ex.group}|{ex.party}"
             if key in moved:
                 ex.cooldown_until = max(ex.cooldown_until, now_m + self.cfg.ref_jump_cooldown_seconds)
+                ex.ref_jump_at = now_m
                 log.warning("POLYMARKET JUMP %s moved %.1fc - pulling quotes for %.0f s",
                             ex.label, 100 * moved[key], self.cfg.ref_jump_cooldown_seconds)
 
@@ -4320,6 +4380,12 @@ class Bot:
                      else "")                         # (shown only while it changes the quote: not when unloading)
         u_side = None if reduce_only else self.unload_side(ex, now_m)   # reduce-only / flatten: stricter anyway
         u_size = int(self.unloads[ex.eid]["left"] * cfg.fast_unload_size_mult) if u_side else None
+        # reduce_from_book (A): the reducing side prices from the book's own price. Not in ref-only markets, not
+        # without a book price, not for reduce_from_book_pause_s after a Polymarket jump here, and (staging gate)
+        # not in headline markets unless reduce_from_book_headline.
+        reduce_fv = (book_fv if cfg.reduce_from_book and book_fv is not None and ex.eid not in self.ref_only
+                     and (cfg.reduce_from_book_headline or ex.group not in cfg.headline_races)
+                     and now_m - ex.ref_jump_at >= cfg.reduce_from_book_pause_s else None)
         q = compute_quote(fv, ex.inv, inv_for_quote, best_bid, best_ask, cfg, reduce_only, no_bid, no_ask,
                              bid_cap, ask_cap, kelly_p=kelly_p, bankroll=self.bankroll(),
                              shift=self.party_shift(ex, party_delta), order_size=planned, position_limit=headline_limit,
@@ -4327,7 +4393,7 @@ class Bot:
                              adding_factor=adding, bias_side=side, bias_edge=bias_edge, bias_size=bias_size,
                              unload_side=u_side, unload_edge=cfg.fast_unload_edge, unload_size=u_size,
                              adding_limit_factor=adding_limit, frag_limit=frag_limit,
-                             behind_best=ex.eid not in self.ref_only)
+                             behind_best=ex.eid not in self.ref_only, reduce_fv=reduce_fv)
         ex.bb_tag = " bb" if q.behind else ""
         ex.lad_ctx = (adding, adding_limit, frag_limit)   # (R3 ladder: the same factors and limits)
         return q
