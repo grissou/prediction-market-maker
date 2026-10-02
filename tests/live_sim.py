@@ -20,6 +20,14 @@ fixed block of positions sized so that capital in positions starts at `start_cap
 Run:  python tests/live_sim.py SEEDS HOURS REGIME '{overrides}' ['{variant}' ...]   (paired seeds)
       overrides: Config fields, plus "_n" (biggest positions, default 40), "_start_cap" (0.90), "_house"
       ("0945" = House legs +10,834 / -9,396 as at 09:45, default; "0814" = status.json), "_outsiders" (3).
+      World knobs (Package 5, PLAN_POLY_BIAS.md 3/3.1): "_rival_anchor" a (0 = today: rivals and informed takers price
+      from Polymarket; 1 = from the tournament consensus without its noise: Polymarket + bias + tilt term),
+      "_world_tilt" s0 and "_world_tilt_growth" g per hour: consensus = Polymarket - s_t (Polymarket - 0.5) + bias +
+      noise, s_t = s0 + g x hours. The real starting gap already holds the live tilt, so the per-market bias becomes
+      the residual (bias + s0 (p0 - 0.5)): the start matches the real book either way. All three 0 = as before.
+      Liquidation-marked fields: pnl_mid, pnl_liq, mk15_mid, exit_ratio, hold_med (see LiveSim.metrics).
+      Env LIVE_SIM_CACHE=file: per-(seed, hours, regime, config, LIVE_SIM_TAG) results cached, never run twice.
+      Env SIM_EARLY_STOP=1: a variant stops after 4 seeds if d pnl_liq < -3 SE.
 """
 import json
 import logging
@@ -60,8 +68,10 @@ def all_off():
 
 
 class LiveSim(Sim):
-    def __init__(self, seed, hours, regime, cfg, n=40, start_cap=0.90, house="0945", outsiders=3):
+    def __init__(self, seed, hours, regime, cfg, n=40, start_cap=0.90, house="0945", outsiders=3,
+                 rival_anchor=0.0, world_tilt=0.0, world_tilt_growth=0.0):
         super().__init__(seed, hours, regime, cfg, share=SHARE)
+        self.anchor, self.tilt0, self.tilt_g = float(rival_anchor), float(world_tilt), float(world_tilt_growth)
         data = json.load(open(START))
         rows = [r for r in data["markets"] if r["ref"] is not None]
         if house == "0945":
@@ -104,6 +114,14 @@ class LiveSim(Sim):
                 for m in ms:                              # tournament prices of a race add up to a bit over 1
                     for rv in m.rivals:
                         rv.offset += LIFT
+        if self.tilt0:                                    # the starting gap holds the tilt: keep the residual
+            for m in self.mkts:
+                m.bias += self.tilt0 * (m.p0 - 0.5)
+        self.inv0 = {id(m): m.inv for m in self.mkts}
+        self.cash0 = {id(m): m.cash for m in self.mkts}
+        self.lots0 = {id(m): sorted(([float(x), float(u)] for x, u in m.state["lots"]), key=lambda l: l[1])
+                      for m in self.mkts}
+        self.takes, self.mid0, self.liq0 = [], {}, {}
         sim_cap = sum(cap(m.row) for m in self.mkts)
         self.bg_cap = max(0.0, start_cap * ACCOUNT - sim_cap)
         self.cap0_sim = sim_cap
@@ -200,7 +218,27 @@ class LiveSim(Sim):
                 p2 = [min(0.99, max(0.01, s - x)) for x in p_first]
                 x1 = [c - p - ms[0].bias for p, c in zip(p_first, c_first)]
                 self.paths_by[id(ms[1])] = (p2, self.consensus(ms[1], p2, x1))
+        self.rp = {}
+        for m in self.mkts:
+            p, c = self.paths_by[id(m)]
+            if self.tilt0 or self.tilt_g:
+                for t in range(len(c)):
+                    c[t] = min(0.99, max(0.01, c[t] + self.tilt_term(t, p[t])))
+            if self.anchor:
+                self.rp[id(m)] = [x + self.anchor * (m.bias + self.tilt_term(t, x)) for t, x in enumerate(p)]
+        self.cpath = {id(m): self.paths_by[id(m)][1] for m in self.mkts}
         return super().run()
+
+    def tilt_term(self, t, p):
+        """The world's favourite-longshot tilt at second t: consensus - Polymarket from the tilt alone."""
+        return -(self.tilt0 + self.tilt_g * t / 3600.0) * (p - 0.5)
+
+    def rival_step(self, m, rv, t, p):
+        return super().rival_step(m, rv, t, self.rp.get(id(m), p))
+
+    def informed_px(self, m, t, p):
+        rp = self.rp.get(id(m))
+        return rp[t] if rp is not None else p[t]
 
     def make_paths(self, m):
         return self.paths_by[id(m)]
@@ -224,6 +262,10 @@ class LiveSim(Sim):
     # ---------------------------------------------------------------- us: one cycle = bot bookkeeping + arb + quotes
     def our_cycle(self, t, paths):
         self.t_now = t
+        if t == 0:                                # start marks: other traders' mid, and the liquidation price
+            for m, p, c in paths:
+                self.mid0[id(m)] = self.mid_px(m, c[t])
+                self.liq0[id(m)] = self.liq_px(m, m.inv, c[t])
         bot, cfg = self.bot, self.cfg
         inv = {m.eid: m.inv for m in self.mkts}
         pnow = {m.eid: p[t] for m, p, c in paths}
@@ -346,6 +388,7 @@ class LiveSim(Sim):
             m.inv += q if is_buy else -q
             m.cash -= (q if is_buy else -q) * o.price
             S.add_lot(m.state.setdefault("lots", []), q if is_buy else -q, t)
+            self.takes.append((t, m, 1 if is_buy else -1, q, o.price))
         m.orders = [o for o in m.orders if o.qty > 1e-9]
         return done
 
@@ -367,6 +410,86 @@ class LiveSim(Sim):
                 self.bidsum["asksum_lo"] += sum(asks) < 0.98
 
     # ---------------------------------------------------------------- metrics
+    def mid_px(self, m, c):
+        """Other traders' mid; one side missing -> the consensus value."""
+        bb, ba = self.best(self.others(m, "us"), True), self.best(self.others(m, "us"), False)
+        return (bb + ba) / 2 if bb is not None and ba is not None else c
+
+    def liq_px(self, m, inv, c):
+        """What a position sells for now: longs at the best other bid, shorts at the best other ask; no quote on
+        that side -> the consensus value 2c worse."""
+        if inv > 0:
+            bb = self.best(self.others(m, "us"), True)
+            return bb if bb is not None else c - 0.02
+        if inv < 0:
+            ba = self.best(self.others(m, "us"), False)
+            return ba if ba is not None else c + 0.02
+        return 0.0
+
+    def replay(self):
+        """Our fills and takes in time order from the starting book: (shares that reduced |inventory|, shares that
+        added, closed lots as (hours held, shares)) with FIFO lots and the starting lots' real ages."""
+        ev = sorted([(f[0], f[1], f[2], f[3]) for f in self.fills] + [(x[0], x[1], x[2], x[3]) for x in self.takes],
+                    key=lambda e: e[0])
+        state = {}
+        red = add = 0.0
+        closed = []
+        for t, m, side, q in ev:
+            if id(m) not in state:
+                inv0 = self.inv0[id(m)]
+                lots = [l[:] for l in self.lots0[id(m)] if l[0] * inv0 > 0]
+                tot = sum(abs(l[0]) for l in lots)
+                while lots and tot > abs(inv0) + 1e-9:             # more lots than position: trim the newest
+                    cut = min(tot - abs(inv0), abs(lots[-1][0]))
+                    lots[-1][0] -= math.copysign(cut, lots[-1][0])
+                    tot -= cut
+                    if abs(lots[-1][0]) < 1e-9:
+                        lots.pop()
+                if abs(inv0) - tot > 1e-9:
+                    lots.append([math.copysign(abs(inv0) - tot, inv0), 0.0])
+                state[id(m)] = [inv0, lots]
+            st = state[id(m)]
+            x = side * q
+            if st[0] * x < 0:
+                r = min(abs(x), abs(st[0]))
+                red += r
+                left = r
+                while left > 1e-9 and st[1]:
+                    k = min(left, abs(st[1][0][0]))
+                    closed.append(((t - st[1][0][1]) / 3600.0, k))
+                    st[1][0][0] -= math.copysign(k, st[1][0][0])
+                    left -= k
+                    if abs(st[1][0][0]) < 1e-9:
+                        st[1].pop(0)
+                if abs(x) - r > 1e-9:
+                    add += abs(x) - r
+                    st[1].append([math.copysign(abs(x) - r, x), t])
+            else:
+                add += abs(x)
+                st[1].append([x, t])
+            st[0] += x
+        return red, add, closed
+
+    def liq_fields(self, T):
+        """Package 5 yardstick: P&L from the start marked at other traders' mid and at liquidation (start and end
+        both), markout against the consensus 15 min later, exit ratio and median hold of closed lots."""
+        cT = {id(m): self.cpath[id(m)][T] for m in self.mkts}
+        pnl_mid = sum(m.cash + m.inv * self.mid_px(m, cT[id(m)]) - self.cash0[id(m)]
+                      - self.inv0[id(m)] * self.mid0.get(id(m), m.p0) for m in self.mkts)
+        pnl_liq = sum(m.cash + m.inv * self.liq_px(m, m.inv, cT[id(m)]) - self.cash0[id(m)]
+                      - self.inv0[id(m)] * self.liq0.get(id(m), m.p0) for m in self.mkts)
+        fsh = sum(f[3] for f in self.fills)
+        mk_mid = sum(f[2] * f[3] * (self.cpath[id(f[1])][min(T, int(f[0]) + 900)] - f[4]) for f in self.fills)
+        red, add, closed = self.replay()
+        hold_med, acc, tot_c = 0.0, 0.0, sum(w for _, w in closed)
+        for a, w in sorted(closed):
+            acc += w
+            if acc >= tot_c / 2:
+                hold_med = a
+                break
+        return dict(pnl_mid=round(pnl_mid), pnl_liq=round(pnl_liq), mk15_mid=round(100 * mk_mid / fsh, 2) if fsh else 0.0,
+                   exit_ratio=round(red / max(add, 1.0), 3), hold_med=round(hold_med, 2))
+
     def metrics(self):
         out = super().metrics()
         T = self.T
@@ -382,6 +505,7 @@ class LiveSim(Sim):
                 med = a
                 break
         sen = self.bidsum["senate"]
+        out.update(self.liq_fields(T))
         out.update(cap_start=round((self.bg_cap + self.cap0_sim) / ACCOUNT, 3),
                    cap_end=round((self.bg_cap + cap_end) / ACCOUNT, 3),
                    cap_peak=round(max(c for _, c, _ in self.curve), 3) if self.curve else 0.0,
@@ -514,22 +638,41 @@ def _one(args):
     seed, hours, regime, ov = args
     ov = dict(ov)
     kw = dict(n=int(ov.pop("_n", 40)), start_cap=float(ov.pop("_start_cap", 0.90)), house=str(ov.pop("_house", "0945")),
-              outsiders=int(ov.pop("_outsiders", 3)))
+              outsiders=int(ov.pop("_outsiders", 3)), rival_anchor=float(ov.pop("_rival_anchor", 0.0)),
+              world_tilt=float(ov.pop("_world_tilt", 0.0)), world_tilt_growth=float(ov.pop("_world_tilt_growth", 0.0)))
     sim = LiveSim(seed, hours, regime, S.make_cfg(ov), **kw)
     return sim.run()
 
 
-def run_many(seeds, hours, regime, ov):
-    jobs = [(s, hours, regime, ov) for s in range(1, seeds + 1)]
+def _key(j):
+    s, hours, regime, ov = j
+    return json.dumps([s, hours, regime, sorted(ov.items()), os.environ.get("LIVE_SIM_TAG", "")])
+
+
+def run_many(seeds, hours, regime, ov, first=1):
+    jobs = [(s, hours, regime, ov) for s in range(first, seeds + 1)]
+    path, cache = os.environ.get("LIVE_SIM_CACHE"), {}
+    if path and os.path.exists(path):
+        for line in open(path):
+            k, v = json.loads(line)
+            cache[k] = v
+    todo = [j for j in jobs if _key(j) not in cache]
     procs = int(os.environ.get("SIM_PROCS", "4"))
-    if procs > 1 and seeds > 1:
+    if procs > 1 and len(todo) > 1:
         import multiprocessing
-        with multiprocessing.Pool(min(procs, seeds)) as pool:
-            return pool.map(_one, jobs)
-    return [_one(j) for j in jobs]
+        with multiprocessing.Pool(min(procs, len(todo))) as pool:
+            res = pool.map(_one, todo)
+    else:
+        res = [_one(j) for j in todo]
+    for j, r in zip(todo, res):
+        cache[_key(j)] = r
+        if path:
+            with open(path, "a") as f:
+                f.write(json.dumps([_key(j), r]) + "\n")
+    return [cache[_key(j)] for j in jobs]
 
 
-KEYS = ("pnl", "pnl_lag", "writes_pm", "deferred_h", "lvl_sh", "lvl_pnl", "lad_gate", "lg_ok_w", "lg_sh", "dead", "free_min", "clipped", "cap_end", "cap_peak", "freed", "age_end", "unwind_sh", "arb_sh", "outsider_arb_sh",
+KEYS = ("pnl_liq", "pnl_mid", "pnl", "pnl_lag", "exit_ratio", "hold_med", "mk15_mid", "pick_cost", "wc_end", "writes_pm", "deferred_h", "lvl_sh", "lvl_pnl", "lad_gate", "lg_ok_w", "lg_sh", "dead", "free_min", "clipped", "cap_end", "cap_peak", "freed", "age_end", "unwind_sh", "arb_sh", "outsider_arb_sh",
         "arb_pnl", "wc_peak", "shares")
 
 
@@ -548,12 +691,20 @@ def main(argv):
     print(f"BASE {json.dumps(base)[:60]} | " + " ".join(f"{k} {agg[k]:.3g}" for k in
           KEYS + tuple(k for k in rb[0] if k.startswith("lg_") and k not in KEYS) + ("cap_start", "bidsum_ge1", "bidsum_ge1005", "bidsum_ge103", "sen_bidsum_ge1", "sen_bidsum_max", "asksum_lt098", "outsider_asksum_le0985", "n_mkts")), flush=True)
     for v in variants:
-        rv = run_many(seeds, hours, regime, {**base, **v})
+        early = os.environ.get("SIM_EARLY_STOP") == "1" and seeds > 4
+        rv = run_many(min(seeds, 4) if early else seeds, hours, regime, {**base, **v})
+        stop = ""
+        if early:
+            mu, se = stats([y["pnl_liq"] - x["pnl_liq"] for x, y in zip(rb, rv)])
+            if se > 0 and mu < -3 * se:
+                stop = " STOPPED_AT_4"
+            else:
+                rv += run_many(seeds, hours, regime, {**base, **v}, first=5)
         parts = []
         for k in KEYS:
             mu, se = stats([y[k] - x[k] for x, y in zip(rb, rv)])
             parts.append(f"d{k} {mu:+.3g}+-{se:.2g}")
-        print(f"{json.dumps(v)[:60]:<60} | " + " ".join(parts), flush=True)
+        print(f"{json.dumps(v)[:60]:<60}{stop} | " + " ".join(parts), flush=True)
 
 
 if __name__ == "__main__":

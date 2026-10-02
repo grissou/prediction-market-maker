@@ -206,6 +206,10 @@ class Sim:
             c[t] = min(0.99, max(0.01, cur + m.bias + x))
         return p, c
 
+    def informed_px(self, m, t, p):
+        """The price informed takers trade toward after a Polymarket jump (live_sim's anchored world overrides it)."""
+        return p[t]
+
     def lat(self):
         lo, hi = self.reg["lat"]
         r = self.lrng
@@ -445,7 +449,7 @@ class Sim:
             for m, p, c in self.paths:
                 jump_due = due[id(m)]
                 if t > 0 and abs(p[t] - p[t - 1]) >= 0.009:
-                    jump_due.append((t + self.rng.uniform(5, 60), p[t] > p[t - 1], p[t]))
+                    jump_due.append((t + self.rng.uniform(5, 60), p[t] > p[t - 1], self.informed_px(m, t, p)))
                     for rv in m.rivals:                  # rivals react to a Polymarket move after their lag
                         rv.next_t = min(rv.next_t, t + rv.lag + 1)
                 self.humans(m, t, c[t])
