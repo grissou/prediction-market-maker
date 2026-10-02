@@ -27,6 +27,10 @@ Run:  python tests/live_sim.py SEEDS HOURS REGIME '{overrides}' ['{variant}' ...
       the residual (bias + s0 (p0 - 0.5)): the start matches the real book either way. All three 0 = as before.
       Liquidation-marked fields: pnl_mid, pnl_liq, mk15_mid, exit_ratio, hold_med (see LiveSim.metrics).
       Env LIVE_SIM_CACHE=file: per-(seed, hours, regime, config, LIVE_SIM_TAG) results cached, never run twice.
+      "_bg_wc" W (default 0 = as before): the rest of the account's sum-of-maxima worst case, so the live reduce-only
+      backstop binds as live (mm_bot cycle step 6: worst > (worst_case_backstop_frac - hysteresis) x equity ->
+      Bot.decide(global_reduce=True)); live 2 Oct evening: total 77.7-81.6k, backstop 0.8 x ~101k. Metrics wc_start,
+      ro_frac (share of cycles in reduce-only).
       Env SIM_EARLY_STOP=1: a variant stops after 4 seeds if d pnl_liq < -3 SE.
 """
 import json
@@ -69,8 +73,9 @@ def all_off():
 
 class LiveSim(Sim):
     def __init__(self, seed, hours, regime, cfg, n=40, start_cap=0.90, house="0945", outsiders=3,
-                 rival_anchor=0.0, world_tilt=0.0, world_tilt_growth=0.0):
+                 rival_anchor=0.0, world_tilt=0.0, world_tilt_growth=0.0, bg_wc=0.0):
         super().__init__(seed, hours, regime, cfg, share=SHARE)
+        self.bg_wc, self.global_reduce, self.ro_cycles, self.n_cycles, self.wc_start = float(bg_wc), False, 0, 0, None
         self.anchor, self.tilt0, self.tilt_g = float(rival_anchor), float(world_tilt), float(world_tilt_growth)
         data = json.load(open(START))
         rows = [r for r in data["markets"] if r["ref"] is not None]
@@ -313,6 +318,15 @@ class LiveSim(Sim):
             self.pair_passive(t, inv, fvs)
         if cfg.hold_target_hours > 0 and t % 5 == 0:    # Package 5 C (isolated mirror, see hold_take)
             self.hold_take(t, inv)
+        if self.bg_wc:                            # the live backstop (mm_bot cycle step 6, sum-of-maxima part only)
+            worst = self.bg_wc + bot.total_worst_case(inv, fvs)
+            if self.wc_start is None:
+                self.wc_start = worst
+            hyst = min(cfg.reduce_only_hysteresis, cfg.max_worst_case_frac / 2) if self.global_reduce else 0.0
+            self.global_reduce = worst > (cfg.worst_case_backstop_frac - hyst) * equity
+            bot.global_reduce = self.global_reduce
+            self.n_cycles += 1
+            self.ro_cycles += self.global_reduce
         if t % 600 == 0:
             wc = bot.total_worst_case(inv, fvs)
             self.wc_peak = max(self.wc_peak, wc)
@@ -587,7 +601,10 @@ class LiveSim(Sim):
                       for k, v in self.lg.items()},
                    dead=sum(1 for e in self.bot.ex.values() if e.turnover_dead),
                    tx_bind_frac=round(self.tx_bind / max(1, self.tx_quoted), 3),   # Package 5 T2.4
-                   hold_take_sh=round(getattr(self, "hold_take_sh", 0.0)))
+                   hold_take_sh=round(getattr(self, "hold_take_sh", 0.0)),
+                   ro_frac=round(self.ro_cycles / max(1, self.n_cycles), 3),
+                   wc_start=round(self.wc_start) if self.wc_start is not None else 0,
+                   tilt_s_end=round(getattr(getattr(self, "tilt", None), "s", 0.0), 4))
         return out
 
 
@@ -602,7 +619,7 @@ def bot_strategy(sim, m, t, fv, bfv, ref, book):
         # reference_jump_guard sets: feed it the sim's Polymarket jump (see_ref sets cooldown_until = jump + cooldown)
         ex.ref_jump_at = max(ex.ref_jump_at, m.cooldown_until - sim.cfg.ref_jump_cooldown_seconds)
     inv = {x.eid: x.inv for x in sim.mkts}
-    q = bot.decide(ex, fv, inv, sim.eff, False, sim.party_delta, t, ref=ref, book_fv=bfv, ref_liquid=True)
+    q = bot.decide(ex, fv, inv, sim.eff, sim.global_reduce, sim.party_delta, t, ref=ref, book_fv=bfv, ref_liquid=True)
     if sim.cfg.tilt_exposure_max_frac > 0:         # Package 5 T2.4: market-cycles where the tilt limit binds
         sim.tx_quoted += 1
         sim.tx_bind += any(bot.tilt_blocks(ex, ref))
@@ -705,7 +722,8 @@ def _one(args):
     ov = dict(ov)
     kw = dict(n=int(ov.pop("_n", 40)), start_cap=float(ov.pop("_start_cap", 0.90)), house=str(ov.pop("_house", "0945")),
               outsiders=int(ov.pop("_outsiders", 3)), rival_anchor=float(ov.pop("_rival_anchor", 0.0)),
-              world_tilt=float(ov.pop("_world_tilt", 0.0)), world_tilt_growth=float(ov.pop("_world_tilt_growth", 0.0)))
+              world_tilt=float(ov.pop("_world_tilt", 0.0)), world_tilt_growth=float(ov.pop("_world_tilt_growth", 0.0)),
+              bg_wc=float(ov.pop("_bg_wc", 0.0)))
     sim = LiveSim(seed, hours, regime, S.make_cfg(ov), **kw)
     return sim.run()
 

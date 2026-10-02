@@ -31,6 +31,12 @@ check("pin news", (r["pnl"], r["cap_end"], r["writes_pm"], r["shares"]) == (26, 
 for k in ("pnl_mid", "pnl_liq", "mk15_mid", "exit_ratio", "hold_med", "pick_cost", "wc_end"):
     check(f"key {k} printed", k in L.KEYS and k in r)
 
+# 1b. The live reduce-only backstop (_bg_wc): 0 = never; huge = reduce-only every cycle, so nothing is added
+r = L._one((1, 0.02, "quiet", {"_bg_wc": 1e6, "worst_case_backstop_frac": 0.8}))
+check("backstop pinned: reduce-only every cycle", r["ro_frac"] == 1.0 and r["wc_start"] > 1e6)
+rq = L._one((1, 0.02, "quiet", {}))
+check("backstop off: ro_frac 0, wc_start 0", rq["ro_frac"] == 0.0 and rq["wc_start"] == 0)
+
 # 2. The tilt world: start consensus unchanged (residual bias), tilt grows, rivals anchored
 cfg = S.make_cfg({})
 a = L.LiveSim(3, 0.02, "quiet", cfg)
