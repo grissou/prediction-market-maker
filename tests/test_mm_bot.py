@@ -1789,6 +1789,97 @@ finally:
 check("an outage with a failing cancel-all alerts once, not every cycle", n_outage == 1, sent)
 check("recovery alerts once, and only after an alerted outage", n_back == 1 and n_quiet == 0, sent)
 
+# F3a: reduce-only hysteresis. Enter above max_worst_case_frac (30%), leave only below 30% - 3% (also the backstop).
+def reduce_seq(b, values, model="correlated"):
+    """Cycles with (settlement risk, sum-of-maxima worst case) forced -> b.global_reduce after each."""
+    out = []
+    b.cfg.risk_model = model
+    for risk, worst in values:
+        b.settlement_risk = lambda inv, fvs, pd, r=risk: r
+        b.total_worst_case = lambda inv, fvs, w=worst: w
+        b.cycle(); out.append(b.global_reduce)
+    return out
+logging.disable(logging.CRITICAL)
+try:
+    a, b = make_bot(); b.cycle()                          # account value 100,000
+    seq = reduce_seq(b, [(31e3, 50e3), (28e3, 50e3), (27.5e3, 50e3), (26.9e3, 50e3), (29.9e3, 50e3), (30.1e3, 50e3)])
+    check("F3: reduce-only enters above 30% and leaves only below 27% (no flapping around 30%)",
+          seq == [True, True, True, False, False, True], seq)
+    a, b = make_bot(); b.cycle()
+    seq = reduce_seq(b, [(10e3, 70e3), (10e3, 67e3), (10e3, 65.9e3)])
+    check("F3: ...the 69% backstop has the same hysteresis (leaves below 66%)", seq == [True, True, False], seq)
+    a, b = make_bot(); b.cycle()
+    seq = reduce_seq(b, [(31e3, 31e3), (28e3, 28e3), (26e3, 26e3)], model="sum_max")
+    check("F3: ...and so does the sum_max risk model", seq == [True, True, False], seq)
+    a, b = make_bot(); b.cycle(); b.cfg.reduce_only_hysteresis = 0.0
+    seq = reduce_seq(b, [(31e3, 50e3), (29.9e3, 50e3)])
+    check("F3: reduce_only_hysteresis = 0: the old single threshold", seq == [True, False], seq)
+    a, b = make_bot(); b.cycle(); b.cfg.max_worst_case_frac = 0.05; b.cfg.reduce_only_hysteresis = 0.1
+    seq = reduce_seq(b, [(6e3, 6e3), (2e3, 2e3)])
+    check("F3: a hysteresis bigger than the cap can't trap the bot in reduce-only", seq == [True, False], seq)
+finally:
+    logging.disable(logging.NOTSET)
+
+# F3b: many pulls in one cycle -> ONE tournament-wide cancel-all (1 write) instead of a DELETE each.
+def pull_storm_bot(**cfg):
+    a, b = make_bot(); b.cycle()                          # 8 quotes on 4 markets, no positions
+    for k, v in cfg.items():
+        setattr(b.cfg, k, v)
+    a.calls.clear()
+    b.settlement_risk = lambda inv, fvs, pd: 40e3         # reduce-only with no position: every quote is pulled
+    b.total_worst_case = lambda inv, fvs: 50e3
+    return a, b
+logging.disable(logging.CRITICAL)
+try:
+    a, b = pull_storm_bot(pulls_cancel_all_over=2)
+    b.cycle()
+    check("F3: more pulls than pulls_cancel_all_over: one tournament-wide cancel-all, no per-exchange cancels",
+          a.sent("cancel_all") == [("cancel_all", None)] and not a.sent("cancel_order") and not a.orders
+          and not b.my_orders and not a.sent("batch"), a.calls)
+    b.settlement_risk = lambda inv, fvs, pd: 0.0
+    b.cycle()
+    check("F3: ...and the next cycle re-places what should rest, in one batch", len(a.orders) == 8
+          and len(a.sent("batch")) == 1, (len(a.orders), a.calls))
+    a, b = pull_storm_bot(pulls_cancel_all_over=0)
+    b.cycle()
+    check("F3: pulls_cancel_all_over = 0: the pulls go one by one, as before",
+          len(a.sent("cancel_all")) == 4 and all(c[1] for c in a.sent("cancel_all")) and not a.orders, a.calls)
+    a, b = pull_storm_bot()
+    a.writes_left = lambda: 2
+    b.cycle()
+    check("F3: more pulls than the writes left (and than re-placing everything costs): one cancel-all",
+          a.sent("cancel_all") == [("cancel_all", None)] and not a.orders, a.calls)
+    a, b = pull_storm_bot(batch_size=2)                   # re-placing 8 quotes: 4 batches + the cancel-all = 5
+    a.writes_left = lambda: 3
+    b.cycle()
+    check("F3: ...but not when re-placing every quote would cost as much as the pulls",
+          len(a.sent("cancel_all")) == 4 and all(c[1] for c in a.sent("cancel_all")), a.calls)
+    a, b = pull_storm_bot(pulls_cancel_all_over=2)
+    b.selftest_future = object()                          # the self-test is running on its own thread
+    b.cycle()
+    check("F3: never while the self-test runs (its orders would vanish under it)",
+          ("cancel_all", None) not in a.sent("cancel_all") and not a.orders, a.calls)
+    a, b = pull_storm_bot(pulls_cancel_all_over=2)
+    real_ca = a.cancel_all
+    def ca_fails(tid, eid=None):
+        if eid is None:
+            a.log("cancel_all", None); raise ApiError(0, "NETWORK", "timeout")
+        return real_ca(tid, eid)
+    a.cancel_all = ca_fails
+    b.cycle()
+    check("F3: a cancel-all that fails falls back to the pulls themselves (they reduce risk)",
+          not a.orders and len(a.sent("cancel_all")) == 5, a.calls)
+    a, b = pull_storm_bot(pulls_cancel_all_over=2)
+    gen = b.cancel_gen
+    def ca_partial(tid, eid=None):
+        a.log("cancel_all", eid); return False            # 207 and the list still shows orders
+    a.cancel_all = ca_partial
+    b.cycle()
+    check("F3: a cancel-all not confirmed forgets nothing (re-read next cycle), never stacks quotes",
+          len(b.my_orders) == 8 and b.orders_stale and not a.sent("batch") and b.cancel_gen == gen + 1, a.calls)
+finally:
+    logging.disable(logging.NOTSET)
+
 # F11: a partial cancel-all (207, orders left) must not count as "pulled": the next failed cycle tries again.
 a, b = make_bot()
 answers, calls = [False, False, True], []

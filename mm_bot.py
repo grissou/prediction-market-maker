@@ -121,6 +121,15 @@ class Config:
     worst_case_backstop_frac: float = 0.69  # with "correlated": the old sum-of-maxima still forces reduce-only above
                                             #   69% of account value (~70k on 2026-10-02, the owner's choice; a
                                             #   backstop that no longer binds at 30%)
+    reduce_only_hysteresis: float = 0.03  # once in reduce-only, leave only below max_worst_case_frac - this (and the
+                                          #   backstop - this): risk hovering at 30% used to flip reduce-only every
+                                          #   cycle, each flip pulling (then re-placing) a side on every market held.
+                                          #   0 = no hysteresis (the old behaviour)
+    pulls_cancel_all_over: int = 25       # more pulls than this in one cycle (or more than the writes left this
+                                          #   minute, when that's also more than re-placing every quote costs): one
+                                          #   tournament-wide cancel-all (1 write) instead of one DELETE each; what
+                                          #   should rest is re-placed next cycle in batches. 0 = off. Not with
+                                          #   ONLY_EXCHANGES (its cancel-all is one write per exchange anyway)
     # Sizes below are FRACTIONS OF ACCOUNT VALUE (0.01 = 1%), recalculated as the account changes, so the
     # bot sizes up after gains and down after losses. "shares" = contracts that each pay up to 1.
     sizing_step_frac: float = 0.05        # ...but the account value they're a fraction of only moves in steps: it's
@@ -454,6 +463,8 @@ OVERRIDABLE = {
     "positions_stale_max_cycles": (0, 100),
     "positions_stale_max_seconds": (0.0, 3600.0),
     "handover_exit_max_seconds": (0.0, 600.0),
+    "reduce_only_hysteresis": (0.0, 0.1),
+    "pulls_cancel_all_over": (0, 500),
 }
 
 
@@ -2120,14 +2131,19 @@ class Bot:
         eff = self.effective_inventory(inv)
         worst = self.total_worst_case(inv, fvs)
         party_delta = sum(PARTY_SIGN.get(ex.party, 0) * inv.get(eid, 0.0) for eid, ex in self.ex.items())
+        # Hysteresis: once in reduce-only, both caps are reduce_only_hysteresis lower until it has been left.
+        hyst = min(cfg.reduce_only_hysteresis, cfg.max_worst_case_frac / 2) if self.global_reduce else 0.0
         if cfg.risk_model == "correlated":
             # never above the sum of maxima, which is a hard bound (for a few big positions 3 sd exceeds it)
             risk = min(worst, self.settlement_risk(inv, fvs, party_delta))
-            global_reduce = bool(equity) and (risk > cfg.max_worst_case_frac * equity
-                                              or worst > cfg.worst_case_backstop_frac * equity)
+            global_reduce = bool(equity) and (risk > (cfg.max_worst_case_frac - hyst) * equity
+                                              or worst > (cfg.worst_case_backstop_frac - hyst) * equity)
         else:
             risk = worst
-            global_reduce = bool(equity) and worst > cfg.max_worst_case_frac * equity
+            global_reduce = bool(equity) and worst > (cfg.max_worst_case_frac - hyst) * equity
+        if global_reduce != self.global_reduce:
+            log.warning("%s reduce-only: risk %.0f, worst case %.0f, account %s", "ENTERING" if global_reduce
+                        else "leaving", risk, worst, f"{equity:.0f}" if equity is not None else "?")
         self.global_reduce = global_reduce
         if full:                                  # summary line on full checks only (event cycles can be every 2 s)
             log.info("%s | account %s (locked in orders %.0f, %s) | worst-case loss %.0f (risk %.0f)%s | party delta %+.0f | "
@@ -2810,6 +2826,8 @@ class Bot:
         side). The cycle waits at most write_wait_seconds; writes still running then carry on in the
         background, their exchanges are left alone (Ex.writes) and the results are applied next cycle."""
         cfg = self.cfg
+        if self.pull_storm(changes):
+            return
         deadline = time.monotonic() + cfg.write_wait_seconds
         changes = sorted(changes, key=lambda c: c.key)
         # Within the request budget, keeping write_read_reserve back so reads (positions, orders, books) never
@@ -2849,6 +2867,34 @@ class Bot:
             wait([w.future for w in self.writes], timeout=left, return_when=FIRST_COMPLETED)
             self.progress("waiting for order writes")
         self.harvest_writes()
+
+    def pull_storm(self, changes):
+        """Many pulls at once (reduce-only switching on pulls a side on every market held; pulls bypass the write
+        budget, so ~70 DELETEs used to take ~2.4 min of a 30/min budget, every write behind them waiting): send
+        ONE tournament-wide cancel-all instead and plan again next cycle, which re-places what should rest in
+        batches. True = done that (send nothing else this cycle). Only when it's clearly cheaper: more pulls
+        than pulls_cancel_all_over, or more than the writes left this minute AND than re-placing every quote
+        would cost. Never while the self-test runs (its orders would vanish under it) or with ONLY_EXCHANGES.
+        cancel_everything forgets our orders only once the cancel-all is confirmed (else orders_stale: re-read)."""
+        cfg = self.cfg
+        if not (self.api.live and cfg.pulls_cancel_all_over > 0) or cfg.only_exchanges or self.selftest_future:
+            return False
+        pulls = sum(1 if c.whole else len(c.doomed) for c in changes if c.key[0] == 0 and c.doomed)
+        if not pulls:
+            return False
+        left = getattr(self.api, "writes_left", lambda: 10 ** 6)()
+        replace = 1 + math.ceil(len(self.my_orders) / cfg.batch_size)   # this cancel-all + re-placing everything
+        if not (pulls > cfg.pulls_cancel_all_over or (pulls > left and pulls > replace)):
+            return False
+        log.warning("%d pulls planned (%d writes left this minute) - one cancel-all instead; what should rest "
+                    "is re-placed next cycle", pulls, left)
+        try:
+            if not self.cancel_everything():
+                log.warning("cancel-all instead of pulls: not confirmed - re-reading our orders next cycle")
+        except ApiError as e:                     # fall back to the pulls themselves: they reduce risk
+            log.error("cancel-all instead of %d pulls failed (%s) - sending the pulls", pulls, e)
+            return False
+        return True
 
     def send_orders(self, changes):
         """New orders of these changes in batches of batch_size, in the order given; party-control markets get
