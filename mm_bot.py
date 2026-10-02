@@ -551,7 +551,7 @@ class Config:
     # Data: fills with > 3c edge made +1,704 on 109 fills (DATA_REPORT_2 s5); the mid reverts toward Polymarket with
     # a 5-13 min half-life, positions are held a median 7.2 h. After a sweep fill, offer the shares back near fair
     # value for a few minutes (realised P&L) instead of carrying them at the normal skewed quote.
-    fast_unload_enabled: bool = True      # a quote fill that ADDED to a position opens an "unload window" there
+    fast_unload_enabled: bool = False      # a quote fill that ADDED to a position opens an "unload window" there
     fast_unload_min_edge: float = 0.02    # ...if it had at least this edge at the quote (vs fv when quoted)...
     fast_unload_min_shares: int = 100     # ...and at least this many shares
     fast_unload_seconds: float = 300.0    # how long the window stays open
@@ -563,7 +563,7 @@ class Config:
     # Data (Explorer): P(fill in 10 min) 33-34% AT the best, 6-8% one tick behind; our reducing side was at the
     # best only 24% of the time; 11 of 12 positions >= 1,000 sh had no reducing fill in 6 h; round trips made all
     # the realised profit (+1,824 on 254k shares). So the side that shrinks |race-netted position| joins the best.
-    reduce_join_best: bool = True         # that side quotes AT the best other price on its side (joins the queue,
+    reduce_join_best: bool = False         # that side quotes AT the best other price on its side (joins the queue,
                                           #   no pennying), or at fair +- reduce_join_min_edge rounded away if the
                                           #   best is closer than that; never crossing. The inventory / age skews
                                           #   then only move the ADDING side (and the sizes); a fast unload window
@@ -2239,6 +2239,9 @@ class Bot:
         self.lots_seeded = False          # first reconcile rebuilds missing ones from fills.csv
         self.lots_dirty = False
         self.capital_over = False         # capital ceiling active (capital_in_positions_max_frac)
+        self.cur_refs, self.cur_liquid = {}, set()   # this cycle's Polymarket prices (for risk_fv)
+        self.pos_marks = {}               # {eid: the exchange's own valuation price of the position (currentPrice)}
+        self.fv_fallback_logged = {}      # {eid: source} - which fallback risk_fv used for a held position (logged once)
         self.notes_dirty = False
         self.exit_code = 0                # what the process exits with (see EXIT_* codes)
         self.health = {}                  # latest cycle summary, written to status.json
@@ -2511,6 +2514,9 @@ class Bot:
             self.orders_stale = True              # read positions (and orders) again next cycle
         pos, raw_orders = self.cached_pos, self.cached_orders
         # position.quantity is already signed by the API: + YES shares, - NO shares.
+        self.pos_marks = {str(p["exchangeId"]): float(next(p[k] for k in Bot.POS_PRICE_KEYS if p.get(k) is not None))
+                          for p in pos.get("positions", []) if not p.get("settled")
+                          and any(p.get(k) is not None for k in Bot.POS_PRICE_KEYS)} if isinstance(pos, dict) else {}
         inv = {str(p["exchangeId"]): float(p.get("quantity") or 0)
                for p in pos.get("positions", []) if not p.get("settled")}
         reserved = reserved_cash(raw_orders)
@@ -2556,6 +2562,7 @@ class Bot:
             if len(members) > 1:
                 book_fvs.update(normalise({e: book_fvs[e] for e in members}))
         refs, liquid = self.reference_prices(book_fvs)
+        self.cur_refs, self.cur_liquid = refs, liquid
         self.mark_ref_moves()
         self.reference_jump_guard(now_m)
         fvs = dict(book_fvs)
@@ -3197,8 +3204,7 @@ class Bot:
         for e, q in inv.items():
             if not q:
                 continue
-            ex = self.ex.get(e)
-            p = fvs.get(e) or (ex.last_fv if ex else None) or 0.5
+            p = self.risk_fv(e, fvs) if e in self.ex else (fvs.get(e) or 0.5)
             total += abs(q) * (p if q > 0 else 1 - p)
         return total
 
@@ -3220,13 +3226,44 @@ class Bot:
                         100 * cap, f"at x{cfg.capital_ceiling_adding_size_factor:g}" if on else "back to normal")
         self.capital_over = on
 
+    def risk_fv(self, e, fvs, members=None):
+        """The probability the risk model uses for market e: this cycle's fair value when there is one; else, for
+        a market we hold, in this order: the liquid Polymarket reference; 1 minus the other leg's fair value in a
+        two-leg race; the exchange's own mark of the position (currentPrice); the last fair value we had; 0.5.
+        (2 Oct 11:22: Rep U.S. House, short 9,396, was unpriced after a restart and the old `or 0.5` treated it as
+        a coin flip: settlement risk 20.6k -> 31k, reduce-only, no quotes there.) The fallback used for a held
+        position is logged once per market and source."""
+        p = fvs.get(e)
+        if p is not None:
+            return p
+        src = None
+        ref = self.cur_refs.get(e)
+        if ref is not None and e in self.cur_liquid:
+            p, src = ref, f"Polymarket {ref:.3f}"
+        else:
+            others = [o for o in (members or self.groups.get(self.ex[e].group, ())) if o != e and fvs.get(o) is not None]
+            if len(others) == 1 and len(members or self.groups.get(self.ex[e].group, ())) == 2:
+                p, src = max(0.0, min(1.0, 1 - fvs[others[0]])), f"1 - {self.ex[others[0]].label} {fvs[others[0]]:.3f}"
+            elif self.pos_marks.get(e) is not None:
+                p, src = self.pos_marks[e], f"exchange mark {self.pos_marks[e]:.4f}"
+            elif self.ex[e].last_fv is not None:
+                p, src = self.ex[e].last_fv, f"last fair value {self.ex[e].last_fv:.3f}"
+            else:
+                p, src = 0.5, "0.5 (nothing better)"
+        if self.fv_fallback_logged.get(e) != src:
+            self.fv_fallback_logged[e] = src
+            log.warning("%s unpriced: risk uses %s for its %+.0f-share position", self.ex[e].label, src,
+                        self.ex[e].inv)
+        return p
+
     def settlement_risk(self, inv, fvs, party_delta):
         """R7: national swing shock (risk_swing_shock x |net Rep-minus-Dem YES shares|) plus risk_z standard
         deviations of the settlement value of every race, races independent once the swing is taken out.
         The cycle uses min(this, sum of per-race maxima)."""
         var = 0.0
         for members in self.groups.values():
-            legs = [(inv.get(e, 0.0), fvs.get(e) or self.ex[e].last_fv or 0.5) for e in members]
+            legs = [(inv.get(e, 0.0), self.risk_fv(e, fvs, members) if inv.get(e) else (fvs.get(e) or self.ex[e].last_fv or 0.5))
+                    for e in members]
             if any(x for x, _ in legs):
                 var += race_variance(legs)
         return self.cfg.risk_swing_shock * abs(party_delta) + self.cfg.risk_z * math.sqrt(var)
@@ -3235,7 +3272,8 @@ class Bot:
         """Sum over races of the worst-case settlement loss (see worst_case_loss)."""
         total = 0.0
         for members in self.groups.values():
-            legs = [(inv.get(e, 0.0), fvs.get(e) or self.ex[e].last_fv or 0.5) for e in members]
+            legs = [(inv.get(e, 0.0), self.risk_fv(e, fvs, members) if inv.get(e) else (fvs.get(e) or self.ex[e].last_fv or 0.5))
+                    for e in members]
             if any(x for x, _ in legs):
                 total += worst_case_loss(legs)
         return total

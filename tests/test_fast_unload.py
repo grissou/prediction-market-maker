@@ -25,9 +25,10 @@ def check(name, cond, extra=""):
 
 print("--- settings")
 c = M.Config()
-check("defaults: on, 2c / 100 sh trigger, 300 s, 0.5c from fair, size x1",
+check("defaults: OFF until reviewed (Package 3), 2c / 100 sh trigger, 300 s, 0.5c from fair, size x1",
       (c.fast_unload_enabled, c.fast_unload_min_edge, c.fast_unload_min_shares, c.fast_unload_seconds,
-       c.fast_unload_edge, c.fast_unload_size_mult) == (True, 0.02, 100, 300.0, 0.005, 1.0))
+       c.fast_unload_edge, c.fast_unload_size_mult) == (False, 0.02, 100, 300.0, 0.005, 1.0))
+c.fast_unload_enabled = True                       # the tests below exercise the feature switched on
 good, bad = M.validate_overrides({"fast_unload_enabled": False, "fast_unload_min_edge": 0.03,
                                   "fast_unload_min_shares": 200, "fast_unload_seconds": 120.0,
                                   "fast_unload_edge": 0.0, "fast_unload_size_mult": 0.5}, c)
@@ -35,6 +36,7 @@ check("all six settings are live-overridable", len(good) == 6 and not bad, bad)
 
 print("--- compute_quote: the unload side")
 cfg = M.Config()
+cfg.fast_unload_enabled = cfg.reduce_join_best = True    # (OFF by default until reviewed)
 cfg.skew_per_quote = 0.0                                 # isolate the unload floor from the inventory skew
 cfg.skew_age_enabled = False
 kw = dict(bankroll=100000, order_size=100)
@@ -77,6 +79,7 @@ print("--- the bot: a 3.5c sweep fill of 1,000 on Rep Ohio (fv 0.14, our bid 0.1
 
 def bot(**kw):
     a, b = make_bot()
+    b.cfg.fast_unload_enabled = b.cfg.reduce_join_best = True   # OFF by default until reviewed; tested switched on
     for k, v in kw.items():
         setattr(b.cfg, k, v)
     return a, b
@@ -223,8 +226,9 @@ M.log.propagate = True
 
 print("--- reduce_join_best: the reducing side joins the best")
 c = M.Config()
-check("defaults: on, 0.5c from fair at the closest (the simulator showed edge/share 1.27c -> 1.14c at 0c), from 100 shares",
-      (c.reduce_join_best, c.reduce_join_min_edge, c.reduce_join_min_shares) == (True, 0.005, 100))
+c.fast_unload_enabled = c.reduce_join_best = True  # (both OFF by default until reviewed; the tests exercise them on)
+check("defaults: OFF until reviewed; 0.5c from fair at the closest (the simulator showed edge/share 1.27c -> 1.14c at 0c), from 100 shares",
+      (M.Config().reduce_join_best, c.reduce_join_min_edge, c.reduce_join_min_shares) == (False, 0.005, 100))
 good, bad = M.validate_overrides({"reduce_join_best": False, "reduce_join_min_edge": 0.005,
                                   "reduce_join_min_shares": 500}, c)
 check("join settings are live-overridable", len(good) == 3 and not bad, bad)
@@ -247,7 +251,7 @@ check("best ask 0.495 (through fair): ours at the 0.5c floor from fair, 0.505", 
 check("best bid 0.50, best ask 0.505: never crosses, ask 0.505", jq(1000, 0.50, 0.505).ask == 0.505)
 check("best bid 0.50, best ask 0.49 (crossed): still not a take, ask 0.505", jq(1000, 0.50, 0.49).ask == 0.505)
 check("reduce_join_min_edge 0.01, best ask 0.505: at fv + 1c",
-      jq(1000, 0.45, 0.505, M.Config(reduce_join_min_edge=0.01)).ask == 0.51)
+      jq(1000, 0.45, 0.505, M.Config(reduce_join_best=True, reduce_join_min_edge=0.01)).ask == 0.51)
 check("short 1,000, best bid 0.48: bid joins at 0.48", jq(-1000, 0.48, 0.55).bid == 0.48)
 check("race-netted: flat here, long 1,000 in the race -> the ask joins", jq(0, 0.45, 0.52, eff=1000).ask == 0.52)
 check("below min shares (50): today's quote", jq(50, 0.45, 0.52) == jq(50, 0.45, 0.52, off))

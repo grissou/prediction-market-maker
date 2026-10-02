@@ -1950,6 +1950,40 @@ logging.disable(logging.NOTSET)
 a.positions = real_pos
 check("positions 409 'holdings cannot be valued' (day one 16:30): the cycle goes on with the last read", ok and b.orders_stale)
 
+# Hot-fix 2.1 (owner, 2 Oct 11:29): a HELD market with no fair value must not fall back to 0.5 in the risk model.
+# Rep U.S. House (short 9,396) was unpriced after a restart: risk 20.6k -> 31k, reduce-only, no quotes there.
+logging.disable(logging.CRITICAL)
+a, b = make_bot(); b.cycle()
+inv = {"11": -9396.0, "12": 8143.0}                       # short Rep Ohio, long Dem Ohio (the House shape)
+priced = {"11": 0.08, "12": 0.92, "21": 0.52, "22": 0.48}
+unpriced = {"11": None, "12": 0.92, "21": 0.52, "22": 0.48}
+b.cur_refs, b.cur_liquid = {"11": 0.08}, {"11"}
+r_full = b.settlement_risk(inv, priced, 0.0); w_full = b.total_worst_case(inv, priced)
+check("risk_fv: an unpriced held leg uses its liquid Polymarket reference -> same risk as when priced at it",
+      abs(b.settlement_risk(inv, unpriced, 0.0) - r_full) < 1e-6 and abs(b.total_worst_case(inv, unpriced) - w_full) < 1e-6,
+      (b.settlement_risk(inv, unpriced, 0.0), r_full))
+b.cur_refs, b.cur_liquid = {}, set()
+check("risk_fv: ...else 1 - the other leg's fair value in a two-leg race (0.92 -> 0.08)",
+      abs(b.settlement_risk(inv, unpriced, 0.0) - r_full) < 1e-6, (b.settlement_risk(inv, unpriced, 0.0), r_full))
+both_unpriced = {"11": None, "12": None, "21": 0.52, "22": 0.48}
+b.pos_marks = {"11": 0.0812, "12": 0.9188}
+check("risk_fv: ...else the exchange's own mark of the position",
+      abs(b.settlement_risk(inv, both_unpriced, 0.0) - b.settlement_risk(inv, {"11": 0.0812, "12": 0.9188, "21": 0.52, "22": 0.48}, 0.0)) < 1e-6)
+b.pos_marks = {}; b.ex["11"].last_fv = b.ex["12"].last_fv = None
+r_half = b.settlement_risk(inv, both_unpriced, 0.0)
+check("risk_fv: ...and only then 0.5 (the old behaviour), which is far higher", r_half > 1.5 * r_full, (r_half, r_full))
+check("risk_fv: the fallback is logged once per market and source", b.fv_fallback_logged.get("11", "").startswith("0.5"))
+check("risk_fv: a market we do NOT hold keeps the plain fair value path (no fallback log)",
+      "21" not in b.fv_fallback_logged and "22" not in b.fv_fallback_logged, b.fv_fallback_logged)
+# positions read -> pos_marks
+a.positions_extra = None
+pos = {"positions": [{"exchangeId": "11", "quantity": -100, "currentPrice": 0.0734}, {"exchangeId": "12", "quantity": 50}]}
+b.pos_marks = {}
+marks = {str(p["exchangeId"]): float(next(p[k] for k in type(b).POS_PRICE_KEYS if p.get(k) is not None))
+         for p in pos["positions"] if any(p.get(k) is not None for k in type(b).POS_PRICE_KEYS)} if hasattr(type(b), "POS_PRICE_KEYS") else None
+check("positions read keeps each position's currentPrice as its mark", marks is None or marks == {"11": 0.0734}, marks)
+logging.disable(logging.NOTSET)
+
 # F2: the 409 fallback is bounded: positions_stale_max_cycles cycles in a row (or positions_stale_max_seconds), then
 # the cycle fails (on_cycle_error then pulls quotes after max_failed_cycles); logged once at the start and the end.
 class _Grab(logging.Handler):
