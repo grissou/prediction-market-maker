@@ -4597,11 +4597,20 @@ class Bot:
         max_cash = max(cfg.max_order_cash_frac * self.bankroll(), quote)   # (as compute_quote: a planned size
         want, _ = ladder_levels(ex.lad_fv, q, best_bid, best_ask, offsets, mults, quote,   # is capital-checked)
                                 self.ladder_caps(ex, fv, quote), max_cash)
-        # Without the size factors (level 0 at its unscaled size): what a resting ladder order may keep.
+        # Without the size factors (level 0 at its unscaled size): what a resting ladder order may keep. No cash
+        # cap here: it is a sizing rule, not a limit (it moves with the account value and the quote size, and as a
+        # keep limit a 0.1% dip in either made every cash-capped level an urgent pull on every market at once).
         q_max = replace(q, bid_size=max(q.bid_size, q.bid_max or 0), ask_size=max(q.ask_size, q.ask_max or 0))
         keep, allowed = ladder_levels(ex.lad_fv, q_max, best_bid, best_ask, offsets, mults, quote,
-                                      self.ladder_caps(ex, fv, quote, factors=False), max_cash)
+                                      self.ladder_caps(ex, fv, quote, factors=False))
         self.lad_keep = keep
+        for key in list(want):                    # never place more than a resting order may keep: allowed counts
+            px, size = want[key]                  # level 0 at its unscaled size, so with the position limit
+            size = min(size, int(allowed.get(key, 0)))   # binding a level could be placed and pulled as too big
+            if size >= 1:                         # next cycle, every cycle
+                want[key] = (px, size)
+            else:
+                del want[key]
         for key in sorted(want, key=lambda k: (k[1], not k[0])):   # level 1 first: the cash goes to the closest
             px, size = want[key]
             cash = size * (px if key[0] else 1 - px)
@@ -4700,8 +4709,13 @@ class Bot:
         doomed = [o for o in stale if (o.is_bid, self.order_level(o)) in replaced | kept
                   or (o.is_bid, self.order_level(o)) not in want]
         if cfg.churn_control:                      # churn control: a safe ladder order younger than min_quote_life stays
-            young = {o.order_id for o in doomed
-                     if now_m - self.lad_placed.get(o.order_id, -1e18) < cfg.min_quote_life_seconds}
+            young, seen = set(), set()            # (never a duplicate of a kept level, one per level at most)
+            for o in doomed:
+                k = (o.is_bid, self.order_level(o))
+                if (k not in kept and k not in seen
+                        and now_m - self.lad_placed.get(o.order_id, -1e18) < cfg.min_quote_life_seconds):
+                    young.add(o.order_id)
+                    seen.add(k)
             if len(self.lad_placed) > 5000:        # (forget placement times older than an hour)
                 self.lad_placed = {k: v for k, v in self.lad_placed.items() if now_m - v < 3600}
             if young:
@@ -4848,8 +4862,12 @@ class Bot:
         if self.burst:                            # burst mode re-quotes only the top markets: a cancel-all would
             return False                          # leave ~200 safe resting orders empty until the burst ends
         # (R3 ladder-only pulls don't count: 9 markets x 3 levels must not become a tournament-wide cancel-all)
-        pulls = sum(1 if c.whole else len([o for o in c.doomed if o.order_id not in c.ladder])
-                    for c in changes if c.key[0] == 0 and c.doomed and not c.new)
+        # (a ladder-only cancel-all of one exchange, whole=True, is a ladder-only pull too)
+        pulls = 0
+        for c in changes:
+            if c.key[0] == 0 and c.doomed and not c.new:
+                n0 = len([o for o in c.doomed if o.order_id not in c.ladder])
+                pulls += 1 if c.whole and n0 else n0
         if not pulls:                             # (urgent reprices carry new orders: they are not pulls)
             return False
         left = getattr(self.api, "writes_left", lambda: 10 ** 6)()
