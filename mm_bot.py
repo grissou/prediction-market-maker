@@ -731,6 +731,12 @@ class Config:
     # Short sets mirror it (rest a BID, take the other leg's ask). Selling both legs to others is not a self-trade.
     pair_unwind_passive: bool = False
     pair_unwind_max_cost: float = 0.003   # at most 0.3c per set below 1 (22 on 7,335 sets)
+    # --- Package 5: T2.3 carry ramp (HARD GATE) ---
+    # MUST stay 0 until the owner has SIG's answer IN WRITING that positions open at the close are settled at the
+    # outcome (not marked at the last trades). > 0 (with ref_tilt_enabled): inside the last N days before a market's
+    # close the tilt s applied in blend_fv ramps linearly to 0 at the close (carry_ramp), so quotes lean back to raw
+    # Polymarket and the book takes the favourite-longshot carry late. The estimator itself is untouched.
+    ref_tilt_carry_days: float = 0.0
 
 
 CFG = Config()
@@ -873,6 +879,8 @@ OVERRIDABLE = {
     "reduce_from_book_headline": (False, True),
     "pair_unwind_passive": (False, True),
     "pair_unwind_max_cost": (0.0, 0.02),
+    # --- Package 5: T2.3 carry ramp (HARD GATE: keep 0 until SIG confirms settlement at the outcome) ---
+    "ref_tilt_carry_days": (0.0, 30.0),
 }
 MAX_ORDER_TTL = 7200.0    # no order of ours lives longer than this (dead-man's switch), whatever the TTL settings
 LADDER_MAX_LEVELS = 8
@@ -1770,11 +1778,20 @@ def tilted_ref(r, s, legs):
     return c + (1 - s) * (r - c)
 
 
-def blend_fv(book_fv, r, cfg, s=0.0, legs=2, headline=False):
+def carry_ramp(s, hours_to_close, days):
+    """T2.3: the tilt applied in the blend inside the last `days` days before the close, s x min(1, hours / (24 days)),
+    ramping linearly to 0 at the close. days <= 0 (off), or no known close: s unchanged. Never below 0, never above s."""
+    if not days or days <= 0 or hours_to_close is None or hours_to_close == float("inf"):
+        return s
+    return s * max(0.0, min(1.0, hours_to_close / (24.0 * days)))
+
+
+def blend_fv(book_fv, r, cfg, s=0.0, legs=2, headline=False, hours_to_close=float("inf")):
     """The main loop's blend: book price leaned toward Polymarket by ref_weight. With ref_tilt_enabled (and, in a
-    headline market, ref_tilt_headline) toward the tilt-corrected Polymarket price instead of the raw one."""
+    headline market, ref_tilt_headline) toward the tilt-corrected Polymarket price instead of the raw one; with
+    ref_tilt_carry_days > 0 the tilt applied fades to 0 over the last N days before the close (carry_ramp)."""
     if cfg.ref_tilt_enabled and (cfg.ref_tilt_headline or not headline):
-        r = tilted_ref(r, s, legs)
+        r = tilted_ref(r, carry_ramp(s, hours_to_close, getattr(cfg, "ref_tilt_carry_days", 0.0)), legs)
     return (1 - cfg.ref_weight) * book_fv + cfg.ref_weight * r
 
 
@@ -3438,7 +3455,8 @@ class Bot:
             for eid, r in refs.items():
                 if fvs.get(eid) is not None and eid in liquid and eid not in self.ref_only:   # liquid only
                     ex = self.ex[eid]
-                    fvs[eid] = blend_fv(fvs[eid], r, cfg, self.tilt_s, self.legs(ex), ex.group in cfg.headline_races)
+                    fvs[eid] = blend_fv(fvs[eid], r, cfg, self.tilt_s, self.legs(ex), ex.group in cfg.headline_races,
+                                        self.hours_to_close(ex))
             for members in self.groups.values():
                 if len(members) > 1:
                     fvs.update(normalise({e: fvs[e] for e in members}))
