@@ -170,6 +170,7 @@ b.ex["11"].book = a.books["11"]
 b.mark_sd = {"11": 0.10, "21": 0.05}
 inv = {"11": 900.0, "21": -100.0}                         # 90 + 5 = 95 $/step
 b.cfg.mark_frag_total_max_cash = 90.0
+b.cfg.mark_frag_enabled = False                           # (ON by default since Package 3: test the off path)
 h = b.update_mark_frag(inv, b.cfg)
 check("disabled: total computed (95) but the cap never engages",
       near(h["mark_frag_total_cash"], 95.0, 1e-9) and not b.mark_frag_over, h)
