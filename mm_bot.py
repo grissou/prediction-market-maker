@@ -265,6 +265,25 @@ class Config:
     arb_max_frac: float = 0.005           # most sets sold per arbitrage: 0.5% of account = 500 at 100k
     arb_order_ttl: float = 10.0           # arbitrage orders expire after this (leftovers are also cancelled at once)
     arb_cooldown_seconds: float = 30.0    # after acting on a race, leave it alone for this long
+    # Buy side (arb_two_sided): other traders' asks across ALL of a race's listed parties add up to
+    # <= 1 - arb_min_profit_buy -> buy YES on every leg (a long set pays exactly 1 if a listed party wins).
+    # 60-s snapshots: ask-sum < 0.98 in 853 race-minutes/day (2.5%). The pair unwinder sells the set later.
+    arb_two_sided: bool = True
+    arb_min_profit_buy: float = 0.015     # ask-sum <= 0.985. Not done in reduce-only or the pre-close window
+    arb_buy_min_sum: float = 0.90         # ...nor when the asks add up to less than this: that more likely means
+                                          #   the market prices a winner OUTSIDE the listed parties (e.g. an
+                                          #   independent with no market of its own), when a set pays nothing
+
+    # --- PAIR UNWIND (inventory-aware: turn a held complete set back into cash) ----------------
+    # Long YES on EVERY listed party of a race (min over legs = n sets) pays exactly n at settlement: zero risk,
+    # zero return, capital tied up and mark noise. When other traders' bids add up to >= 1 + pair_unwind_min_profit,
+    # sell the sets (riskless gain of bids-1 per set). Mirror: short every leg and asks add up to <= 1 - this ->
+    # buy back. Reduces positions, so it also runs in reduce-only and in the pre-close window. A race with an
+    # independent leg is only a set if that leg is held too (min over ALL legs).
+    pair_unwind_enabled: bool = True
+    pair_unwind_min_profit: float = 0.0   # 0 = unwind at exactly fair (bids sum to 1.000)
+    pair_unwind_max_frac: float = 0.02    # at most this much cash per unwind order: 2,000 at 100k
+    pair_unwind_cooldown_seconds: float = 30.0
 
     # --- TAKING STALE HOUSE QUOTES (liquid Polymarket prices only) -----------------------------
     # When Polymarket has clearly moved and the tournament's best quote hasn't followed, trade against
@@ -499,6 +518,13 @@ OVERRIDABLE = {
     "risk_swing_shock": (0.05, 0.5), "risk_z": (1.0, 6.0), "worst_case_backstop_frac": (0.3, 0.9),
     "order_ttl": (300.0, 7200.0), "refresh_before_expiry": (30.0, 900.0), "batch_size": (1, 50),
     "kelly_no_edge_frac": (0.0, 0.01), "take_ref_max_age_seconds": (0.0, 300.0),
+    "arb_two_sided": (False, True),
+    "arb_min_profit_buy": (0.005, 0.20),
+    "arb_buy_min_sum": (0.5, 1.0),
+    "pair_unwind_enabled": (False, True),
+    "pair_unwind_min_profit": (0.0, 0.10),
+    "pair_unwind_max_frac": (0.0, 0.10),
+    "pair_unwind_cooldown_seconds": (0.0, 3600.0),
 }
 
 
@@ -1926,6 +1952,7 @@ class Bot:
         self.last_tops = {}               # latest bulk best bid/ask per exchange (for recording)
         self.arb_cooldown = {}            # race -> time.monotonic() until which we leave it alone
         self.arbs_total = 0               # arbitrages / takes since start (summaries report the change)
+        self.unwinds_total = 0            # pair unwinds since start (status.json pair_unwinds_total)
         self.takes_total = 0
         self.take_version_seen = 0        # last Polymarket reading the take logic has counted
         self.db = self.open_recorder()
@@ -2232,6 +2259,7 @@ class Bot:
                        "polymarket_fetch_seconds": getattr(self.refs, "fetch_seconds", None),
                        "burst_mode": self.burst,
                        "arbitrages_total": self.arbs_total,
+                       "pair_unwinds_total": self.unwinds_total,
                        "rate_limited_total": getattr(self.api, "rate_limited", 0),     # should stay 0
                        "request_budget_per_min": round(getattr(self.api, "budget", 0)),
                        "write_budget_per_min": round(getattr(self.api, "wbudget", 0)),
@@ -3329,28 +3357,42 @@ class Bot:
 
     # ------------------------------------------------------------------------------ arbitrage
     def take_arbitrage(self, inv, fvs, mine_real, now_m):
-        """Guaranteed profit inside a race: if other traders' best bids on EVERY party add up to more
-        than 1, sell YES to all of them.
+        """Guaranteed profit inside a race, and turning held complete sets back into cash.
 
-        Why it can't lose: at most one party wins a race, so for each set sold we pay out at most 1,
-        but we collected the sum of the bids (> 1). In the engine's terms we're buying NO on every
-        party for sum(1 - bid) = n - sum(bids), and at least n - 1 of those NO shares pay 1.
-        (The opposite trade, buying YES on every party when the asks add up to < 1, only works if one
-        listed party is certain to win, so it isn't done.)
+        A race's group holds every listed party's YES (one exchange each, grouped by race title), and at
+        most one of them wins. Checked in this order, at most one action per race per cycle:
+
+        1. Pair unwind (pair_unwind_enabled): long YES on EVERY leg (n = min over legs) and other traders'
+           bids add up to >= 1 + pair_unwind_min_profit -> sell up to n sets at those bids. The set pays
+           exactly n whatever happens, so selling for >= n is a riskless gain plus freed capital. Mirror: short
+           every leg, asks add up to <= 1 - pair_unwind_min_profit -> buy back. Positions only shrink, so
+           this also runs in reduce-only and in the pre-close window. A race with an independent leg is a
+           set only if that leg is held too (the min is over ALL legs), so a Dem+Rep pair there is left alone.
+        2. Sell-side arbitrage (arb_enabled): bids add up to >= 1 + arb_min_profit -> sell YES on all.
+           At most one party wins, so for each set sold we pay out at most 1 but collected the bids (> 1).
+        3. Buy-side arbitrage (arb_two_sided): asks add up to <= 1 - arb_min_profit_buy -> buy YES on all.
+           Pays 1 per set if one LISTED party wins, so not when the asks add up to less than arb_buy_min_sum
+           (the market then likely prices an outsider), not in reduce-only (it adds gross positions) and not
+           in the pre-close window. The unwinder sells the set later when the bids reach 1.
+        Prices are other traders' only (books are stripped of our orders; our quotes there are pulled first).
         Returns the set of races acted on, whose quoting is skipped until next cycle.
         """
         cfg = self.cfg
         done = set()
-        if not cfg.arb_enabled:
+        if not (cfg.arb_enabled or cfg.pair_unwind_enabled):
             return done
         for race, members in self.groups.items():
             if (len(members) < 2 or not self.running or now_m < self.arb_cooldown.get(race, 0)
-                    or any(busy(self.ex[e], now_m) for e in members)
-                    # not in the pre-close window: the positions are hedged across the race, but the
-                    # per-market flatten would then pay the spread to unwind each leg
-                    or any(self.hours_to_close(self.ex[e]) <= cfg.flatten_hours_before_close for e in members)):
+                    or any(busy(self.ex[e], now_m) for e in members)):
                 continue
-            if self.arb_bids(members) is None:            # quick check on the cached books
+            # pre-close window: arbitrage would open positions the per-market flatten then pays to unwind;
+            # unwinding a held set only reduces them, so it still runs
+            closing = any(self.hours_to_close(self.ex[e]) <= cfg.flatten_hours_before_close for e in members)
+            if self.arb_plan(members, inv, fvs, closing) is None:     # quick check on the cached books
+                continue
+            # Write budget: cancel our quotes on each leg, one batch, cancel the leftovers on each leg.
+            if getattr(self.api, "writes_left", lambda: 10 ** 6)() < 2 * len(members) + 1:
+                log.info("arbitrage/unwind on %s deferred: write budget used up", race)
                 continue
             # Cached books can be up to book_max_age old: re-download this race before acting on it.
             books = self.in_parallel(lambda e: self.api.book(e, self.tid), members)
@@ -3359,48 +3401,113 @@ class Bot:
             for e, b in books.items():
                 self.ex[e].book = strip_own(b, mine_real.get(e, []))
                 self.ex[e].book_time = self.ex[e].verified = time.monotonic()
-            bids = self.arb_bids(members)
-            if bids is None:
+            plan = self.arb_plan(members, inv, fvs, closing)
+            if plan is None:
                 continue
-            bank = self.bankroll()
-            qty = int(min([cfg.arb_max_frac * bank] +
-                          [size for _, size in bids.values()] +                            # only what's bid at that price
-                          [cfg.max_position_frac * bank + inv.get(e, 0.0) for e in members] +   # selling lowers position
-                          [cfg.max_order_cash_frac * bank / max(1 - p, TICK) for p, _ in bids.values()]))  # cash per order
-            self.arb_cooldown[race] = now_m + cfg.arb_cooldown_seconds
+            kind, action, levels, qty = plan
+            self.arb_cooldown[race] = now_m + (cfg.pair_unwind_cooldown_seconds if kind == "unwind"
+                                               else cfg.arb_cooldown_seconds)
             if qty >= 1:
-                self.execute_arbitrage(race, members, bids, qty, fvs, now_m)
+                self.execute_arbitrage(race, members, levels, qty, fvs, now_m, action=action, kind=kind)
                 done.add(race)
         return done
+
+    def top_levels(self, members, key):
+        """{eid: (price, size)} of the best OTHER-trader level ("bids"/"asks") on every leg, or None if a leg has none."""
+        out = {}
+        for e in members:
+            b = self.ex[e].book
+            if not b or not b.get(key):
+                return None
+            out[e] = (b[key][0]["price"], b[key][0]["quantity"])
+        return out
 
     def arb_bids(self, members):
         """{eid: (price, size)} of the best OTHER-trader bid on each party of a race, if those bids
         add up to at least 1 + arb_min_profit. Otherwise None."""
-        bids = {}
-        for e in members:
-            b = self.ex[e].book
-            if not b or not b.get("bids"):
-                return None
-            bids[e] = (b["bids"][0]["price"], b["bids"][0]["quantity"])
-        return bids if sum(p for p, _ in bids.values()) >= 1 + self.cfg.arb_min_profit - 1e-9 else None
+        bids = self.top_levels(members, "bids")
+        return bids if bids and sum(p for p, _ in bids.values()) >= 1 + self.cfg.arb_min_profit - 1e-9 else None
 
-    def execute_arbitrage(self, race, members, bids, qty, fvs, now_m):
+    def arb_plan(self, members, inv, fvs, closing):
+        """What take_arbitrage would do in one race on the current books: (kind, action, {eid: (price, size)},
+        sets) with kind "unwind" or "arb" and action "sell"/"buy", or None."""
         cfg = self.cfg
-        total = sum(p for p, _ in bids.values())
-        legs = ", ".join(f"{self.ex[e].label} @{p:.3f}" for e, (p, _) in bids.items())
-        log.warning("%sARBITRAGE %s: bids add up to %.3f (%s) -> selling %d YES on each, locking in >= %.0f",
-                    "" if self.api.live else "[dry] ", race, total, legs, qty, (total - 1) * qty)
-        self.arbs_total += 1
+        bank = self.bankroll()
+        bids, asks = self.top_levels(members, "bids"), self.top_levels(members, "asks")
+        if cfg.pair_unwind_enabled:
+            held = [inv.get(e, 0.0) for e in members]
+            for sign, levels, action in ((+1, bids, "sell"), (-1, asks, "buy")):
+                sets = min(sign * h for h in held)
+                if sets < 1 or not levels:
+                    continue
+                total = sum(p for p, _ in levels.values())
+                edge = total - 1 if sign > 0 else 1 - total
+                if edge < cfg.pair_unwind_min_profit - 1e-9 or (sign < 0 and total < cfg.arb_buy_min_sum):
+                    continue
+                qty = int(min([sets] + [size for _, size in levels.values()] +
+                              [cfg.pair_unwind_max_frac * bank / max(p, TICK) for p, _ in levels.values()]))
+                if qty >= 1 and self.unwind_is_safe(inv, fvs, members, -sign * qty):
+                    return "unwind", action, levels, qty
+        if not cfg.arb_enabled or closing:
+            return None
+        if bids and sum(p for p, _ in bids.values()) >= 1 + cfg.arb_min_profit - 1e-9:
+            qty = int(min([cfg.arb_max_frac * bank] +
+                          [size for _, size in bids.values()] +                            # only what's bid at that price
+                          [cfg.max_position_frac * bank + inv.get(e, 0.0) for e in members] +   # selling lowers position
+                          [cfg.max_order_cash_frac * bank / max(1 - p, TICK) for p, _ in bids.values()]))  # cash per order
+            return "arb", "sell", bids, qty
+        if (cfg.arb_two_sided and asks and not self.global_reduce
+                and cfg.arb_buy_min_sum - 1e-9 <= sum(p for p, _ in asks.values()) <= 1 - cfg.arb_min_profit_buy + 1e-9):
+            qty = int(min([cfg.arb_max_frac * bank] +
+                          [size for _, size in asks.values()] +                            # only what's offered there
+                          [cfg.max_position_frac * bank - inv.get(e, 0.0) for e in members] +   # buying raises position
+                          [cfg.max_order_cash_frac * bank / max(p, TICK) for p, _ in asks.values()]))  # cash per order
+            return "arb", "buy", asks, qty
+        return None
+
+    def unwind_is_safe(self, inv, fvs, members, delta):
+        """Would adding `delta` YES shares on every leg of a race leave the party delta within its cap (or no
+        further past it) and the settlement risk and the worst case no higher? A complete set is riskless,
+        so this holds by construction; it guards against the set being part of a hedge the risk logic relies on."""
+        after = dict(inv)
+        for e in members:
+            after[e] = after.get(e, 0.0) + delta
+
+        def pdelta(pos):
+            return sum(PARTY_SIGN.get(ex.party, 0) * pos.get(eid, 0.0) for eid, ex in self.ex.items())
+
+        before_pd, after_pd = pdelta(inv), pdelta(after)
+        cap = self.cfg.max_party_delta_frac * self.bankroll()
+        if abs(after_pd) > cap and abs(after_pd) > abs(before_pd) + 1e-6:
+            return False
+        if self.total_worst_case(after, fvs) > self.total_worst_case(inv, fvs) + 1e-6:
+            return False
+        return self.settlement_risk(after, fvs, after_pd) <= self.settlement_risk(inv, fvs, before_pd) + 1e-6
+
+    def execute_arbitrage(self, race, members, levels, qty, fvs, now_m, action="sell", kind="arb"):
+        cfg = self.cfg
+        total = sum(p for p, _ in levels.values())
+        per_set = total - 1 if action == "sell" else 1 - total
+        legs = ", ".join(f"{self.ex[e].label} @{p:.3f} x{s:.0f}" for e, (p, s) in levels.items())
+        what = (("PAIR UNWIND", "long set" if action == "sell" else "short set") if kind == "unwind"
+                else ("ARBITRAGE", "sell side" if action == "sell" else "buy side"))
+        log.warning("%s%s %s (%s): %s add up to %.3f (%s) -> %s %d YES on each, %+.4f per set, locking in %+.2f",
+                    "" if self.api.live else "[dry] ", what[0], race, what[1], "bids" if action == "sell" else "asks",
+                    total, legs, "selling" if action == "sell" else "buying", qty, per_set, per_set * qty)
+        if kind == "unwind":
+            self.unwinds_total += 1
+        else:
+            self.arbs_total += 1
         if not self.api.live:
             return
         # 1. Pull our own quotes in this race, so the arbitrage can't trade against ourselves.
         if not all([self.cancel(e, [], whole_exchange=True) for e in members]):
             log.warning("arbitrage on %s abandoned: could not clear our own quotes", race)
             return
-        # 2. Sell at exactly those bids. The orders expire within seconds so leftovers can't rest.
+        # 2. Trade at exactly those prices. The orders expire within seconds so leftovers can't rest.
         exp = iso(utcnow() + timedelta(seconds=cfg.arb_order_ttl))
-        orders = [{"exchangeId": e, "side": "yes", "action": "sell", "quantity": qty, "price": p,
-                   "tournamentId": self.tid, "expirationDate": exp} for e, (p, _) in bids.items()]
+        orders = [{"exchangeId": e, "side": "yes", "action": action, "quantity": qty, "price": p,
+                   "tournamentId": self.tid, "expirationDate": exp} for e, (p, _) in levels.items()]
         self.orders_stale = True                  # positions and orders change: re-read next cycle
         try:
             results = self.api.place_batch(orders)
@@ -3424,7 +3531,8 @@ class Bot:
             data = (by_index.get(k) or {}).get("data") or {}
             traded.append(float(data.get("quantityTraded") or 0))
             if data.get("orderId") is not None:           # so these fills show up in `report`
-                self.order_meta[data["orderId"]] = {"our_side": "ask", "price": o["price"], "arb": True,
+                self.order_meta[data["orderId"]] = {"our_side": "ask" if action == "sell" else "bid",
+                                                    "price": o["price"], "arb": True,
                                                     "fv": fvs.get(o["exchangeId"]), "t": time.time(),
                                                     "eid": o["exchangeId"]}
                 self.notes_dirty = True
