@@ -60,3 +60,10 @@ Method: position history from `snapshots.position` (290 live snapshots, median g
 | 1.0-2.0c | 67 | 40 (60%) |
 | 2.0-5.0c | 102 | 62 (61%) |
 | 5.0-100.0c | 9 | 8 (89%) |
+
+## Verdict (added by hand, Finisher 2a): PARTLY CONFIRMED
+- Confirmed, the bias: 76% of open position capital was entered toward Polymarket (11% against, 12% no clear gap); by the gap now 77% vs 3%. Toward lots stick: 65% of toward-entered capital has exited vs 85% of against-entered.
+- Confirmed, size follows the gap: mean capital per position 1,194 at gaps of 5c+ vs 175-434 below; 49 positions entered at 2c+ hold 52% of capital. Five of the eight biggest sit at ~2,000 = `kelly_max_market_frac` (2% of the account): quarter Kelly is at its cap there.
+- Confirmed, stuck: open capital has a median age of 8.8 h (69% older than 6 h) while closed lots lasted a median 14 min. Gaps on the big positions widened since entry (e.g. Rep U.S. House -3.2c -> -5.5c): no convergence so far. Worst case 32% of the account.
+- Not confirmed at this snapshot: "the gain is mostly marks". +1,509 = realised +154, unrealised -42, spread capture and other +1,398; top-of-book liquidation haircut 428. The open book carries a +1,839 bet on the gaps closing, not yet in the account value. The +26% day-one figure is not in the data: the day-one account value double-counted locked cash (snapshot README).
+- Not in this snapshot: 90% of capital in positions (51% here at 08:14 UTC, after a night of reduce-only; the afternoon state is later than the data). 14% of position capital is the U.S. Senate pair (long both legs, 7,335 each): locked, neutral, not a Polymarket bet.
