@@ -711,6 +711,167 @@ a, b = make_bot(books=small_arb)
 b.cycle()
 check("bids summing to 1.02 are below the 3c threshold -> no arbitrage", not a.inv, a.inv)
 
+print("--- pair unwind (sell a held complete set at bids adding up to >= 1)")
+def unwind_books(b11, b12, a11=(0.70, 300), a12=(0.55, 200), extra=None):
+    books = {"11": {"bids": [lvl(*b11)], "asks": [lvl(*a11)]}, "12": {"bids": [lvl(*b12)], "asks": [lvl(*a12)]},
+             "21": {"bids": [lvl(0.48, 1000)], "asks": [lvl(0.56, 1000)]}, "22": {"bids": [lvl(0.44, 1000)], "asks": [lvl(0.52, 1000)]}}
+    books.update(extra or {})
+    return books
+def unwind_bot(inv, books, extra_markets=(), **cfg_kw):
+    a, b = make_bot(books=books, extra_markets=extra_markets)
+    a.inv = dict(inv)
+    for k, v in cfg_kw.items():
+        setattr(b.cfg, k, v)
+    return a, b
+
+a, b = unwind_bot({"11": 500, "12": 500}, unwind_books((0.605, 300), (0.40, 200)))
+b.cycle()
+check("long pair, bids add up to 1.005 -> both legs sold up to the bid size (200 of the 500 sets)",
+      a.inv == {"11": 300, "12": 300}, a.inv)
+check("counted as a pair unwind (status.json), not as an arbitrage",
+      b.unwinds_total == 1 and b.arbs_total == 0 and b.health["pair_unwinds_total"] == 1, (b.unwinds_total, b.arbs_total))
+check("no unwind leftovers resting on the Ohio legs", not a.ours("11") and not a.ours("12"), (a.ours("11"), a.ours("12")))
+b.cycle()                                 # fills are logged on the next read
+uw_rows = [r for r in read_fills(b.cfg.fills_csv) if r["exchange_id"] in ("11", "12")]
+check("unwind fills logged as our asks", sorted(r["our_side"] for r in uw_rows) == ["ask", "ask"], uw_rows)
+
+a, b = unwind_bot({"11": 150, "12": 500}, unwind_books((0.605, 300), (0.40, 200)))
+b.cycle()
+check("sells at most the number of complete sets (min over legs = 150)", a.inv == {"11": 0, "12": 350}, a.inv)
+
+a, b = unwind_bot({"11": 500, "12": 500}, unwind_books((0.595, 300), (0.40, 200)))
+b.cycle()
+check("long pair, bids add up to 0.995 -> nothing sold", a.inv == {"11": 500, "12": 500} and b.unwinds_total == 0, a.inv)
+
+a, b = unwind_bot({"11": 500, "12": 500}, unwind_books((0.60, 300), (0.40, 200)))
+b.cycle()
+check("bids add up to exactly 1.000 with pair_unwind_min_profit 0 -> unwound at fair", a.inv == {"11": 300, "12": 300}, a.inv)
+a, b = unwind_bot({"11": 500, "12": 500}, unwind_books((0.605, 300), (0.40, 200)), pair_unwind_min_profit=0.01)
+b.cycle()
+check("pair_unwind_min_profit 0.01 -> 1.005 is not enough", a.inv == {"11": 500, "12": 500}, a.inv)
+
+a, b = unwind_bot({"11": -500, "12": -500}, unwind_books((0.50, 300), (0.30, 200), a11=(0.60, 300), a12=(0.39, 400)))
+b.cycle()
+check("short pair, asks add up to 0.99 -> bought back up to the ask size (300)", a.inv == {"11": -200, "12": -200}, a.inv)
+check("short-pair buy-back counted as an unwind", b.unwinds_total == 1 and b.arbs_total == 0, (b.unwinds_total, b.arbs_total))
+a, b = unwind_bot({"11": -500, "12": -500}, unwind_books((0.50, 300), (0.30, 200), a11=(0.61, 300), a12=(0.40, 400)))
+b.cycle()
+check("short pair, asks add up to 1.01 -> nothing bought", a.inv == {"11": -500, "12": -500}, a.inv)
+
+ind_market = market("9", "13", "Independent", "Ohio Senate")
+ind_book = {"13": {"bids": [lvl(0.05, 1000)], "asks": [lvl(0.08, 1000)]}}
+a, b = unwind_bot({"11": 500, "12": 500}, unwind_books((0.60, 300), (0.36, 200), extra=ind_book), extra_markets=[ind_market])
+check("an independent's market joins its race's group", sorted(b.groups["Ohio Senate"]) == ["11", "12", "13"], dict(b.groups))
+b.cycle()
+check("race with an independent leg we don't hold: the Dem+Rep pair is not a set -> left alone",
+      a.inv == {"11": 500, "12": 500} and b.unwinds_total == 0, a.inv)
+a, b = unwind_bot({"11": 500, "12": 500, "13": 400}, unwind_books((0.60, 300), (0.36, 200), extra=ind_book),
+                  extra_markets=[ind_market])
+b.cycle()
+check("...but holding all three legs is a set: bids 0.60+0.36+0.05 = 1.01 -> all three sold",
+      a.inv == {"11": 300, "12": 300, "13": 200}, a.inv)
+
+a, b = unwind_bot({"11": 500, "12": 500}, unwind_books((0.605, 300), (0.40, 200)), pair_unwind_max_frac=0.001)
+b.cycle()
+check("cash cap: 0.1% of 100k = 100 per order at 0.605 -> 165 sets", a.inv == {"11": 335, "12": 335}, a.inv)
+
+a, b = unwind_bot({"11": 500, "12": 500}, unwind_books((0.605, 300), (0.40, 200)))
+b.cycle()
+a.books.update(unwind_books((0.605, 300), (0.40, 200)))
+b.cycle()
+check("cooldown: no second unwind within pair_unwind_cooldown_seconds", a.inv == {"11": 300, "12": 300} and b.unwinds_total == 1,
+      (a.inv, b.unwinds_total))
+b.arb_cooldown.clear()
+a.cancel_all("T")
+b.cycle()
+check("...and another once it has passed", a.inv == {"11": 100, "12": 100} and b.unwinds_total == 2, (a.inv, b.unwinds_total))
+
+a, b = unwind_bot({"11": 500, "12": 500, "21": 3000}, unwind_books((0.605, 300), (0.40, 200)), max_worst_case_frac=0.01)
+b.global_reduce = True
+b.cycle()
+check("reduce-only still unwinds (it only reduces positions)", b.health["reduce_only"] and a.inv["11"] == 300 and a.inv["12"] == 300,
+      (b.health["reduce_only"], a.inv))
+a, b = unwind_bot({"11": 500, "12": 500}, unwind_books((0.605, 300), (0.40, 200)))
+for e in ("11", "12"):
+    b.ex[e].close = utcnow() + timedelta(hours=1)
+b.cycle()
+check("the pre-close window still unwinds", b.unwinds_total == 1 and b.arbs_total == 0, (b.unwinds_total, a.inv))
+
+a, b = unwind_bot({"11": 500, "12": 500}, unwind_books((0.605, 300), (0.40, 200)), pair_unwind_enabled=False, arb_two_sided=False)
+b.cycle()
+check("pair_unwind_enabled False -> today's behaviour: the pair is kept", a.inv == {"11": 500, "12": 500} and b.unwinds_total == 0, a.inv)
+a, b = unwind_bot({}, unwind_books((0.57, 300), (0.45, 200)), pair_unwind_enabled=False, arb_two_sided=False)
+b.cycle()
+check("...and the sell-side arbitrage threshold is unchanged (1.02 < 1.03 -> nothing)", not a.inv, a.inv)
+
+a, b = unwind_bot({"11": 500, "12": 500}, unwind_books((0.605, 300), (0.40, 200)))
+a.writes_left = lambda: 4                 # needs 2 cancels + 1 batch + 2 cancels
+b.cycle()
+check("write budget below the 5 writes an unwind needs -> deferred", a.inv == {"11": 500, "12": 500} and b.unwinds_total == 0, a.inv)
+a, b = unwind_bot({"11": 500, "12": 500}, unwind_books((0.605, 300), (0.40, 200)))
+b.ex["12"].pending_until = time.monotonic() + 600
+b.cycle()
+check("a leg with a write in flight (busy) -> no unwind", a.inv == {"11": 500, "12": 500} and b.unwinds_total == 0, a.inv)
+a, b = unwind_bot({"11": 500, "12": 500}, unwind_books((0.605, 300), (0.40, 200)))
+b.running = False
+check("stopped (kill switch / Ctrl+C) -> no unwind", b.take_arbitrage(a.inv, {}, {}, time.monotonic()) == set() and not a.sent("batch"))
+
+own_exp = iso(utcnow() + timedelta(hours=1))
+a, b = unwind_bot({"11": 500, "12": 500}, unwind_books((0.59, 300), (0.40, 200)))
+a.orders[999] = {"id": 999, "exchangeId": "11", "quantity": 50, "open": True, "expirationDate": own_exp,
+                 "side": "yes", "action": "buy", "priceLimit": 0.62}   # OUR bid on top: with it the bids add up to 1.02
+b.cycle()
+check("our own bid at the top is excluded from the sum (others' 0.99 -> no unwind)",
+      a.inv.get("11") == 500 and a.inv.get("12") == 500 and b.unwinds_total == 0, a.inv)
+
+print("--- risk guard for pair unwinds")
+a, b = unwind_bot({"11": 500, "12": 500}, unwind_books((0.605, 300), (0.40, 200)))
+fv = {"11": 0.6, "12": 0.4, "21": 0.52, "22": 0.48}
+check("selling a complete set never raises the risk or the party delta", b.unwind_is_safe(a.inv, fv, ["11", "12"], -200))
+check("selling ONE leg of a hedged pair would (guard says no)", not b.unwind_is_safe(a.inv, fv, ["11"], -500))
+check("race_variance and worst case treat a long pair as zero risk",
+      race_variance([(500, 0.6), (500, 0.4)]) < 1e-9 and worst_case_loss([(500, 0.6), (500, 0.4)]) < 1e-9)
+b.unwind_is_safe = lambda *args: False
+b.cycle()
+check("unwind skipped when the risk guard refuses it", a.inv == {"11": 500, "12": 500} and b.unwinds_total == 0, a.inv)
+
+print("--- two-sided arbitrage (buy every leg when the asks add up to <= 0.985)")
+a, b = unwind_bot({}, unwind_books((0.50, 300), (0.30, 200), a11=(0.58, 300), a12=(0.40, 200)))
+b.cycle()
+check("asks add up to 0.98 -> bought 200 YES on both legs (the ask size)", a.inv == {"11": 200, "12": 200}, a.inv)
+check("counted as an arbitrage", b.arbs_total == 1 and b.unwinds_total == 0, (b.arbs_total, b.unwinds_total))
+check("no buy leftovers resting on the Ohio legs", not a.ours("11") and not a.ours("12"), (a.ours("11"), a.ours("12")))
+b.cycle()
+arb_buy_rows = [r for r in read_fills(b.cfg.fills_csv) if r["exchange_id"] in ("11", "12")]
+check("buy-side fills logged as our bids", sorted(r["our_side"] for r in arb_buy_rows) == ["bid", "bid"], arb_buy_rows)
+a, b = unwind_bot({}, unwind_books((0.50, 300), (0.30, 200), a11=(0.59, 300), a12=(0.40, 200)))
+b.cycle()
+check("asks add up to 0.99 -> nothing bought", not a.inv and b.arbs_total == 0, a.inv)
+a, b = unwind_bot({}, unwind_books((0.50, 300), (0.30, 200), a11=(0.58, 300), a12=(0.40, 200)), arb_two_sided=False)
+b.cycle()
+check("arb_two_sided False -> 0.98 is left alone", not a.inv and b.arbs_total == 0, a.inv)
+a, b = unwind_bot({}, unwind_books((0.50, 300), (0.20, 200), a11=(0.58, 300), a12=(0.25, 200)))
+b.cycle()
+check("asks add up to 0.83 (< arb_buy_min_sum 0.90: an outsider is likely priced) -> nothing bought", not a.inv, a.inv)
+a, b = unwind_bot({}, unwind_books((0.50, 300), (0.30, 200), a11=(0.58, 300), a12=(0.40, 200)))
+b.global_reduce = True
+b.cycle()
+check("no buy-side arbitrage in reduce-only (it adds gross positions)", not a.inv.get("11") and not a.inv.get("12"), a.inv)
+a, b = unwind_bot({}, unwind_books((0.50, 300), (0.30, 200), a11=(0.60, 300), a12=(0.40, 200)))
+a.orders[998] = {"id": 998, "exchangeId": "11", "quantity": 50, "open": True, "expirationDate": own_exp,
+                 "side": "yes", "action": "sell", "priceLimit": 0.57}  # OUR ask on top: with it the asks add up to 0.97
+b.cycle()
+check("our own ask at the top is excluded from the sum (others' 1.00 -> no buy)",
+      not a.inv.get("11") and not a.inv.get("12") and b.arbs_total == 0, a.inv)
+a, b = unwind_bot({}, unwind_books((0.50, 300), (0.30, 200), a11=(0.58, 300), a12=(0.40, 200)))
+b.cycle()
+a.books.update(unwind_books((0.605, 300), (0.40, 200), a11=(0.70, 300), a12=(0.55, 200)))
+b.arb_cooldown.clear()
+a.cancel_all("T")
+b.cycle()
+check("the bought set is later unwound when the bids add up to 1.005 (round trip +0.025 per set)",
+      a.inv == {"11": 0, "12": 0} and b.arbs_total == 1 and b.unwinds_total == 1, a.inv)
+
 print("--- taking stale house quotes")
 def take_setup(**kw):
     a, b = make_bot(**kw)
