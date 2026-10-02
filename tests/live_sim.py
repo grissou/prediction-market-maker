@@ -759,17 +759,20 @@ def run_many(seeds, hours, regime, ov, first=1):
             cache[k] = v
     todo = [j for j in jobs if _key(j) not in cache]
     procs = int(os.environ.get("SIM_PROCS", "4"))
-    if procs > 1 and len(todo) > 1:
-        import multiprocessing
-        with multiprocessing.Pool(min(procs, len(todo))) as pool:
-            res = pool.map(_one, todo)
-    else:
-        res = [_one(j) for j in todo]
-    for j, r in zip(todo, res):
+
+    def done(j, r):                                   # cache each seed as it finishes: a cut-off loses one seed
         cache[_key(j)] = r
         if path:
             with open(path, "a") as f:
                 f.write(json.dumps([_key(j), r]) + "\n")
+    if procs > 1 and len(todo) > 1:
+        import multiprocessing
+        with multiprocessing.Pool(min(procs, len(todo))) as pool:
+            for j, r in zip(todo, pool.imap(_one, todo)):
+                done(j, r)
+    else:
+        for j in todo:
+            done(j, _one(j))
     return [cache[_key(j)] for j in jobs]
 
 
