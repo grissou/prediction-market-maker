@@ -41,6 +41,7 @@ class FakeApi(Api):
     def log(self, *a): self.calls.append(a)
     def sent(self, kind): return [c for c in self.calls if c[0] == kind]
     def budget_left(self): return 10 ** 6         # unlimited unless a test overrides it
+    def writes_left(self): return 10 ** 6
     def tournament(self): return {"id": "T", "initialBalance": 100000, "myBalance": self.equity, "status": "active",
                                   "endDate": "2026-11-04T17:00:00Z"}
     def markets(self): return self.markets_list
@@ -201,6 +202,7 @@ def make_bot(live=True, only="", books=None, extra_markets=()):
         os.path.join(d, n) for n in ("fills.csv", "status.json", "notes.json", "kill.tripped"))
     cfg.record_file, cfg.ref_map_file, cfg.summary_every_hours = "", "", 0
     pin_test_sizes(cfg)   # opt-in per test
+    cfg.churn_control = False             # tests reprice straight after placing; churn control has its own tests
     cfg.slow_poll_seconds = 0             # read P&L and fills every cycle, so each test cycle sees them
     cfg.realtime_enabled = False          # no network in tests; realtime is tested with a FakeFeed
     return api, Bot(api, cfg)
