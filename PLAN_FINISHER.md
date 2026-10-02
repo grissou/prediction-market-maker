@@ -14,9 +14,9 @@ Common BASE_JSON (the owner's live overrides): `{"arb_two_sided": false, "worst_
 | S1 screen | 8 x 3 | quiet | base, (a) no-chase, (b) TTL saver | 6 |
 | S1c screen (only if a and b merged, budget left) | 8 x 3 | quiet | base, (c) headline | 4 |
 | S2 confirm (passing savers together) | 16 x 6 | quiet | base, combo | 16 |
-| S2 news | 16 x 6 | news | combo arm rides item 4's news run (shared base) | 8 (counted under item 4) |
-Item 2 total 22-26: S1c is dropped if S1 + S2 would exceed the cap; the news arm shares item 4's base to avoid a
-second 8-min base.
+| S2 news | 8 x 3 | news | base, combo | 4 |
+Item 2 total 26 (6 over its cap, paid from item 3's unused 7): the brief asks for quiet AND news; news is cut to 8 x 3
+because the savers re-quote on every fair-value move, so news is the lower-risk check. S1c is dropped if over budget.
 
 ## Item 3: ladder (cap 20 CPU-min)
 | Run | Seeds x h | Configs | CPU-min |
@@ -31,7 +31,6 @@ Total <= 13.
 | Run | Seeds x h | Regime | Configs | CPU-min |
 |---|---|---|---|---|
 | N1 | 16 x 6 | news | base, turnover_control_enabled, ceiling factor 0.25 (vs 0.5) | 24 |
-| + savers combo arm (item 2) | 16 x 6 | news | added to N1 if item 2's combo is known in time | +8 |
 12 h runs only for a positive result within one standard error: not budgeted; would exceed the cap, so reported instead.
 
 ## Rules kept
