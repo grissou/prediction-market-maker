@@ -5,6 +5,7 @@ Offline tests for mm_bot.py. No network: a FakeApi plays the exchange, following
 Run:  python tests/test_mm_bot.py      (exit code 0 = all passed; GitHub Actions runs this on every push)
 """
 import csv
+from collections import deque
 import json
 import logging
 import os
@@ -1339,6 +1340,96 @@ b.cycle()
 check("recover_unconfirmed = False: the old behaviour (hold for pending_seconds, no notes)",
       all(b.ex[e].pending_until > time.monotonic() for e in a.books) and not b.unconfirmed)
 
+print("--- burst protection (slow exchange: fewer, smaller, wider quotes)")
+a, b = make_bot(); b.cycle()
+check("normal speed: no burst mode", not b.burst and b.health.get("burst_mode") is False)
+now_m = time.monotonic()
+b.write_log.extend([(now_m, 18.0, True), (now_m, 16.0, True), (now_m, 20.0, False)])
+b.cfg.burst_markets, b.size_plan = 2, {"11": 300, "12": 300, "21": 100, "22": 100}
+b.update_burst(now_m)
+check("2 write timeouts in a minute -> burst mode, top markets = the 2 biggest", b.burst and b.burst_set == {"11", "12"}, b.burst_set)
+before = {e: a.ours(e) for e in a.books}
+for e in a.books:                                          # every book moves 1.5c: all quotes want repricing
+    a.books[e] = {"bids": [lvl(round(l["price"] + 0.015, 3), 1000) for l in a.books[e]["bids"]],
+                  "asks": [lvl(round(l["price"] + 0.015, 3), 1000) for l in a.books[e]["asks"]]}
+b.feed = FakeFeed(); b.feed.push(dirty=set(a.books)); b.last_cycle_seconds = 0
+real_ub = b.update_burst
+b.update_burst = lambda now_m: None                       # hold burst mode on for this cycle
+a.calls.clear(); b.cycle()
+new21 = [x for x in a.ours("21") if x not in before["21"]]
+check("...e.g. Utah: no new orders there", not new21, (before["21"], a.ours("21")))
+moved = [x for x in a.ours("11") if x not in before["11"]]
+check("burst: top markets repriced at half size", moved and all(n == 50 for _, _, n in moved), (before["11"], a.ours("11")))
+b.update_burst = real_ub
+b.write_log.clear(); b.burst_calm_since = time.monotonic() - 121
+b.update_burst(time.monotonic())
+check("after burst_calm_seconds of normal speed: burst mode off", not b.burst)
+a, b = make_bot(); b.cfg.burst_protection = False
+b.write_log.extend([(time.monotonic(), 30.0, True)] * 5); b.update_burst(time.monotonic())
+check("burst_protection = False: never enters burst mode", not b.burst)
+
+a, b = make_bot()
+a.cancel_all = lambda tid, eid=None: (_ for _ in ()).throw(ApiError(0, "NETWORK", "read timed out"))
+b.cfg.selftest_enabled = False
+try:
+    logging.disable(logging.CRITICAL); run_cycles(b, 2); crashed = False
+except ApiError:
+    crashed = True
+finally:
+    logging.disable(logging.NOTSET)
+check("startup: a clean-slate cancel that times out doesn't crash the bot; it goes on quoting", not crashed and a.orders)
+
+print("--- churn control (crowded book: bots stepping in front of us all day)")
+a, b = make_bot(); b.cfg.churn_control = True; b.cycle()
+start = a.ours("11")
+a.books["11"]["bids"] = [lvl(0.11, 1000)]                # a rival pennies our 0.105 bid: target becomes 0.115
+b.feed = FakeFeed(); b.feed.push(dirty={"11"}); b.cycle()
+check("an order younger than min_quote_life_seconds isn't chased while it's safe", a.ours("11") == start, a.ours("11"))
+for o in list(b.recent_orders):
+    b.recent_orders[o] = (b.recent_orders[o][0], b.recent_orders[o][1] - 10)
+b.feed.push(dirty={"11"}); b.cycle()
+check("...older than that: repriced as before", ("bid", 0.115, 100) in a.ours("11"), a.ours("11"))
+b.ex["11"].reprices["bid"] = deque([time.monotonic()] * 4)
+a.books["11"]["bids"] = [lvl(0.12, 1000)]
+for o in list(b.recent_orders):
+    b.recent_orders[o] = (b.recent_orders[o][0], b.recent_orders[o][1] - 10)
+b.feed.push(dirty={"11"}); b.cycle()
+check("4 reprices in a minute on one side: it stops chasing (keeps its safe order, no ping-pong)",
+      ("bid", 0.115, 100) in a.ours("11"), a.ours("11"))
+a.books["11"]["bids"] = [lvl(0.08, 1000)]; a.books["11"]["asks"] = [lvl(0.09, 1000)]   # fair value drops below our bid
+b.feed.push(dirty={"11"}); b.cycle()
+check("...but an order that's no longer safe always moves", ("bid", 0.115, 100) not in a.ours("11"), a.ours("11"))
+a, b = make_bot(); b.cfg.churn_control = True; b.cycle()
+b.refs = FakeRefs({"Ohio Senate|Republican": 0.14})
+b.refs.last_moves, b.refs.version = {"Ohio Senate|Republican": 0.01}, 2
+b.mark_ref_moves()
+check("a Polymarket move of >= 0.5c makes that market's changes the most urgent",
+      b.change_key(b.ex["11"], pull=False)[0] == 0.5 and b.change_key(b.ex["21"], pull=False)[0] == 1)
+b.mark_ref_moves()
+check("...for that reading only", not b.ref_moved)
+
+# Review fixes (items 7-8)
+a, b = make_bot(); b.cycle()
+b.burst, b.burst_set, b.burst_cfg = True, set(), b.cfg
+b.update_burst = lambda now_m: None
+a.inv["21"] = 300                                          # long Utah, and the exit window has started
+for e in b.ex.values():
+    e.close = utcnow() + timedelta(hours=1)
+b.cycle(); b.cycle()
+check("burst mode never blocks the election-night exit (markets outside the top N still get exit orders)",
+      any(side == "ask" for side, _, _ in a.ours("21")), a.ours("21"))
+a, b = make_bot(); b.cfg.churn_control = True; b.cycle()
+o = next(x for x in b.my_orders.values() if x.eid == "11" and x.is_bid)
+check("churn hold never keeps an order bigger than the size now wanted",
+      not b.hold_side(b.ex["11"], [o], o.price, o.price + 0.01, o.qty - 10, True, utcnow(), time.monotonic()))
+wapi2 = Api(CFG, False)
+wapi2.gap, wapi2.budget, wapi2.wbudget, wapi2.BUDGET_WINDOW = 0.001, 100, 1, 1.0
+wapi2.throttle(write=True)
+th = threading.Thread(target=lambda: wapi2.throttle(write=True)); th.start()   # waits ~1 s for the write window
+time.sleep(0.05); t0 = time.monotonic(); wapi2.throttle(); waited = time.monotonic() - t0
+th.join()
+check("a write waiting on the write budget doesn't hold up reads", waited < 0.3, f"{waited:.2f}s")
+
 print("--- parallel requests")
 a, b = make_bot()
 res = b.in_parallel(lambda x: 1 / x, [1, 0, 2])
@@ -1351,6 +1442,18 @@ threads = [threading.Thread(target=lambda: [real_api.throttle() for _ in range(3
 [t.start() for t in threads]; [t.join() for t in threads]
 elapsed = time.monotonic() - t0
 check("rate limiter spaces 12 requests from 4 threads >= 0.05 s apart", 0.5 <= elapsed < 1.5, f"{elapsed:.2f}s")
+wapi = Api(CFG, False)
+wapi.gap, wapi.budget, wapi.wbudget, wapi.BUDGET_WINDOW = 0.001, 100, 3, 1.0     # 3 writes per 1 s, for speed
+t0 = time.monotonic()
+for _ in range(3):
+    wapi.throttle(write=True)
+for _ in range(5):
+    wapi.throttle()                                         # reads aren't held back by the write budget
+check("write budget: separate from reads (3 writes + 5 reads go at once)", time.monotonic() - t0 < 0.3 and wapi.writes_left() == 0,
+      wapi.writes_left())
+wapi.throttle(write=True)
+check("...a 4th write in the window waits for it", time.monotonic() - t0 >= 0.9, time.monotonic() - t0)
+check("default write budget: 30/min (conservative reading of the platform docs)", Config().writes_per_minute == 30)
 budget_api = Api(CFG, False)
 budget_api.gap, budget_api.budget, budget_api.BUDGET_WINDOW = 0.001, 5, 1.0   # 5 requests per 1 s, for speed
 t0 = time.monotonic()
@@ -1387,6 +1490,36 @@ except ApiError as e:
 finally:
     M.time.sleep = real_sleep
 check("HTML error page -> ApiError, never a crash", ok)
+
+# Plain-text errors ({"error": "Not found"}, the 2026-10-02 outage): an ApiError carrying the text, never a crash.
+class R2:
+    def __init__(s, code, payload): s.status_code, s.payload, s.headers = code, payload, {}; s.text = json.dumps(payload); s.content = s.text.encode()
+    def json(s): return s.payload
+real_api.s.request = lambda *a, **k: R2(404, {"error": "Not found"})
+try:
+    real_api.call("GET", "/x"); ok = False
+except ApiError as e:
+    ok = e.status == 404 and "Not found" in str(e)
+check("plain-text error {'error': 'Not found'} -> ApiError with its text, never a crash", ok)
+
+# One phone alert per outage, however long (it used to repeat every cycle while cancel-all failed), one when it ends.
+sent = []
+real_alert, M.alert = M.alert, (lambda m: sent.append(m))
+try:
+    a, b = make_bot()
+    def cancel_fails(): raise ApiError(0, "NETWORK", "down")
+    b.cancel_everything = cancel_fails
+    for _ in range(5):
+        b.on_cycle_error("unexpected error", pull_now=True)
+    n_outage = len(sent)
+    b.on_cycle_ok()
+    n_back = len(sent) - n_outage
+    b.on_cycle_ok()
+    n_quiet = len(sent) - n_outage - n_back
+finally:
+    M.alert = real_alert
+check("an outage with a failing cancel-all alerts once, not every cycle", n_outage == 1, sent)
+check("recovery alerts once, and only after an alerted outage", n_back == 1 and n_quiet == 0, sent)
 
 print(f"\n{sum(RESULTS)}/{len(RESULTS)} passed")
 sys.exit(0 if all(RESULTS) else 1)
