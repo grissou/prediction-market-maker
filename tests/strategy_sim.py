@@ -580,11 +580,13 @@ def baseline_strategy(sim, m, t, fv, bfv, ref, book):
     side, bias_edge, bias_size = M.fl_side(fv, m.state.get("fl"), cfg)     # favourite-longshot side bias
     m.state["fl"] = side
     over = cfg.capital_in_positions_max_frac < 1.0 and sim.cap_frac > cfg.capital_in_positions_max_frac
+    u_side, u_size = unload_window(sim, m, t)
     q = M.compute_quote(fv, m.inv, m.inv, bb, ba, cfg, no_bid=no_bid, no_ask=no_ask,
                         kelly_p=None if m.headline else ref, order_size=size, position_limit=plimit,
                         bias_side="bid" if side == "mid" else side, bias_edge=bias_edge, bias_size=bias_size,
                         net_inv=m.inv, age_hours=lot_age(m.state.get("lots"), t),
-                        adding_factor=cfg.capital_ceiling_adding_size_factor if over else 1.0)
+                        adding_factor=cfg.capital_ceiling_adding_size_factor if over else 1.0,
+                        unload_side=u_side, unload_edge=cfg.fast_unload_edge, unload_size=u_size)
     want = quote_to_want(q)
     fu = m.state.get("fu")
     if fu and t < fu[0] and fu[1] * m.inv > 0:
@@ -667,6 +669,36 @@ def lot_age(lots, t):
     """Share-weighted age of the held lots, hours (Bot.age_hours)."""
     n = sum(abs(x) for x, _ in lots) if lots else 0.0
     return sum(abs(x) * (t - u) for x, u in lots) / n / 3600 if n else 0.0
+
+
+def unload_window(sim, m, t):
+    """Bot.note_unloads + Bot.unload_side for one market: (reducing side or None, shares to unload)."""
+    cfg = sim.cfg
+    if not cfg.fast_unload_enabled:
+        return None, None
+    st = m.state
+    i = st.get("nf", 0)
+    st["nf"] = len(sim.fills)                    # markets run one after another: new fills are this market's
+    w = st.get("unload")
+    for (ft, fm, sgn, q, price, fv, _lvl, _taker) in sim.fills[i:]:
+        if fm is not m:
+            continue
+        side = "bid" if sgn > 0 else "ask"
+        if w and w["side"] == side:
+            w["left"] -= q
+            continue
+        if t - ft > cfg.fast_unload_seconds or (fv - price) * sgn < cfg.fast_unload_min_edge - 1e-9 \
+                or q < cfg.fast_unload_min_shares or m.inv * sgn <= 0:
+            continue                             # (position now: approximates "added" for fills since last step)
+        left = min(q, abs(m.inv)) + (w["left"] if w else 0.0)
+        w = {"until": ft + cfg.fast_unload_seconds, "side": "ask" if side == "bid" else "bid",
+             "left": min(left, abs(m.inv))}
+    if w and (t >= w["until"] or w["left"] < 1 or (m.inv < 1 if w["side"] == "ask" else m.inv > -1)):
+        w = None
+    st["unload"] = w
+    if w:
+        st["unload_s"] = st.get("unload_s", 0) + 1
+    return (w["side"], int(w["left"] * cfg.fast_unload_size_mult)) if w else (None, None)
 
 
 def quote_to_want(q):

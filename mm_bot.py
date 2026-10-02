@@ -157,7 +157,7 @@ class Config:
                                           #   sized by capital_ceiling_adding_size_factor, the reducing side quotes as
                                           #   usual, until it is back below this - 0.05. 2 Oct: 90.5k of 101k sat in
                                           #   positions, 11k cash left to quote with. 0 = off
-    capital_ceiling_adding_size_factor: float = 0.0   # ...0 = adding side not quoted at all, 0.5 = half size
+    capital_ceiling_adding_size_factor: float = 0.25  # ...0 = adding side not quoted at all, 0.5 = half size
     max_order_cash_frac: float = 0.01     # max cash tied up in a single order: 1,000 at 100k
     tail_low: float = 0.05                # fair value below this: don't SELL YES (risks ~95c a share to earn ~1c)...
     tail_high: float = 0.95               # ...above this: don't BUY YES. Either side still allowed to shrink a position
@@ -322,8 +322,8 @@ class Config:
     # buy back. Reduces positions, so it also runs in reduce-only and in the pre-close window. A race with an
     # independent leg is only a set if that leg is held too (min over ALL legs).
     pair_unwind_enabled: bool = True
-    pair_unwind_min_profit: float = 0.0   # 0 = unwind at exactly fair (bids sum to 1.000)
-    pair_unwind_max_frac: float = 0.02    # at most this much cash per unwind order: 2,000 at 100k
+    pair_unwind_min_profit: float = 0.005  # 0 = unwind at exactly fair (bids sum to 1.000)
+    pair_unwind_max_frac: float = 0.01    # at most this much cash per unwind order: 2,000 at 100k
     pair_unwind_cooldown_seconds: float = 30.0
 
     # --- TAKING STALE HOUSE QUOTES (liquid Polymarket prices only) -----------------------------
@@ -494,6 +494,13 @@ class Config:
     analyze_daily_hour: int = -1          # send the first lines of `analyze` (last 24 h) to your phone daily at this
                                           #   hour UTC (-1 = off)
     slow_cycle_alert_seconds: float = 120.0   # a cycle running this long: status.json says so and one alert is sent
+    # Rival-floor map (analysis/rival_floor.py writes market_edge.json from the recorder's books): a per-market
+    # min_edge, max(min_edge, the market's entry capped at market_edge_max); markets without an entry keep
+    # min_edge. Off until calibrated on the live recorder data.
+    market_edge_enabled: bool = False
+    market_edge_file: str = "market_edge.json"   # {"<exchange id>": {"min_edge": 0.015, ...}, ...}; "" = off
+    market_edge_reload_seconds: float = 600.0    # re-read this often (when the file changed)
+    market_edge_max: float = 0.02         # no market's own edge above this
 
     # --- FILES (relative names are kept in the bot's own folder) -----------------------------
     fills_csv: str = "fills.csv"
@@ -539,6 +546,30 @@ class Config:
     refill_cooldown_window_seconds: float = 60.0   # ...within this long
     refill_cooldown_min_shares: int = 200  # ...totalling at least this many shares (1-share probes don't count)
     refill_cooldown_seconds: float = 30.0  # how long that side stays withheld
+
+    # --- FAST UNLOAD AFTER SWEEP FILLS ---------------------------------------------------------
+    # Data: fills with > 3c edge made +1,704 on 109 fills (DATA_REPORT_2 s5); the mid reverts toward Polymarket with
+    # a 5-13 min half-life, positions are held a median 7.2 h. After a sweep fill, offer the shares back near fair
+    # value for a few minutes (realised P&L) instead of carrying them at the normal skewed quote.
+    fast_unload_enabled: bool = True      # a quote fill that ADDED to a position opens an "unload window" there
+    fast_unload_min_edge: float = 0.02    # ...if it had at least this edge at the quote (vs fv when quoted)...
+    fast_unload_min_shares: int = 100     # ...and at least this many shares
+    fast_unload_seconds: float = 300.0    # how long the window stays open
+    fast_unload_edge: float = 0.005       # the reducing side quotes this far from fair value (not min_edge / the
+                                          #   ref_only edge, not pennying), never through fair; 0 = fv rounded away
+    fast_unload_size_mult: float = 1.0    # reducing size = shares still to unload x this, capped by the position
+
+    # --- REDUCING SIDE JOINS THE BEST -----------------------------------------------------------
+    # Data (Explorer): P(fill in 10 min) 33-34% AT the best, 6-8% one tick behind; our reducing side was at the
+    # best only 24% of the time; 11 of 12 positions >= 1,000 sh had no reducing fill in 6 h; round trips made all
+    # the realised profit (+1,824 on 254k shares). So the side that shrinks |race-netted position| joins the best.
+    reduce_join_best: bool = True         # that side quotes AT the best other price on its side (joins the queue,
+                                          #   no pennying), or at fair +- reduce_join_min_edge rounded away if the
+                                          #   best is closer than that; never crossing. The inventory / age skews
+                                          #   then only move the ADDING side (and the sizes); a fast unload window
+                                          #   still wins when closer to fair. Off in reduce-only (stricter anyway)
+    reduce_join_min_edge: float = 0.005    # closest the joining side may sit to fair value (0 = fv rounded away)
+    reduce_join_min_shares: int = 100     # only while |race-netted position| is at least this
 
     # --- CONNECTION / ALERTS (from the environment: see top of file) ------------------------
     summary_every_hours: int = 2          # phone summary every N hours, on the hour UTC (2 = 00:00, 02:00, 04:00...),
@@ -624,6 +655,17 @@ OVERRIDABLE = {
     "refill_cooldown_window_seconds": (1.0, 600.0),
     "refill_cooldown_min_shares": (0, 100000),
     "refill_cooldown_seconds": (0.0, 600.0),
+    "fast_unload_enabled": (False, True),
+    "fast_unload_min_edge": (0.0, 0.20),
+    "fast_unload_min_shares": (0, 100000),
+    "fast_unload_seconds": (0.0, 3600.0),
+    "fast_unload_edge": (0.0, 0.05),
+    "fast_unload_size_mult": (0.0, 10.0),
+    "reduce_join_best": (False, True),
+    "reduce_join_min_edge": (0.0, 0.05),
+    "reduce_join_min_shares": (0, 100000),
+    "market_edge_enabled": (False, True),
+    "market_edge_max": (0.005, 0.05),
 }
 
 
@@ -662,6 +704,32 @@ def validate_overrides(raw, cfg):
             if k in good:
                 del good[k]
                 bad.append(f"{k}: refresh_before_expiry ({refresh:.0f}) must be at most half of order_ttl ({ttl:.0f})")
+    return good, bad
+
+
+MARKET_EDGE_RANGE = (0.005, 0.05)
+
+
+def validate_market_edge(raw, known):
+    """market_edge.json -> ({eid: min_edge}, [problems]). Entries are {"min_edge": x, ...} or a bare number x, x in
+    MARKET_EDGE_RANGE (dollars); keys starting with "_" (metadata) are skipped; an unknown exchange id or a bad
+    value is refused (that entry only)."""
+    good, bad = {}, []
+    if not isinstance(raw, dict):
+        return good, ["the file must hold one JSON object {exchange id: {\"min_edge\": ...}}"]
+    lo, hi = MARKET_EDGE_RANGE
+    for k, v in raw.items():
+        k = str(k)
+        if k.startswith("_"):
+            continue
+        if k not in known:
+            bad.append(f"{k}: unknown exchange id")
+            continue
+        x = v.get("min_edge") if isinstance(v, dict) else v
+        if isinstance(x, bool) or not isinstance(x, (int, float)) or not (lo <= x <= hi):
+            bad.append(f"{k}: min_edge {x!r} is not a number in {lo}..{hi}")
+            continue
+        good[k] = float(x)
     return good, bad
 
 # =============================================================================================
@@ -1583,7 +1651,8 @@ def fl_side(fv, prev, cfg=CFG):
 def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=False, no_bid=False, no_ask=False,
                   bid_cap=None, ask_cap=None, kelly_p=None, bankroll=None, shift=0.0, order_size=None,
                   position_limit=None, min_edge=None, reduce_size=None, net_inv=None, age_hours=0.0,
-                  adding_factor=1.0, bias_side=None, bias_edge=0.0, bias_size=1.0):
+                  adding_factor=1.0, bias_side=None, bias_edge=0.0, bias_size=1.0, unload_side=None,
+                  unload_edge=0.0, unload_size=None):
     """
     fv         fair YES probability
     inv        our net YES shares on THIS exchange (negative = net NO); drives the hard position limit
@@ -1610,6 +1679,9 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
                        max_half_spread) and at bias_size times its size (favourite-longshot bias, see fl_side).
                        Ignored on a side that shrinks this exchange's position: that side quotes normally
                        (its size beyond the position itself still gets bias_size)
+    unload_side        "bid" / "ask" / None: fast unload window (see Bot.note_unloads). That side, if it shrinks this
+                       exchange's position, quotes unload_edge from fv (or closer, if the skews already put it
+                       there), never crossing the best other order, at unload_size shares capped by the position
     """
     bankroll = bankroll or DEFAULT_BANKROLL
     max_order_cash = cfg.max_order_cash_frac * bankroll
@@ -1665,6 +1737,32 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
     if best_bid is not None:
         ask = max(ask, ceil_tick(best_bid + TICK))
 
+    # 4a. Reducing side joins the best other price on its side (reduce_join_best): never through fair, never crossing.
+    if cfg.reduce_join_best and not reduce_only and abs(eff_inv) >= max(1, cfg.reduce_join_min_shares):
+        if eff_inv > 0 and best_ask is not None:
+            ask = max(ceil_tick(best_ask), ceil_tick(fv + cfg.reduce_join_min_edge))
+            if best_bid is not None:
+                ask = max(ask, ceil_tick(best_bid + TICK))
+            ask_lo = min(ask_lo, ask)
+            bid = min(bid, floor_tick(ask - TICK))
+        elif eff_inv < 0 and best_bid is not None:
+            bid = min(floor_tick(best_bid), floor_tick(fv - cfg.reduce_join_min_edge))
+            if best_ask is not None:
+                bid = min(bid, floor_tick(best_ask - TICK))
+            bid_hi = max(bid_hi, bid)
+            ask = max(ask, ceil_tick(bid + TICK))
+    # 4b. Fast unload window: the reducing side quotes near fair value (no pennying, never through fair).
+    unload_bid = unload_side == "bid" and inv <= -1 and not reduce_only
+    unload_ask = unload_side == "ask" and inv >= 1 and not reduce_only
+    if unload_bid:
+        bid = max(bid, min(floor_tick(fv - unload_edge), floor_tick(best_ask - TICK) if best_ask is not None else 1.0))
+        bid_hi = max(bid_hi, bid)                  # (the keep limit: an order there is safe)
+        ask = max(ask, ceil_tick(bid + TICK))
+    if unload_ask:
+        ask = min(ask, max(ceil_tick(fv + unload_edge), ceil_tick(best_bid + TICK) if best_bid is not None else 0.0))
+        ask_lo = min(ask_lo, ask)
+        bid = min(bid, floor_tick(ask - TICK))
+
     # 5. Size: shrink toward the position limit on each side, and cap the cash tied up per order.
     #    Limits: Kelly sizing when we have a liquid Polymarket price, else max_position_frac of the account.
     long_limit = short_limit = cfg.max_position_frac * bankroll
@@ -1692,6 +1790,10 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
             ask_size = min(ask_size, short_limit + net)
     bid_size = min(bid_size, max_order_cash / bid)          # buying YES costs `bid` a share
     ask_size = min(ask_size, max_order_cash / (1 - ask))    # selling YES = buying NO at 1-ask
+    if unload_bid and unload_size is not None:              # only what it holds: never flips the position
+        bid_size = min(max(1, unload_size), -inv)
+    if unload_ask and unload_size is not None:
+        ask_size = min(max(1, unload_size), inv)
 
     # 6. Risk overrides.
     if reduce_only:
@@ -2006,6 +2108,44 @@ def analyze(fills_path, db_path, hours=None, top=15):
         out.append(f"{labels.get(eid, eid)[:26]:26} {m['fills']:5d} {m['shares']:8.0f} {c(m, 'edge'):>7} "
                    + " ".join(f"{c(m, f'm{x}'):>7}" for x in MARKOUT_MINUTES)
                    + f" {m['pnl']:+8.0f} {pct(tb)} {pct(ta)} {uh if uh is None else round(uh, 1)!s:>10}")
+    out.extend(rival_floor_lines(db_path, since, top))
+    return out
+
+
+def rival_floor_lines(db_path, since=None, top=15):
+    """`analyze`, last table: the other traders' half-spread around the fair value and how often the best price
+    changes (60-s intervals), per market, from the recorder's books table, via rival_floor.py (next to mm_bot.py
+    or in analysis/). The widest `top` markets plus the spread of the recommended min_edge."""
+    if not (db_path and os.path.exists(db_path)):
+        return []
+    src = next((x for x in (os.path.join(HERE, "rival_floor.py"), os.path.join(HERE, "analysis", "rival_floor.py"))
+                if os.path.exists(x)), None)
+    if src is None:
+        return ["(rival floor: copy analysis/rival_floor.py next to mm_bot.py for this table)"]
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("rival_floor", src)
+        rf = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(rf)
+        db = sqlite3.connect(db_path)
+        try:
+            if not rf.has_rows(db, "books"):
+                return []
+            st = rf.stats_from_books(db, since.timestamp() if since else None, min_samples=10)
+        finally:
+            db.close()
+    except Exception as e:                    # an analysis aid: never let it break `analyze`
+        return [f"(rival floor unavailable: {e})"]
+    dist = defaultdict(int)
+    for v in st.values():
+        dist[v["min_edge"]] += 1
+    out = [f"rival floor (books, {len(st)} markets): recommended min_edge "
+           + ", ".join(f"{100 * k:g}c x{n}" for k, n in sorted(dist.items())),
+           f"{'market':26} {'half c':>6} {'top chg':>7} {'n':>6} {'edge c':>6}"]
+    for eid, v in sorted(st.items(), key=lambda kv: -kv[1]["rival_half_spread_c"])[:top]:
+        rate = v["top_change_rate"]
+        out.append(f"{v['label'][:26]:26} {v['rival_half_spread_c']:6.2f} {'-' if rate is None else f'{rate:.2f}':>7} "
+                   f"{v['samples']:6d} {100 * v['min_edge']:6g}")
     return out
 
 # =============================================================================================
@@ -2146,6 +2286,7 @@ class Bot:
         self.trading_since = None         # monotonic time the trading loop started (burst_startup_grace_seconds)
         self.global_reduce = False
         self.ref_moved = set()            # eids whose Polymarket price moved >= urgent_ref_move at the latest reading
+        self.unloads = {}                 # eid -> {"until", "side", "left"}: fast unload windows (note_unloads)
         self.ref_version_urgent = 0
         self.refs = self.load_reference_prices()
         self.ref_version_seen = 0         # last Polymarket reading the jump guard has looked at
@@ -2181,6 +2322,7 @@ class Bot:
         self.last_progress_write, self.last_slow_alert = -1e9, -1e9
         self.defaults = {k: getattr(cfg, k) for k in OVERRIDABLE}   # what a removed override goes back to
         self.overrides, self.overrides_mtime, self.last_overrides_check = {}, None, -1e9
+        self.market_edge, self.market_edge_mtime, self.last_market_edge_check = {}, None, -1e9   # rival-floor map
         self.selftest_future = None       # the self-test running in the background (see selftest_tick)
         self.selftest_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="selftest")
         self.selftest_eid = None
@@ -2432,7 +2574,9 @@ class Bot:
 
         # 4. Fills (every slow_poll_seconds, and straight after a fill) --------------------------------
         if read_fills:
-            self.note_refills(self.log_fills(fvs), inv, now_m)
+            new_fills = self.log_fills(fvs)
+            self.note_refills(new_fills, inv, now_m)
+            self.note_unloads(new_fills, inv, now_m)
 
         # 5. Guaranteed arbitrage inside races (takes liquidity; our quotes there are pulled first) --
         arb_races = self.take_arbitrage(inv, fvs, mine_real, now_m) if self.running else set()
@@ -2528,8 +2672,11 @@ class Bot:
                 self.place(new_orders, now_m)
         # Orders resting NOW, after this cycle's changes (the health snapshot above was taken before them).
         self.health["orders_resting"] = len(self.my_orders) if self.api.live else len(self.sim)
+        self.health["fast_unload_windows"] = sum(1 for e in list(self.unloads)
+                                                 if e in self.ex and self.unload_side(self.ex[e], now_m))
         self.health["fl_bias_markets"] = {k: sum(1 for x in self.ex.values() if x.fl_tag.startswith(f" fl:{k}"))
                                           for k in ("bid", "ask")}
+        self.health["market_edge_markets"] = len(self.market_edge) if self.cfg.market_edge_enabled else 0
 
         # 8. Snapshot for later analysis (every record_seconds) -------------------------------------
         self.record(fvs, now_m)
@@ -2639,12 +2786,13 @@ class Bot:
         for eid, top in tops.items():
             bid, ask = others_top(top, mine_real.get(eid, []))
             prev = self.other_tops.get(eid)
+            t = now_m
             if prev is not None and now_m - prev[2] <= self.cfg.tops_max_age:
                 if bid is None and top[0] is not None and prev[0] is not None and prev[0] <= top[0] + 1e-9:
-                    bid = prev[0]
+                    bid, t = prev[0], prev[2]             # carried: keeps the time it was really seen, so a
                 if ask is None and top[1] is not None and prev[1] is not None and prev[1] >= top[1] - 1e-9:
-                    ask = prev[1]
-            self.other_tops[eid] = (bid, ask, now_m)
+                    ask, t = prev[1], prev[2]             #   side we can't see expires after tops_max_age
+            self.other_tops[eid] = (bid, ask, t)
 
     def mark_ref_moves(self):
         """Which markets' Polymarket price just moved (urgent: see urgent_ref_move). Cleared once handled."""
@@ -3166,6 +3314,9 @@ class Bot:
             planned = min(full, max(1.0, cfg.ref_only_size_frac * self.bankroll()))
             if cfg.ref_only_reduce_full:          # ...but a held position leaves at the market's normal size
                 reduce_size = full
+        if cfg.market_edge_enabled and ex.eid in self.market_edge:   # rival-floor map: this market's own floor
+            own = max(cfg.min_edge, min(self.market_edge[ex.eid], cfg.market_edge_max))
+            edge = own if edge is None else max(edge, own)
         ex.age = self.age_hours(ex)
         adding = cfg.capital_ceiling_adding_size_factor if self.capital_over else 1.0
         side, bias_edge, bias_size = fl_side(fv, ex.fl_side, cfg)
@@ -3173,11 +3324,14 @@ class Bot:
         side = "bid" if side == "mid" else side       # mid band: an optional extra edge on bids, full size
         ex.fl_tag = (f" fl:{tag}+{100 * bias_edge:g}c" if side and (ex.inv > -1 if side == "bid" else ex.inv < 1)
                      else "")                         # (shown only while it changes the quote: not when unloading)
+        u_side = None if reduce_only else self.unload_side(ex, now_m)   # reduce-only / flatten: stricter anyway
+        u_size = int(self.unloads[ex.eid]["left"] * cfg.fast_unload_size_mult) if u_side else None
         return compute_quote(fv, ex.inv, inv_for_quote, best_bid, best_ask, cfg, reduce_only, no_bid, no_ask,
                              bid_cap, ask_cap, kelly_p=kelly_p, bankroll=self.bankroll(),
                              shift=self.party_shift(ex, party_delta), order_size=planned, position_limit=headline_limit,
                              min_edge=edge, reduce_size=reduce_size, net_inv=ex.eff, age_hours=ex.age,
-                             adding_factor=adding, bias_side=side, bias_edge=bias_edge, bias_size=bias_size)
+                             adding_factor=adding, bias_side=side, bias_edge=bias_edge, bias_size=bias_size,
+                             unload_side=u_side, unload_edge=cfg.fast_unload_edge, unload_size=u_size)
 
     def update_size_plan(self, now_m, fvs):
         """Every size_plan_seconds: work out how many shares to quote in each market (see plan_sizes).
@@ -3345,6 +3499,8 @@ class Bot:
             return False
         if ex.eid in self.ref_moved or now_m - ex.ref_moved_at < 15:
             return False                                  # Polymarket moved here lately: follow it now
+        if self.unload_side(ex, now_m) == ("bid" if is_bid else "ask"):
+            return False                                  # fast unload window: place the unload quote now
         young = o.order_id in self.recent_orders and now_m - self.recent_orders[o.order_id][1] < cfg.min_quote_life_seconds
         hist = ex.reprices.get("bid" if is_bid else "ask") or deque()
         while hist and now_m - hist[0] > cfg.churn_window_seconds:
@@ -3360,7 +3516,8 @@ class Bot:
     def change_key(self, ex, pull, reprice=False):
         """Sending order: pulls first, then the party-control markets, then quotes for empty sides (cheap: a
         share of one batch), then reprices (a cancel each), biggest quotes first within each."""
-        return (0 if pull else 0.5 if ex.eid in self.ref_moved else 1, 0 if ex.group in self.cfg.headline_races else 1,
+        urgent = ex.eid in self.ref_moved or ex.eid in self.unloads      # (fast unload: first batch too)
+        return (0 if pull else 0.5 if urgent else 1, 0 if ex.group in self.cfg.headline_races else 1,
                 1 if reprice else 0,
                 -self.size_plan.get(ex.eid, 0))
 
@@ -3445,7 +3602,7 @@ class Bot:
             # budget, so writes stay at the old 30/min until every book is in (pulls and unsafe orders still go).
             used = int(getattr(self.api, "wbudget", 0)) - writes_left
             writes_left = min(writes_left, cfg.startup_writes_per_minute - used)
-        spare = min(getattr(self.api, "budget_left", lambda: 10 ** 6)() - cfg.write_read_reserve, writes_left)
+        spare = min(getattr(self.api, "budget_left", lambda: 10 ** 6)() - self.write_reserve(), writes_left)
         kept, cost, orders = [], 0.0, 0
         for ch in changes:
             n = orders + len(ch.new)
@@ -3892,7 +4049,10 @@ class Bot:
             self.arb_cooldown[race] = now_m + (cfg.pair_unwind_cooldown_seconds if kind == "unwind"
                                                else cfg.arb_cooldown_seconds)
             if qty >= 1:
-                self.execute_arbitrage(race, members, levels, qty, fvs, now_m, action=action, kind=kind)
+                traded = self.execute_arbitrage(race, members, levels, qty, fvs, now_m, action=action, kind=kind)
+                if traded is not None and not any(traded):      # nothing filled: the prices were gone. 4x cooldown
+                    self.arb_cooldown[race] = now_m + 4 * (cfg.pair_unwind_cooldown_seconds if kind == "unwind"
+                                                           else cfg.arb_cooldown_seconds)
                 done.add(race)
         return done
 
@@ -3926,7 +4086,7 @@ class Bot:
                     continue
                 total = sum(p for p, _ in levels.values())
                 edge = total - 1 if sign > 0 else 1 - total
-                if edge < cfg.pair_unwind_min_profit - 1e-9 or (sign < 0 and total < cfg.arb_buy_min_sum):
+                if edge < cfg.pair_unwind_min_profit - 1e-9:   # (buying back a short set below 0.90 only cuts risk)
                     continue
                 qty = int(min([sets] + [size for _, size in levels.values()] +
                               [cfg.pair_unwind_max_frac * bank / max(p, TICK) for p, _ in levels.values()]))
@@ -3940,8 +4100,12 @@ class Bot:
                           [cfg.max_position_frac * bank + inv.get(e, 0.0) for e in members] +   # selling lowers position
                           [cfg.max_order_cash_frac * bank / max(1 - p, TICK) for p, _ in bids.values()]))  # cash per order
             return "arb", "sell", bids, qty
+        fv_sum = sum(fvs.get(e) or 0.0 for e in members) if all(fvs.get(e) is not None for e in members) else None
         if (cfg.arb_two_sided and asks and not self.global_reduce
-                and cfg.arb_buy_min_sum - 1e-9 <= sum(p for p, _ in asks.values()) <= 1 - cfg.arb_min_profit_buy + 1e-9):
+                and cfg.arb_buy_min_sum - 1e-9 <= sum(p for p, _ in asks.values()) <= 1 - cfg.arb_min_profit_buy + 1e-9
+                # the set pays 1 only if a LISTED party wins: our fair values (70% Polymarket) must add up to
+                # about 1 too, or the cheap asks price an unlisted outsider (110 of 113 races list Dem + Rep only)
+                and fv_sum is not None and fv_sum >= 1 - cfg.arb_min_profit_buy / 2 - 1e-9):
             qty = int(min([cfg.arb_max_frac * bank] +
                           [size for _, size in asks.values()] +                            # only what's offered there
                           [cfg.max_position_frac * bank - inv.get(e, 0.0) for e in members] +   # buying raises position
@@ -4025,6 +4189,7 @@ class Bot:
                   f"inventory, which the quoting will work off")
         else:
             log.info("arbitrage on %s: every leg filled %.0f", race, traded[0] if traded else 0)
+        return traded
 
     # ------------------------------------------------------------------------------ taking stale quotes
     def take_stale_quotes(self, refs, liquid, fvs, inv, mine_real, global_reduce, party_delta, now_m):
@@ -4230,6 +4395,60 @@ class Bot:
             return False
         return ex.inv >= 0 if is_bid else ex.inv <= 0   # a side that would reduce the position is exempt
 
+    def note_unloads(self, new, inv, now_m):
+        """Fast unload: a fill of one of our quotes (not a take or arbitrage leg) that ADDED to the position, with at
+        least fast_unload_min_edge at the quote (quote price vs fv when quoted) and fast_unload_min_shares, opens (or
+        extends) a window of fast_unload_seconds in which the reducing side quotes near fair value (decide,
+        compute_quote). Shares to unload = the position increase; fills on the reducing side count them down."""
+        cfg = self.cfg
+        if not new or not cfg.fast_unload_enabled:
+            return
+        wall = utcnow().timestamp()
+        for f in reversed(new):                   # oldest first
+            meta = self.order_meta.get(f.get("orderId")) or {}
+            side, eid = meta.get("our_side"), str(f.get("exchangeId"))
+            if side not in ("bid", "ask") or meta.get("take") or meta.get("arb") or eid not in self.ex:
+                continue
+            qty = abs(float(f.get("quantity") or 0))
+            w = self.unloads.get(eid)
+            if w and w["side"] == side:           # the reducing side traded: fewer shares left to unload
+                w["left"] -= qty
+                continue
+            try:
+                t = parse_ts(f.get("filledAt"))
+            except (TypeError, ValueError):
+                t = None
+            if t is not None and wall - t.timestamp() > cfg.fast_unload_seconds:
+                continue                          # an old fill seen late (e.g. after a restart)
+            pos = float(inv.get(eid, self.ex[eid].inv) if inv is not None else self.ex[eid].inv)
+            if (pos <= 0) if side == "bid" else (pos >= 0):
+                continue                          # it reduced (or closed) the position
+            price, fv = meta.get("price"), meta.get("fv")
+            if fv is None or price is None:
+                continue
+            edge = (float(fv) - float(price)) if side == "bid" else (float(price) - float(fv))
+            if edge < cfg.fast_unload_min_edge - 1e-9 or qty < cfg.fast_unload_min_shares:
+                continue
+            red = "ask" if side == "bid" else "bid"
+            left = min(qty, abs(pos)) + (w["left"] if w and w["side"] == red else 0.0)
+            self.unloads[eid] = {"until": now_m + cfg.fast_unload_seconds, "side": red, "left": min(left, abs(pos))}
+            log.info("fast unload %s: %s %s at %+.1fc, %s %gc %s fair for %.0f s", self.ex[eid].label,
+                     "bought" if side == "bid" else "sold", f"{qty:,.0f}", 100 * edge,
+                     "offering" if red == "ask" else "bidding", 100 * cfg.fast_unload_edge,
+                     "over" if red == "ask" else "under", cfg.fast_unload_seconds)
+
+    def unload_side(self, ex, now_m):
+        """The reducing side ("bid"/"ask") of this exchange's open fast unload window, or None. A window closes once
+        it has expired, its shares are unloaded, or the position in that direction is gone."""
+        w = self.unloads.get(ex.eid)
+        if w is None:
+            return None
+        if (not self.cfg.fast_unload_enabled or now_m >= w["until"] or w["left"] < 1
+                or (ex.inv < 1 if w["side"] == "ask" else ex.inv > -1)):
+            del self.unloads[ex.eid]
+            return None
+        return w["side"]
+
     def load_order_notes(self):
         """Order notes saved by a previous run (so fills that land around a restart get attributed)."""
         try:
@@ -4308,8 +4527,8 @@ class Bot:
                 qty = nums.pop("quantity", None)
                 vals = (qty, price, json.dumps(nums, sort_keys=True, separators=(",", ":")))
                 old = self.pos_seen.get(eid)
-                if full or old is None or old[0] != vals:
-                    rows.append((ts, old[1] if old else None, eid, *vals))
+                if full or old is None or old[0][:2] != vals[:2]:   # quantity or the mark changed (P&L ticks
+                    rows.append((ts, old[1] if old else None, eid, *vals))   # alone would write every position every minute)
                 self.pos_seen[eid] = (vals, ts)
             for eid in [e for e in self.pos_seen if e not in seen]:   # closed (or settled): one row saying so
                 rows.append((ts, self.pos_seen.pop(eid)[1], eid, 0.0, None, "{}"))
@@ -4497,6 +4716,47 @@ class Bot:
                     self.size_plan_time = -1e9                 # re-plan sizes now
         self.overrides = good
         self.health["overrides"] = dict(good)
+
+    def check_market_edge(self, force=False):
+        """Every market_edge_reload_seconds: re-read market_edge.json (rival-floor map) if it changed. Bad entries
+        are refused one by one (a file with nothing usable is refused whole); an unreadable file keeps the current
+        map; a removed file empties it."""
+        cfg = self.cfg
+        now_m = time.monotonic()
+        if not cfg.market_edge_file or (not force and now_m - self.last_market_edge_check < cfg.market_edge_reload_seconds):
+            return
+        self.last_market_edge_check = now_m
+        path = bot_path(cfg.market_edge_file)
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            mtime = None
+        if mtime == self.market_edge_mtime:
+            return
+        self.market_edge_mtime = mtime
+        if mtime is None:
+            if self.market_edge:
+                log.info("MARKET EDGE %s gone - every market back to min_edge", cfg.market_edge_file)
+            self.market_edge = {}
+            return
+        try:
+            with open(path) as f:
+                raw = json.load(f)
+        except (OSError, ValueError) as e:
+            log.info("MARKET EDGE %s refused (unreadable: %s) - keeping %d markets", cfg.market_edge_file, e,
+                     len(self.market_edge))
+            return
+        good, bad = validate_market_edge(raw, self.ex)
+        if bad and not good:
+            log.info("MARKET EDGE %s refused: %s - keeping %d markets", cfg.market_edge_file, "; ".join(bad[:5]),
+                     len(self.market_edge))
+            return
+        self.market_edge = good
+        vals = sorted(good.values())
+        log.info("MARKET EDGE %s loaded: %d markets%s%s%s", cfg.market_edge_file, len(good),
+                 f", {100 * vals[0]:g}-{100 * vals[-1]:g}c" if vals else "",
+                 "" if cfg.market_edge_enabled else " (market_edge_enabled is off: not used)",
+                 f"; refused {len(bad)}: " + "; ".join(bad[:5]) if bad else "")
 
     # ------------------------------------------------------------------------------ dry-run helpers
     def sim_by_eid(self):
@@ -4910,6 +5170,7 @@ class Bot:
                 t0 = time.monotonic()
                 try:
                     self.check_overrides()
+                    self.check_market_edge()
                     self.maybe_daily_analysis()
                     if t0 - self.last_reload > self.cfg.market_reload_seconds:
                         self.load_markets()

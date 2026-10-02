@@ -743,9 +743,14 @@ a, b = unwind_bot({"11": 500, "12": 500}, unwind_books((0.595, 300), (0.40, 200)
 b.cycle()
 check("long pair, bids add up to 0.995 -> nothing sold", a.inv == {"11": 500, "12": 500} and b.unwinds_total == 0, a.inv)
 
-a, b = unwind_bot({"11": 500, "12": 500}, unwind_books((0.60, 300), (0.40, 200)))
+a, b = unwind_bot({"11": 500, "12": 500}, unwind_books((0.60, 300), (0.40, 200)), pair_unwind_min_profit=0.0)
 b.cycle()
 check("bids add up to exactly 1.000 with pair_unwind_min_profit 0 -> unwound at fair", a.inv == {"11": 300, "12": 300}, a.inv)
+a, b = unwind_bot({"11": 500, "12": 500}, unwind_books((0.60, 300), (0.40, 200)))
+b.cycle()
+check("...but the default pair_unwind_min_profit (0.5c) wants 1.005: a one-leg partial fill at 1.000 could be 2c offside",
+      a.inv == {"11": 500, "12": 500} and Config().pair_unwind_min_profit == 0.005 and Config().pair_unwind_max_frac == 0.01,
+      a.inv)
 a, b = unwind_bot({"11": 500, "12": 500}, unwind_books((0.605, 300), (0.40, 200)), pair_unwind_min_profit=0.01)
 b.cycle()
 check("pair_unwind_min_profit 0.01 -> 1.005 is not enough", a.inv == {"11": 500, "12": 500}, a.inv)
@@ -2333,7 +2338,8 @@ _qb = compute_quote(0.50, 400, 400, None, None, _c, order_size=100, age_hours=30
 check("age skew: added after the inventory cap (2c + 2c = 4c lower bid), ask never below fair value",
       _qb.bid == 0.42 and _qb.ask == 0.50, _qb)
 _qs = compute_quote(0.50, -400, -400, 0.52, None, _c, order_size=100, age_hours=30.0)
-check("age skew: an old short bids at most fair value (would penny 0.525)", _qs.bid == 0.50, _qs)
+check("age skew: an old short bids at most fair value (would penny 0.525; the joining reducing side sits 0.5c under fair)",
+      _qs.bid <= 0.50 + 1e-9 and _qs.bid >= 0.495 - 1e-9, _qs)
 _c.skew_age_enabled = False
 check("age skew disabled = today's quote", compute_quote(0.50, 50, 50, None, None, _c, order_size=100, age_hours=30.0) == _q0)
 _c.skew_age_enabled = True
@@ -2412,7 +2418,10 @@ try:
           b.capital_in_positions({"summary": {"totalMarketValue": 90500}}, {"11": 1}, {}) == 90500)
 
     # End to end: over the ceiling, adding sides go, reducing sides stay; status and summary show it.
-    a, b = make_bot()
+    check("capital ceiling default: adding sides at a quarter size, not withdrawn (the account was 90% in positions on "
+          "2 Oct, so the ceiling is on at deploy: factor 0 would have blacked out every flat market)",
+          Config().capital_ceiling_adding_size_factor == 0.25)
+    a, b = make_bot(); b.cfg.capital_ceiling_adding_size_factor = 0.0
     a.inv = {"11": 500}                                   # long 500 Rep Ohio -> race +500 Rep / -500 Dem
     b.cfg.capital_in_positions_max_frac = 0.0005          # 500 x ~0.14 = ~70 of 100,000 -> over
     b.cycle()
@@ -2437,6 +2446,179 @@ try:
     check("ceiling left: full sizes again", b.ex["21"].quote.bid_size == 100 and not b.capital_over, b.ex["21"].quote)
 finally:
     logging.disable(logging.NOTSET)
+
+print("--- rival-floor map (market_edge.json: a per-market min_edge, off by default)")
+check("market edge: off by default, 600 s reload, 2c cap, live-overridable",
+      _live.market_edge_enabled is False and _live.market_edge_file == "market_edge.json"
+      and _live.market_edge_reload_seconds == 600.0 and _live.market_edge_max == 0.02
+      and "market_edge_enabled" in OVERRIDABLE and "market_edge_max" in OVERRIDABLE
+      and "market_edge_file" not in OVERRIDABLE)
+_known = {"11": 1, "12": 1, "21": 1, "22": 1}
+_g, _b = validate_market_edge({"_meta": {"source": "books"}, "11": {"label": "x", "min_edge": 0.015}, "12": 0.02,
+                               "99": {"min_edge": 0.015}, "21": {"min_edge": 0.2}, "22": {"min_edge": True}}, _known)
+check("market edge file: entries and bare numbers accepted, metadata skipped",
+      _g == {"11": 0.015, "12": 0.02}, _g)
+check("market edge file: unknown ids, out-of-range and non-numeric values refused",
+      len(_b) == 3 and any("99" in x for x in _b) and any("21" in x for x in _b) and any("22" in x for x in _b), _b)
+check("market edge file: not an object -> nothing", validate_market_edge([1, 2], _known)[0] == {})
+check("market edge range edges: 0.5c and 5c accepted, 0.4c and 5.5c not",
+      validate_market_edge({"11": 0.005, "12": 0.05, "21": 0.004, "22": 0.055}, _known)[0] == {"11": 0.005, "12": 0.05})
+
+a, b = make_bot()
+_me = b.cfg.market_edge_file
+check("tests keep market_edge.json in their temp dir", os.path.dirname(_me) == os.path.dirname(b.cfg.overrides_file), _me)
+with open(_me, "w") as f:
+    json.dump({"11": {"min_edge": 0.015}, "21": {"min_edge": 0.02}, "99": {"min_edge": 0.015}}, f)
+_logs = []
+_h = logging.Handler(); _h.emit = lambda r: _logs.append(r.getMessage())
+M.log.addHandler(_h); _lvl = M.log.level; M.log.setLevel(logging.INFO); M.log.propagate = False
+try:
+    b.check_market_edge()
+    check("market edge: loaded (unknown id dropped), one INFO line saying so",
+          b.market_edge == {"11": 0.015, "21": 0.02} and len(_logs) == 1 and "loaded: 2 markets" in _logs[0]
+          and "99" in _logs[0], (b.market_edge, _logs))
+    with open(_me, "w") as f:
+        json.dump({"11": {"min_edge": 0.01}}, f)
+    os.utime(_me, (time.time() + 5, time.time() + 5))
+    b.check_market_edge()
+    check("market edge: not re-read before market_edge_reload_seconds", b.market_edge == {"11": 0.015, "21": 0.02})
+    b.last_market_edge_check -= b.cfg.market_edge_reload_seconds + 1
+    b.check_market_edge()
+    check("market edge: re-read after market_edge_reload_seconds", b.market_edge == {"11": 0.01}, b.market_edge)
+    _logs.clear()
+    b.last_market_edge_check -= b.cfg.market_edge_reload_seconds + 1
+    b.check_market_edge()
+    check("market edge: an unchanged file is not re-read or logged", b.market_edge == {"11": 0.01} and not _logs, _logs)
+    with open(_me, "w") as f:
+        json.dump({"11": {"min_edge": 0.5}, "77": 0.01}, f)
+    os.utime(_me, (time.time() + 10, time.time() + 10))
+    b.check_market_edge(force=True)
+    check("market edge: a file with nothing valid is refused (current map kept), one INFO line",
+          b.market_edge == {"11": 0.01} and len(_logs) == 1 and "refused" in _logs[0], (b.market_edge, _logs))
+    with open(_me, "w") as f:
+        f.write("{broken")
+    os.utime(_me, (time.time() + 15, time.time() + 15))
+    _logs.clear(); b.check_market_edge(force=True)
+    check("market edge: an unreadable file is refused (current map kept)",
+          b.market_edge == {"11": 0.01} and len(_logs) == 1 and "refused" in _logs[0], _logs)
+    os.remove(_me)
+    _logs.clear(); b.check_market_edge(force=True)
+    check("market edge: a removed file empties the map", b.market_edge == {} and len(_logs) == 1, _logs)
+finally:
+    M.log.removeHandler(_h); M.log.setLevel(_lvl); M.log.propagate = True
+
+# decide: a tight house (0.51 / 0.53 around 0.52) makes min_edge the binding limit.
+a, b = make_bot(books={"11": {"bids": [lvl(0.10, 1000)], "asks": [lvl(0.18, 1000)]},
+                       "12": {"bids": [lvl(0.82, 1000)], "asks": [lvl(0.90, 1000)]},
+                       "21": {"bids": [lvl(0.515, 1000)], "asks": [lvl(0.525, 1000)]},
+                       "22": {"bids": [lvl(0.44, 1000)], "asks": [lvl(0.52, 1000)]}})
+b.cycle()
+ex21 = b.ex["21"]
+dq = lambda: b.decide(ex21, 0.52, {}, {}, False, 0, time.monotonic())
+q_base = dq()
+b.market_edge = {"21": 0.015}
+q_off = dq()
+b.cfg.market_edge_enabled = True
+q_on = dq()
+check("decide: market edge ignored while market_edge_enabled is off", (q_off.bid, q_off.ask) == (q_base.bid, q_base.ask),
+      (q_off, q_base))
+check("decide: base quote 1c from fair value (min_edge binds)", (q_base.bid, q_base.ask) == (0.51, 0.53), q_base)
+check("decide: enabled -> the market's own 1.5c edge", (q_on.bid, q_on.ask) == (0.505, 0.535), q_on)
+b.market_edge = {"21": 0.05}
+q_cap = dq()
+check("decide: the market's edge is capped at market_edge_max (2c)", (q_cap.bid, q_cap.ask) == (0.50, 0.54), q_cap)
+b.cfg.market_edge_max = 0.03
+q_cap3 = dq()
+check("decide: ...a higher cap lets the 5c entry through up to it", (q_cap3.bid, q_cap3.ask) == (0.49, 0.55), q_cap3)
+b.cfg.market_edge_max = 0.02
+b.market_edge = {"21": 0.005}
+check("decide: an entry below min_edge never narrows it", (dq().bid, dq().ask) == (0.51, 0.53), dq())
+b.market_edge = {"22": 0.02}
+check("decide: a market with no entry keeps min_edge", (dq().bid, dq().ask) == (0.51, 0.53), dq())
+b.ref_only = {"21"}
+b.cfg.ref_only_min_edge = 0.015
+b.market_edge = {"21": 0.02}
+q_ro = dq()
+check("decide: ref_only market, entry wider than ref_only_min_edge -> the entry", (q_ro.bid, q_ro.ask) == (0.50, 0.54), q_ro)
+b.market_edge = {"21": 0.01}
+q_ro2 = dq()
+check("decide: ref_only market, narrower entry -> ref_only_min_edge kept", (q_ro2.bid, q_ro2.ask) == (0.505, 0.535), q_ro2)
+b.ref_only = set()
+b.market_edge = {"21": 0.015, "11": 0.015}
+b.cycle()
+b.write_status(True)
+_st = json.load(open(b.cfg.status_file))
+check("status.json: count of markets with their own edge", _st.get("market_edge_markets") == 2, _st.get("market_edge_markets"))
+b.cfg.market_edge_enabled = False
+b.cycle(); b.write_status(True)
+check("status.json: 0 while disabled", json.load(open(b.cfg.status_file)).get("market_edge_markets") == 0)
+
+# analysis/rival_floor.py on small synthetic databases (books and snapshots variants) + the analyze table
+sys.path.insert(0, os.path.join(M.HERE, "analysis"))
+import rival_floor as RF   # noqa: E402
+check("rival floor: recommend clips to 1-2c and rounds half up to the 0.5c grid",
+      [RF.recommend(x) for x in (0.0, 0.005, 0.0075, 0.01, 0.0125, 0.015, 0.03)]
+      == [0.01, 0.01, 0.01, 0.015, 0.015, 0.02, 0.02])
+_d = tempfile.mkdtemp()
+_db = os.path.join(_d, "md.sqlite")
+_c = sqlite3.connect(_db)
+_c.execute("CREATE TABLE snapshots (ts TEXT, mode TEXT, eid TEXT, label TEXT, best_bid REAL, best_ask REAL, "
+           "fair_value REAL, reference REAL, our_bid REAL, our_ask REAL, position REAL)")
+_t0 = 1_790_000_000.0
+_iso = lambda t: datetime.fromtimestamp(t, timezone.utc).isoformat().replace("+00:00", "Z")
+for i in range(40):
+    t = _iso(_t0 + 60 * i)
+    # A: rivals 0.5c from 0.50 with the bid moving every other minute; we never quote
+    _c.execute("INSERT INTO snapshots VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+               (t, "live", "A", "Mkt A", 0.495 - 0.005 * (i % 2), 0.505, 0.50, None, None, None, 0))
+    # B: rivals 1.5c away, but our bid sits at the best (0.49 = ours): only the ask side counts
+    _c.execute("INSERT INTO snapshots VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+               (t, "live", "B", "Mkt B", 0.49, 0.515, 0.50, None, 0.49, 0.53, 0))
+    if i < 5:   # C: too few samples
+        _c.execute("INSERT INTO snapshots VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                   (t, "live", "C", "Mkt C", 0.40, 0.60, 0.50, None, None, None, 0))
+_c.commit()
+_src, _st = RF.rival_floor(_c, min_samples=30)
+check("rival floor (snapshots): source, half-spreads, change rate, min_edge, too-few-samples dropped",
+      _src == "snapshots" and set(_st) == {"A", "B"} and _st["A"]["rival_half_spread_c"] == 0.5
+      and _st["A"]["min_edge_follow"] == 0.01 and abs(_st["A"]["top_change_rate"] - 1.0) < 1e-9
+      and _st["B"]["rival_half_spread_c"] == 1.5 and _st["B"]["min_edge_follow"] == 0.02 and _st["B"]["top_change_rate"] == 0
+      and _st["A"]["label"] == "Mkt A" and _st["A"]["samples"] == 40, _st)
+check("rival floor modes: sweep_only (default) is 2c on tight books, 1c on wide ones; follow the reverse",
+      _st["A"]["min_edge_sweep_only"] == _st["A"]["min_edge"] == 0.02 and _st["B"]["min_edge_sweep_only"] == 0.01
+      and RF.rival_floor(_c, min_samples=30, mode="follow")[1]["A"]["min_edge"] == 0.01
+      and RF.rival_floor(_c, min_samples=30, mode="follow")[1]["B"]["min_edge"] == 0.02, _st)
+check("rival floor sweep_only bands: <0.75c -> 2c, 0.75-1.25c -> 1.5c, >=1.25c -> 1c",
+      [RF.recommend_sweep_only(x) for x in (0.0, 0.005, 0.0074, 0.0075, 0.01, 0.0124, 0.0125, 0.03)]
+      == [0.02, 0.02, 0.02, 0.015, 0.015, 0.015, 0.01, 0.01])
+_c.execute("CREATE TABLE books (ts REAL, eid TEXT, bids TEXT, asks TEXT)")
+# A: one row per change: 0.49/0.51 for 40 min, then 0.48/0.52 for 20 min (one change in 60 intervals)
+_c.execute("INSERT INTO books VALUES (?,?,?,?)", (_t0, "A", "[[0.49, 100]]", "[[0.51, 100]]"))
+_c.execute("INSERT INTO books VALUES (?,?,?,?)", (_t0 + 2400, "A", "[[0.48, 100]]", "[[0.52, 100]]"))
+_c.execute("INSERT INTO books VALUES (?,?,?,?)", (_t0 + 3600, "A", "[[0.48, 50]]", "[[0.52, 100]]"))
+_c.commit()
+_src, _st = RF.rival_floor(_c, min_samples=30)
+check("rival floor (books): preferred over snapshots, sampled every 60 s, fair value from the snapshots",
+      _src == "books" and set(_st) == {"A"} and _st["A"]["samples"] == 61 and _st["A"]["label"] == "Mkt A"
+      and abs(_st["A"]["top_change_rate"] - 1 / 60) < 1e-3 and _st["A"]["min_edge"] == 0.015
+      and _st["A"]["min_edge_follow"] == _st["A"]["min_edge_sweep_only"] == 0.015, _st)
+_out = os.path.join(_d, "market_edge.json")
+import io, contextlib   # noqa: E401,E402
+with contextlib.redirect_stdout(io.StringIO()):
+    RF.main([_db, "-o", _out, "--min-samples", "30"])
+_j = json.load(open(_out))
+check("rival floor: writes market_edge.json the bot accepts, mode in _meta, both recommendations kept",
+      _j["_meta"]["source"] == "books" and _j["_meta"]["mode"] == "sweep_only"
+      and validate_market_edge(_j, {"A": 1})[0] == {"A": 0.015}
+      and {"min_edge_follow", "min_edge_sweep_only"} <= set(_j["A"]), _j)
+with contextlib.redirect_stdout(io.StringIO()):
+    RF.main([_db, "-o", _out, "--mode", "follow"])
+check("rival floor: --mode follow is written to _meta", json.load(open(_out))["_meta"]["mode"] == "follow")
+_c.close()
+_lines = rival_floor_lines(_db, None, 5)
+check("analyze: a rival-floor table from the books table",
+      len(_lines) == 3 and "rival floor (books, 1 markets)" in _lines[0] and _lines[2].startswith("Mkt A"), _lines)
+check("analyze: no rival-floor table without a database", rival_floor_lines("", None) == [])
 
 # F7: a method defined twice in a class silently shadows the first (thin_book_prices was): none may be.
 import ast

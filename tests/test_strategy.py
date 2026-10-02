@@ -43,7 +43,8 @@ check("R1: account value = the API's number, locked cash not added on top",
 # R2 SKEW SCALED TO THE QUOTE SIZE, NEVER THROUGH FAIR VALUE
 
 c = Config()
-q_old = compute_quote(0.50, 8000, 8000, 0.40, 0.60, Config(skew_mode="share", skew_max=1.0, max_skew_through=1.0),
+q_old = compute_quote(0.50, 8000, 8000, 0.40, 0.60, Config(skew_mode="share", skew_max=1.0, max_skew_through=1.0,
+                                                         reduce_join_best=False),
                       order_size=10000, position_limit=10000)
 q_new = compute_quote(0.50, 8000, 8000, 0.40, 0.60, c, order_size=10000, position_limit=10000)
 check("R2: old rule, 8,000-share headline long -> ask 4c THROUGH fair value", q_old.ask is not None and q_old.ask <= 0.465, q_old)
@@ -97,7 +98,7 @@ b.refs = FakeRefs({"Ohio Senate|Republican": 0.30, "Ohio Senate|Democratic": 0.7
 b.cycle()
 check("R5: switched off -> old behaviour (thin book unpriced)", not any(o["exchangeId"] == "11" for o in a.orders.values()))
 
-q = compute_quote(0.30, 2000, 2000, 0.25, 0.35, Config(), order_size=100, reduce_size=1500)
+q = compute_quote(0.30, 2000, 2000, 0.25, 0.35, Config(reduce_join_best=False), order_size=100, reduce_size=1500)
 check("R5b: reduce_size: long 2,000 -> sell side 1,470 (1,500 within the 1,000 cash cap), buy side stays 100",
       q.ask_size == 1470 and q.bid_size <= 100, q)
 q = compute_quote(0.30, -300, -300, 0.25, 0.35, Config(), order_size=100, reduce_size=1500)
@@ -157,13 +158,13 @@ check("R5c: our bid behind the top -> the top is someone else's", others_top((0.
 a, b = make_bot(books=thin)
 b.other_tops = {"11": (0.29, 0.31, 100.0)}
 b.note_other_tops({"11": (0.295, 0.31)}, {"11": mine}, 130.0)
-check("R5c: once our bid is the top, the others' bid seen before (still fresh) is kept",
-      b.other_tops["11"] == (0.29, 0.31, 130.0), b.other_tops["11"])
+check("R5c: once our bid is the top, the others' bid seen before (still fresh) is kept, with the time it was SEEN",
+      b.other_tops["11"] == (0.29, 0.31, 100.0), b.other_tops["11"])
 b.note_other_tops({"11": (0.295, 0.31)}, {"11": mine}, 200.0)
-check("R5c: ...and carried on while every reading comes within tops_max_age", b.other_tops["11"] == (0.29, 0.31, 200.0))
-b.note_other_tops({"11": (0.295, 0.31)}, {"11": mine}, 321.0)
-check("R5c: ...but not after a gap longer than tops_max_age (bid unknown -> R5 can't use it)",
-      b.other_tops["11"] == (None, 0.31, 321.0), b.other_tops["11"])
+check("R5c: ...and carried on while that observation is within tops_max_age", b.other_tops["11"] == (0.29, 0.31, 100.0))
+b.note_other_tops({"11": (0.295, 0.31)}, {"11": mine}, 225.0)
+check("R5c: ...but not once the observation is older than tops_max_age (a side we can't see is not carried for ever)",
+      b.other_tops["11"] == (None, 0.31, 225.0), b.other_tops["11"])
 b.other_tops = {"11": (0.30, 0.31, 100.0)}
 b.note_other_tops({"11": (0.295, 0.31)}, {"11": mine}, 130.0)
 check("R5c: never carried when the old others' bid is better than the top now (it must have gone)",
