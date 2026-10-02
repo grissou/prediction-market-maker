@@ -1497,6 +1497,41 @@ check("analyze: edge at quote (+1c), 5-min markout (+1.5c), P&L at latest fair v
 check("analyze: time at the top of the book per market", "50%" in lines[3] and "Rep Ohio" in lines[3], lines[3:4])
 check("analyze runs without a snapshot file", analyze(fp, "")[0].startswith("fills: 1 matched"))
 
+print("--- handover restart (deploy without pulling quotes)")
+a, b = make_bot(); b.cfg.selftest_enabled = False
+real_cycle = b.cycle
+n = {"k": 0}
+def then_handover():
+    n["k"] += 1
+    real_cycle()
+    if n["k"] == 2:
+        b.request_handover()
+b.cycle, b.cfg.loop_seconds = then_handover, 0
+b.run()
+resting = dict(a.orders)
+check("SIGUSR1 handover: the bot exits WITHOUT cancelling, and leaves a handover note",
+      len(resting) == 8 and os.path.exists(b.cfg.handover_file), (len(resting), a.calls[-3:]))
+b2 = Bot(a, b.cfg)
+a.calls.clear()
+seen = []
+real_c2 = b2.cycle
+b2.cycle = lambda: (real_c2(), seen.append(set(b2.my_orders)))[0]
+run_cycles(b2, 2)
+calls_before_stop = a.calls[:a.calls.index(("cancel_all", None))] if ("cancel_all", None) in a.calls else a.calls
+check("the next start adopts those orders: no clean-slate cancel, nothing placed twice, nothing replaced",
+      not [c for c in calls_before_stop if c[0] in ("batch", "cancel_order")] and seen and set(resting) <= seen[-1]
+      and not os.path.exists(b.cfg.handover_file), (calls_before_stop[:6], list(b2.my_orders)))
+a, b = make_bot()
+with open(b.cfg.handover_file, "w") as f:
+    json.dump({"t": time.time() - 3600, "orders": 3}, f)
+check("a handover note older than handover_max_age is ignored (clean slate as usual)", not b.adopt_handover())
+a, b = make_bot()
+b.handover, b.exit_code = True, EXIT_KILLED
+a.orders[1] = {"id": 1, "exchangeId": "11", "side": "yes", "action": "buy", "priceLimit": 0.05, "quantity": 5, "open": True,
+               "expirationDate": iso(utcnow() + timedelta(minutes=20))}
+b.shutdown()
+check("kill switch / fatal exits always cancel, even after a handover request", not a.orders)
+
 print("--- parallel requests")
 a, b = make_bot()
 res = b.in_parallel(lambda x: 1 / x, [1, 0, 2])

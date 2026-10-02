@@ -202,6 +202,7 @@ def make_bot(live=True, only="", books=None, extra_markets=()):
         os.path.join(d, n) for n in ("fills.csv", "status.json", "notes.json", "kill.tripped"))
     cfg.record_file, cfg.ref_map_file, cfg.summary_every_hours = "", "", 0
     cfg.overrides_file = os.path.join(d, "overrides.json")
+    cfg.handover_file = os.path.join(d, "handover.json")
     pin_test_sizes(cfg)   # opt-in per test
     cfg.churn_control = False             # tests reprice straight after placing; churn control has its own tests
     cfg.slow_poll_seconds = 0             # read P&L and fills every cycle, so each test cycle sees them

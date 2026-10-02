@@ -352,6 +352,9 @@ class Config:
     status_file: str = "status.json"      # health snapshot rewritten after every cycle
     order_notes_file: str = "order_notes.json"  # survives restarts, so fills can still be attributed
     kill_file: str = "kill_switch.tripped"      # the kill switch creates it; delete it to allow trading again
+    handover_file: str = "handover.json"        # written by a handover stop (SIGUSR1): the next start adopts the
+    handover_max_age: float = 300.0             #   orders left resting instead of cancelling them, if within this
+                                                #   many seconds (else: clean slate as usual)
     record_file: str = "market_data.sqlite"     # snapshots for tuning later ("" = off)
     record_seconds: float = 60.0          # one snapshot of every market this often (~15 MB a day)
 
@@ -1718,6 +1721,7 @@ class Bot:
         self.selftest_passed = False
         self.cycle_started, self.cycle_alerted = None, False
         self.last_analysis_day = None
+        self.handover = False             # SIGUSR1: stop without cancelling (see request_handover)
         self.last_progress_write, self.last_slow_alert = -1e9, -1e9
         self.defaults = {k: getattr(cfg, k) for k in OVERRIDABLE}   # what a removed override goes back to
         self.overrides, self.overrides_mtime, self.last_overrides_check = {}, None, -1e9
@@ -3377,6 +3381,31 @@ class Bot:
         log.info("stop requested - finishing the current request, then cancelling all orders (Ctrl+C again to force)")
         self.running = False
 
+    def request_handover(self, *_):
+        """SIGUSR1 (deploy): stop like Ctrl+C but leave our quotes resting, so the new version can adopt them
+        (see adopt_handover) instead of the market going unquoted for the restart. They expire within order_ttl
+        anyway, so a new version that never starts leaves nothing behind for long."""
+        log.info("handover requested - stopping without cancelling; the next start adopts the resting orders")
+        self.handover = True
+        self.running = False
+
+    def adopt_handover(self):
+        """At start: True if the previous run handed over recently (its orders are ours to manage, not cancel)."""
+        path = bot_path(self.cfg.handover_file)
+        try:
+            with open(path) as f:
+                info = json.load(f)
+            os.remove(path)
+        except (OSError, ValueError):
+            return False
+        age = time.time() - float(info.get("t", 0))
+        if not 0 <= age <= self.cfg.handover_max_age:
+            log.info("handover file is %.0f s old - too old, starting from a clean slate", age)
+            return False
+        log.info("handover: adopting the %s orders the previous run left resting", info.get("orders", "?"))
+        self.orders_stale = True                  # first cycle reads the list; sync_orders takes them over
+        return True
+
     def sleep_until(self, t):
         while self.running and time.monotonic() < t:
             time.sleep(min(0.25, max(0.0, t - time.monotonic())))
@@ -3645,6 +3674,8 @@ class Bot:
     def run(self):
         signal.signal(signal.SIGINT, self.request_stop)
         signal.signal(signal.SIGTERM, self.request_stop)   # `systemctl stop` sends this
+        if hasattr(signal, "SIGUSR1"):                     # handover restart (deploy): stop WITHOUT cancelling
+            signal.signal(signal.SIGUSR1, self.request_handover)
         kill_file = bot_path(self.cfg.kill_file)
         if self.api.live and os.path.exists(kill_file):
             log.critical("the kill switch fired earlier (%s). Check what happened, then delete that file to trade again.",
@@ -3660,7 +3691,9 @@ class Bot:
             if self.api.live:
                 alert("bot starting (live)")
                 self.wait_for_trading()
-                if self.running:
+                if self.running and self.adopt_handover():
+                    pass                                  # keep the previous run's quotes (see request_handover)
+                elif self.running:
                     try:
                         left = [o for o in self.api.open_orders(self.tid) if str(o.get("exchangeId")) in self.ex]
                     except ApiError as e:
@@ -3730,6 +3763,13 @@ class Bot:
         # ones, wait for those already sent, and cancel again below if any are still running after that.
         self.writer.shutdown(wait=False, cancel_futures=True)
         self.drain_writes(timeout=2 * self.cfg.request_timeout)
+        if self.handover and self.exit_code == 0:
+            self.notes_dirty = True
+            self.save_order_notes()                   # the next run attributes their fills
+            write_json(bot_path(self.cfg.handover_file), {"t": time.time(), "orders": len(self.my_orders)})
+            log.info("handover: %d orders left resting for the next run (they expire within %.0f min)",
+                     len(self.my_orders), self.cfg.order_ttl / 60)
+            return
         self.notes_dirty = True
         self.save_order_notes()
         for attempt in range(self.cfg.shutdown_cancel_attempts):
