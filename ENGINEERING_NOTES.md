@@ -26,6 +26,11 @@ same-key retries get 409 REQUEST_IN_FLIGHT; reads 0.5-1.5 s; 236 markets, books 
 taker picks off quotes left >= 1c wrong 3 s after a Polymarket move. `crowded` = writes 0.5-2 s (5% slow) and
 three rival bots (re-check every 1 / 2.5 / 5 s, floors 1 / 1 / 1.5c) that penny us down to their floor and pick off
 quotes left >= 1c wrong after a Polymarket move. Polymarket: every 5 s, small drift + 3% chance of a 1-2.5c move.
+`ceiling` = the 2 Oct 11:31 incident: full-size quotes resting, then at 90 s the capital ceiling switches on (positions
+85% of the account, adding sides x0.25); writes 0.3-0.6 s; the exchange 429s (Retry-After 60) any write beyond 30 in
+60 s. Prints cycles / median / max cycle after the switch and the 429s. `SCENARIO_SCALE=0.05 SCENARIO_SELFTEST=0
+python tests/scenario.py ceiling 1 5`: before the fix 4 cycles in 6.5 min (median 139 s, max 278 s, 8 silent 429s);
+after: 17 cycles (median 5 s; the one long cycle is the start-up placement's 429 pause), 2 logged 429s / 2 pauses.
 
 Baseline, main a49587c, 10 min, seeds 1-3:
 

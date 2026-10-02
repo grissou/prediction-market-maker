@@ -2683,5 +2683,217 @@ for _node in ast.walk(ast.parse(open(M.__file__).read())):
         _dups += [f"{_node.name}.{n}" for n in set(_names) if _names.count(n) > 1]
 check("no method is defined twice in one class (thin_book_prices was)", not _dups, _dups)
 
+
+# =============================================================================================
+# 2 Oct 11:31 INCIDENT: 2-5 min cycles after leaving reduce-only (capital ceiling x0.25, burst x0.5)
+# =============================================================================================
+print("--- incident 2 Oct: size factors, urgent cap, 429 pauses, main-loop blocking, watchdog")
+from mm_bot import Change, ApiError, compute_quote, Api as _Api
+from dataclasses import replace as _rp
+
+# (a) A size factor (capital ceiling) shrinks the wanted size; the unscaled size stays the most that may rest.
+_cq = _rp(M.CFG, fl_bias_enabled=False)
+q_full = compute_quote(0.5, 0, 0, 0.45, 0.55, _cq, order_size=400)
+q_ceil = compute_quote(0.5, 0, 0, 0.45, 0.55, _cq, order_size=400, adding_factor=0.25)
+check("ceiling x0.25: wanted sizes shrink, bid_max/ask_max keep the unscaled sizes (within the limits)",
+      q_ceil.bid_size == int(q_full.bid_size * 0.25) and q_ceil.bid_max == q_full.bid_size
+      and q_ceil.ask_max == q_full.ask_size and q_full.bid_max is None and q_full.ask_max is None,
+      (q_full, q_ceil))
+q_ro = compute_quote(0.5, 100, 100, 0.45, 0.55, _cq, reduce_only=True, order_size=400, adding_factor=0.25)
+check("...a limit (reduce-only) still caps bid_max/ask_max: no bid allowed, ask at most the position",
+      q_ro.bid is None and (q_ro.ask_max or q_ro.ask_size) <= 100, q_ro)
+
+a, b = make_bot(); b.cycle()
+rest = lambda e: [o for o in b.my_orders.values() if o.eid == e]
+bid11 = [o for o in rest("11") if o.is_bid][0]
+ask11 = [o for o in rest("11") if not o.is_bid][0]
+now, now_m = M.utcnow(), time.monotonic()
+Q, QA = int(bid11.qty), int(ask11.qty)
+shrunk = Quote(bid11.price, max(1, Q // 4), ask11.price, max(1, QA // 4), bid11.price, ask11.price, Q, QA)
+check("a full-size order under a shrunk size FACTOR (ceiling x0.25, bid_max = its size) stays: no change",
+      b.plan_change(b.ex["11"], shrunk, rest("11"), 0.14, now, now_m) is None)
+b.burst = True; b.burst_set = set()
+check("...also in burst mode outside the top markets (burst x0.5 on top of the ceiling)",
+      b.plan_change(b.ex["11"], shrunk, rest("11"), 0.14, now, now_m) is None)
+b.burst = False
+old = Quote(bid11.price, max(1, Q // 4), ask11.price, max(1, QA // 4), bid11.price, ask11.price)
+ch_old = b.plan_change(b.ex["11"], old, rest("11"), 0.14, now, now_m)
+check("without bid_max (a real limit shrank it) the oversized order is unsafe: urgent (key 0)",
+      ch_old is not None and ch_old.key[0] == 0 and ch_old.unsafe, ch_old and ch_old.key)
+lim = Quote(bid11.price, max(1, Q // 4), ask11.price, QA, bid11.price, ask11.price, Q - 10, None)
+ch_lim = b.plan_change(b.ex["11"], lim, rest("11"), 0.14, now, now_m)
+check("an order above the POSITION limit (bid_max below its size) is still urgent",
+      ch_lim is not None and ch_lim.key[0] == 0 and ch_lim.unsafe, ch_lim and ch_lim.key)
+
+# (b) urgent writes per cycle are capped; price-unsafe / pulls go first.
+a, b = make_bot(); b.cycle()
+rest = lambda e: [o for o in b.my_orders.values() if o.eid == e]
+b.cfg.urgent_writes_per_cycle = 2
+reprices = [Change(b.ex[e], rest(e)[:1], False, [], (0, 1, 1, -100), unsafe=False) for e in ("11", "12")]
+pulls = [Change(b.ex[e], rest(e)[:1], False, [], (0, 1, 1, 0), unsafe=True) for e in ("21", "22")]
+pulled = {o.order_id for c in pulls for o in c.doomed}
+n0 = len(a.sent("cancel_order"))
+b.send_changes(reprices + pulls)
+sent = [c[1] for c in a.sent("cancel_order")[n0:]]
+check("urgent_writes_per_cycle 2: only 2 urgent cancels this cycle, the unsafe pulls first",
+      len(sent) == 2 and set(sent) == pulled, sent)
+b.cfg.urgent_writes_per_cycle = 0
+n0 = len(a.sent("cancel_order"))
+b.send_changes([Change(b.ex[e], rest(e)[:1], False, [], (0, 1, 1, 0), unsafe=True) for e in ("11", "12")])
+check("...0 = no cap", len(a.sent("cancel_order")) - n0 == 2)
+
+# (c) The main loop never blocks on the write budget.
+cap_api = _Api(M.CFG, False)
+cap_api.gap, cap_api.wbudget, cap_api.BUDGET_WINDOW = 0.0, 1, 30.0
+cap_api.throttle(write=True)
+cap_api.tl.max_write_wait = 0.2
+t0 = time.monotonic()
+try:
+    cap_api.throttle(write=True); raised = None
+except ApiError as e:
+    raised = e
+check("a main-thread write that would wait 30 s for the write budget raises 429 WRITE_BUDGET_WAIT at once, unreserved",
+      raised is not None and raised.status == 429 and raised.code == "WRITE_BUDGET_WAIT"
+      and time.monotonic() - t0 < 0.1 and len(cap_api._wwindow) == 1, raised)
+other = {}
+th = threading.Thread(target=lambda: other.setdefault("tl", getattr(cap_api.tl, "max_write_wait", None)))
+th.start(); th.join()
+check("...the cap is per thread (writer threads still wait their turn)", other["tl"] is None)
+cap_api.tl.max_write_wait = None
+check("write_wait() reports the wait a write would have (~30 s)", 29 < cap_api.write_wait() <= 30.01, cap_api.write_wait())
+
+a, b = make_bot(); b.cycle()
+b.cfg.write_wait_seconds = 0.3
+def slow_batch(orders, _real=a.place_batch):
+    time.sleep(2.0); return _real(orders)
+a.place_batch = slow_batch
+rest = lambda e: [o for o in b.my_orders.values() if o.eid == e]
+o11 = rest("11")[0]
+new = [b.new_order(b.ex["11"], o11.is_bid, o11.price, int(o11.qty), 0.14, M.utcnow())]
+a.cancel_all(None, "11"); b.forget_orders([o.order_id for o in rest("11")])
+t0 = time.monotonic()
+b.send_changes([Change(b.ex["11"], [], False, new, (1, 1, 0, 0))])
+took = time.monotonic() - t0
+check("send_changes returns after write_wait_seconds (0.3 s) while a 2 s write runs on: no join", took < 0.8, took)
+check("...the next cycle doesn't wait for it either (the exchange is just left alone while busy)",
+      M.busy(b.ex["11"], time.monotonic()))
+t0 = time.monotonic(); b.cycle(); took = time.monotonic() - t0
+check("...a cycle with that write in flight takes well under its 2 s", took < 1.5, took)
+b.drain_writes(3)
+
+# A sleeping request that a 429 pause overtakes waits the pause out instead of firing into it.
+p_api = _Api(M.CFG, False)
+p_api.gap, p_api.BUDGET_WINDOW = 0.3, 60.0
+p_api.throttle()
+box = {}
+def late():
+    t = time.monotonic(); p_api.throttle(); box["w"] = time.monotonic() - t
+th = threading.Thread(target=late); th.start()
+time.sleep(0.05)
+with p_api._lock:
+    p_api.paused_until = time.monotonic() + 0.6
+th.join()
+check("a request already sleeping for its slot when a 429 pause starts waits until the pause ends", box["w"] >= 0.6, box)
+
+# (d) Every 429 logged; a 429 during a pause extends it to Retry-After from now (not added); one cut per pause.
+class _Resp:
+    def __init__(s, code, headers=None): s.status_code, s.headers, s.text = code, headers or {}, "{}"; s.content = b"{}"
+    def json(s): return {}
+class _Grab(logging.Handler):
+    def __init__(s): super().__init__(); s.msgs = []
+    def emit(s, r): s.msgs.append(r.getMessage())
+grab = _Grab(); M.log.addHandler(grab); _lvl = M.log.level; M.log.setLevel(logging.WARNING); M.log.propagate = False
+r_api = _Api(_rp(M.CFG, writes_per_minute=45, write_budget_cut=0.75), False)
+r_api.gap = 0.0
+def inside_pause(*a, **k):
+    # another thread's 429 started a pause just before this request's answer arrives
+    with r_api._lock:
+        r_api.paused_until = time.monotonic() + 0.4
+        r_api.pauses_total += 1
+    r_api.s.request = lambda *a, **k: _Resp(200)
+    return _Resp(429, {"Retry-After": "0.2"})
+r_api.s.request = inside_pause
+w0 = r_api.wbudget
+t0 = time.monotonic()
+r_api.call("POST", "/orders/batch", body={})
+waited = time.monotonic() - t0
+lines = [m for m in grab.msgs if "RATE LIMITED (429)" in m]
+check("a 429 inside a pause is logged (method, path, Retry-After, already paused)",
+      len(lines) == 1 and "POST /orders/batch" in lines[0] and "Retry-After 0.2" in lines[0]
+      and "already paused" in lines[0], lines)
+check("...the pause is NOT added up (0.4 s, not 0.6 s) and the budgets are not cut again",
+      0.38 <= waited < 0.58 and r_api.pauses_total == 1 and abs(r_api.wbudget - (w0 + 1 / 60)) < 1e-6,
+      (round(waited, 2), r_api.pauses_total, r_api.wbudget))
+grab.msgs.clear()
+answers = [_Resp(429, {"Retry-After": "0.1"}), _Resp(429, {"Retry-After": "0.1"}), _Resp(200)]
+r_api.s.request = lambda *a, **k: answers.pop(0)
+r_api.call("GET", "/x")
+lines = [m for m in grab.msgs if "RATE LIMITED (429)" in m]
+check("two 429s one after another: both logged, each a new pause (the first had ended)",
+      len(lines) == 2 and all("new pause" in m for m in lines) and r_api.pauses_total == 3 and r_api.rate_limited == 3,
+      (lines, r_api.pauses_total))
+M.log.removeHandler(grab); M.log.setLevel(_lvl); M.log.propagate = True
+st = r_api.pause_state()
+check("pause_state for status.json: paused_until / pause_seconds_left / pauses_total / rate_limited_total",
+      set(st) == {"paused_until", "pause_seconds_left", "pauses_total", "rate_limited_total"} and st["pauses_total"] == 3)
+
+a, b = make_bot(); b.cycle()
+b.write_status(ok=True)
+with open(b.cfg.status_file) as f:
+    stj = json.load(f)
+check("status.json: last cycle seconds + per-phase timings, pause state, seconds since the last cycle",
+      "reads" in stj.get("last_cycle_phases", {}) and "decide" in stj["last_cycle_phases"]
+      and "pauses_total" in stj and "paused_until" in stj and stj.get("seconds_since_cycle") is not None, stj.get("last_cycle_phases"))
+check("summary-line text: '<s> s (reads .., decide ..)'", b.phases_text().endswith(")") or b.phases_text().endswith(" s"),
+      b.phases_text())
+a.paused_until = time.monotonic() + 5
+n0 = len(a.calls)
+t0 = time.monotonic(); b.cycle(); took = time.monotonic() - t0
+check("during a 429 pause the cycle is skipped (no reads that would only sleep out the pause), loop stays responsive",
+      not [c for c in a.calls[n0:] if c[0] in ("positions", "pnl")] and took < 1.5, (a.calls[n0:], took))
+a.paused_until = 0.0
+b.cfg.pause_skip_cycles = False
+
+# (b2) takes / arbitrage on the main thread only when the budget has room.
+a, b = make_bot(); b.cycle()
+a.write_wait = lambda: 30.0
+check("writes_ready: False while a write would wait 30 s (takes and arbitrage skip, the loop doesn't block)",
+      not b.writes_ready(3))
+a.write_wait = lambda: 0.0
+check("...True when the budget has room", b.writes_ready(3))
+
+# (e) Watchdog.
+a, b = make_bot(); b.cycle()
+alerts, exits = [], []
+M.log.disabled = True                     # (the watchdog's stack dump is long)
+_real_alert = M.alert
+M.alert = lambda msg: alerts.append(msg)
+b.hard_exit = lambda code: exits.append(code)
+b.cfg.watchdog_alert_seconds, b.cfg.watchdog_exit_seconds = 180, 600
+t = b.last_cycle_done
+check("watchdog: quiet while cycles complete", b.watchdog_check(t + 10) is None and not alerts)
+check("...alerts once at 180 s without a completed cycle", b.watchdog_check(t + 181) == "alert"
+      and b.watchdog_check(t + 200) is None and len(alerts) == 1, alerts)
+n0 = len(a.sent("cancel_all"))
+check("...at 600 s: stacks logged, cancel-all, exit code 5 (systemd Restart=on-failure restarts; 3/4 are not)",
+      b.watchdog_check(t + 601) == "exit" and exits == [M.EXIT_WATCHDOG] and M.EXIT_WATCHDOG == 5
+      and len(a.sent("cancel_all")) == n0 + 1, (exits, a.sent("cancel_all")[n0:]))
+hang = threading.Event()
+a.cancel_all = lambda *x, **k: hang.wait(5)
+b.cfg.watchdog_cancel_seconds = 0.2
+t0 = time.monotonic(); b.watchdog_check(t + 601); took = time.monotonic() - t0
+check("...a hanging cancel-all is cut off after watchdog_cancel_seconds, then the exit anyway", took < 1.0
+      and exits == [5, 5], (took, exits))
+hang.set()
+b.cfg.watchdog_exit_seconds = 0
+exits.clear()
+check("...watchdog_exit_seconds 0 = never exits", b.watchdog_check(t + 5000) in (None, "alert") and not exits)
+M.alert = _real_alert
+M.log.disabled = False
+check("new settings are live-overridable", all(k in M.OVERRIDABLE for k in (
+    "urgent_writes_per_cycle", "main_write_wait_margin", "watchdog_alert_seconds", "watchdog_exit_seconds",
+    "pause_skip_cycles")))
+
+
 print(f"\n{sum(RESULTS)}/{len(RESULTS)} passed")
 sys.exit(0 if all(RESULTS) else 1)

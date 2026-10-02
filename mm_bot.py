@@ -67,6 +67,7 @@ import sqlite3
 import sys
 import threading
 import time
+import traceback
 import uuid
 from collections import defaultdict, deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -373,6 +374,19 @@ class Config:
                                           #   would only get 409 in flight); its orders are recovered from the list
     write_wait_seconds: float = 3.0       # a cycle waits at most this long for its writes; slower ones (day one: 15-30 s)
                                           #   finish in the background and their exchanges are left alone until then
+    main_write_wait_margin: float = 2.0   # a write sent by the MAIN thread (take, arbitrage, cancel-all instead of
+                                          #   pulls) that would wait longer than write_wait_seconds + this for the write
+                                          #   budget or a 429 pause is not sent (429 WRITE_BUDGET_WAIT) - the loop never
+                                          #   blocks on the budget (2 Oct 11:31: 2-5 min cycles)
+    urgent_writes_per_cycle: int = 20     # at most this many writes per cycle for changes the request budget can't
+                                          #   defer (pulls, unsafe orders); price-unsafe / unwanted sides first, the rest
+                                          #   next cycle. 0 = no cap
+    pause_skip_cycles: bool = True        # while the exchange's 429 pause lasts, skip cycles (reads would only wait
+                                          #   for the pause inside the cycle) instead of blocking the loop
+    watchdog_alert_seconds: float = 180.0  # no cycle completed for this long -> alert (watchdog thread). 0 = off
+    watchdog_exit_seconds: float = 600.0  # ...for this long -> log every thread's stack, cancel everything (at most
+                                          #   watchdog_cancel_seconds) and exit with code 5 (systemd restarts). 0 = off
+    watchdog_cancel_seconds: float = 20.0
     pending_seconds: float = 90.0         # placement outcome unknown -> leave that exchange alone this long, unless
                                           #   the orders show up in the open-orders list first (recovered: see
                                           #   adopt_unconfirmed), which on a slow exchange takes seconds
@@ -475,9 +489,11 @@ class Config:
                                           #   writes stay at most this (the old budget), so the bigger write budget
                                           #   doesn't slow the book downloads new quotes need. 0 = no cap
     write_budget_cut: float = 0.75        # a write answered 429 cuts the write budget to this fraction (min 10/min)
-    never_defer_unsafe: bool = True       # a change that removes an UNSAFE order (beyond its limit price, bigger than
-                                          #   now allowed, or a side we no longer want) is never deferred by the
-                                          #   request budget, like a pull (False = only pure pulls are exempt)
+    never_defer_unsafe: bool = True       # a change that removes an UNSAFE order (beyond its limit price, above the
+                                          #   position / cash limits, or a side we no longer want) is never deferred by
+                                          #   the request budget, like a pull (False = only pure pulls are exempt).
+                                          #   An order only bigger than a size FACTOR now wants (capital ceiling, burst,
+                                          #   favourite-longshot) is not unsafe: it stays (see Quote.bid_max)
     budget_reserve: int = 20              # requests per minute kept free for orders, cancels and account
                                           #   reads; book downloads only use what's left
     parallel_requests: int = 2            # HTTP requests in flight at once (1 = one at a time)
@@ -634,7 +650,9 @@ OVERRIDABLE = {
     "requests_per_minute": (10, 100), "writes_per_minute": (5, 100), "budget_reserve": (0, 60),
     "writes_per_minute_max": (5, 100), "startup_writes_per_minute": (0, 100), "write_budget_cut": (0.25, 1.0), "never_defer_unsafe": (False, True),
     "max_books_per_cycle": (1, 100), "book_stale": (60.0, 3600.0), "book_reverify_seconds": (10.0, 1800.0),
-    "parallel_writes": (1, 8), "write_wait_seconds": (0.0, 30.0),
+    "parallel_writes": (1, 8), "write_wait_seconds": (0.0, 30.0), "main_write_wait_margin": (0.0, 60.0),
+    "urgent_writes_per_cycle": (0, 500), "pause_skip_cycles": (False, True),
+    "watchdog_alert_seconds": (0.0, 3600.0), "watchdog_exit_seconds": (0.0, 7200.0), "watchdog_cancel_seconds": (1.0, 120.0),
     "churn_control": (False, True), "min_quote_life_seconds": (0.0, 120.0), "churn_max_reprices": (1, 100),
     "churn_window_seconds": (5.0, 3600.0), "urgent_ref_move": (0.0, 0.10),
     "burst_protection": (False, True), "burst_write_seconds": (0.5, 60.0), "burst_cycle_seconds": (2.0, 600.0),
@@ -799,6 +817,7 @@ PARTY_SIGN = {"Republican": +1, "Democratic": -1}
 # 0 = normal stop; 1 = crash (restart it); these two mean "don't restart, a human must look":
 EXIT_FATAL = 3        # bad/revoked API key, missing scope, terms not accepted, missing settings
 EXIT_KILLED = 4       # kill switch tripped
+EXIT_WATCHDOG = 5     # no cycle completed for watchdog_exit_seconds: systemd restarts (Restart=on-failure)
 # API error codes that retrying or restarting will never fix.
 FATAL_API_CODES = {"MISSING_API_KEY", "INVALID_API_KEY", "API_KEY_REVOKED", "API_KEY_EXPIRED",
                    "INSUFFICIENT_SCOPES", "ACCOUNT_BANNED", "TERMS_NOT_ACKNOWLEDGED"}
@@ -955,6 +974,9 @@ class Api:
         self._wwindow = deque()           # start times of writes in the last BUDGET_WINDOW seconds
         self.write_times = deque(maxlen=500)   # (time done, seconds on the wire, timed out) per write attempt
         self.rate_limited = 0             # how many 429s we've had (shown in status.json - should stay 0)
+        self.paused_until = 0.0           # monotonic end of the exchange's 429 pause (Retry-After); 0 = none
+        self.pauses_total = 0             # 429 pauses started (several 429s inside one pause extend it)
+        self.tl = threading.local()       # per thread: max_write_wait (the main thread's cap on a write's wait)
         self.s = requests.Session()
         self.s.headers.update({"Authorization": f"Bearer {cfg.api_key}", "Content-Type": "application/json"})
         # Keep one open connection per thread that can talk to the exchange at once, so none has to open (and
@@ -973,13 +995,16 @@ class Api:
     def throttle(self, write=False):
         """Rate limiter for every request, across all threads:
           1. never more than `self.budget` requests in any BUDGET_WINDOW seconds (hard cap), and
-          2. request starts at least `self.gap` apart (smooths bursts).
-        A request that would break either rule waits until it wouldn't."""
+          2. request starts at least `self.gap` apart (smooths bursts), and
+          3. nothing starts during the exchange's 429 pause (paused_until).
+        A request that would break a rule waits until it wouldn't (sleeping WITHOUT the lock). A write on a thread
+        with tl.max_write_wait set (the main thread, during a cycle) that would wait longer raises ApiError 429
+        WRITE_BUDGET_WAIT instead, unsent and unreserved: the main loop never blocks on the write budget."""
         with self._lock:
             now = time.monotonic()
             while self._window and now - self._window[0] >= self.BUDGET_WINDOW:
                 self._window.popleft()
-            start = max(now, self._next_start)
+            start = max(now, self._next_start, self.paused_until)
             if len(self._window) >= int(self.budget):
                 start = max(start, self._window[-int(self.budget)] + self.BUDGET_WINDOW)
             general = start
@@ -988,13 +1013,45 @@ class Api:
                     self._wwindow.popleft()
                 if len(self._wwindow) >= int(self.wbudget):
                     start = max(start, self._wwindow[-int(self.wbudget)] + self.BUDGET_WINDOW)
+                cap = getattr(self.tl, "max_write_wait", None)
+                if cap is not None and start - now > cap:
+                    raise ApiError(429, "WRITE_BUDGET_WAIT", f"a write would wait {start - now:.0f} s for the write "
+                                   f"budget / rate-limit pause (main thread: at most {cap:.0f} s) - not sent")
                 bisect.insort(self._wwindow, start)
             self._next_start = general + self.gap   # a write waiting on the WRITE budget never holds up reads
             # Kept sorted: a write held back by the write budget starts later than reads throttled after it, and
             # the clean-up above and the [-budget] lookup both assume oldest-first order.
             bisect.insort(self._window, start)
-        if start > now:
+        while start > now:
             time.sleep(start - now)
+            # A 429 pause that began while this request slept: wait it out too, instead of knocking during it
+            # (each such request earned another 429 and, before, another silent 60 s pause).
+            now = time.monotonic()
+            with self._lock:
+                start = self.paused_until
+
+    def pause_left(self):
+        """Seconds left of the exchange's 429 pause (0 = none)."""
+        return max(0.0, getattr(self, "paused_until", 0.0) - time.monotonic())
+
+    def write_wait(self):
+        """Seconds a write sent now would wait (write budget full, or a 429 pause)."""
+        if not hasattr(self, "_wwindow"):         # (test doubles without the limiter)
+            return 0.0
+        with self._lock:
+            now = time.monotonic()
+            wait_s = max(0.0, self.paused_until - now, self._next_start - now)
+            live = [t for t in self._wwindow if now - t < self.BUDGET_WINDOW]
+            if len(live) >= int(self.wbudget):
+                wait_s = max(wait_s, live[-int(self.wbudget)] + self.BUDGET_WINDOW - now)
+            return wait_s
+
+    def pause_state(self):
+        """For status.json: the 429 pause now, how many there were, the 429s."""
+        left = self.pause_left()
+        return {"paused_until": iso(utcnow() + timedelta(seconds=left)) if left > 0 else None,
+                "pause_seconds_left": round(left, 1), "pauses_total": getattr(self, "pauses_total", 0),
+                "rate_limited_total": getattr(self, "rate_limited", 0)}
 
     def budget_left(self):
         """How many more requests fit in the budget right now."""
@@ -1069,20 +1126,29 @@ class Api:
             if r.status_code == 429:
                 # Rate limited. Don't just retry this one request: pause EVERY thread for as long as the
                 # server asks, and slow down for good, so we never keep knocking on a closed door.
+                # A 429 inside a pause EXTENDS it to Retry-After from now (never added up); the budgets are cut
+                # once per pause, not per 429. Every 429 is logged (2 Oct: 20 counted, none logged - the old
+                # "already paused" test was fooled by ordinary queued requests).
                 pause = retry_after if retry_after is not None else 5.0
                 with self._lock:
-                    already_paused = self._next_start > time.monotonic() + 1
-                    self._next_start = max(self._next_start, time.monotonic() + pause)
-                    self.gap = min(self.cfg.max_request_gap, self.gap * 2)
+                    now = time.monotonic()
+                    already_paused = self.paused_until > now
+                    left_before = max(0.0, self.paused_until - now)
+                    self.paused_until = max(self.paused_until, now + pause)
+                    self._next_start = max(self._next_start, self.paused_until)
                     if not already_paused:        # the budget was too generous: cut it by a quarter
+                        self.pauses_total += 1
+                        self.gap = min(self.cfg.max_request_gap, self.gap * 2)
                         self.budget = max(20.0, self.budget * 0.75)
                         if method != "GET" or self.wbudget > self.cfg.writes_per_minute:
                             # (a per-key limit 429s the more frequent reads first: a grown write budget is cut too)
                             self.wbudget = max(10.0, self.wbudget * self.cfg.write_budget_cut)
                     self.rate_limited += 1
-                if not already_paused:
-                    log.warning("RATE LIMITED (429): pausing all requests for %.0f s; budget now %.0f/min",
-                                pause, self.budget)
+                    until = self.paused_until - now
+                log.warning("RATE LIMITED (429) %s %s: Retry-After %s; %s - all requests paused %.0f s; budget %.0f/min, "
+                            "writes %.0f/min (429 #%d, pause #%d)", method, path.split("?")[0], ra or "-",
+                            f"already paused ({left_before:.0f} s left): pause extended" if already_paused
+                            else "new pause", until, self.budget, self.wbudget, self.rate_limited, self.pauses_total)
                 if attempt < retries:
                     continue                  # throttle() makes the retry wait until the pause is over
             elif r.status_code in (502, 503, 504) and attempt < retries:
@@ -1587,6 +1653,10 @@ class Quote:
     # None = no tolerance (e.g. election-night exits). Not part of comparing two quotes.
     bid_limit: float | None = field(default=None, compare=False)
     ask_limit: float | None = field(default=None, compare=False)
+    # The size before size FACTORS (capital ceiling, favourite-longshot bad side) but within every position /
+    # cash / risk limit: the biggest order already resting that may stay (None = the size itself).
+    bid_max: int | None = field(default=None, compare=False)
+    ask_max: int | None = field(default=None, compare=False)
 
 
 NO_QUOTE = Quote()
@@ -1873,52 +1943,61 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
             long_limit *= max(0.0, adding_limit_factor)
         elif net < 0:
             short_limit *= max(0.0, adding_limit_factor)
+
+    def limited(bid_size, ask_size):
+        """Steps 5-6 after the size factors: position, cash and risk limits (applied to the scaled sizes and,
+        for bid_max / ask_max, to the unscaled ones alike)."""
+        if reduce_size is not None and reduce_size > order_size:
+            if inv < 0:
+                bid_size = max(bid_size, min(reduce_size, -inv))   # buying back a short
+            elif inv > 0:
+                ask_size = max(ask_size, min(reduce_size, inv))    # selling down a long
+        if cfg.limits_use_race_net:               # the race-netted position counts too, on the side that grows it
+            if net > 0:
+                bid_size = min(bid_size, long_limit - net)
+            elif net < 0:
+                ask_size = min(ask_size, short_limit + net)
+        if frag_limit is not None:                # mark-fragility cap: only the side growing |inv| here
+            if inv >= 0:
+                bid_size = min(bid_size, frag_limit - inv)
+            if inv <= 0:
+                ask_size = min(ask_size, frag_limit + inv)
+        bid_size = min(bid_size, max_order_cash / bid)          # buying YES costs `bid` a share
+        ask_size = min(ask_size, max_order_cash / (1 - ask))    # selling YES = buying NO at 1-ask
+        if unload_bid and unload_size is not None:              # only what it holds: never flips the position
+            bid_size = min(max(1, unload_size), -inv)
+        if unload_ask and unload_size is not None:
+            ask_size = min(max(1, unload_size), inv)
+
+        # 6. Risk overrides.
+        if reduce_only:
+            bid_size = min(bid_size, -eff_inv)     # only buy back a short
+            ask_size = min(ask_size, eff_inv)      # only sell down a long
+        if no_bid:
+            bid_size = 0
+        if no_ask:
+            ask_size = 0
+        if bid_cap is not None:
+            bid_size = min(bid_size, bid_cap)
+        if ask_cap is not None:
+            ask_size = min(ask_size, ask_cap)
+        return bid_size, ask_size
+
     bid_size = min(order_size, long_limit - inv)
     ask_size = min(order_size, short_limit + inv)
+    bid_max, ask_max = limited(bid_size, ask_size)     # the sizes no factor shrank: the most that may stay
     if bias_side == "bid" and bias_size != 1.0:        # bad side: smaller, except the part that only unloads
         bid_size = min(bid_size, max(order_size * bias_size, -inv))
     if bias_side == "ask" and bias_size != 1.0:
         ask_size = min(ask_size, max(order_size * bias_size, inv))
-    if reduce_size is not None and reduce_size > order_size:
-        if inv < 0:
-            bid_size = max(bid_size, min(reduce_size, -inv))   # buying back a short
-        elif inv > 0:
-            ask_size = max(ask_size, min(reduce_size, inv))    # selling down a long
-    if cfg.limits_use_race_net:               # the race-netted position counts too, on the side that grows it
-        if net > 0:
-            bid_size = min(bid_size, long_limit - net)
-        elif net < 0:
-            ask_size = min(ask_size, short_limit + net)
-    if frag_limit is not None:                # mark-fragility cap: only the side growing |inv| here
-        if inv >= 0:
-            bid_size = min(bid_size, frag_limit - inv)
-        if inv <= 0:
-            ask_size = min(ask_size, frag_limit + inv)
-    bid_size = min(bid_size, max_order_cash / bid)          # buying YES costs `bid` a share
-    ask_size = min(ask_size, max_order_cash / (1 - ask))    # selling YES = buying NO at 1-ask
-    if unload_bid and unload_size is not None:              # only what it holds: never flips the position
-        bid_size = min(max(1, unload_size), -inv)
-    if unload_ask and unload_size is not None:
-        ask_size = min(max(1, unload_size), inv)
-
-    # 6. Risk overrides.
-    if reduce_only:
-        bid_size = min(bid_size, -eff_inv)     # only buy back a short
-        ask_size = min(ask_size, eff_inv)      # only sell down a long
-    if no_bid:
-        bid_size = 0
-    if no_ask:
-        ask_size = 0
-    if bid_cap is not None:
-        bid_size = min(bid_size, bid_cap)
-    if ask_cap is not None:
-        ask_size = min(ask_size, ask_cap)
+    bid_size, ask_size = limited(bid_size, ask_size)
     if adding_factor < 1.0:                   # capital ceiling: the side growing |net| shrinks (0 = not quoted)
         if net >= 0:
             bid_size = min(bid_size, bid_size * adding_factor)
         if net <= 0:
             ask_size = min(ask_size, ask_size * adding_factor)
     bid_size, ask_size = max(0, int(bid_size)), max(0, int(ask_size))   # the API only takes whole shares
+    bid_max, ask_max = max(bid_size, int(bid_max)), max(ask_size, int(ask_max))
 
     if bid >= ask:
         return NO_QUOTE
@@ -1926,7 +2005,8 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
     # to r, never crossing the best other order.
     bid_limit = min(bid_hi, floor_tick(best_ask - TICK)) if best_ask is not None else bid_hi
     ask_limit = max(ask_lo, ceil_tick(best_bid + TICK)) if best_bid is not None else ask_lo
-    return Quote(bid if bid_size else None, bid_size, ask if ask_size else None, ask_size, bid_limit, ask_limit)
+    return Quote(bid if bid_size else None, bid_size, ask if ask_size else None, ask_size, bid_limit, ask_limit,
+                 bid_max if bid_max != bid_size else None, ask_max if ask_max != ask_size else None)
 
 
 def exit_quote(fv, inv, best_bid, best_ask, cfg=CFG, bankroll=None, max_size=None):
@@ -2438,11 +2518,12 @@ def busy(ex, now_m):
 class Change:
     """What one exchange needs this cycle: orders to cancel first (all of them with whole=True), then new ones.
     key orders the work: pulls first, then party-control markets, then the biggest quotes."""
-    __slots__ = ("ex", "doomed", "whole", "new", "key", "count")
+    __slots__ = ("ex", "doomed", "whole", "new", "key", "count", "unsafe")
 
-    def __init__(self, ex, doomed, whole, new, key, count=True):
+    def __init__(self, ex, doomed, whole, new, key, count=True, unsafe=False):
         self.ex, self.doomed, self.whole, self.new, self.key = ex, doomed, whole, new, key
         self.count = count            # its cancels count as reprices (churn control) once sent
+        self.unsafe = unsafe          # removes an order that must not stay (urgent_writes_per_cycle sends these first)
 
     def reprice_sides(self):
         """The sides this change cancels resting orders on (what churn control counts as a reprice)."""
@@ -2491,6 +2572,9 @@ class Bot:
         self.notes_dirty = False
         self.exit_code = 0                # what the process exits with (see EXIT_* codes)
         self.health = {}                  # latest cycle summary, written to status.json
+        self.last_cycle_done = None       # monotonic time the last cycle ended (watchdog, status.json)
+        self.last_cycle_phases, self.pause_logged = {}, False
+        self.watchdog_alerted, self.watchdog_thread = False, None
         self.kill_breaches = 0
         self.reserved_mode = None if cfg.reserved_cash_mode == "auto" else cfg.reserved_cash_mode
         self.calib_prev = None            # (account value, locked cash, positions) from the previous cycle
@@ -2687,11 +2771,48 @@ class Bot:
         cfg = self.cfg
         now, now_m = utcnow(), time.monotonic()
         self.cycle_started, self.cycle_alerted = now_m, False
+        self.cycle_phases, self.phase_t = {}, now_m
+        left = self.api.pause_left() if hasattr(self.api, "pause_left") else 0.0
+        if cfg.pause_skip_cycles and left > 0:
+            # The exchange said wait (429): every read would only sleep out the pause inside the cycle, the loop
+            # blocked for minutes. Apply finished writes and come back after it.
+            self.harvest_writes()
+            if not self.pause_logged:
+                self.pause_logged = True
+                log.warning("exchange rate-limit pause: %.0f s left - cycles skipped until it ends", left)
+            self.last_cycle_done, self.cycle_started = time.monotonic(), None
+            self.wake.wait(timeout=min(left, 1.0))
+            return
+        self.pause_logged = False
+        tl = getattr(self.api, "tl", None)
+        if tl is not None:                        # main-thread writes never wait long for the write budget
+            tl.max_write_wait = cfg.write_wait_seconds + cfg.main_write_wait_margin
         try:
             self.cycle_body(cfg, now, now_m)
         finally:
+            if tl is not None:
+                tl.max_write_wait = None
+            self.phase_mark("other")
             self.last_cycle_seconds = time.monotonic() - now_m
+            self.last_cycle_phases = {k: round(v, 1) for k, v in self.cycle_phases.items()}
+            self.health["last_cycle_seconds"] = round(self.last_cycle_seconds, 1)
+            self.health["last_cycle_phases"] = self.last_cycle_phases
             self.cycle_started = None
+            self.last_cycle_done = time.monotonic()
+
+    def phase_mark(self, name):
+        """Cycle timing: the time since the previous mark is added to phase `name` (summary line, status.json)."""
+        t = time.monotonic()
+        phases = getattr(self, "cycle_phases", None)
+        if phases is not None:
+            phases[name] = phases.get(name, 0.0) + t - getattr(self, "phase_t", t)
+        self.phase_t = t
+
+    def phases_text(self):
+        """The last cycle's length and where it went, for the summary line: '31.2 s (reads 2.1, ...)'."""
+        ph = getattr(self, "last_cycle_phases", None) or {}
+        parts = ", ".join(f"{k} {v:.1f}" for k, v in ph.items() if v >= 0.05)
+        return f"{self.last_cycle_seconds:.1f} s" + (f" ({parts})" if parts else "")
 
     def progress(self, phase):
         """Inside a cycle: if it's running long, keep status.json fresh (it's otherwise written only after a
@@ -2803,6 +2924,7 @@ class Bot:
             self.reverify_books(mine_real, now_m)  # books unconfirmed for a while: cheap bulk check first
 
         self.log_priming()
+        self.phase_mark("reads")
         self.progress("books")
 
         # 3. Fair values ---------------------------------------------------------------------------
@@ -2834,6 +2956,7 @@ class Bot:
         if cfg.size_by_activity:
             self.update_size_plan(now_m, fvs)
 
+        self.phase_mark("fair_values")
         # 4. Fills (every slow_poll_seconds, and straight after a fill) --------------------------------
         if read_fills:
             new_fills = self.log_fills(fvs)
@@ -2871,12 +2994,13 @@ class Bot:
         ages = self.portfolio_age(time.time())
         if full:                                  # summary line on full checks only (event cycles can be every 2 s)
             log.info("%s | account %s (locked in orders %.0f, %s) | worst-case loss %.0f (risk %.0f)%s | party delta %+.0f | "
-                     "priced %d/%d | resting %d",
+                     "priced %d/%d | resting %d | last cycle %s",
                      "realtime" if realtime else ("polling (realtime connecting)" if self.feed else "polling"),
                      f"{equity:.0f}" if equity is not None else "?", reserved,
                      {"add": "added back", "ignore": "already included"}.get(self.reserved_mode, "detecting"), worst, risk,
                      " -> REDUCE-ONLY" if global_reduce else "", party_delta,
-                     sum(v is not None for v in fvs.values()), len(fvs), sum(len(v) for v in resting.values()))
+                     sum(v is not None for v in fvs.values()), len(fvs), sum(len(v) for v in resting.values()),
+                     self.phases_text())
         self.health = {"account_value": equity, "locked_in_orders": round(reserved, 2),
                        "reserved_cash_mode": self.reserved_mode or "detecting", "worst_case_loss": round(worst, 2),
                        "reduce_only": global_reduce, "party_delta": party_delta,
@@ -2912,6 +3036,7 @@ class Bot:
         taken = (self.take_stale_quotes(refs, liquid, fvs, inv, mine_real, global_reduce, party_delta, now_m)
                  if self.running else set())
 
+        self.phase_mark("fills_risk_takes")
         # 7. Decide + reconcile each exchange. One write at a time (parallel_writes = 1): cancels happen now,
         #    new orders are batched after. Otherwise every change is planned first, then sent in parallel.
         new_orders, changes = [], []
@@ -2931,12 +3056,14 @@ class Bot:
                     new_orders += self.reconcile(ex, ex.quote, resting.get(eid, []), fvs.get(eid), now, now_m)
             except ApiError as e:         # one exchange failing must not stop the others
                 log.error("exchange %s (%s): %s", eid, ex.label, e)
+        self.phase_mark("decide")
         self.progress("sending orders")
         if self.running:
             if cfg.parallel_writes > 1:
                 self.send_changes(changes)
             else:
                 self.place(new_orders, now_m)
+                self.phase_mark("send")
         # Orders resting NOW, after this cycle's changes (the health snapshot above was taken before them).
         self.health["orders_resting"] = len(self.my_orders) if self.api.live else len(self.sim)
         self.health["fast_unload_windows"] = sum(1 for e in list(self.unloads)
@@ -3948,10 +4075,16 @@ class Bot:
         pulling orders is always allowed, unless a cancel is already on its way."""
         if busy(ex, now_m):
             if q.bid is None and q.ask is None and resting and not ex.cancelling:
-                return Change(ex, resting, True, [], self.change_key(ex, pull=True, reprice=True), count=False)
+                return Change(ex, resting, True, [], self.change_key(ex, pull=True, reprice=True), count=False,
+                              unsafe=True)
             return None
 
-        full_bid, full_ask = q.bid_size, q.ask_size      # the normal sizes: still the ceiling in burst mode
+        # The normal sizes (no size factor: burst, capital ceiling, favourite-longshot), within every position /
+        # cash limit: the most a resting order may hold and still stay. A full-size order placed before a factor
+        # shrank the wanted size is kept, not pulled as "unsafe" (2 Oct 11:31: the capital ceiling's x0.25 made
+        # ~200 resting orders urgent reprices at once, which bypassed the budget and drew the 429s).
+        full_bid = max(q.bid_size, q.bid_max or 0) if q.bid is not None else q.bid_size
+        full_ask = max(q.ask_size, q.ask_max or 0) if q.ask is not None else q.ask_size
         if self.burst and self.cfg.burst_size_factor != 1.0:
             # Burst mode places burst_size_factor of each size: compare what rests with THAT size, or a half-size
             # order fails keep_fraction (187 of 375 < 50%) and is cancelled and replaced every cycle. A full-size
@@ -4002,7 +4135,8 @@ class Bot:
                    if fix_ask and q.ask is not None and not asks and not cool_ask else []))
             if not doomed and not new:
                 return None
-            return Change(ex, doomed, False, new, self.change_key(ex, pull=bool(doomed) or not new, reprice=bool(doomed)))
+            return Change(ex, doomed, False, new, self.change_key(ex, pull=bool(doomed) or not new, reprice=bool(doomed)),
+                          unsafe=bool(doomed))
         # Cancel the wrong side(s). Both wrong -> one cancel-all for the exchange; else per order.
         doomed = (bids if fix_bid else []) + (asks if fix_ask else [])
         new = []
@@ -4018,12 +4152,15 @@ class Bot:
                  fmt(q.bid, q.bid_size), fmt(q.ask, q.ask_size) + ex.fl_tag + ex.turnover_tag)
         if not doomed and not new:
             return None
-        # An order that must not stay (unsafe) makes this change as urgent as a pull: never deferred by the budget.
-        urgent = self.cfg.never_defer_unsafe and (
-            (fix_bid and any(unsafe_order(o, q.bid, full_bid, q.bid_limit, True) for o in bids))
-            or (fix_ask and any(unsafe_order(o, q.ask, full_ask, q.ask_limit, False) for o in asks)))
+        # An order that must not stay (unsafe: beyond its limit price, a side we no longer want, or above the
+        # position / cash limits - NOT merely above a size factor, see full_bid) makes this change as urgent as a
+        # pull: never deferred by the budget (but capped by urgent_writes_per_cycle).
+        unsafe = ((fix_bid and any(unsafe_order(o, q.bid, full_bid, q.bid_limit, True) for o in bids))
+                  or (fix_ask and any(unsafe_order(o, q.ask, full_ask, q.ask_limit, False) for o in asks)))
+        urgent = self.cfg.never_defer_unsafe and unsafe
         return Change(ex, doomed, fix_bid and fix_ask, new,
-                      self.change_key(ex, pull=not new or urgent, reprice=bool(doomed)))
+                      self.change_key(ex, pull=not new or urgent, reprice=bool(doomed)),
+                      unsafe=unsafe or (not new and bool(doomed)))
 
     def hold_side(self, ex, resting, price, limit, size, is_bid, now, now_m):
         """Churn control: keep this side's single resting order although it's off target, because it's still safe
@@ -4135,7 +4272,8 @@ class Bot:
         if self.pull_storm(changes):
             return
         deadline = time.monotonic() + cfg.write_wait_seconds
-        changes = sorted(changes, key=lambda c: c.key)
+        # Urgent changes (key[0] == 0) that remove an unsafe order go first among them (urgent_writes_per_cycle).
+        changes = sorted(changes, key=lambda c: (c.key[0], 0 if c.key[0] == 0 and c.unsafe else 1) + tuple(c.key[1:]))
         # Within the request budget, keeping write_read_reserve back so reads (positions, orders, books) never
         # starve; the least urgent changes wait for the next cycle.
         writes_left = getattr(self.api, "writes_left", lambda: 10 ** 6)()
@@ -4145,18 +4283,25 @@ class Bot:
             used = int(getattr(self.api, "wbudget", 0)) - writes_left
             writes_left = min(writes_left, cfg.startup_writes_per_minute - used)
         spare = min(getattr(self.api, "budget_left", lambda: 10 ** 6)() - self.write_reserve(), writes_left)
-        kept, cost, orders = [], 0.0, 0
+        kept, cost, orders, urgent_cost, capped = [], 0.0, 0, 0, False
+        cap = cfg.urgent_writes_per_cycle
         for ch in changes:
             n = orders + len(ch.new)
             c = (0 if not ch.doomed else 1 if ch.whole else len(ch.doomed)) + (
                 math.ceil(n / cfg.batch_size) - math.ceil(orders / cfg.batch_size))
+            if ch.key[0] == 0 and cap > 0 and urgent_cost + c > cap and urgent_cost > 0:
+                capped = True                 # urgent writes capped: the rest (and everything after) next cycle
+                break
             if cost + c > spare and ch.key[0] != 0:
                 break                         # pulls always go; everything after the first misfit waits
             kept.append(ch)
             cost, orders = cost + c, n
+            if ch.key[0] == 0:
+                urgent_cost += c
         if len(kept) < len(changes):
-            log.info("request budget: %d of %d order changes deferred to the next cycle",
-                     len(changes) - len(kept), len(changes))
+            log.info("request budget: %d of %d order changes deferred to the next cycle%s",
+                     len(changes) - len(kept), len(changes),
+                     f" (urgent writes capped at {cap}/cycle)" if capped else "")
         changes = kept
         now_m = time.monotonic()
         for ch in changes:
@@ -4166,6 +4311,7 @@ class Bot:
             if ch.doomed:
                 waiting.add(self.submit_write("cancel", [ch.ex.eid], (ch.doomed, ch.whole), change=ch))
         self.send_orders([c for c in changes if not c.doomed and c.new])
+        self.phase_mark("send")
         while self.running:
             # Only cancels sent by THIS call release their new orders: a late one from an earlier cycle carries
             # that cycle's prices (the next cycle re-plans that exchange instead).
@@ -4178,6 +4324,7 @@ class Bot:
             wait([w.future for w in self.writes], timeout=left, return_when=FIRST_COMPLETED)
             self.progress("waiting for order writes")
         self.harvest_writes()
+        self.phase_mark("wait")
 
     def pull_storm(self, changes):
         """Many pulls at once (reduce-only switching on pulls a side on every market held; pulls bypass the write
@@ -4675,8 +4822,20 @@ class Bot:
             return False
         return self.settlement_risk(after, fvs, after_pd) <= self.settlement_risk(inv, fvs, before_pd) + 1e-6
 
+    def writes_ready(self, n):
+        """Main thread: True if n writes can go now without waiting for the write budget or a 429 pause."""
+        if not self.api.live:
+            return True
+        wait_s = getattr(self.api, "write_wait", lambda: 0.0)()
+        left = getattr(self.api, "writes_left", lambda: 10 ** 6)()
+        return wait_s <= self.cfg.write_wait_seconds and left >= n
+
     def execute_arbitrage(self, race, members, levels, qty, fvs, now_m, action="sell", kind="arb"):
         cfg = self.cfg
+        if not self.writes_ready(len(members) + 1):
+            log.info("%s on %s skipped: write budget busy (next cycle)", "pair unwind" if kind == "unwind"
+                     else "arbitrage", race)
+            return
         total = sum(p for p, _ in levels.values())
         per_set = total - 1 if action == "sell" else 1 - total
         legs = ", ".join(f"{self.ex[e].label} @{p:.3f} x{s:.0f}" for e, (p, s) in levels.items())
@@ -4768,6 +4927,8 @@ class Bot:
                     or busy(ex, now_m) or global_reduce
                     or self.hours_to_close(ex) <= cfg.flatten_hours_before_close):
                 continue
+            if not self.writes_ready(3):          # cancel + take + leftover cancel, on the main thread
+                continue                          # (the direction stays confirmed: taken once the budget frees)
             no_bid, no_ask = self.party_blocks(ex, party_delta)
             if (ex.take_dir > 0 and no_bid) or (ex.take_dir < 0 and no_ask):
                 continue
@@ -5199,7 +5360,10 @@ class Bot:
             write_json(bot_path(self.cfg.status_file), {
                 "updated": iso(utcnow()), "mode": "live" if self.api.live else "dry run",
                 "last_cycle_ok": ok, "failed_cycles_in_a_row": self.failed_cycles,
-                "quotes_pulled_after_errors": self.pulled_after_errors, **self.health})
+                "quotes_pulled_after_errors": self.pulled_after_errors, **self.health,
+                **(self.api.pause_state() if hasattr(self.api, "pause_state") else {}),
+                "seconds_since_cycle": round(time.monotonic() - self.last_cycle_done, 1)
+                if self.last_cycle_done is not None else None})
         except OSError as e:
             log.warning("could not write status file: %s", e)
 
@@ -5354,6 +5518,77 @@ class Bot:
         self.hard_exit(0)
 
     hard_exit = staticmethod(os._exit)    # no interpreter clean-up: it would wait for the writer threads
+
+    # ------------------------------------------------------------------------------ watchdog
+    def start_watchdog(self):
+        if self.watchdog_thread is None:
+            self.watchdog_thread = threading.Thread(target=self.watchdog_loop, name="watchdog", daemon=True)
+            self.watchdog_thread.start()
+
+    def watchdog_loop(self):
+        while self.running:
+            try:
+                self.watchdog_check(time.monotonic())
+            except Exception:                     # the watchdog itself must never die quietly
+                log.exception("watchdog check failed")
+            time.sleep(5.0)
+
+    def watchdog_check(self, now_m):
+        """Watchdog thread: alert when no cycle has completed for watchdog_alert_seconds; after
+        watchdog_exit_seconds dump every thread's stack, cancel everything (bounded) and exit with EXIT_WATCHDOG
+        so systemd restarts the bot. Returns "alert" / "exit" / None (tests)."""
+        cfg = self.cfg
+        ref = self.last_cycle_done if self.last_cycle_done is not None else self.trading_since
+        if ref is None or not self.running:
+            return None
+        since = now_m - ref
+        if since < 1:
+            self.watchdog_alerted = False
+        if cfg.watchdog_exit_seconds > 0 and since >= cfg.watchdog_exit_seconds:
+            self.watchdog_exit(since)
+            return "exit"
+        if cfg.watchdog_alert_seconds > 0 and since >= cfg.watchdog_alert_seconds and not self.watchdog_alerted:
+            self.watchdog_alerted = True
+            alert(f"WATCHDOG: no cycle completed for {since:.0f} s (phase: {self.health.get('cycle_phase', '?')}, "
+                  f"429 pause {self.api.pause_left() if hasattr(self.api, 'pause_left') else 0:.0f} s left)"
+                  + (f" - exiting for a restart at {cfg.watchdog_exit_seconds:.0f} s" if cfg.watchdog_exit_seconds else ""))
+            return "alert"
+        if since < cfg.watchdog_alert_seconds:
+            self.watchdog_alerted = False
+        return None
+
+    def watchdog_exit(self, since):
+        log.critical("WATCHDOG: no cycle completed for %.0f s - thread stacks follow, then cancel-all and exit %d",
+                     since, EXIT_WATCHDOG)
+        try:
+            frames = sys._current_frames()
+            names = {t.ident: t.name for t in threading.enumerate()}
+            for ident, frame in frames.items():
+                log.critical("thread %s:\n%s", names.get(ident, ident), "".join(traceback.format_stack(frame)[-8:]))
+        except Exception:
+            pass
+        alert(f"WATCHDOG: no cycle for {since:.0f} s - cancelling everything and exiting (exit {EXIT_WATCHDOG}, "
+              f"systemd restarts the bot)")
+        if self.api.live:
+            done = threading.Event()
+
+            def cancel():
+                try:
+                    self.api.cancel_all(self.tid)
+                    log.critical("watchdog: cancel-all sent")
+                except Exception as e:
+                    log.critical("watchdog: cancel-all failed: %s", e)
+                done.set()
+            threading.Thread(target=cancel, name="watchdog-cancel", daemon=True).start()
+            if not done.wait(self.cfg.watchdog_cancel_seconds):
+                log.critical("watchdog: cancel-all still running after %g s - exiting anyway (orders expire "
+                             "within %.0f min)", self.cfg.watchdog_cancel_seconds, self.cfg.order_ttl / 60)
+        for h in logging.getLogger().handlers + log.handlers:
+            try:
+                h.flush()
+            except Exception:
+                pass
+        self.hard_exit(EXIT_WATCHDOG)
 
     def adopt_handover(self):
         """At start: True if the previous run handed over recently (its orders are ours to manage, not cancel)."""
@@ -5709,6 +5944,7 @@ class Bot:
                         self.orders_stale = True
             self.phase = "trading"
             self.trading_since = time.monotonic()     # startup priming (books first) runs from here
+            self.start_watchdog()
             while self.running:
                 t0 = time.monotonic()
                 try:
