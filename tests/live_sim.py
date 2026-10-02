@@ -306,6 +306,8 @@ class LiveSim(Sim):
             self.lad_gate_hits += not self.lad_writes_ok
         if t % 10 == 0:
             self.arbitrage(t, inv, fvs)
+        if cfg.pair_unwind_passive and t % 5 == 0:      # Package 5 T2.5 (isolated mirror, see pair_passive)
+            self.pair_passive(t, inv, fvs)
         if t % 600 == 0:
             wc = bot.total_worst_case(inv, fvs)
             self.wc_peak = max(self.wc_peak, wc)
@@ -369,6 +371,32 @@ class LiveSim(Sim):
                     self.outsider_arb_sh += done
             self.arb_pnl += per_set * done
             inv.update({m.eid: m.inv for m in ms})
+
+    # ---- Package 5 T2.5: passive pair unwind mirror (isolated; only runs with cfg.pair_unwind_passive) ----
+    def pair_passive(self, t, inv, fvs):
+        """Bot.pair_passive_step on the simulated books every 5 s: a fill of the resting leg -> the other leg taken at
+        once (self.take, our quotes there pulled first). The resting ask goes through Bot.decide, wrapped once with
+        Bot.pair_passive_quote as cycle_body applies it. Counts: self.pp_take_sh (second-leg shares taken)."""
+        bot = self.bot
+        if not getattr(self, "pp_wrapped", False):
+            self.pp_wrapped, self.pp_take_sh, plain = True, 0.0, bot.decide
+            bot.decide = lambda ex, *a, **k: (bot.pair_passive_quote(ex, plain(ex, *a, **k)) if bot.pp
+                                              else plain(ex, *a, **k))
+        by = {}
+        for ms in self.races.values():
+            if len(ms) == 2:
+                for m in ms:
+                    bot.ex[m.eid].book, by[m.eid] = self.book_dict(m), m
+
+        def execute(eid, buy, qty, price):
+            m = by[eid]
+            m.orders = [o for o in m.orders if o.owner != "us"]
+            got = self.take(m, t, buy, qty, price)
+            inv[eid] = m.inv
+            self.pp_take_sh += got
+            return got
+        bot.pair_passive_step(inv, fvs, t, execute=execute)
+    # ---- end Package 5 T2.5 mirror ----
 
     def take(self, m, t, is_buy, qty, limit):
         """Our immediate-or-cancel order: walks other traders' orders up to `limit`; returns shares done."""
