@@ -267,7 +267,9 @@ class Config:
     ladder_size_mults: tuple = (1.0, 2.0, 3.0)      # ...at these multiples of the market's quote size
     ladder_headline_offsets: tuple = (0.02, 0.04, 0.06, 0.08)   # party-control markets: wider levels...
     ladder_headline_mults: tuple = (0.25, 0.25, 0.5, 0.5)       # ...at fractions of their 10,000-share quote
-    ladder_move: float = 0.01             # re-price the ladder only when fair value moved this far from its anchor
+    ladder_move: float = 0.02             # re-price the ladder only when fair value moved this far from its anchor
+                                          #   (was 1c: fair value wobbling 0.50/0.51 re-placed it every cycle; the
+                                          #   sim found holding vs re-anchoring often makes no P&L difference)
     ladder_pull_jump: float = 0.015       # Polymarket moved this far from its reading at the anchor -> pull the
     ladder_pull_seconds: float = 30.0     #   ladder for this long (cheap insurance on news nights)
     ladder_markets: str = "headline,busy" # which markets get one: "headline" (headline_races), "busy" (planned quote
@@ -2173,7 +2175,7 @@ def ladder_lock(o):
     return o.qty * (o.price if o.is_bid else 1 - o.price)
 
 
-def ladder_levels(anchor, q, best_bid, best_ask, offsets, mults, quote_size, cap):
+def ladder_levels(anchor, q, best_bid, best_ask, offsets, mults, quote_size, cap, max_cash=None):
     """R3 resting depth ladder around `anchor` (fair value when the ladder was last placed).
     q          level 0 (the touch Quote): a side gets a ladder only where level 0 quotes it
     offsets    level i (1..n) rests at anchor - offsets[i-1] (bids) / + (asks), on the 0.5c grid away from fair value
@@ -2181,6 +2183,7 @@ def ladder_levels(anchor, q, best_bid, best_ask, offsets, mults, quote_size, cap
     cap        {is_bid: f(price) -> the most shares that side may have in orders in total (level 0 + ladder)}: the
                position limits (Kelly at that price, headline, race-netted, party, reduce-only), already net of the
                position. Levels fill it in order (cumulative clip); a level that would get < 1 share is left out.
+    max_cash   most cash one order may lock (bid: price a share, ask: 1 - price), like max_order_cash_frac
     Never at or inside level 0, never at or through the best OTHER order on the other side (that would trade).
     Returns (want, allowed): want {(is_bid, level): (price, size)}; allowed {(is_bid, level): most shares a resting
     order at that level may still hold (the clip alone)} for every level considered."""
@@ -2201,6 +2204,8 @@ def ladder_levels(anchor, q, best_bid, best_ask, offsets, mults, quote_size, cap
             if px <= PMIN + 1e-9 or px >= PMAX - 1e-9:
                 continue                                        # nothing left to catch at the edge of the grid
             room = max(0, int(cap[is_bid](px) - used))
+            if max_cash is not None:                            # per-order cash cap (level 3 = 3 x the quote)
+                room = min(room, int(max_cash / (px if is_bid else 1 - px)))
             allowed[(is_bid, lvl)] = room
             size = min(int(mult * quote_size), room)
             if size >= 1:
@@ -2803,6 +2808,7 @@ class Bot:
         self.ref_only = set()             # eids priced from Polymarket alone this cycle (thin book, R5)
         self.lad_cash_left = 0.0          # R3 ladder: cash the ladder may still lock this cycle (see ladder_setup)
         self.lad_keep = {}                # ...this exchange's levels a resting ladder order may keep (ladder_targets)
+        self.lad_placed = {}              # ...ladder orderId -> monotonic time placed (churn control)
         self.lad_liquid, self.lad_party_delta = set(), 0.0   # ...this cycle's liquid Polymarket eids, party delta
         # Threads for sending several HTTP requests at once (downloads mostly wait on the network).
         self.pool = ThreadPoolExecutor(max_workers=max(1, cfg.parallel_requests), thread_name_prefix="http")
@@ -4553,13 +4559,14 @@ class Bot:
             return min([c] + extra[False])
         return {True: bid_cap, False: ask_cap}
 
-    def ladder_targets(self, ex, q, fv, now_m):
+    def ladder_targets(self, ex, q, fv, now_m, touch=None):
         """The ladder wanted on this exchange now: (want, allowed, blocked) - see ladder_levels for want/allowed;
         blocked {is_bid: True} = whatever ladder rests on that side must go now (level 0 not quoted there, or the
         ladder is pulled after a Polymarket jump). Moves the anchor: fair value when the ladder is (re)placed, kept
         until fair value is ladder_move from it; a Polymarket move of ladder_pull_jump from its reading at the
         anchor pulls the ladder for ladder_pull_seconds. Spends self.lad_cash_left (levels that don't fit are left
-        out)."""
+        out). touch {is_bid: price}: our resting level-0 prices (a level stays behind those too, or it would be
+        placed and then pulled as at/inside the touch, every cycle)."""
         cfg = self.cfg
         self.lad_keep = {}                        # levels a resting ladder order may keep (see plan_exchange)
         blocked = {True: q.bid is None or q.bid_size <= 0, False: q.ask is None or q.ask_size <= 0}
@@ -4579,15 +4586,21 @@ class Bot:
         if mk is None or ex.eid in self.ref_only:     # not a ladder market, or no depth-checked price (R5)
             return {}, {}, blocked
         offsets, mults, quote = mk
+        t_bid, t_ask = (touch or {}).get(True), (touch or {}).get(False)
+        if q.bid is not None and t_bid is not None:   # behind BOTH the wanted and the resting level 0
+            q = replace(q, bid=min(q.bid, t_bid))
+        if q.ask is not None and t_ask is not None:
+            q = replace(q, ask=max(q.ask, t_ask))
         b = ex.book or {}
         best_bid = b["bids"][0]["price"] if b.get("bids") else None
         best_ask = b["asks"][0]["price"] if b.get("asks") else None
-        want, _ = ladder_levels(ex.lad_fv, q, best_bid, best_ask, offsets, mults, quote,
-                                self.ladder_caps(ex, fv, quote))
+        max_cash = max(cfg.max_order_cash_frac * self.bankroll(), quote)   # (as compute_quote: a planned size
+        want, _ = ladder_levels(ex.lad_fv, q, best_bid, best_ask, offsets, mults, quote,   # is capital-checked)
+                                self.ladder_caps(ex, fv, quote), max_cash)
         # Without the size factors (level 0 at its unscaled size): what a resting ladder order may keep.
         q_max = replace(q, bid_size=max(q.bid_size, q.bid_max or 0), ask_size=max(q.ask_size, q.ask_max or 0))
         keep, allowed = ladder_levels(ex.lad_fv, q_max, best_bid, best_ask, offsets, mults, quote,
-                                      self.ladder_caps(ex, fv, quote, factors=False))
+                                      self.ladder_caps(ex, fv, quote, factors=False), max_cash)
         self.lad_keep = keep
         for key in sorted(want, key=lambda k: (k[1], not k[0])):   # level 1 first: the cash goes to the closest
             px, size = want[key]
@@ -4616,8 +4629,19 @@ class Bot:
             return self.plan_change(ex, q, resting, fv, now, now_m)
         ex.lad_tag = f" L{len(lad)}" if lad else ""
         ch = self.plan_change(ex, q, [o for o in resting if self.order_level(o) == 0], fv, now, now_m)
+        # The touch a ladder order must stay behind: the RESTING level-0 order (kept by reprice tolerance a tick
+        # off its target), else level 0's target. Inside the wanted level 0 but behind the resting touch and
+        # within level 0's limit price is only stale (tier 2), not an urgent pull (a 0.5c dip did that on every
+        # market at once).
+        rest0 = {s_: [o.price for o in resting if o.is_bid == s_ and self.order_level(o) == 0] for s_ in (True, False)}
+        rest0 = {True: max(rest0[True]) if rest0[True] else None, False: min(rest0[False]) if rest0[False] else None}
+        touch = {True: rest0[True] if rest0[True] is not None else q.bid,
+                 False: rest0[False] if rest0[False] is not None else q.ask}
+        for s_ in {o.is_bid for o in (ch.doomed if ch is not None else [])}:
+            touch[s_] = q.bid if s_ else q.ask         # level 0 is re-placed there now: its new price is the touch
+                                                       # (pulls then ride with that change, not as pulls of their own)
         if cfg.ladder_enabled:
-            want, allowed, blocked = self.ladder_targets(ex, q, fv, now_m)
+            want, allowed, blocked = self.ladder_targets(ex, q, fv, now_m, rest0)
         else:
             want, allowed = {}, {}
             blocked = {True: q.bid is None or q.bid_size <= 0, False: q.ask is None or q.ask_size <= 0}
@@ -4626,21 +4650,24 @@ class Bot:
         best_ask = b["asks"][0]["price"] if b.get("asks") else None
         urgent, stale, kept = [], [], set()
         keep = self.lad_keep if cfg.ladder_enabled else {}
+        tol = cfg.reprice_tolerance_ticks * TICK + 1e-9
+        limit = {True: q.bid_limit, False: q.ask_limit}
         for o in lad:
-            key, l0 = (o.is_bid, self.order_level(o)), (q.bid if o.is_bid else q.ask)
+            key, t0, lim = (o.is_bid, self.order_level(o)), touch[o.is_bid], limit[o.is_bid]
             if (blocked[o.is_bid]
-                    or (l0 is not None and (o.price >= l0 - 1e-9 if o.is_bid else o.price <= l0 + 1e-9))
+                    or (t0 is not None and (o.price >= t0 - 1e-9 if o.is_bid else o.price <= t0 + 1e-9))
+                    or (lim is not None and (o.price > lim + 1e-9 if o.is_bid else o.price < lim - 1e-9))
                     or (o.is_bid and best_ask is not None and o.price >= best_ask - 1e-9)
                     or (not o.is_bid and best_bid is not None and o.price <= best_bid + 1e-9)
                     or o.qty > allowed.get(key, o.qty) + 1e-9):
                 urgent.append(o)
                 continue
             w = want.get(key)
-            if (w is not None and key not in kept and abs(o.price - w[0]) < 1e-9
+            if (w is not None and key not in kept and abs(o.price - w[0]) <= tol
                     and w[1] * cfg.keep_fraction <= o.qty <= w[1] + 1e-9
                     and not (o.expires and (o.expires - now).total_seconds() < cfg.refresh_before_expiry)):
                 kept.add(key)                              # exactly right: leave it (and its queue spot) alone
-            elif (key not in kept and key in keep and abs(o.price - keep[key][0]) < 1e-9
+            elif (key not in kept and key in keep and abs(o.price - keep[key][0]) <= tol
                   and (w[1] if w is not None else 0) * cfg.keep_fraction <= o.qty <= keep[key][1] + 1e-9
                   and not (o.expires and (o.expires - now).total_seconds() < cfg.refresh_before_expiry)):
                 kept.add(key)                              # only a size FACTOR wants it smaller / gone: it stays
@@ -4672,6 +4699,15 @@ class Bot:
         # (refill cooldown, back-off) stays while it's safe, like level 0.
         doomed = [o for o in stale if (o.is_bid, self.order_level(o)) in replaced | kept
                   or (o.is_bid, self.order_level(o)) not in want]
+        if cfg.churn_control:                      # churn control: a safe ladder order younger than min_quote_life stays
+            young = {o.order_id for o in doomed
+                     if now_m - self.lad_placed.get(o.order_id, -1e18) < cfg.min_quote_life_seconds}
+            if len(self.lad_placed) > 5000:        # (forget placement times older than an hour)
+                self.lad_placed = {k: v for k, v in self.lad_placed.items() if now_m - v < 3600}
+            if young:
+                doomed = [o for o in doomed if o.order_id not in young]
+                new = [(o, m) for o, m in new if (o["action"] == "buy", m["level"]) not in
+                       {(x.is_bid, self.order_level(x)) for x in stale if x.order_id in young}]
         if not doomed and not new:
             return None
         log.info("%sLADDER %-26.26s anchor %s | bid %s | ask %s | cancel %d", "" if self.api.live else "[dry] ",
@@ -4764,7 +4800,7 @@ class Bot:
                 continue                      #   the ordinary reprices and new quotes behind them still go
             if cost + c > spare and ch.key[0] != 0:
                 break                         # pulls always go; everything after the first misfit waits
-            if ch.key[0] == LADDER_TIER and writes_left - cost - c < cfg.ladder_min_writes:
+            if ch.key[0] == LADDER_TIER and min(spare, writes_left) - cost - c < cfg.ladder_min_writes:
                 break                         # R3 ladder (sorted last): only with ladder_min_writes to spare after it
             kept.append(ch)
             cost, orders = cost + c, n
@@ -4811,7 +4847,9 @@ class Bot:
             return False
         if self.burst:                            # burst mode re-quotes only the top markets: a cancel-all would
             return False                          # leave ~200 safe resting orders empty until the burst ends
-        pulls = sum(1 if c.whole else len(c.doomed) for c in changes if c.key[0] == 0 and c.doomed and not c.new)
+        # (R3 ladder-only pulls don't count: 9 markets x 3 levels must not become a tournament-wide cancel-all)
+        pulls = sum(1 if c.whole else len([o for o in c.doomed if o.order_id not in c.ladder])
+                    for c in changes if c.key[0] == 0 and c.doomed and not c.new)
         if not pulls:                             # (urgent reprices carry new orders: they are not pulls)
             return False
         left = getattr(self.api, "writes_left", lambda: 10 ** 6)()
@@ -5141,6 +5179,8 @@ class Bot:
                                             order["price"], order["quantity"], parse_ts(order["expirationDate"]))
                 if oid is not None:
                     self.order_meta[oid] = {**meta, "eid": order["exchangeId"]}
+                    if meta.get("level"):
+                        self.lad_placed[oid] = now_m      # R3 ladder: min_quote_life (monotonic, like level 0)
                     self.notes_dirty = True
                 self.remember_order(order, data, now_m)       # our record of resting orders
                 if data.get("quantityTraded"):
