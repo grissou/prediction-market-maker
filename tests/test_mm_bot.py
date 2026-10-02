@@ -1634,20 +1634,20 @@ a, b = make_bot(); b.cfg.burst_protection = False
 b.write_log.extend([(time.monotonic(), 30.0, True)] * 5); b.update_burst(time.monotonic())
 check("burst_protection = False: never enters burst mode", not b.burst)
 
-# Start-up: the first cycles are long because of our own throttled book downloads (2 Oct 08:08: 21 s -> burst for
+# Start-up: the first cycles are long because of our own throttled book downloads (2 Oct 08:08: 61 s -> burst for
 # 2 min with a 0.4 s write median). The cycle-length trigger waits out burst_startup_grace_seconds and the first
 # download of every book; slow writes and timeouts still count.
 a, b = make_bot(); b.cycle()
 now_m = time.monotonic()
-b.trading_since, b.last_cycle_seconds = now_m - 5, 21.0
+b.trading_since, b.last_cycle_seconds = now_m - 5, 61.0
 b.update_burst(now_m)
-check("start-up: a 21 s first cycle doesn't trigger burst mode", not b.burst)
+check("start-up: a 61 s first cycle doesn't trigger burst mode", not b.burst)
 b.write_log.extend([(now_m, 18.0, True), (now_m, 16.0, True)])
 b.update_burst(now_m)
 check("...but 2 write timeouts during the start-up grace still do", b.burst)
 a, b = make_bot(); b.cycle()
 now_m = time.monotonic()
-b.trading_since, b.last_cycle_seconds = now_m - 200, 21.0
+b.trading_since, b.last_cycle_seconds = now_m - 200, 61.0
 b.ex["11"].book = None                                     # still downloading the first books
 b.update_burst(now_m)
 check("past the grace, while the first download of every book is still running: no burst from cycle length",
@@ -1657,12 +1657,12 @@ b.update_burst(now_m)
 check("...that part of the grace ends after BURST_LOADING_MAX_SECONDS (a book that never loads can't block it)", b.burst)
 a, b = make_bot(); b.cycle()
 now_m = time.monotonic()
-b.trading_since, b.last_cycle_seconds = now_m - 91, 21.0
+b.trading_since, b.last_cycle_seconds = now_m - 91, 61.0
 b.update_burst(now_m)
-check("past the grace with every book loaded: a 21 s cycle triggers burst mode as before", b.burst)
+check("past the grace with every book loaded: a 61 s cycle triggers burst mode as before", b.burst)
 a, b = make_bot(); b.cycle(); b.cfg.burst_startup_grace_seconds = 0
 now_m = time.monotonic()
-b.trading_since, b.last_cycle_seconds = now_m - 1, 21.0
+b.trading_since, b.last_cycle_seconds = now_m - 1, 61.0
 b.update_burst(now_m)
 check("burst_startup_grace_seconds = 0: the old behaviour (a long first cycle triggers it)", b.burst)
 a, b = make_bot(); b.cfg.selftest_enabled = False
@@ -2113,9 +2113,10 @@ check("write budget: separate from reads (3 writes + 5 reads go at once)", time.
       wapi.writes_left())
 wapi.throttle(write=True)
 check("...a 4th write in the window waits for it", time.monotonic() - t0 >= 0.9, time.monotonic() - t0)
-check("default write budget: starts at 45/min, may grow to 50/min (1-2 Oct: no 429 at >= 40 writes/min; 429s "
-      "seen after 33-53 writes in 60 s, and 60 would starve book reads under the 80/min cap)",
-      Config().writes_per_minute == 45 and Config().writes_per_minute_max == 50 and Config().write_budget_cut == 0.75)
+check("default write budget: 28/min flat (2 Oct live: 4 x 429 while the budget climbed to 36-50/min, 0 at 28), "
+      "burst cycle trigger 60 s (normal cycles take 20-30 s)",
+      Config().writes_per_minute == 28 and Config().writes_per_minute_max == 28 and Config().write_budget_cut == 0.75
+      and Config().burst_cycle_seconds == 60.0)
 check("the positions-409 fallback is bounded by time only by default (120 s): cycles can be 0.5 s apart",
       Config().positions_stale_max_cycles == 0 and Config().positions_stale_max_seconds == 120)
 check("default batch: 10 orders (full 20-order batches were 273 of the 417 '409 in flight' failures)",
@@ -2164,7 +2165,7 @@ check("429 -> request gap doubled (0.4 -> 0.8, then drifts down 1%) and counted"
 # budget that has grown above its start value; a budget at or below the start value is left alone.
 for start_w, want in ((50.0, 37.5), (45.0, 45.0)):
     answers = [Resp(429, {"Retry-After": "0.05"}), Resp(200)]
-    read_api = Api(CFG, False); read_api.wbudget = start_w
+    read_api = Api(__import__("dataclasses").replace(CFG, writes_per_minute=45, writes_per_minute_max=50), False); read_api.wbudget = start_w
     read_api.s.request = lambda *a, **k: answers.pop(0)
     read_api.call("GET", "/x")
     check(f"a read 429 with the write budget at {start_w:g}: budget now {want:g} (cut only above its start value)",
@@ -3247,7 +3248,7 @@ class _Grab(logging.Handler):
     def __init__(s): super().__init__(); s.msgs = []
     def emit(s, r): s.msgs.append(r.getMessage())
 grab = _Grab(); M.log.addHandler(grab); _lvl = M.log.level; M.log.setLevel(logging.WARNING); M.log.propagate = False
-r_api = _Api(_rp(M.CFG, writes_per_minute=45, write_budget_cut=0.75), False)
+r_api = _Api(_rp(M.CFG, writes_per_minute=45, writes_per_minute_max=50, write_budget_cut=0.75), False)
 r_api.gap = 0.0
 def inside_pause(*a, **k):
     # another thread's 429 started a pause just before this request's answer arrives

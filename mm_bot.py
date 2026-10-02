@@ -462,7 +462,8 @@ class Config:
     # safe and only pull, never place. Back to normal after burst_calm_seconds of normal speed.
     burst_protection: bool = True
     burst_write_seconds: float = 5.0      # enter when the median order write of the last minute takes this long...
-    burst_cycle_seconds: float = 20.0     # ...or a cycle takes this long...
+    burst_cycle_seconds: float = 60.0     # ...or a cycle takes this long (2 Oct live: normal cycles take 20-30 s, so 20
+                                          #   fired 4 times with writes at 0.4 s and no timeouts; 60 = owner override)...
     burst_timeouts: int = 2               # ...or this many writes timed out in the last minute
     burst_calm_seconds: float = 120.0     # leave after this long without any of that
     burst_startup_grace_seconds: float = 90.0   # after a (re)start or handover, the cycle-length trigger is ignored
@@ -515,13 +516,15 @@ class Config:
     # NOTE: other commands (status, markets...) run while the bot is live use the same key's budget.
     requests_per_minute: int = 80         # hard budget, sliding 60 s window. Cut by 25% after a 429, then
                                           #   recovers slowly (+1 a minute), so it tunes itself
-    writes_per_minute: int = 45           # separate budget for order writes (each batch, cancel-all or DELETE = 1),
+    writes_per_minute: int = 28           # separate budget for order writes (each batch, cancel-all or DELETE = 1),
+                                          #   2 Oct live (Package 2.3): 4 x 429 in the first hour while the budget
+                                          #   climbed to 36-50/min, 0 since capped at 28: the limit is ~30/min per bot.
                                           #   the value it starts at. A copy of the platform docs says "100 reads and
                                           #   30 writes per minute per key", but 1-2 Oct (16:00-08:08) ran 63 minutes
                                           #   at >= 40 writes (peaks ~60) with no 429; the 6 429s came at 33-53 writes
                                           #   and didn't follow the write rate. 30 deferred changes on every cycle for
                                           #   3 minutes after the 2 Oct 08:08 restart
-    writes_per_minute_max: int = 50       # ...it then grows slowly (+1 per 60 successful writes) up to this while no
+    writes_per_minute_max: int = 28       # ...it then grows slowly (+1 per 60 successful writes) up to this while no
                                           #   write is rate limited (= writes_per_minute: never grows)
     startup_writes_per_minute: int = 30   # while the first download of every book is still running after a (re)start,
                                           #   writes stay at most this (the old budget), so the bigger write budget

@@ -7,7 +7,8 @@ Deploy only commits whose message starts "READY"; the branch is cumulative.
 
 ## Package 4 (Finisher, in progress; branch `claude/finisher-package4`, plan `PLAN_FINISHER.md`)
 Base: team HEAD 58adcac (Package 3 final 439ac54 + the merged ladder fixes L1-L4). Not READY yet: deploy Package 3 final until a
-commit "READY: Package 4" exists. Progress: item 1 (branch + costed plan) done.
+commit "READY: Package 4" exists. Progress: item 1 (branch + costed plan) done. Code defaults now `writes_per_minute` 28, `writes_per_minute_max` 28,
+`burst_cycle_seconds` 60 (the owner's live overrides; test_mm_bot 596/596).
 
 ## HANDOFF (read this if you are picking the work up)
 **State at 14:35 UTC, 2 Oct.** Live: Package 2 (83f6d45) since 11:21:57 with settings_override `{"arb_two_sided": false, "worst_case_backstop_frac": 0.8}`
