@@ -5,6 +5,10 @@ The Builder's previous START_HERE is kept as `START_HERE_BUILDER.md`; Run A's no
 Plan: `PLAN.md`. Packages appear below as they become READY (commit messages start "READY: Package N").
 Deploy only commits whose message starts "READY"; the branch is cumulative.
 
+## Package 4 (Finisher, in progress; branch `claude/finisher-package4`, plan `PLAN_FINISHER.md`)
+Base: team HEAD 58adcac (Package 3 final 439ac54 + the merged ladder fixes L1-L4). Not READY yet: deploy Package 3 final until a
+commit "READY: Package 4" exists. Progress: item 1 (branch + costed plan) done.
+
 ## HANDOFF (read this if you are picking the work up)
 **State at 14:35 UTC, 2 Oct.** Live: Package 2 (83f6d45) since 11:21:57 with settings_override `{"arb_two_sided": false, "worst_case_backstop_frac": 0.8}`
 plus the stop-gap keys below. Deploy candidate: **Package 3 (HEAD, "READY: Package 3")**; it includes 2.1-2.3.
