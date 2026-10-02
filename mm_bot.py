@@ -261,12 +261,19 @@ class Config:
                                           #   reverts is never traded
     take_cooldown_seconds: float = 60.0   # after taking in a market, leave it alone for this long
     take_order_ttl: float = 10.0          # take orders expire after this (leftovers are also cancelled at once)
+    take_ref_max_age_seconds: float = 30.0  # a Polymarket price not re-downloaded for this long never confirms or
+                                          #   triggers a take (a failed download keeps the old price for 5 min and
+                                          #   still counts as a reading). 0 = off
 
     # --- ORDER LIFECYCLE ---------------------------------------------------------------------
     order_ttl: float = 1800.0             # every order expires after 30 min (dead-man's switch). Longer = fewer
                                           #   replacements (each costs requests and our place in line)
     refresh_before_expiry: float = 180.0  # replace an order once it has less than 3 min to live
-    batch_size: int = 20                  # orders per POST /orders/batch
+    batch_size: int = 10                  # orders per POST /orders/batch. Was 20: 1 Oct 16:00-2 Oct 08:08, 273 of
+                                          #   the 417 "409 in flight" batches (each a batch that ran past the 15 s
+                                          #   timeout, then retried) were full 20-order batches, while batches
+                                          #   under 20 failed ~5% of the time. Smaller = faster writes, a bit more
+                                          #   write budget on big re-quotes (a restart: ~6 batches instead of 3)
     parallel_writes: int = 4              # order writes (cancels, batches) in flight at once. Cancels go first, then
                                           #   new orders: party-control (headline) markets first, then the biggest
                                           #   quotes. 1 = the old way: one write at a time, the cycle waiting for each
@@ -3318,8 +3325,11 @@ class Bot:
         if not cfg.take_enabled or not self.refs or version == self.take_version_seen:
             return taken
         self.take_version_seen = version
+        ages = self.refs.ages() if hasattr(self.refs, "ages") else {}
         for eid, ex in self.ex.items():
             p = refs.get(eid)
+            if p is not None and 0 < cfg.take_ref_max_age_seconds < ages.get(f"{ex.group}|{ex.party}", 0.0):
+                p = None                                  # an old price, kept through failed downloads: not evidence
             direction = self.take_direction(ex, p) if (p is not None and eid in liquid) else 0
             if direction != ex.take_dir:
                 ex.take_since = now_m                     # new direction (or none): the clock starts again

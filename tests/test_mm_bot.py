@@ -734,6 +734,19 @@ for e in b.ex.values():
     e.close = utcnow() + timedelta(hours=10)               # inside the 12 h pre-close window
 b.cycle(); later(b); b.refs.new_reading(b.refs.prices, {}); b.cycle()
 check("no taking in the pre-close window (no new positions)", not a.inv, a.inv)
+a, b = take_setup()
+b.refs.ages = lambda: {k: 120.0 for k in b.refs.prices}   # downloads failing: the same old price, re-read
+b.cycle(); later(b); b.refs.new_reading(b.refs.prices, {}); b.cycle()
+check("a Polymarket price not re-downloaded for > take_ref_max_age_seconds never triggers a take", not a.inv, a.inv)
+b.refs.ages = lambda: {k: 2.0 for k in b.refs.prices}     # fresh again: the 30 s confirmation starts over
+b.refs.new_reading(b.refs.prices, {}); b.cycle()
+check("...fresh again: the confirmation starts over (nothing at once)", not a.inv, a.inv)
+later(b); b.refs.new_reading(b.refs.prices, {}); b.cycle()
+check("...then trades once confirmed on fresh readings", a.inv.get("11") == 1000, a.inv)
+a, b = take_setup(); b.cfg.take_ref_max_age_seconds = 0
+b.refs.ages = lambda: {k: 120.0 for k in b.refs.prices}
+b.cycle(); later(b); b.refs.new_reading(b.refs.prices, {}); b.cycle()
+check("take_ref_max_age_seconds = 0: the old behaviour (age not checked)", a.inv.get("11") == 1000, a.inv)
 
 print("--- lagging open-orders list")
 a, b = make_bot()
@@ -1685,6 +1698,8 @@ wapi.throttle(write=True)
 check("...a 4th write in the window waits for it", time.monotonic() - t0 >= 0.9, time.monotonic() - t0)
 check("default write budget: starts at 45/min, may grow to 60/min (1-2 Oct: no 429 at >= 40 writes/min)",
       Config().writes_per_minute == 45 and Config().writes_per_minute_max == 60 and Config().write_budget_cut == 0.75)
+check("default batch: 10 orders (full 20-order batches were 273 of the 417 '409 in flight' failures)",
+      Config().batch_size == 10)
 from dataclasses import replace as _replace
 for pr, pw in ((2, 4), (1, 1), (3, 8)):
     _c = _replace(CFG, parallel_requests=pr, parallel_writes=pw)
