@@ -39,6 +39,13 @@ Checked and found correct: thread-safety of shared state, order recovery vs dupl
   ceiling on positions, all behind settings), Engineer 5 (pair unwinder: sells a long pair when bids sum >= 1, frees ~17k), the
   Strategist's sweeps of R8 headline sizes, R2 strength, age skew, capital ceiling and fast unload with rival bots.
 
+### Package 2 (merged on the branch, NOT yet READY: Reviewer red-team and simulator numbers pending). Code deploy.
+All behind settings. Current defaults (to be confirmed by the Strategist's sweeps): pair unwinder ON, buy-side arbitrage ON
+(ask-sum <= 0.985), race-netted limits ON, age skew ON (0.25c/h after 1 h, max 2c), capital ceiling ON (75% of the account
+in positions -> adding sides withdrawn), thin-book pricing from bulk tops ON + start-up book priming ON, same-side refill
+cooldown ON (2 adding fills / 200 sh in 60 s -> 30 s pause), positions/account_marks recorder ON, favourite-longshot bias OFF.
+Suites after the merges: test_mm_bot 461, test_ref_prices 37, test_strategy 101, test_recorder_refill 37, test_stress 20.
+
 ## Parameter changes (cumulative against live)
 | Setting | Live | New | Evidence | Expected effect |
 |---|---|---|---|---|
