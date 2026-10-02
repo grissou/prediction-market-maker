@@ -2223,27 +2223,6 @@ class Bot:
         for e in self.ref_moved:
             self.ex[e].ref_moved_at = time.monotonic()
 
-    def thin_book_prices(self, fvs, refs, liquid, now_m):
-        """R5: markets whose book is too thin for a depth-checked price (fair_value None) but that have a
-        liquid Polymarket price get fv = Polymarket, if the tournament's raw best bid/ask (other traders,
-        any size, verified recently) are two-sided, not wider than max_spread_for_fv, and their mid is
-        within ref_only_max_gap of Polymarket. Fills fvs in place; returns the set of those eids."""
-        cfg, out = self.cfg, set()
-        for eid, ex in self.ex.items():
-            if fvs.get(eid) is not None or eid not in liquid or eid not in refs or not ex.book:
-                continue
-            if now_m - ex.verified >= cfg.book_stale:
-                continue
-            b = ex.book
-            if not b.get("bids") or not b.get("asks"):
-                continue
-            bb, ba = b["bids"][0]["price"], b["asks"][0]["price"]
-            if ba <= bb or ba - bb > cfg.max_spread_for_fv or abs((bb + ba) / 2 - refs[eid]) > cfg.ref_only_max_gap:
-                continue
-            fvs[eid] = refs[eid]
-            out.add(eid)
-        return out
-
     def reference_jump_guard(self, now_m):
         """After each new Polymarket reading, pull quotes on any market whose Polymarket price moved
         at least ref_jump_threshold since the previous reading. Polymarket usually moves first, so

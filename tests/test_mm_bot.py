@@ -1664,5 +1664,14 @@ finally:
 check("an outage with a failing cancel-all alerts once, not every cycle", n_outage == 1, sent)
 check("recovery alerts once, and only after an alerted outage", n_back == 1 and n_quiet == 0, sent)
 
+# F7: a method defined twice in a class silently shadows the first (thin_book_prices was): none may be.
+import ast
+_dups = []
+for _node in ast.walk(ast.parse(open(M.__file__).read())):
+    if isinstance(_node, ast.ClassDef):
+        _names = [f.name for f in _node.body if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        _dups += [f"{_node.name}.{n}" for n in set(_names) if _names.count(n) > 1]
+check("no method is defined twice in one class (thin_book_prices was)", not _dups, _dups)
+
 print(f"\n{sum(RESULTS)}/{len(RESULTS)} passed")
 sys.exit(0 if all(RESULTS) else 1)
