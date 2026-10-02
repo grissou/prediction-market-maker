@@ -311,6 +311,8 @@ class LiveSim(Sim):
             self.arbitrage(t, inv, fvs)
         if cfg.pair_unwind_passive and t % 5 == 0:      # Package 5 T2.5 (isolated mirror, see pair_passive)
             self.pair_passive(t, inv, fvs)
+        if cfg.hold_target_hours > 0 and t % 5 == 0:    # Package 5 C (isolated mirror, see hold_take)
+            self.hold_take(t, inv)
         if t % 600 == 0:
             wc = bot.total_worst_case(inv, fvs)
             self.wc_peak = max(self.wc_peak, wc)
@@ -400,6 +402,31 @@ class LiveSim(Sim):
             return got
         bot.pair_passive_step(inv, fvs, t, execute=execute)
     # ---- end Package 5 T2.5 mirror ----
+
+    # ---- Package 5 C: hold target take-half mirror (isolated; only runs with cfg.hold_target_hours > 0) ----
+    def hold_take(self, t, inv):
+        """Bot.take_aged on the simulated books every 5 s: the same plan (Bot.hold_take_plan: age >= 2 x
+        hold_target_hours, best other price, 1c floor, per-order / per-minute / hourly caps, first hour closed),
+        executed immediate-or-cancel by self.take with our quotes there pulled first. The quote half needs no
+        mirror (bot_strategy calls Bot.decide). Counts: self.hold_take_sh (shares taken)."""
+        bot = self.bot
+        if not hasattr(self, "hold_take_sh"):
+            self.hold_take_sh = 0.0
+        by, bfvs = {}, {}
+        for m in self.mkts:
+            by[m.eid] = m
+            bot.ex[m.eid].book = self.book_dict(m)
+            bfvs[m.eid] = fair_value(bot.ex[m.eid].book, self.cfg)       # as our_step feeds decide (book_fv)
+
+        def execute(eid, buy, qty, price):
+            m = by[eid]
+            m.orders = [o for o in m.orders if o.owner != "us"]
+            got = self.take(m, t, buy, qty, price)
+            inv[eid] = m.inv
+            self.hold_take_sh += got
+            return got
+        return bot.take_aged(inv, bfvs, {}, t, execute=execute)
+    # ---- end Package 5 C mirror ----
 
     def take(self, m, t, is_buy, qty, limit):
         """Our immediate-or-cancel order: walks other traders' orders up to `limit`; returns shares done."""
@@ -559,7 +586,9 @@ class LiveSim(Sim):
                                          else round(v / max(1, self.lg["cash"])) if k == "lv_cash" else round(v))
                       for k, v in self.lg.items()},
                    dead=sum(1 for e in self.bot.ex.values() if e.turnover_dead),
-                   tx_bind_frac=round(self.tx_bind / max(1, self.tx_quoted), 3))   # Package 5 T2.4
+                   tx_bind_frac=round(self.tx_bind / max(1, self.tx_quoted), 3),   # Package 5 T2.4
+
+                   hold_take_sh=round(getattr(self, "hold_take_sh", 0.0)))
         return out
 
 
