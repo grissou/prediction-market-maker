@@ -1404,6 +1404,61 @@ a, b = make_bot(); b.cfg.burst_protection = False
 b.write_log.extend([(time.monotonic(), 30.0, True)] * 5); b.update_burst(time.monotonic())
 check("burst_protection = False: never enters burst mode", not b.burst)
 
+# Start-up: the first cycles are long because of our own throttled book downloads (2 Oct 08:08: 21 s -> burst for
+# 2 min with a 0.4 s write median). The cycle-length trigger waits out burst_startup_grace_seconds and the first
+# download of every book; slow writes and timeouts still count.
+a, b = make_bot(); b.cycle()
+now_m = time.monotonic()
+b.trading_since, b.last_cycle_seconds = now_m - 5, 21.0
+b.update_burst(now_m)
+check("start-up: a 21 s first cycle doesn't trigger burst mode", not b.burst)
+b.write_log.extend([(now_m, 18.0, True), (now_m, 16.0, True)])
+b.update_burst(now_m)
+check("...but 2 write timeouts during the start-up grace still do", b.burst)
+a, b = make_bot(); b.cycle()
+now_m = time.monotonic()
+b.trading_since, b.last_cycle_seconds = now_m - 200, 21.0
+b.ex["11"].book = None                                     # still downloading the first books
+b.update_burst(now_m)
+check("past the grace, while the first download of every book is still running: no burst from cycle length",
+      not b.burst)
+b.trading_since = now_m - 700
+b.update_burst(now_m)
+check("...that part of the grace ends after BURST_LOADING_MAX_SECONDS (a book that never loads can't block it)", b.burst)
+a, b = make_bot(); b.cycle()
+now_m = time.monotonic()
+b.trading_since, b.last_cycle_seconds = now_m - 91, 21.0
+b.update_burst(now_m)
+check("past the grace with every book loaded: a 21 s cycle triggers burst mode as before", b.burst)
+a, b = make_bot(); b.cycle(); b.cfg.burst_startup_grace_seconds = 0
+now_m = time.monotonic()
+b.trading_since, b.last_cycle_seconds = now_m - 1, 21.0
+b.update_burst(now_m)
+check("burst_startup_grace_seconds = 0: the old behaviour (a long first cycle triggers it)", b.burst)
+a, b = make_bot(); b.cfg.selftest_enabled = False
+run_cycles(b, 1)
+check("run() starts the start-up grace clock when trading starts", b.trading_since is not None)
+
+# Burst half size vs keep_fraction: a size-375 quote is placed as 187; that order must then count as matching
+# (187.5 <= 187 was False: cancelled and replaced every cycle).
+a, b = make_bot(); b.cycle()
+b.burst, b.burst_set, b.burst_cfg = True, {"11"}, b.cfg
+o11 = [o for o in b.my_orders.values() if o.eid == "11"]
+bid11 = [o for o in o11 if o.is_bid][0]; ask11 = [o for o in o11 if not o.is_bid][0]
+q375 = Quote(bid11.price, 375, ask11.price, 375, bid11.price, ask11.price)
+now, now_m = M.utcnow(), time.monotonic()
+ch = b.plan_change(b.ex["11"], q375, [o for o in o11 if not o.is_bid], 0.14, now, now_m)
+check("burst: a 375-share quote is placed at 187 (half)", ch is not None and [o["quantity"] for o, _ in ch.new] == [187],
+      ch and [o["quantity"] for o, _ in ch.new])
+bid11.qty = ask11.qty = 187
+ch = b.plan_change(b.ex["11"], q375, o11, 0.14, now, now_m)
+check("burst: ...and a resting 187 then matches it (no cancel + replace every cycle)", ch is None,
+      ch and (ch.doomed, ch.new))
+b.burst = False
+ch = b.plan_change(b.ex["11"], q375, o11, 0.14, now, now_m)
+check("out of burst mode, the 187 is below keep_fraction of 375 and is replaced at full size",
+      ch is not None and sorted(o["quantity"] for o, _ in ch.new) == [375, 375], ch and ch.new)
+
 a, b = make_bot()
 a.cancel_all = lambda tid, eid=None: (_ for _ in ()).throw(ApiError(0, "NETWORK", "read timed out"))
 b.cfg.selftest_enabled = False

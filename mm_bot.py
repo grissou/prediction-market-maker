@@ -312,6 +312,11 @@ class Config:
     burst_cycle_seconds: float = 20.0     # ...or a cycle takes this long...
     burst_timeouts: int = 2               # ...or this many writes timed out in the last minute
     burst_calm_seconds: float = 120.0     # leave after this long without any of that
+    burst_startup_grace_seconds: float = 90.0   # after a (re)start or handover, the cycle-length trigger is ignored
+                                          #   this long, and while the first download of every book is still running
+                                          #   (at most BURST_LOADING_MAX_SECONDS): those cycles are long because of our
+                                          #   own throttled reads (2 Oct 08:08: 21 s -> burst for 2 min, write median
+                                          #   0.4 s). Slow writes and timeouts still trigger. 0 = no grace
     burst_markets: int = 40               # quote only this many markets: House/Senate, then by planned size
     burst_size_factor: float = 0.5        # new quotes at this fraction of their usual size
     burst_extra_edge: float = 0.005       # ...and this much further from fair value (one tick)
@@ -442,7 +447,7 @@ OVERRIDABLE = {
     "churn_window_seconds": (5.0, 3600.0), "urgent_ref_move": (0.0, 0.10),
     "burst_protection": (False, True), "burst_write_seconds": (0.5, 60.0), "burst_cycle_seconds": (2.0, 600.0),
     "burst_timeouts": (1, 100), "burst_calm_seconds": (0.0, 3600.0), "burst_markets": (1, 300),
-    "burst_size_factor": (0.05, 1.0), "burst_extra_edge": (0.0, 0.05),
+    "burst_size_factor": (0.05, 1.0), "burst_extra_edge": (0.0, 0.05), "burst_startup_grace_seconds": (0.0, 600.0),
     "slow_cycle_alert_seconds": (10.0, 3600.0), "summary_every_hours": (0, 24),
 }
 
@@ -1841,6 +1846,7 @@ class Bot:
         self.write_log = deque()          # (time done, seconds taken, timed out) of recent writes (burst detection)
         self.last_cycle_seconds = 0.0
         self.burst, self.burst_calm_since, self.burst_set = False, 0.0, set()
+        self.trading_since = None         # monotonic time the trading loop started (burst_startup_grace_seconds)
         self.global_reduce = False
         self.ref_moved = set()            # eids whose Polymarket price moved >= urgent_ref_move at the latest reading
         self.ref_version_urgent = 0
@@ -2666,6 +2672,12 @@ class Bot:
                 return Change(ex, resting, True, [], self.change_key(ex, pull=True, reprice=True))
             return None
 
+        if self.burst and self.cfg.burst_size_factor != 1.0:
+            # Burst mode places burst_size_factor of each size: compare what rests with THAT size, or a half-size
+            # order fails keep_fraction (187 of 375 < 50%) and is cancelled and replaced every cycle.
+            k = self.cfg.burst_size_factor
+            q = replace(q, bid_size=max(1, int(q.bid_size * k)) if q.bid_size else 0,
+                        ask_size=max(1, int(q.ask_size * k)) if q.ask_size else 0)
         bids = [o for o in resting if o.is_bid]
         asks = [o for o in resting if not o.is_bid]
         fix_bid = side_needs_change(bids, q.bid, q.bid_size, self.cfg, now, q.bid_limit, is_bid=True)
@@ -2693,22 +2705,20 @@ class Bot:
             fix_ask = fix_ask and (q.ask is None or not asks or any(
                 o.price < (q.ask_limit if q.ask_limit is not None else q.ask) - 1e-9 or o.qty > q.ask_size + 1e-9 for o in asks))
             doomed = (bids if fix_bid else []) + (asks if fix_ask else [])
-            k = self.cfg.burst_size_factor
             new = [] if now_m < ex.pause_until else (
-                ([self.new_order(ex, True, q.bid, max(1, int(q.bid_size * k)), fv, now)] if fix_bid and q.bid is not None and not bids else [])
-                + ([self.new_order(ex, False, q.ask, max(1, int(q.ask_size * k)), fv, now)] if fix_ask and q.ask is not None and not asks else []))
+                ([self.new_order(ex, True, q.bid, q.bid_size, fv, now)] if fix_bid and q.bid is not None and not bids else [])
+                + ([self.new_order(ex, False, q.ask, q.ask_size, fv, now)] if fix_ask and q.ask is not None and not asks else []))
             if not doomed and not new:
                 return None
             return Change(ex, doomed, False, new, self.change_key(ex, pull=bool(doomed) or not new, reprice=bool(doomed)))
         # Cancel the wrong side(s). Both wrong -> one cancel-all for the exchange; else per order.
         doomed = (bids if fix_bid else []) + (asks if fix_ask else [])
         new = []
-        k = self.cfg.burst_size_factor if self.burst else 1.0
-        if now_m >= ex.pause_until:
+        if now_m >= ex.pause_until:       # (sizes already scaled for burst mode above)
             if fix_bid and q.bid is not None:
-                new.append(self.new_order(ex, True, q.bid, max(1, int(q.bid_size * k)), fv, now))
+                new.append(self.new_order(ex, True, q.bid, q.bid_size, fv, now))
             if fix_ask and q.ask is not None:
-                new.append(self.new_order(ex, False, q.ask, max(1, int(q.ask_size * k)), fv, now))
+                new.append(self.new_order(ex, False, q.ask, q.ask_size, fv, now))
         log.info("%s%-26.26s fv %s%s inv %+5.0f race %+5.0f | bid %s ask %s", "" if self.api.live else "[dry] ",
                  ex.label, f"{fv:.3f}" if fv is not None else "  -  ",
                  f" (ref {ex.ref:.3f})" if ex.ref is not None else "", ex.inv, ex.eff,
@@ -2763,6 +2773,17 @@ class Bot:
         return ch.new
 
     # ------------------------------------------------------------------------------ parallel order writes
+    BURST_LOADING_MAX_SECONDS = 600.0     # the "first book download still running" grace never lasts longer
+
+    def starting_up(self, now_m):
+        """Just (re)started: cycles are long because every book is being downloaded for the first time, under our
+        own request budget - not because the exchange is slow. See burst_startup_grace_seconds."""
+        grace = self.cfg.burst_startup_grace_seconds
+        if self.trading_since is None or grace <= 0:
+            return False
+        up = now_m - self.trading_since
+        return up < grace or (up < self.BURST_LOADING_MAX_SECONDS and any(ex.book is None for ex in self.ex.values()))
+
     def update_burst(self, now_m):
         """Burst mode on/off (see BURST PROTECTION). Its effects are in decide() and plan_change()."""
         cfg = self.cfg
@@ -2777,7 +2798,7 @@ class Bot:
         secs = sorted(d for _, d, _ in self.write_log)
         slow = (sum(t for _, _, t in self.write_log) >= cfg.burst_timeouts
                 or (secs and secs[len(secs) // 2] >= cfg.burst_write_seconds)
-                or self.last_cycle_seconds >= cfg.burst_cycle_seconds)
+                or (self.last_cycle_seconds >= cfg.burst_cycle_seconds and not self.starting_up(now_m)))
         if slow:
             self.burst_calm_since = now_m
             if not self.burst:
@@ -4010,6 +4031,7 @@ class Bot:
                         log.warning("clean-slate cancel failed (%s) - going on; leftovers get re-read and managed", e)
                         self.orders_stale = True
             self.phase = "trading"
+            self.trading_since = time.monotonic()
             while self.running:
                 t0 = time.monotonic()
                 try:
