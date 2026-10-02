@@ -52,6 +52,7 @@ All the numbers you can tune (risk limits, spreads, sizes, timings) are in SETTI
 """
 
 import asyncio
+import bisect
 import csv
 import email.utils
 import json
@@ -341,10 +342,18 @@ class Config:
     # NOTE: other commands (status, markets...) run while the bot is live use the same key's budget.
     requests_per_minute: int = 80         # hard budget, sliding 60 s window. Cut by 25% after a 429, then
                                           #   recovers slowly (+1 a minute), so it tunes itself
-    writes_per_minute: int = 30           # separate budget for order writes (each batch, cancel-all or DELETE = 1):
-                                          #   a copy of the platform docs says "100 reads and 30 writes per minute
-                                          #   per key". Day one peaked near 45 cancels/min without a 429, so a batch
-                                          #   probably counts once - CONFIRM with SIG; cut by 25% after a 429 too
+    writes_per_minute: int = 45           # separate budget for order writes (each batch, cancel-all or DELETE = 1),
+                                          #   the value it starts at. A copy of the platform docs says "100 reads and
+                                          #   30 writes per minute per key", but 1-2 Oct (16:00-08:08) ran 63 minutes
+                                          #   at >= 40 writes (peaks ~60) with no 429; the 6 429s came at 33-53 writes
+                                          #   and didn't follow the write rate. 30 deferred changes on every cycle for
+                                          #   3 minutes after the 2 Oct 08:08 restart
+    writes_per_minute_max: int = 60       # ...it then grows slowly (+1 per 60 successful writes) up to this while no
+                                          #   write is rate limited (= writes_per_minute: never grows)
+    write_budget_cut: float = 0.75        # a write answered 429 cuts the write budget to this fraction (min 10/min)
+    never_defer_unsafe: bool = True       # a change that removes an UNSAFE order (beyond its limit price, bigger than
+                                          #   now allowed, or a side we no longer want) is never deferred by the
+                                          #   request budget, like a pull (False = only pure pulls are exempt)
     budget_reserve: int = 20              # requests per minute kept free for orders, cancels and account
                                           #   reads; book downloads only use what's left
     parallel_requests: int = 2            # HTTP requests in flight at once (1 = one at a time)
@@ -426,6 +435,7 @@ OVERRIDABLE = {
     "arb_enabled": (False, True), "arb_min_profit": (0.005, 0.20), "take_enabled": (False, True),
     "take_edge": (0.02, 0.30), "tail_low": (0.0, 0.20), "tail_high": (0.80, 1.0),
     "requests_per_minute": (10, 100), "writes_per_minute": (5, 100), "budget_reserve": (0, 60),
+    "writes_per_minute_max": (5, 100), "write_budget_cut": (0.25, 1.0), "never_defer_unsafe": (False, True),
     "max_books_per_cycle": (1, 100), "book_stale": (60.0, 3600.0), "book_reverify_seconds": (10.0, 1800.0),
     "parallel_writes": (1, 8), "write_wait_seconds": (0.0, 30.0),
     "churn_control": (False, True), "min_quote_life_seconds": (0.0, 120.0), "churn_max_reprices": (1, 100),
@@ -644,9 +654,11 @@ class Api:
                     self._wwindow.popleft()
                 if len(self._wwindow) >= int(self.wbudget):
                     start = max(start, self._wwindow[-int(self.wbudget)] + self.BUDGET_WINDOW)
-                self._wwindow.append(start)
+                bisect.insort(self._wwindow, start)
             self._next_start = general + self.gap   # a write waiting on the WRITE budget never holds up reads
-            self._window.append(start)
+            # Kept sorted: a write held back by the write budget starts later than reads throttled after it, and
+            # the clean-up above and the [-budget] lookup both assume oldest-first order.
+            bisect.insort(self._window, start)
         if start > now:
             time.sleep(start - now)
 
@@ -656,6 +668,10 @@ class Api:
             now = time.monotonic()
             used = sum(1 for t in self._window if now - t < self.BUDGET_WINDOW)
             return int(self.budget) - used
+
+    def write_ceiling(self):
+        """What the self-tuning write budget may grow to: writes_per_minute_max (never below the start value)."""
+        return float(max(self.cfg.writes_per_minute, getattr(self.cfg, "writes_per_minute_max", 0)))
 
     def writes_left(self):
         """How many more order writes fit in the write budget right now."""
@@ -707,8 +723,8 @@ class Api:
             if r.status_code in ok:
                 self.gap = max(self.cfg.min_request_gap, self.gap * 0.99)   # drift back to normal speed
                 self.budget = min(self.cfg.requests_per_minute, self.budget + 1 / 60)   # ~+1 per 60 successes
-                if method != "GET":
-                    self.wbudget = min(self.cfg.writes_per_minute, self.wbudget + 1 / 60)
+                if method != "GET":   # additive increase, up to writes_per_minute_max (AIMD; cut on a 429 below)
+                    self.wbudget = min(self.write_ceiling(), self.wbudget + 1 / 60)
                 return r.status_code, data
 
             err = data.get("error") if isinstance(data, dict) else None
@@ -727,7 +743,7 @@ class Api:
                     if not already_paused:        # the budget was too generous: cut it by a quarter
                         self.budget = max(20.0, self.budget * 0.75)
                         if method != "GET":
-                            self.wbudget = max(10.0, self.wbudget * 0.75)
+                            self.wbudget = max(10.0, self.wbudget * self.cfg.write_budget_cut)
                     self.rate_limited += 1
                 if not already_paused:
                     log.warning("RATE LIMITED (429): pausing all requests for %.0f s; budget now %.0f/min",
@@ -1441,6 +1457,15 @@ def exit_quote(fv, inv, best_bid, best_ask, cfg=CFG, bankroll=None, max_size=Non
         size = int(min(-inv, max(cfg.max_order_cash_frac * bankroll / max(price, TICK), max_size or 0)))
         return Quote(bid=price, bid_size=size) if size >= 1 else NO_QUOTE
     return NO_QUOTE
+
+
+def unsafe_order(o, price, size, limit, is_bid):
+    """A resting order that must not stay: we want nothing on its side, it's beyond its limit price (the price
+    past which the quote loses money; the target price when there's no limit), or bigger than now allowed."""
+    if price is None:
+        return True
+    lim = limit if limit is not None else price
+    return (o.price > lim + 1e-9 if is_bid else o.price < lim - 1e-9) or o.qty > size + 1e-9
 
 
 def side_needs_change(resting, price, size, cfg, now, limit=None, is_bid=True):
@@ -2682,7 +2707,12 @@ class Bot:
                  fmt(q.bid, q.bid_size), fmt(q.ask, q.ask_size))
         if not doomed and not new:
             return None
-        return Change(ex, doomed, fix_bid and fix_ask, new, self.change_key(ex, pull=not new, reprice=bool(doomed)))
+        # An order that must not stay (unsafe) makes this change as urgent as a pull: never deferred by the budget.
+        urgent = self.cfg.never_defer_unsafe and (
+            (fix_bid and any(unsafe_order(o, q.bid, q.bid_size, q.bid_limit, True) for o in bids))
+            or (fix_ask and any(unsafe_order(o, q.ask, q.ask_size, q.ask_limit, False) for o in asks)))
+        return Change(ex, doomed, fix_bid and fix_ask, new,
+                      self.change_key(ex, pull=not new or urgent, reprice=bool(doomed)))
 
     def hold_side(self, ex, resting, price, limit, size, is_bid, now, now_m):
         """Churn control: keep this side's single resting order although it's off target, because it's still safe
@@ -3585,8 +3615,10 @@ class Bot:
                 setattr(cfg, k, v)
                 if k == "requests_per_minute":
                     self.api.budget = min(getattr(self.api, "budget", v), v)
-                if k == "writes_per_minute":
-                    self.api.wbudget = min(getattr(self.api, "wbudget", v), v)
+                if k == "writes_per_minute":          # the owner asked for this rate: start from it now
+                    self.api.wbudget = float(v)
+                if k == "writes_per_minute_max":      # a lower ceiling applies at once; a higher one is grown into
+                    self.api.wbudget = min(getattr(self.api, "wbudget", v), max(v, cfg.writes_per_minute))
                 if k in ("size_min_frac", "size_max_frac", "headline_size_frac", "quote_capital_frac"):
                     self.size_plan_time = -1e9                 # re-plan sizes now
         self.overrides = good

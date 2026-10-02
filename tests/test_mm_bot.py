@@ -1213,6 +1213,38 @@ check("with the request budget nearly gone, every pull still goes out", all(not 
       {e: a.ours(e) for e in ("11", "12", "21")})
 del a.budget_left
 
+# A reprice that removes an UNSAFE order (beyond its limit) is as urgent as a pull: never deferred by the budget.
+a, b = make_bot(); b.cycle()
+rest = lambda e: [o for o in b.my_orders.values() if o.eid == e]
+bid11 = [o for o in rest("11") if o.is_bid][0]
+ask11 = [o for o in rest("11") if not o.is_bid][0]
+now, now_m = M.utcnow(), time.monotonic()
+unsafe_q = Quote(bid11.price - 0.02, int(bid11.qty), ask11.price, int(ask11.qty), bid11.price - 0.01, ask11.price)
+safe_q = Quote(bid11.price + 0.01, int(bid11.qty), ask11.price, int(ask11.qty), bid11.price + 0.01, ask11.price)
+ch_unsafe = b.plan_change(b.ex["11"], unsafe_q, rest("11"), 0.14, now, now_m)
+ch_safe = b.plan_change(b.ex["11"], safe_q, rest("11"), 0.14, now, now_m)
+check("unsafe_order: beyond the limit, oversized or an unwanted side; a better-priced target is safe",
+      unsafe_order(bid11, bid11.price - 0.02, bid11.qty, bid11.price - 0.01, True)
+      and unsafe_order(bid11, bid11.price, bid11.qty - 1, None, True) and unsafe_order(bid11, None, 0, None, True)
+      and not unsafe_order(bid11, bid11.price + 0.01, bid11.qty, bid11.price + 0.01, True))
+check("a reprice whose old bid is now beyond its limit is keyed like a pull (never deferred)",
+      ch_unsafe is not None and ch_unsafe.key[0] == 0 and ch_unsafe.new, ch_unsafe and ch_unsafe.key)
+check("...a reprice of a still-safe order is not (it may wait for budget)", ch_safe is not None and ch_safe.key[0] != 0,
+      ch_safe and ch_safe.key)
+b.cfg.never_defer_unsafe = False
+ch_off = b.plan_change(b.ex["11"], unsafe_q, rest("11"), 0.14, now, now_m)
+check("never_defer_unsafe = False: the old keying (only pure pulls are exempt)", ch_off is not None and ch_off.key[0] != 0)
+b.cfg.never_defer_unsafe = True
+bid21 = [o for o in rest("21") if o.is_bid][0]
+ch_safe21 = b.plan_change(b.ex["21"], Quote(bid21.price + 0.01, int(bid21.qty), None, 0, bid21.price + 0.01, None),
+                          [bid21], 0.5, now, now_m)
+a.budget_left = lambda: 1
+b.send_changes([ch_unsafe, ch_safe21])
+check("with the budget gone, the unsafe reprice goes out and the safe one waits",
+      any(s == "bid" and abs(p - (bid11.price - 0.02)) < 1e-9 for s, p, _ in a.ours("11"))
+      and bid21.order_id in a.orders, (a.ours("11"), a.ours("21")))
+del a.budget_left
+
 a, b = make_bot(); b.cycle()
 real_apply = b.apply_batch
 b.apply_batch = lambda *x: (_ for _ in ()).throw(RuntimeError("boom"))
@@ -1596,7 +1628,17 @@ check("write budget: separate from reads (3 writes + 5 reads go at once)", time.
       wapi.writes_left())
 wapi.throttle(write=True)
 check("...a 4th write in the window waits for it", time.monotonic() - t0 >= 0.9, time.monotonic() - t0)
-check("default write budget: 30/min (conservative reading of the platform docs)", Config().writes_per_minute == 30)
+check("default write budget: starts at 45/min, may grow to 60/min (1-2 Oct: no 429 at >= 40 writes/min)",
+      Config().writes_per_minute == 45 and Config().writes_per_minute_max == 60 and Config().write_budget_cut == 0.75)
+order_api = Api(CFG, False)
+order_api.gap, order_api.budget, order_api.wbudget, order_api.BUDGET_WINDOW = 0.0, 100, 1, 1.0
+order_api.throttle(write=True)
+held = threading.Thread(target=lambda: order_api.throttle(write=True)); held.start()   # waits ~1 s for the write budget
+time.sleep(0.05)
+t0 = time.monotonic(); order_api.throttle(); order_api.throttle(); read_wait = time.monotonic() - t0
+check("a write held by the write budget keeps the request window sorted; reads behind it don't wait",
+      list(order_api._window) == sorted(order_api._window) and read_wait < 0.2, (list(order_api._window), read_wait))
+held.join()
 budget_api = Api(CFG, False)
 budget_api.gap, budget_api.budget, budget_api.BUDGET_WINDOW = 0.001, 5, 1.0   # 5 requests per 1 s, for speed
 t0 = time.monotonic()
@@ -1619,6 +1661,34 @@ t0 = time.monotonic(); status, _ = limited_api.call("GET", "/x"); waited = time.
 check("429 -> waits Retry-After before retrying, then succeeds", status == 200 and waited >= 0.29, f"{waited:.2f}s")
 check("429 -> request gap doubled (0.4 -> 0.8, then drifts down 1%) and counted",
       abs(limited_api.gap - 0.8 * 0.99) < 1e-9 and limited_api.rate_limited == 1, (limited_api.gap, limited_api.rate_limited))
+
+# Write budget AIMD: +1 per 60 successful writes up to writes_per_minute_max; a 429 on a write cuts it.
+from dataclasses import replace as _replace
+aimd_api = Api(_replace(CFG, writes_per_minute=45, writes_per_minute_max=60, write_budget_cut=0.75), False)
+aimd_api.gap, aimd_api.BUDGET_WINDOW = 0.0, 0.001
+aimd_api.s.request = lambda *a, **k: Resp(200)
+for _ in range(60):
+    aimd_api.call("POST", "/orders/batch", body={})
+check("write budget grows +1 per 60 successful writes (45 -> 46)", abs(aimd_api.wbudget - 46) < 1e-6, aimd_api.wbudget)
+aimd_api.wbudget = 59.99
+for _ in range(5):
+    aimd_api.call("POST", "/orders/batch", body={})
+check("...never above writes_per_minute_max (60)", aimd_api.wbudget == 60, aimd_api.wbudget)
+aimd_api.call("GET", "/x")
+check("...reads don't grow the write budget", aimd_api.wbudget == 60)
+answers = [Resp(429, {"Retry-After": "0"}), Resp(200)]
+aimd_api.s.request = lambda *a, **k: answers.pop(0)
+aimd_api._next_start = 0.0
+aimd_api.call("POST", "/orders/batch", body={})
+check("a 429 on a write cuts the write budget by write_budget_cut (60 -> 45, then +1/60 for the retry)",
+      abs(aimd_api.wbudget - (45 + 1 / 60)) < 1e-6, aimd_api.wbudget)
+flat_api = Api(_replace(CFG, writes_per_minute=30, writes_per_minute_max=30), False)
+flat_api.gap, flat_api.BUDGET_WINDOW = 0.0, 0.001
+flat_api.s.request = lambda *a, **k: Resp(200)
+for _ in range(120):
+    flat_api.call("DELETE", "/orders/1")
+check("writes_per_minute_max = writes_per_minute: the budget never grows (old behaviour)", flat_api.wbudget == 30,
+      flat_api.wbudget)
 
 # HTML error page: retried as transient, then an ApiError - never a crash. (Sleeping disabled.)
 class R:
