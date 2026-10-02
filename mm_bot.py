@@ -589,8 +589,8 @@ class Config:
     fast_unload_enabled: bool = False      # a quote fill that ADDED to a position opens an "unload window" there
     fast_unload_min_edge: float = 0.02    # ...if it had at least this edge at the quote (vs fv when quoted)...
     fast_unload_min_shares: int = 100     # ...and at least this many shares
-    fast_unload_seconds: float = 300.0    # how long the window stays open
-    fast_unload_edge: float = 0.005       # the reducing side quotes this far from fair value (not min_edge / the
+    fast_unload_seconds: float = 180.0    # how long the window stays open (only its first placement is urgent)
+    fast_unload_edge: float = 0.01        # the reducing side quotes this far from fair value (not min_edge / the
                                           #   ref_only edge, not pennying), never through fair; 0 = fv rounded away
     fast_unload_size_mult: float = 1.0    # reducing size = shares still to unload x this, capped by the position
 
@@ -598,12 +598,12 @@ class Config:
     # Data (Explorer): P(fill in 10 min) 33-34% AT the best, 6-8% one tick behind; our reducing side was at the
     # best only 24% of the time; 11 of 12 positions >= 1,000 sh had no reducing fill in 6 h; round trips made all
     # the realised profit (+1,824 on 254k shares). So the side that shrinks |race-netted position| joins the best.
-    reduce_join_best: bool = False         # that side quotes AT the best other price on its side (joins the queue,
-                                          #   no pennying), or at fair +- reduce_join_min_edge rounded away if the
-                                          #   best is closer than that; never crossing. The inventory / age skews
-                                          #   then only move the ADDING side (and the sizes); a fast unload window
-                                          #   still wins when closer to fair. Off in reduce-only (stricter anyway)
-    reduce_join_min_edge: float = 0.005    # closest the joining side may sit to fair value (0 = fv rounded away)
+    reduce_join_best: bool = False         # when the best other price on that side is INSIDE our normal quote, that
+                                          #   side joins it (AT the best, no pennying), but never closer than
+                                          #   reduce_join_min_edge to fair (rounded away) and never crossing. A best
+                                          #   outside our quote changes nothing (we stay the best). A fast unload
+                                          #   window still wins when closer to fair. Off in reduce-only
+    reduce_join_min_edge: float = 0.01    # closest the joining side may sit to fair value (0 = fv rounded away)
     reduce_join_min_shares: int = 100     # only while |race-netted position| is at least this
 
     # --- TURNOVER CONTROL (adding side in markets whose position cannot turn) -----------------
@@ -1908,13 +1908,13 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
     # 4a. Reducing side joins the best other price on its side (reduce_join_best): never through fair, never crossing.
     if cfg.reduce_join_best and not reduce_only and abs(eff_inv) >= max(1, cfg.reduce_join_min_shares):
         if eff_inv > 0 and best_ask is not None:
-            ask = max(ceil_tick(best_ask), ceil_tick(fv + cfg.reduce_join_min_edge))
+            ask = min(ask, max(ceil_tick(best_ask), ceil_tick(fv + cfg.reduce_join_min_edge)))   # never moves out
             if best_bid is not None:
                 ask = max(ask, ceil_tick(best_bid + TICK))
             ask_lo = min(ask_lo, ask)
             bid = min(bid, floor_tick(ask - TICK))
         elif eff_inv < 0 and best_bid is not None:
-            bid = min(floor_tick(best_bid), floor_tick(fv - cfg.reduce_join_min_edge))
+            bid = max(bid, min(floor_tick(best_bid), floor_tick(fv - cfg.reduce_join_min_edge)))
             if best_ask is not None:
                 bid = min(bid, floor_tick(best_ask - TICK))
             bid_hi = max(bid_hi, bid)
@@ -4184,8 +4184,8 @@ class Bot:
             return False
         if ex.eid in self.ref_moved or now_m - ex.ref_moved_at < 15:
             return False                                  # Polymarket moved here lately: follow it now
-        if self.unload_side(ex, now_m) == ("bid" if is_bid else "ask"):
-            return False                                  # fast unload window: place the unload quote now
+        if self.unload_urgent(ex, now_m) == ("bid" if is_bid else "ask"):
+            return False                                  # new fast unload window: place the unload quote now
         young = o.order_id in self.recent_orders and now_m - self.recent_orders[o.order_id][1] < cfg.min_quote_life_seconds
         hist = ex.reprices.get("bid" if is_bid else "ask") or deque()
         while hist and now_m - hist[0] > cfg.churn_window_seconds:
@@ -4201,7 +4201,7 @@ class Bot:
     def change_key(self, ex, pull, reprice=False):
         """Sending order: pulls first, then the party-control markets, then quotes for empty sides (cheap: a
         share of one batch), then reprices (a cancel each), biggest quotes first within each."""
-        urgent = ex.eid in self.ref_moved or ex.eid in self.unloads      # (fast unload: first batch too)
+        urgent = ex.eid in self.ref_moved or self.unload_urgent(ex, time.monotonic())   # (unload: first placement)
         return (0 if pull else 0.5 if urgent else 1, 0 if ex.group in self.cfg.headline_races else 1,
                 1 if reprice else 0,
                 -self.size_plan.get(ex.eid, 0))
@@ -4559,6 +4559,9 @@ class Bot:
         orders, unless it traded in full straight away. Every placement goes through here (quotes,
         arbitrage, takes), so the bot never quotes on top of an order it doesn't know about."""
         oid = data.get("orderId")
+        w = self.unloads.get(str(order.get("exchangeId")))
+        if w is not None and w["side"] == ("bid" if order.get("action") == "buy" else "ask"):
+            w["placed"] = True                            # fast unload: later reprices follow normal churn rules
         traded = float(data.get("quantityTraded") or 0)
         left = order["quantity"] - traded
         if not self.api.live or oid is None or left <= 0:
@@ -5177,6 +5180,11 @@ class Bot:
             del self.unloads[ex.eid]
             return None
         return w["side"]
+
+    def unload_urgent(self, ex, now_m):
+        """The side of an open fast unload window whose unload quote has not been placed yet (urgent), else None."""
+        side = self.unload_side(ex, now_m)
+        return side if side and not self.unloads[ex.eid].get("placed") else None
 
     def load_order_notes(self):
         """Order notes saved by a previous run (so fills that land around a restart get attributed)."""
