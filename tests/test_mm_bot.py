@@ -1388,6 +1388,18 @@ threads = [threading.Thread(target=lambda: [real_api.throttle() for _ in range(3
 [t.start() for t in threads]; [t.join() for t in threads]
 elapsed = time.monotonic() - t0
 check("rate limiter spaces 12 requests from 4 threads >= 0.05 s apart", 0.5 <= elapsed < 1.5, f"{elapsed:.2f}s")
+wapi = Api(CFG, False)
+wapi.gap, wapi.budget, wapi.wbudget, wapi.BUDGET_WINDOW = 0.001, 100, 3, 1.0     # 3 writes per 1 s, for speed
+t0 = time.monotonic()
+for _ in range(3):
+    wapi.throttle(write=True)
+for _ in range(5):
+    wapi.throttle()                                         # reads aren't held back by the write budget
+check("write budget: separate from reads (3 writes + 5 reads go at once)", time.monotonic() - t0 < 0.3 and wapi.writes_left() == 0,
+      wapi.writes_left())
+wapi.throttle(write=True)
+check("...a 4th write in the window waits for it", time.monotonic() - t0 >= 0.9, time.monotonic() - t0)
+check("default write budget: 30/min (conservative reading of the platform docs)", Config().writes_per_minute == 30)
 budget_api = Api(CFG, False)
 budget_api.gap, budget_api.budget, budget_api.BUDGET_WINDOW = 0.001, 5, 1.0   # 5 requests per 1 s, for speed
 t0 = time.monotonic()

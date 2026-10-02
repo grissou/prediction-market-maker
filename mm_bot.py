@@ -293,6 +293,10 @@ class Config:
     # NOTE: other commands (status, markets...) run while the bot is live use the same key's budget.
     requests_per_minute: int = 80         # hard budget, sliding 60 s window. Cut by 25% after a 429, then
                                           #   recovers slowly (+1 a minute), so it tunes itself
+    writes_per_minute: int = 30           # separate budget for order writes (each batch, cancel-all or DELETE = 1):
+                                          #   a copy of the platform docs says "100 reads and 30 writes per minute
+                                          #   per key". Day one peaked near 45 cancels/min without a 429, so a batch
+                                          #   probably counts once - CONFIRM with SIG; cut by 25% after a 429 too
     budget_reserve: int = 20              # requests per minute kept free for orders, cancels and account
                                           #   reads; book downloads only use what's left
     parallel_requests: int = 2            # HTTP requests in flight at once (1 = one at a time)
@@ -492,6 +496,8 @@ class Api:
         self._lock = threading.Lock()     # several threads send requests at once (parallel_requests)
         self._window = deque()            # start times of requests in the last BUDGET_WINDOW seconds
         self.budget = float(cfg.requests_per_minute)   # current per-minute budget (self-tuning)
+        self.wbudget = float(cfg.writes_per_minute)    # ...and for order writes on their own (self-tuning)
+        self._wwindow = deque()           # start times of writes in the last BUDGET_WINDOW seconds
         self.rate_limited = 0             # how many 429s we've had (shown in status.json - should stay 0)
         self.s = requests.Session()
         self.s.headers.update({"Authorization": f"Bearer {cfg.api_key}", "Content-Type": "application/json"})
@@ -500,7 +506,7 @@ class Api:
 
     BUDGET_WINDOW = 60.0                  # seconds the per-minute budget is measured over
 
-    def throttle(self):
+    def throttle(self, write=False):
         """Rate limiter for every request, across all threads:
           1. never more than `self.budget` requests in any BUDGET_WINDOW seconds (hard cap), and
           2. request starts at least `self.gap` apart (smooths bursts).
@@ -512,6 +518,12 @@ class Api:
             start = max(now, self._next_start)
             if len(self._window) >= int(self.budget):
                 start = max(start, self._window[-int(self.budget)] + self.BUDGET_WINDOW)
+            if write:
+                while self._wwindow and now - self._wwindow[0] >= self.BUDGET_WINDOW:
+                    self._wwindow.popleft()
+                if len(self._wwindow) >= int(self.wbudget):
+                    start = max(start, self._wwindow[-int(self.wbudget)] + self.BUDGET_WINDOW)
+                self._wwindow.append(start)
             self._next_start = start + self.gap
             self._window.append(start)
         if start > now:
@@ -523,6 +535,12 @@ class Api:
             now = time.monotonic()
             used = sum(1 for t in self._window if now - t < self.BUDGET_WINDOW)
             return int(self.budget) - used
+
+    def writes_left(self):
+        """How many more order writes fit in the write budget right now."""
+        with self._lock:
+            now = time.monotonic()
+            return int(self.wbudget) - sum(1 for t in self._wwindow if now - t < self.BUDGET_WINDOW)
 
     def call(self, method, path, params=None, body=None, ok=(200, 201, 207), retry_sent=True):
         """One HTTP request with rate limiting and retries.
@@ -538,7 +556,7 @@ class Api:
         retries = self.cfg.max_retries
         delay = 0.25                      # first back-off wait; doubles each retry up to 8 s
         for attempt in range(retries + 1):
-            self.throttle()
+            self.throttle(write=method != "GET")
             try:
                 r = self.s.request(method, self.cfg.base_url + path, timeout=self.cfg.request_timeout,
                                    params={k: v for k, v in (params or {}).items() if v is not None},
@@ -563,6 +581,8 @@ class Api:
             if r.status_code in ok:
                 self.gap = max(self.cfg.min_request_gap, self.gap * 0.99)   # drift back to normal speed
                 self.budget = min(self.cfg.requests_per_minute, self.budget + 1 / 60)   # ~+1 per 60 successes
+                if method != "GET":
+                    self.wbudget = min(self.cfg.writes_per_minute, self.wbudget + 1 / 60)
                 return r.status_code, data
 
             err = data.get("error", {}) if isinstance(data, dict) else {}
@@ -578,6 +598,8 @@ class Api:
                     self.gap = min(self.cfg.max_request_gap, self.gap * 2)
                     if not already_paused:        # the budget was too generous: cut it by a quarter
                         self.budget = max(20.0, self.budget * 0.75)
+                        if method != "GET":
+                            self.wbudget = max(10.0, self.wbudget * 0.75)
                     self.rate_limited += 1
                 if not already_paused:
                     log.warning("RATE LIMITED (429): pausing all requests for %.0f s; budget now %.0f/min",
@@ -1742,6 +1764,7 @@ class Bot:
                        "arbitrages_total": self.arbs_total,
                        "rate_limited_total": getattr(self.api, "rate_limited", 0),     # should stay 0
                        "request_budget_per_min": round(getattr(self.api, "budget", 0)),
+                       "write_budget_per_min": round(getattr(self.api, "wbudget", 0)),
                        "requests_last_min": round(getattr(self.api, "budget", 0)) - getattr(self.api, "budget_left", lambda: 0)(),
                        "realtime": "connected" if realtime else ("reconnecting" if self.feed else "off"),
                        "realtime_events": self.feed.events if self.feed else 0,
@@ -2266,7 +2289,8 @@ class Bot:
         changes = sorted(changes, key=lambda c: c.key)
         # Within the request budget, keeping write_read_reserve back so reads (positions, orders, books) never
         # starve; the least urgent changes wait for the next cycle.
-        spare = getattr(self.api, "budget_left", lambda: 10 ** 6)() - cfg.write_read_reserve
+        spare = min(getattr(self.api, "budget_left", lambda: 10 ** 6)() - cfg.write_read_reserve,
+                    getattr(self.api, "writes_left", lambda: 10 ** 6)())
         kept, cost, orders = [], 0.0, 0
         for ch in changes:
             n = orders + len(ch.new)

@@ -41,6 +41,7 @@ class FakeApi(Api):
     def log(self, *a): self.calls.append(a)
     def sent(self, kind): return [c for c in self.calls if c[0] == kind]
     def budget_left(self): return 10 ** 6         # unlimited unless a test overrides it
+    def writes_left(self): return 10 ** 6
     def tournament(self): return {"id": "T", "initialBalance": 100000, "myBalance": self.equity, "status": "active",
                                   "endDate": "2026-11-04T17:00:00Z"}
     def markets(self): return self.markets_list
