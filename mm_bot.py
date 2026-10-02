@@ -166,6 +166,10 @@ class Config:
     max_skew_through: float = 0.0         # a skewed quote may sit at most this far THROUGH fair value (0 = at fair
                                           #   value at worst). Not applied in reduce-only/flatten, which must get out.
                                           #   1.0 = off (the old behaviour: up to max_half_spread through it)
+    improve_ticks: int = 1                # R4: quote this many ticks better than the best other trader (1 = penny,
+                                          #   0 = join their price)
+    undercut_step_back: float = 0.0       # R4: another trader already inside our min_edge band -> quote this far
+                                          #   from the reservation price instead of at min_edge (0 = off)
     keep_fraction: float = 0.5            # keep a partly-filled order (and its queue spot) while >= 50% remains
     reprice_tolerance_ticks: int = 1      # leave an order alone if its target price moved by at most this many
                                           #   ticks (0.5c each) and it still keeps min_edge without crossing anyone:
@@ -201,7 +205,9 @@ class Config:
                                           #   and the tournament's own (raw) mid is within ref_only_max_gap of it
     ref_only_max_gap: float = 0.03        #   (guards against a wrong match: there is no depth-checked book price)
     ref_only_min_edge: float = 0.015      # ...quoting wider than usual there...
-    ref_only_size_frac: float = 0.001     # ...and small: 100 shares at 100k (a position still sheds through skew)
+    ref_only_size_frac: float = 0.001     # ...and small: 100 shares at 100k on the side that adds to a position...
+    ref_only_reduce_full: bool = True     # ...while the side that shrinks one quotes the market's normal size (day one:
+                                          #   Rep U.S. Senate +7,585 would otherwise leave 100 shares at a time)
 
     # --- REFERENCE PRICES (Polymarket via ref_prices.py; only active if ref_map_file exists) ---
     # Polymarket is treated as the better estimate of the true price: the tournament book is seeded
@@ -388,6 +394,11 @@ class Config:
                                                 #   many seconds (else: clean slate as usual)
     record_file: str = "market_data.sqlite"     # snapshots for tuning later ("" = off)
     record_seconds: float = 60.0          # one snapshot of every market this often (~15 MB a day)
+    record_books: bool = True             # also record OTHER traders' top book levels (with sizes) whenever a downloaded
+                                          #   book's top changed, and every tournament trade the feed reports: the data
+                                          #   to measure rival bots (repricing speed, floors, sizes, hours). No extra
+                                          #   requests; roughly 10-15 MB a day
+    record_book_levels: int = 3           # levels per side kept in those rows
 
     # --- CONNECTION / ALERTS (from the environment: see top of file) ------------------------
     summary_every_hours: int = 2          # phone summary every N hours, on the hour UTC (2 = 00:00, 02:00, 04:00...),
@@ -859,6 +870,7 @@ class RealtimeFeed:
         self.last_revision = {}           # topic -> last revision number accepted
         self.events = 0                   # messages received (shown in status.json)
         self.trade_counts = defaultdict(int)   # exchange -> tournament trades seen (all traders)
+        self.trade_log = deque(maxlen=20000)   # (unix time, trade item) for the recorder (see take_trades)
         self.socket_error = False         # the library logged that the socket closed (see _SocketErrorWatch)
         self.thread = threading.Thread(target=lambda: asyncio.run(self._run()), name="realtime", daemon=True)
 
@@ -873,6 +885,13 @@ class RealtimeFeed:
     def healthy(self):
         """Connected and joined to both channels, so pushed updates can be trusted to arrive."""
         return self.connected and len(self.topics_joined) >= 2
+
+    def take_trades(self):
+        """Tournament trades reported since the last call: [(unix time received, trade item)]."""
+        with self.lock:
+            out = list(self.trade_log)
+            self.trade_log.clear()
+        return out
 
     def take(self):
         """Everything reported since the last call: (dirty exchange ids, account changed?, resync?, settled?)."""
@@ -914,6 +933,7 @@ class RealtimeFeed:
             for item in data.get("trades") or []:              # how busy each market is (sizes quotes by it)
                 if item.get("exchangeId") is not None and item.get("tournamentId") in (None, self.tid):
                     self.trade_counts[str(item["exchangeId"])] += 1
+                    self.trade_log.append((time.time(), item))
             if data.get("marketSettled"):
                 self.settled = True
         self.wake.set()
@@ -1078,6 +1098,14 @@ def reserved_cash(raw_orders):
         if parse_order(o) and str(o.get("action")).lower() == "buy":
             total += float(o["quantity"]) * float(o["priceLimit"])
     return total
+
+
+def _num(x):
+    """float(x), or None if it isn't a number."""
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return None
 
 
 def strip_own(book, mine):
@@ -1284,7 +1312,7 @@ def plan_sizes(activity, headline, bankroll, cfg=CFG, prev=None, lock=None, prev
 
 def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=False, no_bid=False, no_ask=False,
                   bid_cap=None, ask_cap=None, kelly_p=None, bankroll=None, shift=0.0, order_size=None,
-                  position_limit=None, min_edge=None):
+                  position_limit=None, min_edge=None, reduce_size=None):
     """
     fv         fair YES probability
     inv        our net YES shares on THIS exchange (negative = net NO); drives the hard position limit
@@ -1301,6 +1329,8 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
     order_size         shares per quote for this market (from the activity-based size plan); None = order_size_frac
     position_limit     flat limit on |net shares| here instead of Kelly / max_position_frac (party-control markets)
     min_edge           overrides cfg.min_edge (e.g. wider in markets priced from Polymarket alone)
+    reduce_size        bigger size allowed on the side that SHRINKS the position (up to the position itself),
+                       e.g. a thin-book market quoting 100 shares that holds 7,585 from before
     """
     bankroll = bankroll or DEFAULT_BANKROLL
     max_order_cash = cfg.max_order_cash_frac * bankroll
@@ -1325,8 +1355,16 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
     # 3. Penny: one tick better than the best other trader, so we're first in the queue while
     #    keeping the widest spread possible. Then clamp into the band. That clamp is what stops a
     #    penny war with another bot from pushing us below min_edge. No other quote -> band edge.
-    bid = floor_tick(best_bid + TICK) if best_bid is not None else bid_lo
-    ask = ceil_tick(best_ask - TICK) if best_ask is not None else ask_hi
+    #    R4: improve_ticks = 0 joins the best price instead; undercut_step_back > 0 quotes that far from r
+    #    (not at min_edge) when another trader already sits inside our min_edge band.
+    imp = cfg.improve_ticks * TICK
+    bid = floor_tick(best_bid + imp) if best_bid is not None else bid_lo
+    ask = ceil_tick(best_ask - imp) if best_ask is not None else ask_hi
+    if cfg.undercut_step_back > 0:
+        if best_bid is not None and best_bid > bid_hi + 1e-9:
+            bid = floor_tick(r - max(edge, cfg.undercut_step_back))
+        if best_ask is not None and best_ask < ask_lo - 1e-9:
+            ask = ceil_tick(r + max(edge, cfg.undercut_step_back))
     bid = min(max(bid, bid_lo), bid_hi)
     ask = max(min(ask, ask_hi), ask_lo)
     if not reduce_only and cfg.max_skew_through < 1.0:
@@ -1352,6 +1390,11 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
         short_limit = kelly_position(kelly_p, ask, bankroll, cfg, yes=False)   # most NO we'd hold
     bid_size = min(order_size, long_limit - inv)
     ask_size = min(order_size, short_limit + inv)
+    if reduce_size is not None and reduce_size > order_size:
+        if inv < 0:
+            bid_size = max(bid_size, min(reduce_size, -inv))   # buying back a short
+        elif inv > 0:
+            ask_size = max(ask_size, min(reduce_size, inv))    # selling down a long
     bid_size = min(bid_size, max_order_cash / bid)          # buying YES costs `bid` a share
     ask_size = min(ask_size, max_order_cash / (1 - ask))    # selling YES = buying NO at 1-ask
 
@@ -1777,6 +1820,7 @@ class Bot:
         self.take_version_seen = 0        # last Polymarket reading the take logic has counted
         self.db = self.open_recorder()
         self.last_record = -1e9
+        self.book_tops, self.book_rows = {}, []    # recorder: last top levels logged per eid, rows not yet written
         self.last_summary_slot = None     # (date, hour) of the last phone summary
         self.value_at_last_summary = None
         self.counts_at_last_summary = {"arbs": 0, "takes": 0, "errors": 0, "rate_limits": 0}
@@ -2179,6 +2223,27 @@ class Bot:
         for e in self.ref_moved:
             self.ex[e].ref_moved_at = time.monotonic()
 
+    def thin_book_prices(self, fvs, refs, liquid, now_m):
+        """R5: markets whose book is too thin for a depth-checked price (fair_value None) but that have a
+        liquid Polymarket price get fv = Polymarket, if the tournament's raw best bid/ask (other traders,
+        any size, verified recently) are two-sided, not wider than max_spread_for_fv, and their mid is
+        within ref_only_max_gap of Polymarket. Fills fvs in place; returns the set of those eids."""
+        cfg, out = self.cfg, set()
+        for eid, ex in self.ex.items():
+            if fvs.get(eid) is not None or eid not in liquid or eid not in refs or not ex.book:
+                continue
+            if now_m - ex.verified >= cfg.book_stale:
+                continue
+            b = ex.book
+            if not b.get("bids") or not b.get("asks"):
+                continue
+            bb, ba = b["bids"][0]["price"], b["asks"][0]["price"]
+            if ba <= bb or ba - bb > cfg.max_spread_for_fv or abs((bb + ba) / 2 - refs[eid]) > cfg.ref_only_max_gap:
+                continue
+            fvs[eid] = refs[eid]
+            out.add(eid)
+        return out
+
     def reference_jump_guard(self, now_m):
         """After each new Polymarket reading, pull quotes on any market whose Polymarket price moved
         at least ref_jump_threshold since the previous reading. Polymarket usually moves first, so
@@ -2286,6 +2351,19 @@ class Bot:
                 self.ex[eid].book = strip_own(book, mine_real.get(eid, []))
                 self.ex[eid].book_time = self.ex[eid].verified = time.monotonic()
                 self.pending_dirty.discard(eid)
+                self.note_book(eid, self.ex[eid].book)
+
+    def note_book(self, eid, book):
+        """Recorder: queue a row of other traders' top levels if they changed since the last row for eid."""
+        if not self.db or not self.cfg.record_books:
+            return
+        n = self.cfg.record_book_levels
+        top = tuple(tuple((rnd(l["price"]), round(float(l["quantity"]), 2)) for l in (book.get(k) or [])[:n])
+                    for k in ("bids", "asks"))
+        if self.book_tops.get(eid) == top:
+            return
+        self.book_tops[eid] = top
+        self.book_rows.append((round(time.time(), 3), eid, json.dumps(top[0]), json.dumps(top[1])))
 
     # ------------------------------------------------------------------------------ risk
     def account_value(self, pos, f_pnl):
@@ -2467,15 +2545,17 @@ class Bot:
         planned = self.size_plan.get(ex.eid, cfg.size_min_frac * self.bankroll()) if cfg.size_by_activity else None
         headline_limit = (cfg.headline_position_frac * self.bankroll()
                           if cfg.size_by_activity and ex.group in cfg.headline_races else None)
-        edge = None
+        edge = reduce_size = None
         if ex.eid in self.ref_only:               # R5: priced from Polymarket alone -> wider and small
             edge = max(cfg.min_edge, cfg.ref_only_min_edge)
-            planned = min(planned if planned is not None else cfg.order_size_frac * self.bankroll(),
-                          max(1.0, cfg.ref_only_size_frac * self.bankroll()))
+            full = planned if planned is not None else cfg.order_size_frac * self.bankroll()
+            planned = min(full, max(1.0, cfg.ref_only_size_frac * self.bankroll()))
+            if cfg.ref_only_reduce_full:          # ...but a held position leaves at the market's normal size
+                reduce_size = full
         return compute_quote(fv, ex.inv, inv_for_quote, best_bid, best_ask, cfg, reduce_only, no_bid, no_ask,
                              bid_cap, ask_cap, kelly_p=kelly_p, bankroll=self.bankroll(),
                              shift=self.party_shift(ex, party_delta), order_size=planned, position_limit=headline_limit,
-                             min_edge=edge)
+                             min_edge=edge, reduce_size=reduce_size)
 
     def update_size_plan(self, now_m, fvs):
         """Every size_plan_seconds: work out how many shares to quote in each market (see plan_sizes).
@@ -2947,11 +3027,19 @@ class Bot:
         self.cancel_gen += 1
         if hasattr(self, "writes"):
             self.stop_queued_writes()
-        self.forget_orders(list(self.my_orders))
         self.orders_stale = True                  # confirm with a fresh read next cycle
+        # Forget our orders only once the cancel is confirmed. Forgetting them first (as before) meant a cancel
+        # that failed (409, timeout) left every order resting while the bot believed - and for
+        # recent_order_grace_seconds even hid from the open-orders list - that they were gone: the next cycle
+        # quoted every market a second time.
+        gone = list(self.my_orders)
         if not self.cfg.only_exchanges:
-            return self.api.cancel_all(self.tid)
-        return all([self.api.cancel_all(self.tid, eid) for eid in self.ex])   # list: try every one
+            ok = self.api.cancel_all(self.tid)
+        else:
+            ok = all([self.api.cancel_all(self.tid, eid) for eid in self.ex])   # list: try every one
+        if ok:
+            self.forget_orders(gone)
+        return ok
 
     def cancel(self, eid, orders, whole_exchange, quiet=False):
         """Cancel orders on one exchange. Returns True only if we're sure they're gone."""
@@ -3337,6 +3425,11 @@ class Bot:
                           ts TEXT, mode TEXT, account_value REAL, locked_in_orders REAL,
                           worst_case_loss REAL, party_delta REAL, orders_resting INTEGER)""")
         db.execute("CREATE INDEX IF NOT EXISTS snapshots_eid_ts ON snapshots (eid, ts)")
+        # Other traders' book tops (our own orders removed), one row per change: bids/asks = JSON [[price, size]...]
+        db.execute("CREATE TABLE IF NOT EXISTS books (ts REAL, eid TEXT, bids TEXT, asks TEXT)")
+        # Tournament trades from the realtime feed (all traders): price/quantity when the item carries them
+        db.execute("CREATE TABLE IF NOT EXISTS trades (ts REAL, eid TEXT, price REAL, quantity REAL, item TEXT)")
+        db.execute("CREATE INDEX IF NOT EXISTS books_eid_ts ON books (eid, ts)")
         db.commit()
         return db
 
@@ -3348,7 +3441,15 @@ class Bot:
         ts, mode, h = iso(utcnow()), "live" if self.api.live else "dry", self.health
         rows = [(ts, mode, eid, ex.label, *self.last_tops.get(eid, (None, None)), fvs.get(eid), ex.ref,
                  ex.quote.bid, ex.quote.ask, ex.inv) for eid, ex in self.ex.items()]
+        trades = []
+        if self.cfg.record_books and self.feed and hasattr(self.feed, "take_trades"):
+            for t, item in self.feed.take_trades():
+                trades.append((round(t, 3), str(item.get("exchangeId")), _num(item.get("price")),
+                               _num(item.get("quantity")), json.dumps(item, default=str)[:1000]))
+        book_rows, self.book_rows = self.book_rows, []
         try:
+            self.db.executemany("INSERT INTO books VALUES (?,?,?,?)", book_rows)
+            self.db.executemany("INSERT INTO trades VALUES (?,?,?,?,?)", trades)
             self.db.executemany("INSERT INTO snapshots VALUES (?,?,?,?,?,?,?,?,?,?,?)", rows)
             self.db.execute("INSERT INTO account VALUES (?,?,?,?,?,?,?)",
                             (ts, mode, h.get("account_value"), h.get("locked_in_orders"), h.get("worst_case_loss"),

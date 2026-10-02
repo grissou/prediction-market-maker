@@ -25,6 +25,8 @@ worst-case loss (peak), share of time quoted, writes per market-hour, duplicate 
 
 Run:  python tests/strategy_sim.py [seeds] [hours] [regime] [key=value ...]
       regime: quiet (day one) | news (a debate/poll day) | slow (day-one writes) ; key=value overrides Config.
+      python tests/strategy_sim.py sweep SEEDS HOURS REGIME '{base overrides}' '{variant}' ...   (same seeds;
+      "_budget" = our writes per market-minute, default 0.5; 30 writes/min over ~150 markets is 0.2)
 """
 import math
 import os
@@ -110,6 +112,7 @@ class Sim:
         self.cfg = cfg or Config()
         self.strategy = strategy or baseline_strategy
         self.cycle, self.budget_rate = cycle, budget / 60.0
+        self.bias_hl = 0.0
         self.fills, self.writes, self.dups, self.quoted_s, self.alive_s = [], 0, 0, 0, 0
         self.pnl_curve, self.worst_peak = [], 0.0
         self.mkts, self.paths = [], []
@@ -258,6 +261,12 @@ class Sim:
         bfv = fair_value(book, cfg)
         ref = m.ref_seen
         fv = (1 - cfg.ref_weight) * bfv + cfg.ref_weight * ref if bfv is not None else None
+        if self.bias_hl and bfv is not None:
+            # T1 prototype: Polymarket + exponentially weighted average of (book price - Polymarket)
+            k = 1 - 0.5 ** (self.cycle / self.bias_hl)
+            g = m.state.get("gap")
+            m.state["gap"] = bfv - ref if g is None else g + k * ((bfv - ref) - g)
+            fv = ref + max(-0.03, min(0.03, m.state["gap"]))
         want = [] if t < m.cooldown_until else self.strategy(self, m, t, fv, bfv, ref, book)
         mine = [o for o in m.orders if o.owner == "us"]
         cancels, places = plan_changes(cfg, mine, want, t)
@@ -425,7 +434,12 @@ def make_cfg(overrides):
 
 def _one(args):
     s, hours, regime, overrides, strategy = args
-    return Sim(s, hours, regime, make_cfg(overrides), strategy).run()
+    ov = dict(overrides or {})
+    budget = float(ov.pop("_budget", BUDGET_PER_MARKET_MIN))   # writes per market-minute (not a Config setting)
+    bias_hl = float(ov.pop("_bias_hl", 0))                     # T1 prototype: fair value = Polymarket + EMA gap
+    sim = Sim(s, hours, regime, make_cfg(ov), strategy, budget=budget)
+    sim.bias_hl = bias_hl
+    return sim.run()
 
 
 def run_many(seeds, hours, regime, overrides=None, strategy=None, procs=None):
@@ -462,8 +476,25 @@ def fmt_row(name, a):
             f"quoted {a['quoted']:.2f} w/mh {a['writes_mh']:5.1f} picked {a['picked_sh']:6.0f} dups {a['dups_max']}")
 
 
+def sweep(seeds, hours, regime, base, variants):
+    """Each variant (dict of overrides on top of base) against base, same seeds. Prints one line each."""
+    a, ra = run_many(seeds, hours, regime, base)
+    print(fmt_row("BASE " + str(base)[:23], a))
+    for v in variants:
+        b, rb = run_many(seeds, hours, regime, {**base, **v})
+        d = [y["pnl"] - x["pnl"] for x, y in zip(ra, rb)]
+        mean = sum(d) / len(d)
+        se = (sum((x - mean) ** 2 for x in d) / max(1, len(d) - 1)) ** 0.5 / len(d) ** 0.5
+        print(fmt_row(str(v)[:28], b), f"| dPnL {mean:+.0f} +- {se:.0f}", flush=True)
+
+
 if __name__ == "__main__":
     args = sys.argv[1:]
+    if args and args[0] == "sweep":
+        # python tests/strategy_sim.py sweep SEEDS HOURS REGIME '{"base": 1}' '{"variant": 2}' ...
+        import json
+        sweep(int(args[1]), float(args[2]), args[3], json.loads(args[4]), [json.loads(v) for v in args[5:]])
+        sys.exit(0)
     seeds = int(args[0]) if args else 5
     hours = float(args[1]) if len(args) > 1 else 2.0
     regime = args[2] if len(args) > 2 else "quiet"
