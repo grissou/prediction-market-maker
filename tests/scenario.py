@@ -8,6 +8,10 @@ threads) against a fake HTTP exchange, on a scaled clock (1 simulated second = S
   crowded  A crowded book: writes mostly 0.5-2 s (5% still slow), plus three rival market-making bots that
            re-quote one tick inside the best price down to their own floor around Polymarket, and pick
            off any of our quotes left stale after a Polymarket move.
+  ceiling  The 2 Oct 11:31 incident: full-size quotes resting on every market, then (after CEILING_AT s)
+           the capital ceiling switches on (positions worth 85% of the account) and every adding side wants
+           x0.25 of its size. Writes 0.3-0.6 s, and the exchange answers 429 (Retry-After 60) to any write
+           beyond 30 in 60 s. Reports cycle times after the switch and the 429s.
 
 Metrics (simulated seconds): time until 50% / 80% of markets have our quotes resting; share of markets
 quoted at 1/2/5/10 min; longest cycle; worst time a headline (House/Senate) quote stayed mispriced after
@@ -34,6 +38,7 @@ import mm_bot as M
 from mm_bot import Api, Bot, Config, TICK, ceil_tick, floor_tick, rnd
 
 SCALE = float(os.environ.get("SCENARIO_SCALE", "0.1"))   # real seconds per simulated second
+CEILING_AT = float(os.environ.get("SCENARIO_CEILING_AT", "90"))   # ceiling scenario: switch-on time (simulated s)
 
 
 class Clock:
@@ -99,8 +104,12 @@ class Exchange:
         self.window = []
         self.n = {"reads": 0, "writes": 0, "409": 0, "429": 0, "timeouts": 0}
         self.write_times = []
+        self.wwindow = []                 # ceiling: accepted writes in the last 60 s (limit 30)
+        self.cap_value = 0.0              # ceiling: positions' totalMarketValue reported by the positions read
 
     def write_latency(self):
+        if self.kind == "ceiling":
+            return self.rng.uniform(0.3, 0.6)
         if self.kind == "slow":     # most writes outlast the 15 s timeout; some (often cancels) don't
             return self.rng.uniform(15, 30) if self.rng.random() < 0.7 else self.rng.uniform(5, 15)
         return self.rng.uniform(16, 22) if self.rng.random() < 0.05 else self.rng.uniform(0.5, 2.0)
@@ -115,10 +124,16 @@ class Exchange:
                 self.n["429"] += 1
                 return Resp(429, {"error": {"code": "RATE_LIMITED", "message": "slow down"}}, {"Retry-After": "60"})
             self.window.append(now)
+            if self.kind == "ceiling" and method in ("POST", "DELETE"):
+                self.wwindow = [t for t in self.wwindow if now - t < 60]
+                if len(self.wwindow) >= 30:
+                    self.n["429"] += 1
+                    return Resp(429, {"error": {"code": "RATE_LIMITED", "message": "writes"}}, {"Retry-After": "60"})
+                self.wwindow.append(now)
         write = method in ("POST", "DELETE")
         if not write:
             self.n["reads"] += 1
-            self.clock.sleep(self.rng.uniform(0.5, 1.5))
+            self.clock.sleep(self.rng.uniform(0.1, 0.3) if self.kind == "ceiling" else self.rng.uniform(0.5, 1.5))
             with self.lock:
                 return Resp(200, self.read(path, params or {}))
         self.n["writes"] += 1
@@ -160,7 +175,10 @@ class Exchange:
         if path.endswith("/markets"):
             return {"data": e.markets(), "pagination": {"hasMore": False}}
         if path.endswith("/portfolio/positions"):
-            return e.positions()
+            r = e.positions()
+            if self.kind == "ceiling":
+                r["summary"] = {"totalMarketValue": self.cap_value}
+            return r
         if path.endswith("/portfolio/pnl"):
             return e.pnl()
         if path.endswith("/portfolio/fills"):
@@ -248,6 +266,7 @@ class World:
                        if kind == "crowded" else [Rival("taker", 3.0, 0.01, 1000, quoting=False)])
         self.m = {"cycles": [], "samples": [], "picked": 0, "picked_shares": 0, "picked_cost": 0.0,
                   "danger": {}, "danger_max": 0.0, "dups": 0, "fatal": None}
+        self.t_ceiling = None
         self.pick_queue = []              # (time, eid) Polymarket moves rivals will act on
 
     def build_markets(self):
@@ -423,6 +442,9 @@ class World:
             if now - last_sample >= 2:
                 self.sample(now - last_sample)
                 last_sample = now
+            if self.kind == "ceiling" and self.t_ceiling is None and now - self.t_open >= CEILING_AT:
+                self.t_ceiling = now      # capital ceiling on: positions worth 85% of the account
+                self.ex.cap_value = 0.85 * self.eng.equity
             self.clock.sleep(0.25)
         self.bot.running = False
 
@@ -476,7 +498,19 @@ class World:
                 "picked": m["picked"], "picked_shares": m["picked_shares"], "picked_cost": round(m["picked_cost"], 1),
                 "fills": len(fills), "unmatched": unmatched, "dups_max": m["dups"],
                 "409": self.ex.n["409"], "429": self.ex.n["429"], "timeouts": self.ex.n["timeouts"],
-                "fatal": m["fatal"]}
+                "fatal": m["fatal"], **self.ceiling_metrics()}
+
+    def ceiling_metrics(self):
+        """ceiling: cycle times (simulated s) from the switch on, and the bot's own 429 / pause counters."""
+        if self.kind != "ceiling":
+            return {}
+        t0 = self.t_ceiling if self.t_ceiling is not None else float("inf")
+        after = sorted(d for t, d in self.m["cycles"] if t + d >= t0)
+        api = self.api
+        return {"cycles_after": len(after), "cycle_median_after": round(after[len(after) // 2], 1) if after else None,
+                "cycle_max_after": round(after[-1], 1) if after else None,
+                "pauses": getattr(api, "pauses_total", None), "bot_429s": api.rate_limited,
+                "resting_end": len(self.bot.my_orders)}
 
 
 def parse_overrides():
@@ -490,7 +524,7 @@ def parse_overrides():
 def main():
     import logging
     logging.basicConfig(level=logging.CRITICAL if not os.environ.get("SCENARIO_LOG") else logging.INFO)
-    kinds = {"slow": ["slow"], "crowded": ["crowded"], "both": ["slow", "crowded"]}[sys.argv[1] if len(sys.argv) > 1 else "both"]
+    kinds = {"slow": ["slow"], "crowded": ["crowded"], "both": ["slow", "crowded"], "ceiling": ["ceiling"]}[sys.argv[1] if len(sys.argv) > 1 else "both"]
     seeds = int(sys.argv[2]) if len(sys.argv) > 2 else 1
     minutes = float(sys.argv[3]) if len(sys.argv) > 3 else 10
     selftest = os.environ.get("SCENARIO_SELFTEST", "1") == "1"
