@@ -156,6 +156,17 @@ mid step; on the snapshot 3 positions would be capped: both RI Senate legs and D
 headroom the exchange may not have). Defaults are decided after the Strategist's real-inventory runs and the Reviewer's second pass.
 Capital ceiling factor 0.25 -> 0.5 will be Package 3's default (Strategist: factor 0 was a cliff, 0.5 recovers ~70% of the lost P&L).
 
+### Simulator from the real book (Strategist round 3, owner's request): `tests/live_sim.py`
+Starts from the real positions and lot ages at 08:14 (`tests/live_start.json`, rebuilt by `tests/live_start_extract.py`; House legs set to the 09:45
+figures), 68 real markets (the races of the 40 biggest positions, both legs) plus 3 made-up races with an unlisted outsider, the other 163 markets as a
+fixed capital block (90% of the account in positions, ~10k free cash; adding orders need free cash), the real decide / arb_plan / fill hooks, a 30-min
+trade-average mark. Usage: `python tests/live_sim.py SEEDS HOURS quiet|news '{settings}' ...`. 16 seeds, 6 h quiet, everything off: P&L +2,990, capital
+0.90 -> 0.93 (peak 0.98), peak worst case 55k. Package 2 "all on" vs off: P&L -180 ± 160 (quiet) / -293 ± 110 (news) at Polymarket prices but
++219 ± 180 / +68 ± 97 at the trade-average mark (+597 ± 270 over 12 h), cash freed +8.5k / +9.7k (+13.8k over 12 h), worst case -7.3k / -8.1k
+(-10.6k), positions 0.6-2 h younger. Alone: race-netted limits +185 ± 150 (+407 ± 180 at the mark, worst case -5.3k); capital ceiling +251 ± 120;
+pair unwind +88 ± 76 (ages -0.85 h); age skew +5 ± 98; arbitrage -54 ± 90; refill cooldown -120 ± 97; fast unload (old 0.5c/300 s) -257 ± 94;
+reduce-join (old) -58 ± 61. The outsider races got 0 arbitrage fills. Limits: 68 of 237 markets simulated; buy-side chances ~2x real.
+
 ## Parameter changes (cumulative against live)
 | Setting | Live | New | Evidence | Expected effect |
 |---|---|---|---|---|
