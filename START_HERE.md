@@ -1,9 +1,9 @@
 <!-- STATUS (Finisher 2b, updated on every push) -->
-**STATUS 15:30 UTC 3 Oct (branch claude/finisher-package7):** phase = Package 7 READY. READY: Package 7 ("READY: Package 7", PR P7PR), Package 6 (f4214f1, PR #8, LIVE with `reduce_no_as_sell`), Package 5 (c14c92b, PR #7).
+**STATUS 15:30 UTC 3 Oct (branch claude/finisher-package7):** phase = Package 7 READY. READY: Package 7 ("READY: Package 7", PR #9), Package 6 (f4214f1, PR #8, LIVE with `reduce_no_as_sell`), Package 5 (c14c92b, PR #7).
 Package 7 = NO+NO sets: `no_set_aware_bids` (covered bids capped at the leg's lone part: stops the remaining 400 refusals), `pair_no_unwind_max_cost` (sets unwound as a pair in one covered-sale batch at asks <= 1.003, after a start-up pair check), `pair_unwind_followup` (unequal fills followed up: no one-sided inventory), T2.5 short-set branch skipped; all OFF.
 Numbers: unit-test evidence only (the simulator does not model set collateral); flags off pinned byte-identical to Package 6; red team 0 high / 1 medium / 5 low, all fixed; 30 suites green.
 Deploy: code -> deploy/package7 stage1 (A + F) -> stage2 (+ B); watch list in the Package 7 section.
-Next: owner reads `pairno_state` and the first "PAIR UNWIND (short set)" lines; the executor stays subscribed to PRs #7/#8/P7PR.
+Next: owner reads `pairno_state` and the first "PAIR UNWIND (short set)" lines; the executor stays subscribed to PRs #7/#8/#9.
 
 # START HERE (Team run, branch `claude/run-c-tournament-improvements-pycdet`)
 
@@ -12,7 +12,7 @@ The Builder's previous START_HERE is kept as `START_HERE_BUILDER.md`; Run A's no
 Plan: `PLAN.md`. Packages appear below as they become READY (commit messages start "READY: Package N").
 Deploy only commits whose message starts "READY"; the branch is cumulative.
 
-## Package 7 (READY, Finisher 2b, 3 Oct ~15:30 UTC; branch `claude/finisher-package7` from Package 6 706e763; draft PR P7PR): NO+NO sets unwound as a pair, set-aware covered bids, pair-unwind follow-up (all OFF; staged files in `deploy/package7/`)
+## Package 7 (READY, Finisher 2b, 3 Oct ~15:30 UTC; branch `claude/finisher-package7` from Package 6 706e763; draft PR #9): NO+NO sets unwound as a pair, set-aware covered bids, pair-unwind follow-up (all OFF; staged files in `deploy/package7/`)
 Live at the time of writing: Package 6 with `reduce_no_as_sell` on since 14:01:54 UTC (the covered-sale check accepted 14:02:24); `ref_tilt_max`
 moving to 0.11 (`tilt_diag` live: slope 0.107 / median 0.100 / wls 0.091 / pinned_weight 0.083, so the 0.14 was the restored EMA, as suspected).
 **The finding (owner, 14:0x):** 47 of the 49 remaining 400 "Insufficient available funds" refusals are on the 38 races where we hold NO on EVERY
