@@ -1,9 +1,9 @@
 <!-- STATUS (Finisher 2b, updated on every push) -->
-**STATUS 02:32 UTC 3 Oct (branch claude/finisher-package6):** phase = Package 6 research/screening. READY: **Package 5** (c14c92b on claude/finisher-package5, PR #7, frozen).
-Key numbers (Package 5): T2.1 pinned 16 x 6 +509 ± 110 / +601 ± 107 (exchange-style / liquidation); backstop 0.85 and hysteresis 0.01 not clearly positive.
-Package 6 candidates (built, OFF, unscreened): `exit_quotes_in_reduce_only`, `pair_passive_in_reduce_only`, `backstop_soft_frac` (PLAN_P6.md). Screens running in the pinned world (two pinning levels), 8 x 3 quiet first.
-Next: passers to 16 x 6; red-team; "READY: Package 6" only if clearly positive (an empty Package 6 is fine).
-ETA: screens ~03:30, confirmation ~05:00, write-up/READY ~06:30 UTC.
+**STATUS 03:45 UTC 3 Oct (branch claude/finisher-package6):** phase = DONE. READY: **Package 5** (c14c92b on claude/finisher-package5, PR #7, frozen). Package 6: nothing clearly positive, nothing shipped (section below); its three candidate settings stay built and OFF on this branch.
+Key numbers (Package 5, d vs base, exchange-style / liquidation): T2.1 `ref_tilt_enabled` pinned 16 x 6 +509 ± 110 / +601 ± 107; free 16 x 6 +330 ± 64 / +426 ± 63; news +670 ± 180 / +761 ± 160. Backstop 0.85 and hysteresis 0.01 with T2.1: not clearly positive.
+Deploy: Package 5 code (all flags off) -> deploy/package5 stage1 (`ref_tilt_enabled`) -> stage2 (+ `take_tilted_ref`) -> stage3 (+ `ref_tilt_headline`); go/no-go rules in the Package 5 section. Live still Package 3 final.
+Next (a later cycle): a simulator background worst case that grows like live, then re-screen the exits-in-reduce-only flags (the 44k capital lever).
+ETA: none; the executor is finished (final commit "Executor complete" on this branch).
 
 # START HERE (Team run, branch `claude/run-c-tournament-improvements-pycdet`)
 
@@ -11,6 +11,33 @@ Status: **complete** (Team complete at 14:45 UTC) (started 2026-10-02 08:50 UTC;
 The Builder's previous START_HERE is kept as `START_HERE_BUILDER.md`; Run A's notes are `ENGINEERING_NOTES.md`.
 Plan: `PLAN.md`. Packages appear below as they become READY (commit messages start "READY: Package N").
 Deploy only commits whose message starts "READY"; the branch is cumulative.
+
+## Package 6 (NO CHANGE SHIPPED, Finisher 2b second cycle, 3 Oct 02:30-03:40 UTC; branch `claude/finisher-package6` from the Package 5 READY commit c14c92b)
+Aim (owner): the live bottlenecks: (a) backstop pinning (reduce-only ~81% of cycles), (b) capital lock-up (positions 99.9k of a 101.0k account,
+84 dead + 49 quiet held markets with 44k), (c) the exchange mark vs fair value. Evidence: `analysis/poly_bias/P6_RESEARCH.md`,
+`analysis/poly_bias/NO_REDUCE_QUOTE.md`, `PLAN_P6.md`, `SIM_NOTES.md` "Round 6".
+**What the 02b data says.** (a) The reduce-only churn is not a cost (-87 net over 7 episodes; 3% of reduced shares re-added within 30 min); 23k
+of the 27k shares added in reduce-only were arbitrage sets; cash binds before the backstop; a 0.85 backstop would re-pin within 15-30 min as the
+worst case climbs 280-570/min between episodes. (b) In 85 of the 133 dead/quiet held markets the bot rests NO reducing quote: 74 are complete-set
+legs whose exit side the race-netted reduce-only clip zeroes (11.8k), 9 are blocked by the reference guard (13.8k; the guard is right); and in
+reduce-only EVERY exit feature was switched off (reduce_join_best, hold_quote, fast unload). Every held market has other traders' quotes on the
+exit side deep enough for 97-100% of the position at a 0.6-0.7c spread. (c) The exchange's mark lags the mid by ~2 h (1.5k below it; our fills
+move it ~0.05c each): a reporting gap, no lever; trading to move a mark would be manipulation. (d) Pass-through after 16:26: 0.14 / 0.23 median
+(15 min / 1 h), fat tail, n = 11. Also: `snapshots.our_bid/our_ask` are the WANTED quote, not the resting orders; 30% of sells in fills.csv carry
+the YES price; the `trades` table is empty.
+**Built (OFF, unit-tested, on this branch only):** `exit_quotes_in_reduce_only` (hold_quote and reduce_join_best keep working in reduce-only; the
+reducing side only, size <= the race-netted position), `pair_passive_in_reduce_only` (a complete-set leg may rest its slice when only the
+reduce-only clip emptied the side; `ex.ro_clip` records why a side is empty), `backstop_soft_frac` (adding size shrinks to 0 across a band under
+the backstop). Tests: test_exit_in_ro 40, test_backstop_soft 35; every other suite green.
+**Screened (pinned worlds, on top of T2.1, 8 x 3 quiet, d pnl_lag / d pnl_liq vs base; T2.1 alone +98 ± 138 / +129 ± 193 and +304 ± 96 / +299 ± 91):**
+C 4 h + exits in reduce-only +201 ± 152 / +290 ± 169 and +253 ± 84 / +220 ± 124 (+100/+160 then -50/-80 vs T2.1: not clearly positive);
+pair passive in reduce-only -26 ± 149 / +50 ± 166 and +146 ± 106 / +61 ± 144 (below T2.1, +4 writes/min: no); backstop soft band +97 ± 107 /
++153 ± 127 and +217 ± 128 / +197 ± 123 but **+7-8 writes/min and deferred changes +19-21k/h** (shrinking sizes re-price every cycle: FAIL).
+**Why the sim is weak here:** its rivals bid for our exits, so the bot leaves reduce-only easily (42-47% of base cycles pinned vs 81% live); the
+exit-in-reduce-only effect is under-weighted. Next step for a later cycle: a background worst case that GROWS between episodes as live does
+(+280-570/min), then re-screen `exit_quotes_in_reduce_only` + `hold_target_hours`; if it passes there, it is the capital lever (44k).
+**Decision:** nothing clearly positive -> no "READY: Package 6"; deploy Package 5 on its own evidence. Owner options without code: none that the
+data supports tonight (0.85 and hysteresis 0.01 were judged in Package 5).
 
 ## Package 5 (READY, Finisher 2b executor, 3 Oct ~03:00 UTC; branch `claude/finisher-package5`, draft PR #7): the Polymarket-bias fix. Package 4 (c29f762) + a tilt-corrected reference (T2.1) and nine more settings, ALL OFF by default + an honest simulator yardstick + ops fields. Code deploy by handover restart, then flags by settings_override.json (deploy/package5/).
 Plan: `PLAN_POLY_BIAS.md` (v2). Evidence: `SIM_NOTES.md` "Round 5" (every run, with error bars) and `analysis/poly_bias/` (RESULTS.md,
