@@ -225,6 +225,13 @@ check("flag off: a converted ask's NO fill still matches the ask (unchanged)",
 print("--- start-up self-test leg")
 
 
+def with_books(b):
+    """The leg only tests where a book is known (nosell_safe): give every market its fake book."""
+    for e, x in b.ex.items():
+        x.book = b.api.full_book(e) if e in b.api.books else None
+    return b
+
+
 def tick_until(b, n=200):
     for _ in range(n):
         b.nosell_tick()
@@ -235,6 +242,7 @@ def tick_until(b, n=200):
 
 api, b = bot(True, {"21": -50, "22": -10}, cash=0.0)
 b.cfg.selftest_enabled = True
+with_books(b)
 check("live + self-test on: not in effect before the leg ran", not b.reduce_no_on())
 o, _ = b.new_order(b.ex["21"], True, 0.4, 30, 0.45, now)
 check("...so the bid is buy YES meanwhile (today's behaviour)", "_no_sell" not in o)
@@ -252,6 +260,7 @@ ALERTS.clear()
 api, b = bot(True, {"21": -50}, cash=0.0)
 b.cfg.selftest_enabled = True
 api.refuse_no_sell = "Insufficient available funds"
+with_books(b)
 try:
     tick_until(b)
     exited = False
@@ -266,6 +275,7 @@ check("refused: bids buy YES again", "_no_sell" not in o)
 api, b = bot(True, {"21": -50})
 b.cfg.selftest_enabled = True
 api.batch_error = M.ApiError(503, "SERVICE_UNAVAILABLE", "busy")
+with_books(b)
 tick_until(b)
 check("busy: not decided, retried later", b.nosell_state is None and b.nosell_next > time.monotonic())
 api, b = bot(True, {"21": 50})
@@ -276,6 +286,78 @@ api, b = bot(False, {"21": -50})
 b.cfg.selftest_enabled = True
 b.nosell_tick()
 check("flag off: no leg placed", b.nosell_future is None and not api.wire and b.nosell_state is None)
+
+print("--- self-test leg: never where it could fill (a YES ask at 0.005)")
+api, b = bot(True, {"21": -50, "22": -10}, cash=0.0)
+b.cfg.selftest_enabled = True
+with_books(b)
+b.ex["21"].book = {"bids": [lvl(0.48, 1000)], "asks": [lvl(M.PMIN, 5), lvl(0.56, 1000)]}
+tick_until(b)
+legs = no_sells(api)
+check("biggest NO holding has an ask at 0.005: the leg goes to the next one (22), not 21",
+      len(legs) == 1 and legs[0]["exchangeId"] == "22" and b.nosell_state == "ok", legs)
+api, b = bot(True, {"21": -50}, cash=0.0)
+b.cfg.selftest_enabled = True
+with_books(b)
+b.ex["21"].book = {"bids": [], "asks": [lvl(0.004, 5)]}
+b.nosell_tick()
+check("only NO holding has an ask at/below 0.005: leg skipped this tick, nothing sent, undecided",
+      b.nosell_future is None and not api.wire and b.nosell_state is None
+      and b.ex["21"].pending_until != float("inf"), (api.wire, b.nosell_state))
+b.ex["21"].book = {"bids": [lvl(0.48, 1000)], "asks": []}
+tick_until(b)
+check("...once that ask is gone (book with no ask at all): the leg runs there",
+      len(no_sells(api)) == 1 and no_sells(api)[0]["exchangeId"] == "21" and b.nosell_state == "ok", api.wire)
+api, b = bot(True, {"21": -50}, cash=0.0)
+b.cfg.selftest_enabled = True
+b.ex["21"].book = None
+b.nosell_tick()
+check("no book downloaded yet: leg skipped (book unknown)", b.nosell_future is None and not api.wire)
+
+print("--- self-test and sell-NO leg never overlap")
+api, b = bot(True, {"21": -50}, cash=0.0)
+b.cfg.selftest_enabled = True
+with_books(b)
+b.selftest_passed = False
+
+
+class _Pending:
+    def done(self):
+        return False
+
+
+b.nosell_future = _Pending()
+b.selftest_next = 0.0
+b.selftest_tick()
+check("selftest_tick while the sell-NO leg is out: the main test doesn't start",
+      b.selftest_future is None and not api.sent("batch"), api.calls[-3:])
+b.nosell_future = None
+b.selftest_future = _Pending()
+b.nosell_next = 0.0
+b.nosell_tick()
+check("nosell_tick while the main test is out: the leg doesn't start", not no_sells(api))
+b.selftest_future = None
+
+print("--- lost batch: covered sale at b and ask at 1-b, YES-side fill at 1-b")
+for on in (True, False):
+    api, b = bot(on, {"21": -50})
+    ex = b.ex["21"]
+    o_bid, m_bid = b.new_order(ex, True, 0.40, 30, 0.45, now)
+    o_ask, m_ask = b.new_order(ex, False, 0.60, 30, 0.45, now)
+    if on:
+        check("setup: the bid at 0.40 is a covered sale", o_bid.get("_no_sell"), o_bid)
+    b.unconfirmed["21"] = [(o_ask, m_ask, nm), (o_bid, m_bid, nm)]
+    api.fills = [{"id": 1, "orderId": 903, "exchangeId": "21", "price": 0.6, "quantity": 10, "side": "yes",
+                  "filledAt": M.iso(M.utcnow())}]
+    b.log_fills({})
+    side = b.order_meta.get(903, {}).get("our_side")
+    if on:
+        check("on: the fill is adopted as the covered bid (not the ask at 0.60), the ask stays unconfirmed",
+              side == "bid" and b.order_meta[903].get("no_sell")
+              and [x[0]["action"] for x in b.unconfirmed.get("21", [])] == ["sell"], (b.order_meta.get(903),))
+    else:
+        check("off: unchanged order of tries (YES-side fill at 0.60 matches the ask at 0.60)", side == "ask",
+              b.order_meta.get(903))
 
 print("--- flag off identical on a grid")
 same = True

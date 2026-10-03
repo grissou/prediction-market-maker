@@ -3413,6 +3413,7 @@ class Bot:
         self.selftest_next = 0.0          # when to try again after the exchange answered busy
         self.selftest_started = None
         self.selftest_alerted = False
+        self.selftest_funds_wait = 0.0    # current funds-refusal back-off (s); 0 = not waiting for cash
         self.selftest_hold = 0.0          # the test exchange's pending_until before the test
         # Package 6 reduce_no_as_sell: its start-up self-test leg (None = not run yet, "ok", "off" = refused: today's
         # behaviour for this run), the background run, when to retry it, and this plan's covered NO per exchange/level
@@ -3845,6 +3846,7 @@ class Bot:
                 self.phase_mark("send")
         # Orders resting NOW, after this cycle's changes (the health snapshot above was taken before them).
         self.health["orders_resting"] = len(self.my_orders) if self.api.live else len(self.sim)
+        self.health["selftest_state"] = self.selftest_state()
         self.health["fast_unload_windows"] = sum(1 for e in list(self.unloads)
                                                  if e in self.ex and self.unload_side(self.ex[e], now_m))
         self.health["fl_bias_markets"] = {k: sum(1 for x in self.ex.values() if x.fl_tag.startswith(f" fl:{k}"))
@@ -6817,7 +6819,10 @@ class Bot:
                 eid = str(f.get("exchangeId"))
                 # Package 6: a covered "sell NO @ 1-b" (our bid at b) is a NO-side fill too, at the NO price: tried
                 # (only against orders sent that way) before the YES-price fallback for asks.
-                tries = (((True, p, None), (False, p, None), (True, rnd(1 - p), True)) if qty > 0 else
+                # With the flag on, the covered-bid reading of a YES-side fill goes before the ask one: in a lost batch
+                # holding a covered sale at b and an ask at 1-b, a covered-sale fill must not be adopted as the ask.
+                tries = ((((True, p, None), (True, rnd(1 - p), True), (False, p, None)) if self.cfg.reduce_no_as_sell
+                          else ((True, p, None), (False, p, None), (True, rnd(1 - p), True))) if qty > 0 else
                          ((False, rnd(1 - p), None), (True, rnd(1 - p), True), (False, p, None), (True, p, True)))
                 for is_bid, price, no_sell in tries:
                     if self.match_unconfirmed(eid, is_bid, price, oid, lift=False, no_sell=no_sell):
@@ -7690,7 +7695,7 @@ class Bot:
         return ("failed" if verdict == "rejected" else verdict), problems, ttl
 
     def selftest_attempt(self, eid, ttl):
-        problems, busy, rejected = [], False, False
+        problems, busy, rejected, funds = [], False, False, False
         exp = iso(utcnow() + timedelta(seconds=ttl))              # the same expiry real quotes use
         orders = [{"exchangeId": eid, "side": "yes", "action": act, "quantity": 1, "price": px,
                    "tournamentId": self.tid, "expirationDate": exp} for act, px in (("buy", PMIN), ("sell", PMAX))]
@@ -7704,8 +7709,12 @@ class Bot:
                 rejected = len(results) == 2 and not any(r.get("ok") for r in results)
                 busy = any(r.get("status") in self.SELFTEST_BUSY for r in results)
                 # 3 Oct live: at 100% capital the 1-share test order was refused "Insufficient available funds"
-                # (HTTP 400) and the bot stopped twice. No cash free is not an API surprise: retry later.
-                busy = busy or any(self.selftest_funds_refusal(r) for r in results)
+                # (HTTP 400) and the bot stopped twice. No cash free is not an API surprise: retry later (backing
+                # off, see selftest_finish) - but only if EVERY order that didn't go through was refused for cash:
+                # a funds refusal next to a real rejection is still a rejection.
+                bad = [r for r in results if not (r.get("ok") and (r.get("data") or {}).get("orderId") is not None)]
+                funds = len(results) == 2 and bool(bad) and all(self.selftest_funds_refusal(r) for r in bad)
+                busy = busy or funds
             else:
                 # The open-orders list can lag the exchange (up to recent_order_grace_seconds): keep looking.
                 # Test orders that never show up at all are reported as "not listed" (busy the first time).
@@ -7730,6 +7739,8 @@ class Bot:
             return "passed", []
         if not busy and not rejected and problems[0] == self.SELFTEST_NOT_LISTED:
             return "not listed", problems
+        if funds:
+            return "funds", problems                      # busy, for lack of free cash (selftest_finish backs off)
         return ("busy" if busy else "rejected" if rejected else "failed"), problems
 
     SELFTEST_NOT_LISTED = "neither test order is in our open orders"
@@ -7798,6 +7809,20 @@ class Bot:
         # The clean-up cancelled whatever we had resting there: drop it from our record and re-read the list.
         self.forget_orders([oid for oid, o in self.my_orders.items() if o.eid == eid])
         self.orders_stale = True
+        if verdict == "funds":
+            # No free cash: retried after selftest_retry_seconds, doubling each time up to SELFTEST_FUNDS_MAX_WAIT
+            # (each try costs writes and wipes our quotes on the test market); one alert per new wait.
+            prev = self.selftest_funds_wait
+            base = self.cfg.selftest_retry_seconds
+            wait = min(prev * 2, max(self.SELFTEST_FUNDS_MAX_WAIT, base)) if prev else base
+            self.selftest_funds_wait = wait
+            self.selftest_next = time.monotonic() + wait
+            log.warning("self-test: refused for lack of free cash (%s) - trying again in %.0f s, quoting meanwhile",
+                        problems[0] if problems else "?", wait)
+            if wait != prev:
+                alert(f"self-test waiting for free cash (insufficient funds), retrying in {wait:.0f} s")
+            return False
+        self.selftest_funds_wait = 0.0                    # not a funds refusal: the back-off starts over
         if verdict == "passed":
             if self.cfg.ttl_tiers_enabled and ttl < self.selftest_ttl():
                 alert(f"orders expiring in {self.selftest_ttl() / 60:.0f} min were rejected: TTL tiers switched off")
@@ -7824,6 +7849,20 @@ class Bot:
             return False
         fatal("self-test failed before trading - " + "; ".join(problems))
 
+    SELFTEST_FUNDS_MAX_WAIT = 1800.0                      # funds-refusal back-off cap (s)
+
+    def selftest_state(self):
+        """For status.json: where the start-up self-test is."""
+        if self.selftest_passed:
+            return "passed"
+        if not self.selftest_needed():
+            return "off"
+        if self.selftest_funds_wait:
+            return "waiting_funds"
+        if self.selftest_future is not None:
+            return "running"
+        return "waiting" if time.monotonic() < self.selftest_next else "pending"
+
     def selftest_tick(self):
         """Main loop, after every cycle: run the self-test on a background thread, without ever waiting for
         it (on day one, order writes took 15-30 s at the open), and act on its result once it's in."""
@@ -7839,6 +7878,8 @@ class Bot:
                     outcome = ("error", [f"self-test error: {e}"], self.cfg.order_ttl)
                 self.selftest_finish(self.selftest_eid, outcome)
             return
+        if self.nosell_future is not None:
+            return                                # the sell-NO leg is out: never two tests at once (holds, same market)
         if time.monotonic() >= self.selftest_next:
             self.selftest_eid = self.selftest_start()
             self.selftest_future = self.selftest_pool.submit(self.selftest_run, self.selftest_eid, self.selftest_ttl())
@@ -7867,10 +7908,23 @@ class Bot:
         held = [e for e in sorted(self.ex) if self.ex[e].inv <= -1]
         if not held:
             return                                # nothing to reduce yet: nothing to check
-        eid = min(held, key=lambda e: self.ex[e].inv)   # the biggest NO holding
+        # The test order is a YES bid at PMIN: only where no other trader's ask (cached book) is at PMIN or below, so
+        # it can't fill. No such market (or no book yet) -> skip this tick and look again next time.
+        safe = [e for e in held if self.nosell_safe(self.ex[e])]
+        if not safe:
+            return
+        eid = min(safe, key=lambda e: self.ex[e].inv)   # the biggest NO holding that is safe to test on
         self.nosell_eid, self.nosell_hold = eid, self.ex[eid].pending_until
         self.ex[eid].pending_until = float("inf")       # no quoting there while the test order may rest
         self.nosell_future = self.selftest_pool.submit(self.nosell_run, eid)
+
+    @staticmethod
+    def nosell_safe(ex):
+        """True if the cached book shows no other trader's ask at PMIN or below (an empty ask side counts as safe;
+        no book downloaded yet does not)."""
+        if ex.book is None:
+            return False
+        return all(float(l["price"]) > PMIN + 1e-9 for l in (ex.book.get("asks") or []))
 
     def nosell_test_order(self, eid):
         """ONE 1-share "sell NO @ 0.995" (= our bid at YES 0.005, PMIN): fills only if someone bids 0.995 for NO."""

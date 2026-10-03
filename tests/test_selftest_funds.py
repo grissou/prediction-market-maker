@@ -102,6 +102,59 @@ check("400 with no message at all: exit code 3 (unchanged)", code == EXIT_FATAL,
 a, b = make_bot()
 check("an ordinary self-test still passes first time", run(b) == (True, None) and b.selftest_passed)
 
+print("--- one funds refusal + one real rejection = rejected (exit 3)")
+a, b = make_bot()
+a.place_batch = lambda orders: [{"index": 0, "ok": False, "status": 400, "data": {"error": MSG}},
+                                {"index": 1, "ok": False, "status": 400, "data": {"error": {"message": "Invalid price"}}}]
+ok, code = run(b)
+check("funds refusal + 'Invalid price': exit code 3, not busy", code == EXIT_FATAL, (ok, code))
+a, b = make_bot()
+a.place_batch = lambda orders: [{"index": 0, "ok": False, "status": 400, "data": {"error": {"message": "Market closed"}}},
+                                {"index": 1, "ok": False, "status": 400, "error": MSG}]
+ok, code = run(b)
+check("'Market closed' + funds refusal (other order): exit code 3", code == EXIT_FATAL, (ok, code))
+
+print("--- funds refusals back off: 60 s, doubling to 30 min, one alert per doubling, reset otherwise")
+ALERTS = []
+M.alert = lambda msg, *a, **k: ALERTS.append(msg)
+a, b = make_bot()
+a.place_batch = refusing(a, SHAPES["data.error string"], 99, "both")
+waits, alerts_per = [], []
+for _ in range(9):
+    n0 = len(ALERTS)
+    ok, code = run(b)
+    waits.append(round(b.selftest_next - time.monotonic()))
+    alerts_per.append(len(ALERTS) - n0)
+check("waits 60, 120, 240, 480, 960, 1800, 1800, 1800, 1800",
+      waits == [60, 120, 240, 480, 960, 1800, 1800, 1800, 1800], waits)
+check("one alert per new wait, none once at the cap", alerts_per == [1, 1, 1, 1, 1, 1, 0, 0, 0], alerts_per)
+check("alert text", ALERTS and ALERTS[0] == "self-test waiting for free cash (insufficient funds), retrying in 60 s"
+      and ALERTS[5].endswith("retrying in 1800 s"), ALERTS[:1])
+check("status: selftest_state waiting_funds", b.selftest_state() == "waiting_funds", b.selftest_state())
+a.place_batch = lambda orders: (_ for _ in ()).throw(M.ApiError(503, "SERVICE_UNAVAILABLE", "busy"))
+ok, code = run(b)
+check("a busy (503) attempt resets the back-off: next try in 60 s, state not waiting_funds",
+      code is None and ok is False and 55 < b.selftest_next - time.monotonic() <= 60 and b.selftest_funds_wait == 0
+      and b.selftest_state() != "waiting_funds", (b.selftest_next - time.monotonic(), b.selftest_state()))
+a.place_batch = refusing(a, SHAPES["data.error string"], 99, "both")
+ok, code = run(b)
+check("funds again after the reset: back to 60 s, alerted again", round(b.selftest_next - time.monotonic()) == 60
+      and ALERTS[-1].endswith("retrying in 60 s"), ALERTS[-1:])
+a.place_batch = FakeApi.place_batch.__get__(a)
+ok, code = run(b)
+check("cash free: passes, selftest_state passed", ok is True and b.selftest_state() == "passed", b.selftest_state())
+
+print("--- the main loop waits out the back-off (selftest_tick)")
+a, b = make_bot()
+a.place_batch = refusing(a, SHAPES["data.error string"], 99, "both")
+b.selftest_funds_wait = 240.0
+b.selftest_next = time.monotonic() + 240
+n0 = len(a.sent("batch"))
+for _ in range(5):
+    b.selftest_tick()
+check("no test is placed during a funds wait", len(a.sent("batch")) == n0 and b.selftest_future is None)
+M.alert = lambda *a, **k: None
+
 print("--- Bot.selftest_funds_refusal")
 f = Bot.selftest_funds_refusal
 cases = [
