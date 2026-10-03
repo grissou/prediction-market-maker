@@ -622,3 +622,11 @@ the 3-h P&L is the same either way (+302 vs +299 at liquidation, +351 vs +316 at
 point per day live) is outside a 3-h run. Default set to 0.20 (live s is 6.3%; alarm if `tilt_s` passes 0.12: re-measure with
 analysis/poly_bias/snapshot02b.py before trusting it). Earlier run in a "growth 0.004 only" world (no added level; 8 x 3, ramp 120):
 T2.1 +133 ± 75 pnl_lag / +151 ± 120 pnl_liq, cap 0.2 within noise of it (tests/live_sim_round5_hightilt_8x3.txt holds the final world only).
+
+## New ideas screened (tilt world, 8 x 3 quiet, all on top of T2.1; d vs BASE, T2.1 alone = +166 ± 72 pnl_lag / +163 ± 60 pnl_liq)
+| Variant | d pnl_lag | d pnl_liq | d pnl_mid | d pnl (Poly) | d exit_ratio | d cap_end | d writes_pm | d deferred_h | d mk15_mid | d pick_cost | Verdict |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| X5 `gap_size_shrink` 0.03 (adding size shrinks with the gap) | +110 ± 118 | +64 ± 85 | +45 ± 82 | -212 ± 74 | +0.124 ± 0.047 | -0.078 ± 0.017 | **+3.58 ± 0.41** | **+4,337 ± 752** | -0.018 ± 0.020 | +45 ± 10 | FAIL: below T2.1 alone, +3.6 writes/min (smaller orders re-price more) |
+| X11 A dead-only (`reduce_from_book_dead_only`) | -45 ± 109 | -26 ± 109 | -93 ± 92 | -284 ± 77 | +0.162 ± 0.033 | -0.092 ± 0.014 | -0.82 ± 0.57 | +198 ± 581 | -0.019 ± 0.046 | +62 ± 15 | FAIL: ~200 below T2.1 alone; dead markets still get picked off |
+| ladder_enabled | +155 ± 77 | +135 ± 66 | +87 ± 70 | -135 ± 51 | +0.102 ± 0.039 | -0.075 ± 0.015 | -1.01 ± 0.52 | +187 ± 583 | +0.048 ± 0.032 | +39 ± 14 | no gain over T2.1 alone (cash still binds); OFF |
+| `ref_tilt_rampin_min` 20 | +176 ± 110 | **+199 ± 83** | +133 ± 87 | -166 ± 62 | +0.153 ± 0.031 | -0.097 ± 0.012 | -1.22 ± 0.63 | +642 ± 650 | +0.061 ± 0.057 | **+9 ± 9** | same P&L as the step-on, less pick-off, smoother switch-on: DEFAULT 20 |
