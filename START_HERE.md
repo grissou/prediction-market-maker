@@ -1,8 +1,9 @@
 <!-- STATUS (Finisher 2b, updated on every push) -->
-**STATUS 02:30 UTC 3 Oct:** phase = Package 5 READY (frozen at the "READY: Package 5" commit; draft PR #7). Next phase: Package 6 cycle on `claude/finisher-package6`.
-Key numbers (d vs base, exchange-style mark / liquidation): T2.1 `ref_tilt_enabled` pinned 16 x 6 **+509 ± 110 / +601 ± 107**, free 16 x 6 +330 ± 64 / +426 ± 63, news 6 x 6 +670 ± 180 / +761 ± 160. Backstop 0.85 and hysteresis 0.01 with T2.1: not clearly positive (stay 0.80 / 0.03). Ramp-in 20 min, `ref_tilt_max` 0.20. Everything else OFF.
-Deploy: code (all flags off) -> deploy/package5/stage1 (`ref_tilt_enabled`) -> stage2 (+ `take_tilted_ref`) -> stage3 (+ `ref_tilt_headline`); go/no-go rules in the Package 5 section.
-Next: Package 6 research (exits that keep quoting in reduce-only, pair unwind in reduce-only, backstop soft band) screened in the pinned world; READY: Package 6 only if clearly positive. ETA: research to ~05:00, implementation/write-up to ~07:30 UTC.
+**STATUS 02:32 UTC 3 Oct (branch claude/finisher-package6):** phase = Package 6 research/screening. READY: **Package 5** (c14c92b on claude/finisher-package5, PR #7, frozen).
+Key numbers (Package 5): T2.1 pinned 16 x 6 +509 ± 110 / +601 ± 107 (exchange-style / liquidation); backstop 0.85 and hysteresis 0.01 not clearly positive.
+Package 6 candidates (built, OFF, unscreened): `exit_quotes_in_reduce_only`, `pair_passive_in_reduce_only`, `backstop_soft_frac` (PLAN_P6.md). Screens running in the pinned world (two pinning levels), 8 x 3 quiet first.
+Next: passers to 16 x 6; red-team; "READY: Package 6" only if clearly positive (an empty Package 6 is fine).
+ETA: screens ~03:30, confirmation ~05:00, write-up/READY ~06:30 UTC.
 
 # START HERE (Team run, branch `claude/run-c-tournament-improvements-pycdet`)
 
