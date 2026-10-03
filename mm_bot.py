@@ -822,6 +822,14 @@ class Config:
     # reducing side is never shrunk. Uses the raw Polymarket price (decide's ref), not the tilted one; no ref ->
     # unchanged. 1.0 = off (unchanged quotes); candidate 0.25.
     tail_adding_factor: float = 1.0
+    # --- Package 6: reduce NO holdings as covered NO sales ---
+    # Live 3 Oct: every order was sent as side "yes", so a BID that buys back a short YES position (we hold NO) went
+    # out as "buy YES @ p", which the exchange treats as a new cash purchase and refuses at 0 free cash ("Insufficient
+    # available funds"): the short book could never shrink. True: the part of a bid that reduces the NO held in that
+    # market (per market, not race-netted) is sent as a covered sale "sell NO @ 1-p" (needs no cash); any part
+    # beyond the NO held stays "buy YES @ p" (see order_wire). Asks and adding bids unchanged. The start-up
+    # self-test checks the exchange accepts it and falls back to False for the run if not. False = unchanged.
+    reduce_no_as_sell: bool = False
 
 
 CFG = Config()
@@ -991,6 +999,8 @@ OVERRIDABLE = {
     "pair_passive_in_reduce_only": (False, True),
     # --- Package 6 candidate: tail adding-size factor ---
     "tail_adding_factor": (0.0, 1.0),
+    # --- Package 6: reduce NO holdings as covered NO sales ---
+    "reduce_no_as_sell": (False, True),
 }
 MAX_ORDER_TTL = 7200.0    # no order of ours lives longer than this (dead-man's switch), whatever the TTL settings
 LADDER_MAX_LEVELS = 8
@@ -1798,6 +1808,19 @@ def parse_order(o):
     is_bid = yes == (str(o["action"]).lower() == "buy")
     price = rnd(o["priceLimit"] if yes else 1 - o["priceLimit"])
     return Resting(int(o["id"]), str(o["exchangeId"]), is_bid, price, float(o["quantity"]), exp)
+
+
+def wire_order(o):
+    """Package 6 (reduce_no_as_sell): an order as the bot builds and tracks it (YES terms: "buy"/"sell" YES at a YES
+    price) -> the request body actually sent. Only an order marked "_no_sell" (a bid that buys back NO we hold, see
+    Bot.cover_no_qty) changes: "buy YES @ p" goes out as the covered sale "sell NO @ 1-p", which needs no cash. It
+    reads back through parse_order as our bid at p, so everything after the send keeps working in YES terms."""
+    if "_no_sell" not in o:
+        return o
+    w = {k: v for k, v in o.items() if k != "_no_sell"}
+    if o["_no_sell"]:
+        w.update(side="no", action="sell", price=round(1 - o["price"], 3))
+    return w
 
 
 def reserved_cash(raw_orders):
@@ -3351,6 +3374,10 @@ class Bot:
         self.selftest_started = None
         self.selftest_alerted = False
         self.selftest_hold = 0.0          # the test exchange's pending_until before the test
+        # Package 6 reduce_no_as_sell: its start-up self-test leg (None = not run yet, "ok", "off" = refused: today's
+        # behaviour for this run), the background run, when to retry it, and this plan's covered NO per exchange/level
+        self.nosell_state, self.nosell_future, self.nosell_next, self.cover_planned = None, None, 0.0, {}
+        self.nosell_eid, self.nosell_hold = None, 0.0
         self.selftest_gen = 0             # cancel_gen when the test started
         self.selftest_unlisted = 0        # tests in a row whose orders were accepted but never listed
         self.selftest_errors = 0          # tests in a row that crashed (a bug in the test)
@@ -4958,6 +4985,13 @@ class Bot:
             k = self.cfg.burst_size_factor
             q = replace(q, bid_size=max(1, int(q.bid_size * k)) if q.bid_size else 0,
                         ask_size=max(1, int(q.ask_size * k)) if q.ask_size else 0)
+        if q.bid is not None and q.bid_size > 0 and ex.inv <= -1:
+            # Package 6 reduce_no_as_sell: a bid buying back NO we hold goes out as a covered "sell NO", capped at
+            # the NO free to sell; the part beyond it (going long) waits until the short is gone. Capping the WANTED
+            # size (not only the order) keeps a resting capped order from looking too small and churning.
+            cover = self.cover_no_qty(ex.eid, ex.inv, 0)
+            if 1 <= cover < q.bid_size:
+                q = replace(q, bid_size=cover)
         bids = [o for o in resting if o.is_bid]
         asks = [o for o in resting if not o.is_bid]
         fix_bid = self.side_fix(ex, bids, q.bid, q.bid_size, q.bid_limit, True, full_bid, fv, now, now_m)
@@ -5269,6 +5303,7 @@ class Bot:
         Ladder cancels never count as level-0 reprices (churn control), and the exchange's cancel-all is used only
         when every order resting there goes."""
         cfg = self.cfg
+        self.__dict__.setdefault("cover_planned", {}).pop(ex.eid, None)   # Package 6: this plan's covered NO afresh
         lad = [o for o in resting if self.order_level(o) > 0]
         if not lad and not cfg.ladder_enabled:
             ex.lad_tag = ""
@@ -5544,7 +5579,7 @@ class Bot:
                 self.cancel_gen += 1      # also removes any self-test orders there (see selftest_finish)
             w.future = self.writer.submit(self.cancel_request, eid, orders, whole)
         else:
-            w.future = self.writer.submit(self.api.place_batch, [o for o, _ in payload])
+            w.future = self.writer.submit(self.place_orders, [o for o, _ in payload])
         def done(_f, w=w):
             w.done_at = time.monotonic()
             self.write_done.set()         # main loop: apply it soon
@@ -5624,16 +5659,64 @@ class Bot:
 
     def new_order(self, ex, is_bid, price, size, fv, now, level=0):
         """One order for POST /orders/batch, plus notes about why we placed it (level: R3 ladder level, 0 = touch)."""
+        cover = self.cover_no_qty(ex.eid, ex.inv, level) if is_bid else 0
+        if cover >= 1:                    # Package 6: a covered NO sale, capped at the NO free to sell (the add waits)
+            size = min(int(size), cover)
+            self.__dict__.setdefault("cover_planned", {}).setdefault(ex.eid, {})[level] = size
         order = {"exchangeId": ex.eid, "side": "yes", "action": "buy" if is_bid else "sell",
                  "quantity": int(size), "price": round(price, 3), "tournamentId": self.tid,
                  # Dead-man's switch: the order dies on its own unless we keep refreshing it.
                  "expirationDate": iso(now + timedelta(seconds=self.order_ttl(ex, level)))}
         meta = {"our_side": "bid" if is_bid else "ask", "price": round(price, 3), "fv": fv, "t": time.time()}
+        if cover >= 1:
+            order["_no_sell"] = meta["no_sell"] = True   # sent as "sell NO @ 1-p" (wire_order)
         if not level and self.cfg.no_chase_enabled:   # no-chase: what we placed it at (inventory, size)
             meta["inv"], meta["qty"] = ex.inv, int(size)
         if level:
             meta["level"] = level
         return order, meta
+
+    # --- Package 6: reduce NO holdings as covered NO sales (reduce_no_as_sell) ---
+    def reduce_no_on(self):
+        """reduce_no_as_sell in effect: the setting, and live with the self-test on, its own start-up leg passed
+        (nosell_state "ok"; "off" = the exchange refused it: today's behaviour for the rest of this run)."""
+        state = getattr(self, "nosell_state", None)
+        if not self.cfg.reduce_no_as_sell or state == "off":
+            return False
+        if self.api.live and self.cfg.selftest_enabled:
+            return state == "ok"
+        return True
+
+    def cover_no_qty(self, eid, inv, level=None):
+        """NO shares a bid on eid may sell as a covered "sell NO" now: the NO held in that market (per market, -inv;
+        never race-netted) less what our OTHER resting / just-planned bids there may already be selling (other ladder
+        levels; the order a re-quote replaces is cancelled first, so the same level never counts). level None = a
+        take, sent after every order of ours there was cancelled: all the NO held. 0 = not in effect / no NO held."""
+        if not self.reduce_no_on() or inv is None or inv > -1:
+            return 0
+        held = -float(inv)
+        if level is not None:
+            held -= sum(o.qty for o in self.my_orders.values()
+                        if o.eid == eid and o.is_bid and self.order_level(o) != level)
+            held -= sum(q for lv, q in (getattr(self, "cover_planned", {}).get(eid) or {}).items() if lv != level)
+        return max(0, int(held + 1e-9))
+
+    def no_sell_order(self, order, inv, whole=False):
+        """A take / arbitrage order (YES terms) that buys back a short: marked to go out as a covered "sell NO",
+        capped at the NO held (whole=True: only if ALL of it fits, else unchanged - arbitrage legs must stay equal).
+        Returns the order (changed in place)."""
+        if order["action"] != "buy":
+            return order
+        cover = self.cover_no_qty(order["exchangeId"], inv)
+        if cover < 1 or (whole and order["quantity"] > cover):
+            return order
+        order["quantity"] = min(int(order["quantity"]), cover)
+        order["_no_sell"] = True
+        return order
+
+    def place_orders(self, orders):
+        """POST /orders/batch with each order in its wire form (wire_order): every placement goes through here."""
+        return self.api.place_batch([wire_order(o) for o in orders])
 
     def order_ttl(self, ex, level=0):
         """Seconds a new order lives: order_ttl, or with ttl_tiers_enabled its market tier's (level 0 only; the
@@ -5712,14 +5795,17 @@ class Bot:
             self.placed_qty.pop(oid, None)            # no longer resting: stop tracking its size
             self.filled_qty.pop(oid, None)
 
-    def match_unconfirmed(self, eid, is_bid, price, oid, expires=None, lift=True):
+    def match_unconfirmed(self, eid, is_bid, price, oid, expires=None, lift=True, no_sell=None):
         """An order (or fill) we have no record of: is it one we sent whose response never came back? Matched on
         exchange, side and price (and expiry when known: every batch has its own). Adopts it: its notes go to
         order_meta (fills get attributed), and the exchange's 'outcome unknown' hold lifts once every order
-        sent there is accounted for. Returns the order we sent, or None."""
+        sent there is accounted for. Returns the order we sent, or None. no_sell True: only an order sent as a covered
+        "sell NO" (Package 6; orders are kept in YES terms, so side and price compare as for any other)."""
         cands = self.unconfirmed.get(eid) or []
         for k, (o, meta, _t) in enumerate(cands):
             if (o["action"] == "buy") != is_bid or abs(o["price"] - price) > 1e-6:
+                continue
+            if no_sell is not None and bool(o.get("_no_sell")) != no_sell:
                 continue
             if expires is not None and abs((parse_ts(o["expirationDate"]) - expires).total_seconds()) > 1.5:
                 continue
@@ -5841,7 +5927,7 @@ class Bot:
         for i in range(0, len(new_orders), cfg.batch_size):
             chunk = new_orders[i:i + cfg.batch_size]
             try:
-                results = self.api.place_batch([o for o, _ in chunk])
+                results = self.place_orders([o for o, _ in chunk])
             except ApiError as e:
                 results = e
             self.apply_batch(chunk, results, now_m)
@@ -6190,12 +6276,12 @@ class Bot:
             return 0.0
         if not self.cancel(y, [], whole_exchange=True):   # our own quotes there first: never trade with ourselves
             return 0.0
-        order = {"exchangeId": y, "side": "yes", "action": "buy" if buy else "sell", "quantity": int(qty),
-                 "price": price, "tournamentId": self.tid,
-                 "expirationDate": iso(utcnow() + timedelta(seconds=self.cfg.arb_order_ttl))}
+        order = self.no_sell_order({"exchangeId": y, "side": "yes", "action": "buy" if buy else "sell",
+                                    "quantity": int(qty), "price": price, "tournamentId": self.tid,
+                                    "expirationDate": iso(utcnow() + timedelta(seconds=self.cfg.arb_order_ttl))}, ex.inv)
         self.orders_stale = True
         try:
-            results = self.api.place_batch([order])
+            results = self.place_orders([order])
         except ApiError as e:
             if e.code == "WRITE_BUDGET_WAIT":
                 self.arbs_skipped_budget += 1
@@ -6212,7 +6298,8 @@ class Bot:
         self.cancel(y, [], whole_exchange=True, quiet=True)
         if data.get("orderId") is not None:
             self.order_meta[data["orderId"]] = {"our_side": "bid" if buy else "ask", "price": price, "arb": True,
-                                                "fv": fvs.get(y), "t": time.time(), "eid": y}
+                                                "fv": fvs.get(y), "t": time.time(), "eid": y,
+                                                **({"no_sell": True} if order.get("_no_sell") else {})}
             self.notes_dirty = True
         return float(data.get("quantityTraded") or 0)
 
@@ -6296,9 +6383,11 @@ class Bot:
         exp = iso(utcnow() + timedelta(seconds=cfg.arb_order_ttl))
         orders = [{"exchangeId": e, "side": "yes", "action": action, "quantity": qty, "price": p,
                    "tournamentId": self.tid, "expirationDate": exp} for e, (p, _) in levels.items()]
+        for o in orders:                          # a leg buying back a short: covered "sell NO" if ALL of it fits
+            self.no_sell_order(o, self.ex[o["exchangeId"]].inv, whole=True)
         self.orders_stale = True                  # positions and orders change: re-read next cycle
         try:
-            results = self.api.place_batch(orders)
+            results = self.place_orders(orders)
         except ApiError as e:
             if e.code == "WRITE_BUDGET_WAIT":             # never sent: nothing can have traded, no hold, no alert
                 self.arbs_skipped_budget += 1
@@ -6327,7 +6416,8 @@ class Bot:
                 self.order_meta[data["orderId"]] = {"our_side": "ask" if action == "sell" else "bid",
                                                     "price": o["price"], "arb": True,
                                                     "fv": fvs.get(o["exchangeId"]), "t": time.time(),
-                                                    "eid": o["exchangeId"]}
+                                                    "eid": o["exchangeId"],
+                                                    **({"no_sell": True} if o.get("_no_sell") else {})}
                 self.notes_dirty = True
         if len(set(traded)) > 1:
             alert(f"arbitrage on {race} only partly filled {traded}: the difference is now ordinary "
@@ -6440,12 +6530,12 @@ class Bot:
         # Pull our own quotes here first (so we can't trade with ourselves), then take, then cancel leftovers.
         if not self.cancel(ex.eid, [], whole_exchange=True):
             return False
-        order = {"exchangeId": ex.eid, "side": "yes", "action": "buy" if buy else "sell", "quantity": qty,
-                 "price": price, "tournamentId": self.tid,
-                 "expirationDate": iso(utcnow() + timedelta(seconds=cfg.take_order_ttl))}
+        order = self.no_sell_order({"exchangeId": ex.eid, "side": "yes", "action": "buy" if buy else "sell",
+                                    "quantity": qty, "price": price, "tournamentId": self.tid,
+                                    "expirationDate": iso(utcnow() + timedelta(seconds=cfg.take_order_ttl))}, ex.inv)
         self.orders_stale = True
         try:
-            results = self.api.place_batch([order])
+            results = self.place_orders([order])
         except ApiError as e:
             if e.code == "WRITE_BUDGET_WAIT":             # never sent: no hold, no alert; quotes back next cycle
                 self.takes_skipped_budget += 1
@@ -6464,9 +6554,10 @@ class Bot:
         self.cancel(ex.eid, [], whole_exchange=True, quiet=True)
         if data.get("orderId") is not None:                # so these fills show up in `report`
             self.order_meta[data["orderId"]] = {"our_side": "bid" if buy else "ask", "price": price, "take": True,
-                                                "fv": fv, "t": time.time(), "eid": ex.eid}
+                                                "fv": fv, "t": time.time(), "eid": ex.eid,
+                                                **({"no_sell": True} if order.get("_no_sell") else {})}
             self.notes_dirty = True
-        log.info("take on %s: traded %s of %d", ex.label, data.get("quantityTraded", "?"), qty)
+        log.info("take on %s: traded %s of %d", ex.label, data.get("quantityTraded", "?"), order["quantity"])
         return True
 
     # ------------------------------------------------------------------------------ C hold target (Package 5)
@@ -6634,12 +6725,12 @@ class Bot:
                 continue
             if not self.cancel(eid, [], whole_exchange=True):  # never trade with ourselves
                 continue
-            order = {"exchangeId": eid, "side": "yes", "action": "buy" if p["buy"] else "sell", "quantity": p["qty"],
-                     "price": p["price"], "tournamentId": self.tid,
-                     "expirationDate": iso(utcnow() + timedelta(seconds=cfg.take_order_ttl))}
+            order = self.no_sell_order({"exchangeId": eid, "side": "yes", "action": "buy" if p["buy"] else "sell",
+                                        "quantity": p["qty"], "price": p["price"], "tournamentId": self.tid,
+                                        "expirationDate": iso(utcnow() + timedelta(seconds=cfg.take_order_ttl))}, ex.inv)
             self.orders_stale = True
             try:
-                results = self.api.place_batch([order])
+                results = self.place_orders([order])
             except ApiError as e:
                 if e.code == "WRITE_BUDGET_WAIT":             # never sent (still counted: the budget errs safe)
                     self.takes_skipped_budget += 1
@@ -6657,7 +6748,7 @@ class Bot:
             if data.get("orderId") is not None:
                 self.order_meta[data["orderId"]] = {"our_side": "bid" if p["buy"] else "ask", "price": p["price"],
                                                     "take": True, "fv": book_fvs.get(eid), "t": time.time(),
-                                                    "eid": eid}
+                                                    "eid": eid, **({"no_sell": True} if order.get("_no_sell") else {})}
                 self.notes_dirty = True
         return taken
 
@@ -6684,9 +6775,12 @@ class Bot:
                 # YES price too.
                 qty, p = float(f.get("quantity") or 0), float(f.get("price") or 0)
                 eid = str(f.get("exchangeId"))
-                tries = ((True, p), (False, p)) if qty > 0 else ((False, rnd(1 - p)), (False, p))
-                for is_bid, price in tries:
-                    if self.match_unconfirmed(eid, is_bid, price, oid, lift=False):
+                # Package 6: a covered "sell NO @ 1-b" (our bid at b) is a NO-side fill too, at the NO price: tried
+                # (only against orders sent that way) before the YES-price fallback for asks.
+                tries = (((True, p, None), (False, p, None), (True, rnd(1 - p), True)) if qty > 0 else
+                         ((False, rnd(1 - p), None), (True, rnd(1 - p), True), (False, p, None), (True, p, True)))
+                for is_bid, price, no_sell in tries:
+                    if self.match_unconfirmed(eid, is_bid, price, oid, lift=False, no_sell=no_sell):
                         break
         if new:
             self.fills.record(new, self.order_meta, fvs)
@@ -7679,6 +7773,89 @@ class Bot:
             self.selftest_eid = self.selftest_start()
             self.selftest_future = self.selftest_pool.submit(self.selftest_run, self.selftest_eid, self.selftest_ttl())
 
+    # --- Package 6: the reduce_no_as_sell self-test leg ---
+    def nosell_tick(self):
+        """Main loop, after every cycle: with reduce_no_as_sell on (live, self-test on) and not checked yet, once some
+        market holds NO, check on a background thread that the exchange takes a covered "sell NO" (nosell_run). Until
+        it has passed, NO holdings are reduced as today ("buy YES"). Refused -> alert, and today's behaviour for the
+        rest of this run (nosell_state "off"); busy -> tried again selftest_retry_seconds later. Never stops the bot."""
+        cfg = self.cfg
+        if not (cfg.reduce_no_as_sell and self.api.live and cfg.selftest_enabled) or self.nosell_state is not None:
+            return
+        f = self.nosell_future
+        if f is not None:
+            if f.done():
+                self.nosell_future = None
+                try:
+                    verdict, msg = f.result()
+                except Exception as e:            # a bug in the test itself: retried later, never fatal
+                    verdict, msg = "busy", f"self-test error: {e}"
+                self.nosell_finish(verdict, msg)
+            return
+        if self.selftest_future is not None or time.monotonic() < self.nosell_next:
+            return
+        held = [e for e in sorted(self.ex) if self.ex[e].inv <= -1]
+        if not held:
+            return                                # nothing to reduce yet: nothing to check
+        eid = min(held, key=lambda e: self.ex[e].inv)   # the biggest NO holding
+        self.nosell_eid, self.nosell_hold = eid, self.ex[eid].pending_until
+        self.ex[eid].pending_until = float("inf")       # no quoting there while the test order may rest
+        self.nosell_future = self.selftest_pool.submit(self.nosell_run, eid)
+
+    def nosell_test_order(self, eid):
+        """ONE 1-share "sell NO @ 0.995" (= our bid at YES 0.005, PMIN): fills only if someone bids 0.995 for NO."""
+        return {"exchangeId": eid, "side": "no", "action": "sell", "quantity": 1, "price": round(1 - PMIN, 3),
+                "tournamentId": self.tid, "expirationDate": iso(utcnow() + timedelta(seconds=self.cfg.order_ttl))}
+
+    def nosell_run(self, eid):
+        """Background thread, API calls only: place the test order, cancel it at once. -> (verdict, message):
+        "ok" (accepted), "refused" (the exchange said no) or "busy" (try again later)."""
+        try:
+            results = self.api.place_batch([self.nosell_test_order(eid)])
+        except ApiError as e:
+            if e.code == "WRITE_BUDGET_WAIT" or e.status in self.SELFTEST_BUSY:
+                return "busy", str(e)
+            return "refused", str(e)
+        r = (results or [{}])[0]
+        data = r.get("data") or {}
+        oid = data.get("orderId")
+        if oid is not None:
+            try:
+                if not self.api.cancel_order(oid):
+                    self.api.cancel_all(self.tid, eid)
+            except ApiError:
+                try:
+                    self.api.cancel_all(self.tid, eid)
+                except ApiError as e:
+                    log.warning("self-test (sell NO): could not cancel test order %s (%s) - it expires on its own",
+                                oid, e)
+        if r.get("ok") and oid is not None:
+            return "ok", f"order {oid} accepted and cancelled"
+        if r.get("status") in self.SELFTEST_BUSY:
+            return "busy", str(r)[:300]
+        err = data.get("error") or data
+        return "refused", (err.get("message") if isinstance(err, dict) and err.get("message") else str(r))[:300]
+
+    def nosell_finish(self, verdict, msg):
+        """Main thread: act on the leg's outcome (see nosell_tick)."""
+        ex = self.ex.get(getattr(self, "nosell_eid", None))
+        if ex is not None:
+            ex.pending_until = self.nosell_hold if self.nosell_hold != float("inf") else 0.0
+        self.orders_stale = True                  # the clean-up may have touched our orders there: re-read the list
+        if verdict == "ok":
+            self.nosell_state = "ok"
+            log.info("self-test (sell NO): a covered 'sell NO' was accepted (%s) - NO holdings are now reduced as "
+                     "covered NO sales (reduce_no_as_sell)", msg)
+        elif verdict == "refused":
+            self.nosell_state = "off"
+            log.error("self-test (sell NO) refused: %s - reduce_no_as_sell OFF for this run", msg)
+            alert(f"reduce_no_as_sell: the exchange refused a covered 'sell NO' ({msg}). NO holdings are reduced as "
+                  f"'buy YES' again (today's behaviour) for the rest of this run; the bot keeps running")
+        else:
+            self.nosell_next = time.monotonic() + self.cfg.selftest_retry_seconds
+            log.warning("self-test (sell NO): exchange busy (%s) - trying again in %.0f s", msg,
+                        self.cfg.selftest_retry_seconds)
+
     def start_feed(self):
         """Start the realtime feed if it's enabled and the `realtime` package is installed."""
         if not self.cfg.realtime_enabled:
@@ -7837,6 +8014,7 @@ class Bot:
                     self.cycle()
                     if self.running:
                         self.selftest_tick()      # stops the bot (exit code 3) if the API surprises us
+                        self.nosell_tick()        # Package 6: covered "sell NO" leg (never stops the bot)
                     self.on_cycle_ok()
                     self.write_status(ok=True)
                     self.maybe_summary()

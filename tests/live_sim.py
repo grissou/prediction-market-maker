@@ -302,7 +302,7 @@ class LiveSim(Sim):
         # Cash: account value now (start + P&L at Polymarket) - positions - what our resting orders lock. An order
         # only locks cash for the part that ADDS to a position (selling YES we hold, or buying back a short, frees it).
         equity = ACCOUNT + sum(m.cash + m.inv * pnow[m.eid] for m in self.mkts)
-        locked = sum(order_lock(o, m.inv) for m in self.mkts for o in m.orders if o.owner == "us")
+        locked = sum(order_lock(o, m.inv, cfg.reduce_no_as_sell) for m in self.mkts for o in m.orders if o.owner == "us")
         self.free = equity - capital - locked
         self.free_min = min(getattr(self, "free_min", 1e18), self.free)
         bot.update_capital_ceiling(self.cap_frac, cfg)
@@ -311,7 +311,8 @@ class LiveSim(Sim):
         if cfg.tilt_exposure_max_frac > 0:        # Package 5 T2.4 feed (Bot.update_tilt's exposure, sim markets, legs 2)
             bot.tilt_exposure = sum(m.inv * (m.ref_seen - 0.5) for m in self.mkts if m.inv and m.ref_seen is not None)
         if cfg.ladder_enabled:                    # Bot.ladder_setup: what the ladder may lock this cycle
-            other = sum(order_lock(o, m.inv) for m in self.mkts for o in m.orders if o.owner == "us" and o.level == 0)
+            other = sum(order_lock(o, m.inv, cfg.reduce_no_as_sell) for m in self.mkts for o in m.orders
+                        if o.owner == "us" and o.level == 0)
             eq = equity
             bot.lad_liquid, bot.lad_party_delta = set(bot.cur_refs), self.party_delta
             bot.lad_cash_left = max(0.0, min(eq - capital - other - cfg.ladder_min_cash_frac * eq,
@@ -636,7 +637,8 @@ class LiveSim(Sim):
                    ro_frac=round(self.ro_cycles / max(1, self.n_cycles), 3), bg_wc_end=round(self.bg_wc),
                    wc_start=round(self.wc_start) if self.wc_start is not None else 0,
                    tilt_s_end=round(getattr(getattr(self, "tilt", None), "s", 0.0), 4),
-                   take_refused=getattr(self, "take_refused", 0))
+                   take_refused=getattr(self, "take_refused", 0),
+                   cash_refused_sh=round(getattr(self, "cash_refused_sh", 0.0)))   # Package 6 (see cash_clip)
         return out
 
 
@@ -722,10 +724,12 @@ class _Clock:
         return getattr(time, k)
 
 
-def order_lock(o, inv):
-    """Cash an order of ours locks: only its part that adds to the position."""
+def order_lock(o, inv, no_sell=True):
+    """Cash an order of ours locks: only its part that adds to the position. Package 6: a bid that buys back a short
+    is free only when it goes out as a covered "sell NO" (cfg.reduce_no_as_sell); otherwise (live until 3 Oct) it is
+    "buy YES @ p" and the exchange locks cash for ALL of it (no_sell False)."""
     if o.is_bid:
-        return o.price * max(0.0, o.qty - max(0.0, -inv))
+        return o.price * max(0.0, o.qty - (max(0.0, -inv) if no_sell else 0.0))
     return (1 - o.price) * max(0.0, o.qty - max(0.0, inv))
 
 
@@ -733,14 +737,19 @@ def cash_clip(sim, m, want):
     """The exchange takes an order only if the cash it locks is there: clip each adding side to the free cash
     (the order it replaces gives its lock back). Reducing shares need none."""
     out = []
+    ns = sim.cfg.reduce_no_as_sell               # Package 6 (see order_lock)
     for w in want:
         is_bid, price, qty = w[0], w[1], w[2]
         lock_ps = price if is_bid else 1 - price
-        reduce = max(0.0, -m.inv) if is_bid else max(0.0, m.inv)
-        back = sum(order_lock(o, m.inv) for o in m.orders if o.owner == "us" and o.is_bid == is_bid and o.level == w[3])
+        short = max(0.0, -m.inv) if is_bid else 0.0
+        if ns and short >= 1 and qty > short:    # Package 6: as Bot.plan_change, the covered bid is capped at the
+            qty = int(short)                     #   NO held (the part going long waits)
+        reduce = (short if ns else 0.0) if is_bid else max(0.0, m.inv)
+        back = sum(order_lock(o, m.inv, ns) for o in m.orders if o.owner == "us" and o.is_bid == is_bid and o.level == w[3])
         room = max(0.0, sim.free + back)
         allowed = reduce + room / max(lock_ps, 0.005)
         if qty > allowed:
+            sim.cash_refused_sh = getattr(sim, "cash_refused_sh", 0.0) + min(qty, short) - min(int(allowed), short)
             qty = int(allowed)
             sim.clipped = getattr(sim, "clipped", 0) + 1
         if qty >= 1:
@@ -793,7 +802,7 @@ def run_many(seeds, hours, regime, ov, first=1):
 
 
 KEYS = ("pnl_liq", "pnl_mid", "pnl", "pnl_lag", "exit_ratio", "hold_med", "mk15_mid", "pick_cost", "wc_end", "writes_pm", "deferred_h", "lvl_sh", "lvl_pnl", "lad_gate", "lg_ok_w", "lg_sh", "dead", "free_min", "clipped", "cap_end", "cap_peak", "freed", "age_end", "unwind_sh", "arb_sh", "outsider_arb_sh",
-        "arb_pnl", "wc_peak", "shares")
+        "arb_pnl", "wc_peak", "shares", "cash_refused_sh")
 
 
 def stats(d):

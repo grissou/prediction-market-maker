@@ -37,6 +37,12 @@ class FakeApi(Api):
         self.batch_error = None
         self.markets_list = []
         self.equity = 100000.0
+        # Package 6 cash model (None = off: every order is accepted, as before). A number = free cash: an order needs
+        # cash for the part that is a purchase (buy YES, buy NO, an uncovered sell); selling shares we hold needs none.
+        # Short of cash -> refused 400 "Insufficient available funds", as live on 3 Oct.
+        self.cash = None
+        self.refuse_no_sell = None        # a message: refuse every "sell NO" with it (the self-test leg's fallback)
+        self.wire = []                    # every order as sent (wire form), for the tests
 
     def log(self, *a): self.calls.append(a)
     def sent(self, kind): return [c for c in self.calls if c[0] == kind]
@@ -113,20 +119,47 @@ class FakeApi(Api):
             self.orders.pop(oid, None)
         return True
 
+    def cash_needed(self, o):
+        """Cash an order (wire form) needs: its purchase part. Covered sells (YES or NO we hold, less what our other
+        resting sells of that side already offer) need none. The part of a sell beyond what we hold is, by the
+        engine's own rule ("sell YES" we don't hold -> "buy NO @ 1-p"), a purchase of the other side at 1 - price."""
+        eid, qty, p = o["exchangeId"], float(o["quantity"]), float(o["price"])
+        if o["action"] == "buy":
+            return qty * p
+        held = self.inv.get(eid, 0)
+        held = max(0.0, held) if o["side"] == "yes" else max(0.0, -held)
+        held -= sum(r["quantity"] for r in self.orders.values()
+                    if r["exchangeId"] == eid and r["action"] == "sell" and r["side"] == o["side"])
+        return max(0.0, qty - max(0.0, held)) * (1 - p)
+
+    def cash_locked(self):
+        return sum(r["quantity"] * r["priceLimit"] for r in self.orders.values() if r["action"] == "buy")
+
     def place_batch(self, orders):
         self.log("batch", len(orders))
+        self.wire = getattr(self, "wire", []) + [dict(o) for o in orders]
         if self.batch_error:
             raise self.batch_error
         if not self.live:
             return [{"index": k, "ok": True, "status": 200, "data": {}} for k in range(len(orders))]
         res = []
         for k, o in enumerate(orders):
+            if getattr(self, "refuse_no_sell", None) and o["side"] == "no" and o["action"] == "sell":
+                res.append({"index": k, "ok": False, "status": 400, "data": {"error": {"message": self.refuse_no_sell}}})
+                continue
+            if getattr(self, "cash", None) is not None and self.cash_needed(o) > self.cash - self.cash_locked() + 1e-9:
+                res.append({"index": k, "ok": False, "status": 400,
+                            "data": {"error": {"code": "BAD_REQUEST", "message": "Insufficient available funds"}}})
+                continue
             oid, self.next_id = self.next_id, self.next_id + 1
-            eid, qty, is_buy = o["exchangeId"], o["quantity"], o["action"] == "buy"
+            # In YES terms: "sell NO @ q" is a YES bid at 1 - q, "buy NO @ q" a YES ask at 1 - q.
+            yes = o["side"] == "yes"
+            eid, qty, is_buy = o["exchangeId"], o["quantity"], yes == (o["action"] == "buy")
+            yp = o["price"] if yes else round(1 - o["price"], 3)
             # Trade immediately against other traders' orders at our price or better (taker).
             side = self.books[eid]["asks" if is_buy else "bids"]
             traded = 0
-            while qty > 0 and side and (side[0]["price"] <= o["price"] + 1e-9 if is_buy else side[0]["price"] >= o["price"] - 1e-9):
+            while qty > 0 and side and (side[0]["price"] <= yp + 1e-9 if is_buy else side[0]["price"] >= yp - 1e-9):
                 take = min(qty, side[0]["quantity"])
                 side[0]["quantity"] -= take
                 p = side[0]["price"]
@@ -140,7 +173,7 @@ class FakeApi(Api):
             if qty > 0:                   # the rest rests. Engine: uncovered sell -> buy NO @ 1-p
                 held = self.inv.get(eid, 0)
                 api_o = ({"side": "no", "action": "buy", "priceLimit": round(1 - o["price"], 3)}
-                         if o["action"] == "sell" and held < qty else
+                         if yes and o["action"] == "sell" and held < qty else
                          {"side": o["side"], "action": o["action"], "priceLimit": o["price"]})
                 self.orders[oid] = {"id": oid, "exchangeId": eid, "quantity": qty, "open": True,
                                     "expirationDate": o["expirationDate"], **api_o}
