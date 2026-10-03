@@ -803,6 +803,18 @@ class Config:
     # backstop_soft_factor), so the worst case stops growing before the hard reduce-only cliff instead of flipping
     # every adding side off and on. The reducing side is never shrunk. 0 = off (unchanged quotes).
     backstop_soft_frac: float = 0.0
+    # --- Package 6 candidate: exits keep quoting in reduce-only ---
+    # The bot is reduce-only most of the time live (backstop), and there every exit feature was switched off.
+    # exit_quotes_in_reduce_only True: hold_quote (C; still needs hold_target_hours > 0 and its age test) and
+    # reduce_join_best (still needs its own flag) also run in reduce-only. Both only move the REDUCING side toward
+    # the book and size it <= the (race-netted) position, so risk can only fall; every other guard stays (reference
+    # guard, jump cooldown, headline gates, never meeting our own other side). Fast unload stays off in reduce-only.
+    # pair_passive_in_reduce_only True (with pair_unwind_passive): pair_passive_quote may rest the slice side of a
+    # complete-set leg when the ONLY thing that emptied that side in decide() was the reduce-only race-net clip
+    # (ex.ro_clip; never after fv None, stop-before-close, cooldown, the reference guard or a block). Price
+    # pp_candidate's, one slice, the other leg taken on fill as usual, cost capped by pair_unwind_max_cost.
+    exit_quotes_in_reduce_only: bool = False
+    pair_passive_in_reduce_only: bool = False
 
 
 CFG = Config()
@@ -967,6 +979,9 @@ OVERRIDABLE = {
     "ref_tilt_rampin_min": (0.0, 1440.0),
     # --- Package 6 candidate: backstop soft band ---
     "backstop_soft_frac": (0.0, 0.3),
+    # --- Package 6 candidate: exits keep quoting in reduce-only ---
+    "exit_quotes_in_reduce_only": (False, True),
+    "pair_passive_in_reduce_only": (False, True),
 }
 MAX_ORDER_TTL = 7200.0    # no order of ours lives longer than this (dead-man's switch), whatever the TTL settings
 LADDER_MAX_LEVELS = 8
@@ -2194,7 +2209,7 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
                   position_limit=None, min_edge=None, reduce_size=None, net_inv=None, age_hours=0.0,
                   adding_factor=1.0, bias_side=None, bias_edge=0.0, bias_size=1.0, unload_side=None,
                   unload_edge=0.0, unload_size=None, adding_limit_factor=1.0, frag_limit=None, behind_best=True,
-                  reduce_fv=None):
+                  reduce_fv=None, why=None):
     """
     fv         fair YES probability
     inv        our net YES shares on THIS exchange (negative = net NO); drives the hard position limit
@@ -2237,6 +2252,8 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
                        position. The adding side is capped 2 x min_edge behind the lowest reducing price that may
                        rest (bid <= ask keep limit - 2 x min_edge when long, mirror when short), so we never meet
                        our own order
+    why                optional dict, filled with why["ro_clip"] = "", "bid", "ask" or "bid ask": the side(s) that
+                       ONLY the reduce-only race-net clip emptied (no no_bid / no_ask block, no zero cap on it)
     """
     bankroll = bankroll or DEFAULT_BANKROLL
     max_order_cash = cfg.max_order_cash_frac * bankroll
@@ -2303,7 +2320,8 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
         ask = max(ask, ceil_tick(best_bid + TICK))
 
     # 4a. Reducing side joins the best other price on its side (reduce_join_best): never through fair, never crossing.
-    if cfg.reduce_join_best and not reduce_only and abs(eff_inv) >= max(1, cfg.reduce_join_min_shares):
+    if (cfg.reduce_join_best and (not reduce_only or cfg.exit_quotes_in_reduce_only)
+            and abs(eff_inv) >= max(1, cfg.reduce_join_min_shares)):
         if eff_inv > 0 and best_ask is not None:
             ask = min(ask, max(ceil_tick(best_ask), ceil_tick(fv + cfg.reduce_join_min_edge)))   # never moves out
             if best_bid is not None:
@@ -2353,6 +2371,7 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
         long_limit = kelly_position(kelly_p, bid, bankroll, cfg, yes=True)     # most YES we'd hold
         short_limit = kelly_position(kelly_p, ask, bankroll, cfg, yes=False)   # most NO we'd hold
     net = eff_inv if net_inv is None else net_inv
+    clipped = [False, False]                  # (the reduce-only race-net clip emptied the bid / ask; see why)
 
     def limited(bid_size, ask_size):
         """Steps 5-6 after the size factors: position, cash and risk limits (applied to the scaled sizes and,
@@ -2385,6 +2404,7 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
 
         # 6. Risk overrides.
         if reduce_only:
+            clipped[:] = [bid_size >= 1 and -eff_inv < 1, ask_size >= 1 and eff_inv < 1]
             bid_size = min(bid_size, -eff_inv)     # only buy back a short
             ask_size = min(ask_size, eff_inv)      # only sell down a long
         if no_bid:
@@ -2448,6 +2468,11 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
 
     if bid >= ask:
         return NO_QUOTE
+    if why is not None:                       # (sizes from the last limited() call: the quoted ones)
+        why["ro_clip"] = " ".join(
+            s for s, hit in (("bid", clipped[0] and not bid_size and not no_bid and (bid_cap is None or bid_cap >= 1)),
+                             ("ask", clipped[1] and not ask_size and not no_ask and (ask_cap is None or ask_cap >= 1)))
+            if hit)
     # How far a resting order may sit from these prices and still be kept: never closer than min_edge
     # to r, never crossing the best other order.
     bid_limit = min(bid_hi, floor_tick(best_ask - TICK)) if best_ask is not None else bid_hi
@@ -3117,6 +3142,8 @@ class Ex:
     turnover_dead: bool = False           # turnover control: holding a position in a market with too little flow
     turnover_tag: str = ""                # " dead" on the quote log line while turnover control changes the quote
     bb_tag: str = ""                      # " bb" on the quote log line while behind-the-best sizing shrinks a side
+    ro_clip: str = ""                     # "bid" / "ask" / "bid ask": side(s) decide() left empty ONLY by the reduce-only
+                                          #   race-net clip this cycle (pair_passive_in_reduce_only)
     lad_fv: float | None = None           # R3 ladder: fair value the ladder is anchored at (None = not anchored)
     lad_ref: float | None = None          # ...Polymarket's price at that moment (ladder_pull_jump compares with it)
     lad_pull_until: float = 0.0           # ...ladder pulled until then after a Polymarket jump
@@ -4684,6 +4711,7 @@ class Bot:
         ref_liquid says whether the Polymarket price is reliable enough to size positions with Kelly."""
         cfg = self.burst_cfg if self.burst else self.cfg
         ex.fl_tag, ex.turnover_tag, ex.turnover_dead, ex.bb_tag = "", "", False, ""
+        ex.ro_clip = ""
         ex.inv, ex.eff, ex.ref = inv.get(ex.eid, 0.0), eff.get(ex.eid, 0.0), ref
         hrs = self.hours_to_close(ex)
         if hrs * 60 <= cfg.stop_minutes_before_close:
@@ -4795,6 +4823,7 @@ class Bot:
             if not (ex.turnover_dead or (cfg.reduce_from_book_max_turnover > 0 and flow is not None
                                          and flow < cfg.reduce_from_book_max_turnover)):
                 reduce_fv = None
+        why = {}
         q = compute_quote(fv, ex.inv, inv_for_quote, best_bid, best_ask, cfg, reduce_only, no_bid, no_ask,
                              bid_cap, ask_cap, kelly_p=kelly_p, bankroll=self.bankroll(),
                              shift=self.party_shift(ex, party_delta), order_size=planned, position_limit=headline_limit,
@@ -4802,10 +4831,12 @@ class Bot:
                              adding_factor=adding, bias_side=side, bias_edge=bias_edge, bias_size=bias_size,
                              unload_side=u_side, unload_edge=cfg.fast_unload_edge, unload_size=u_size,
                              adding_limit_factor=adding_limit, frag_limit=frag_limit,
-                             behind_best=ex.eid not in self.ref_only, reduce_fv=reduce_fv)
+                             behind_best=ex.eid not in self.ref_only, reduce_fv=reduce_fv, why=why)
+        ex.ro_clip = why.get("ro_clip", "")
         ex.bb_tag = " bb" if q.behind else ""
         ex.lad_ctx = (adding, adding_limit, frag_limit)   # (R3 ladder: the same factors and limits)
-        if cfg.hold_target_hours > 0 and not reduce_only:   # C hold target: aged lots' reducing side joins the best
+        if cfg.hold_target_hours > 0 and (not reduce_only or cfg.exit_quotes_in_reduce_only):   # C hold target:
+            # aged lots' reducing side joins the best (Package 6: also in reduce-only, behind its flag)
             q = self.hold_quote(ex, q, best_bid, best_ask, book_fv if book_fv is not None else fv, cfg, ref, now_m)
         return q
 
@@ -6178,10 +6209,16 @@ class Bot:
         """The passive slice replaces the resting leg's ask (long set) or bid (short set) in the normal quote:
         exactly that price (a resting order of ours below/above it is replaced), the slice's open size, and our
         own other side kept at least a tick away. A leg the decision left unquoted (no fair value, stop before
-        close...) stays unquoted, and so does a slice side decide() blocked (long set: no ask; short set: no bid).
-        Applied to the quote decide() returned, before reconciling."""
+        close...) stays unquoted, and so does a slice side decide() blocked (long set: no ask; short set: no bid),
+        except, with pair_passive_in_reduce_only, a side emptied ONLY by the reduce-only race-net clip (ex.ro_clip:
+        a set leg's race-netted position is ~0, but a pair unwind lowers the risk). Applied to the quote decide()
+        returned, before reconciling."""
         st = next((v for v in self.pp.values() if v["leg"] == ex.eid), None)
-        if st is None or not self.cfg.pair_unwind_passive or (q.ask is None if st["sign"] > 0 else q.bid is None):
+        if st is None or not self.cfg.pair_unwind_passive:
+            return q
+        side = "ask" if st["sign"] > 0 else "bid"
+        if getattr(q, side) is None and not (self.cfg.pair_passive_in_reduce_only
+                                             and side in getattr(ex, "ro_clip", "").split()):
             return q                              # decide() blocked the slice's side: it stays blocked
         left, price = int(st.get("left", st["slice"])), st["price"]
         if st["sign"] > 0:
