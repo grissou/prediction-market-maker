@@ -88,8 +88,9 @@ _f, _ov = list(M.Config.__dataclass_fields__), list(M.OVERRIDABLE)
 check("defaults: off, max_cost 0.01, 6 tries", (c.pair_unwind_followup, c.pair_unwind_followup_max_cost,
                                                 c.pair_unwind_followup_tries) == (False, 0.01, 6))
 _NC = "pair_no_unwind_max_per_cycle"            # red-team fix 3, after these
-check("last in Config and OVERRIDABLE (then pair_no_unwind_max_per_cycle)",
-      _f[-4:] == [F, MC, TR, _NC] and _ov[-4:] == [F, MC, TR, _NC], (_f[-4:], _ov[-4:]))
+_P8 = ["pair_no_unwind_max_sets", "pair_unwind_followup_max_age"]   # Package 8 item 2, after those
+check("last in Config and OVERRIDABLE (then pair_no_unwind_max_per_cycle, then Package 8's)",
+      _f[-6:] == [F, MC, TR, _NC] + _P8 and _ov[-6:] == [F, MC, TR, _NC] + _P8, (_f[-6:], _ov[-6:]))
 good, bad = M.validate_overrides({F: True, MC: 0.02, TR: 3}, c)
 check("live overrides accepted", good == {F: True, MC: 0.02, TR: 3} and not bad, (good, bad))
 
