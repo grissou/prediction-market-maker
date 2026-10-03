@@ -890,6 +890,15 @@ class Config:
     # one, so capital_ceiling_adding_size_factor 0 means no new per-market positions (no hedge purchases). The
     # race-netted position still drives skew, the reduce-only clip and the risk limits. False = unchanged.
     adding_factor_per_market: bool = False
+    # --- Package 8 item 2 (all inert while pair_no_unwind_max_cost is -1 / pair_unwind_followup is False) ---
+    # pair_no_unwind_max_sets: with pair_no_unwind_max_cost in effect, a short-set (NO+NO) buy-back is capped at this
+    # many SETS per race per unwind instead of pair_unwind_max_frac x account / YES ask per leg (a cash-per-order cap
+    # measured on the YES price, while the legs are covered "sell NO" orders that lock no cash and RECEIVE 1 - ask).
+    # pair_unwind_max_frac still caps long-set (YES+YES) sales and short-set buy-backs while the flag is off.
+    pair_no_unwind_max_sets: int = 1000
+    # pair_unwind_followup_max_age: an owed record older than this (seconds) is alerted and cleared, so a follow-up the
+    # write budget defers every cycle (not counted as a try) cannot block take_arbitrage on that race for ever.
+    pair_unwind_followup_max_age: float = 600.0
 
 
 CFG = Config()
@@ -1074,6 +1083,9 @@ OVERRIDABLE = {
     "cash_gate_enabled": (False, True),
     "cash_gate_reserve": (0.0, 10000.0),
     "adding_factor_per_market": (False, True),
+    # --- Package 8 item 2 ---
+    "pair_no_unwind_max_sets": (1, 100000),
+    "pair_unwind_followup_max_age": (60.0, 7200.0),
 }
 MAX_ORDER_TTL = 7200.0    # no order of ours lives longer than this (dead-man's switch), whatever the TTL settings
 LADDER_MAX_LEVELS = 8
@@ -6492,7 +6504,7 @@ class Bot:
             return done
         b_left = int(getattr(cfg, "pair_no_unwind_max_per_cycle", 2))   # Package 7: B-only short-set unwinds
         b_waiting = 0
-        for race, members in self.groups.items():
+        for race, members in self.arb_race_order(inv):
             if (len(members) < 2 or not self.running or now_m < self.arb_cooldown.get(race, 0)
                     or race in getattr(self, "pair_owed", ())  # Package 7: its owed legs are evened up first
                     or any(busy(self.ex[e], now_m) for e in members)):
@@ -6538,6 +6550,28 @@ class Bot:
                      "cycles (pair_no_unwind_max_per_cycle %d)", b_waiting, cfg.pair_no_unwind_max_per_cycle)
         return done
 
+    def arb_race_order(self, inv):
+        """The order take_arbitrage visits races in. Unchanged (self.groups order) unless pair_no_unwind_max_cost is in
+        effect; then (Package 8) the races not held NO on every leg keep their order and come first (they are not
+        under pair_no_unwind_max_per_cycle), and the NO+NO races follow, cheapest first: the cached YES asks' sum
+        ascending (no full ask book last), then the capital the sets lock descending (sets x (legs - 1)), then the
+        race name - deterministic, so with the per-cycle cap the cheapest sets go first and the rest wait."""
+        items = list(self.groups.items())
+        if not self.pair_no_unwind_on():
+            return items
+        head, nono = [], []
+        for race, members in items:
+            sets = (min(-float(inv.get(e, 0.0)) for e in members)
+                    if len(members) >= 2 and all(e in self.ex for e in members) else 0.0)
+            if sets < 1:
+                head.append((race, members))
+                continue
+            asks = self.top_levels(members, "asks")
+            total = sum(p for p, _ in asks.values()) if asks else float("inf")
+            nono.append(((round(total, 6), -int(sets) * (len(members) - 1), str(race)), race, members))
+        nono.sort(key=lambda t: t[0])
+        return head + [(race, members) for _, race, members in nono]
+
     def top_levels(self, members, key):
         """{eid: (price, size)} of the best OTHER-trader level ("bids"/"asks") on every leg, or None if a leg has none."""
         out = {}
@@ -6570,15 +6604,22 @@ class Bot:
                 total = sum(p for p, _ in levels.values())
                 edge = total - 1 if sign > 0 else 1 - total
                 floor = cfg.pair_unwind_min_profit
-                if sign < 0 and self.pair_no_unwind_on():
+                nono = sign < 0 and self.pair_no_unwind_on()
+                if nono:
                     # Package 7: a NO+NO set is unwound as a pair even at a small cost (asks <= 1 + max_cost): the
                     # only way to free it without cash (selling one leg breaks the set's collateral)
                     floor = min(floor, -cfg.pair_no_unwind_max_cost)
                 if edge < floor - 1e-9:   # (buying back a short set below 0.90 only cuts risk)
                     continue
-                qty = int(min([sets] + [size for _, size in levels.values()] +
-                              [cfg.pair_unwind_max_frac * bank / max(p, TICK) for p, _ in levels.values()]))
-                if qty >= 1 and self.unwind_is_safe(inv, fvs, members, -sign * qty):
+                if nono:
+                    # Package 8: every leg is a covered "sell NO" (no cash locked, 1 - ask received), so the cap is in
+                    # SETS per race, not cash per order at the YES ask
+                    caps = [max(1, int(getattr(cfg, "pair_no_unwind_max_sets", 1000)))]
+                else:
+                    caps = [cfg.pair_unwind_max_frac * bank / max(p, TICK) for p, _ in levels.values()]
+                qty = int(min([sets] + [size for _, size in levels.values()] + caps))
+                if qty >= 1 and self.unwind_is_safe(inv, fvs, members, -sign * qty,
+                                                     **({"set_slack": True} if nono else {})):
                     self.arb_plan_b = edge < cfg.pair_unwind_min_profit - 1e-9
                     return "unwind", action, levels, qty
         if not cfg.arb_enabled or closing:
@@ -6603,13 +6644,21 @@ class Bot:
             return "arb", "buy", asks, qty
         return None
 
-    def unwind_is_safe(self, inv, fvs, members, delta):
+    def unwind_is_safe(self, inv, fvs, members, delta, set_slack=False):
         """Would adding `delta` YES shares on every leg of a race leave the party delta within its cap (or no
         further past it) and the settlement risk and the worst case no higher? A complete set is riskless,
-        so this holds by construction; it guards against the set being part of a hedge the risk logic relies on."""
+        so this holds by construction; it guards against the set being part of a hedge the risk logic relies on.
+        set_slack (Package 8, a NO+NO buy-back with pair_no_unwind_max_cost in effect): the worst case is a MARK, so
+        when the legs' risk fair values add up to s > 1 buying back d short sets raises it by d x (s - 1) although
+        the set pays the same in every outcome; that mark artefact is allowed (the party delta and the settlement
+        risk are still checked)."""
         after = dict(inv)
         for e in members:
             after[e] = after.get(e, 0.0) + delta
+        slack = 1e-6
+        if set_slack and delta > 0 and all(inv.get(e, 0.0) <= -delta + 1e-9 for e in members):
+            s = sum(self.risk_fv(e, fvs, members) for e in members)
+            slack += delta * max(0.0, s - 1.0)
 
         def pdelta(pos):
             return sum(PARTY_SIGN.get(ex.party, 0) * pos.get(eid, 0.0) for eid, ex in self.ex.items())
@@ -6618,7 +6667,7 @@ class Bot:
         cap = self.cfg.max_party_delta_frac * self.bankroll()
         if abs(after_pd) > cap and abs(after_pd) > abs(before_pd) + 1e-6:
             return False
-        if self.total_worst_case(after, fvs) > self.total_worst_case(inv, fvs) + 1e-6:
+        if self.total_worst_case(after, fvs) > self.total_worst_case(inv, fvs) + slack:
             return False
         return self.settlement_risk(after, fvs, after_pd) <= self.settlement_risk(inv, fvs, before_pd) + 1e-6
 
@@ -7050,6 +7099,13 @@ class Bot:
                             st["legs"].pop(e))
             lag = [e for e, q in st["legs"].items() if q >= 1]
             if not lag:
+                del self.pair_owed[race]
+                continue
+            max_age = float(getattr(cfg, "pair_unwind_followup_max_age", 600.0))
+            if now_m - st.get("t", now_m) >= max_age:   # Package 8: never blocks the race for ever (budget deferrals)
+                owed = ", ".join(f"{self.ex[e].label} {st['legs'][e]}" for e in lag)
+                alert(f"pair unwind on {race}: owed legs not evened up within {max_age:.0f} s ({st['tries']} tries; "
+                      f"{owed}): owed state cleared, now ordinary inventory, which the quoting will work off")
                 del self.pair_owed[race]
                 continue
             if not self.running or not self.api.live:
