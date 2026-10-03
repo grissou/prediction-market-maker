@@ -1,9 +1,9 @@
 <!-- STATUS (Finisher 2b, updated on every push) -->
-**STATUS 21:45 UTC 3 Oct (branch claude/finisher-package8):** phase = Package 8 READY. READY: Package 8 ("READY: Package 8", PR #10), Package 7 (2ef6d12, PR #9, LIVE since 19:15), Package 6 (f4214f1, PR #8), Package 5 (c14c92b, PR #7).
-Package 8 = item 1 `cash_gate_enabled` + `adding_factor_per_market` (every 400 refusal traced to the race-netted "adding" side; no order needing cash the exchange does not have is sent), item 2 pair sizing in sets / cheapest race first / owed-record age (verdict: keep 0.02, per-cycle 1), item 3 tilt exits (`tilt_exit_priority`, `tilt_exit_full_size`, `ref_guard_tilted`, `ref_guard_exits`): +206 ± 55 exchange-style / +275 ± 91 liquidation, tilt exposure -2,340 ± 920 (-30%) in 3 h, live-pinned world; adding factor: keep 0 for 3 h of stage 3, then 0.95 resume if exposure fell.
-Numbers: SIM_NOTES "Round 8" (8 x 3 h paired); items 1-2 unit-test evidence (live_sim has no cash / set collateral); flags off pinned identical to 2ef6d12 on the live config; red team 1 high / 4 medium, all fixed; 33 suites green + STRESS_LADDER 20/20.
-Deploy: code -> deploy/package8 stage1_cash_gate -> stage2_pair_sizing -> stage3_tilt_exits -> (b) by hand after 3 h; watch list in the Package 8 section.
-Next: owner deploys stage 1 and reads `cash_gated` / refusals; the executor stays subscribed to PRs #7/#8/#9/#10.
+**STATUS 22:58 UTC 3 Oct (branch claude/finisher-package9):** phase = Package 9 Phase 1 (explore, to ~02:30). READY: Package 8 (7b298a4, PR #10, LIVE since 22:42 with stages 1-3), Package 7 (PR #9), Package 6 (PR #8), Package 5 (PR #7).
+Package 9 = the catch-up package: objective P(account >= 150k by 4 Nov) first, P(>= 200k) second, P(<= 85k) < ~10%, max drawdown < ~20% (owner 22:5x); plan in PLAN_P9.md; snapshot ops-snapshot-2026-10-03 (to 22:47) is the data.
+Numbers: none yet (4 opus explorers writing analysis/p9/ideas_*.md; screens from 02:30; build from 04:30).
+Deploy: nothing new; Package 8 stages 1-3 live.
+Next: ideas -> ranked table (analysis/p9/RANKED.md) -> top 3-5 built behind OFF flags with kill-switches -> "READY: Package 9" by 07:00.
 
 # START HERE (Team run, branch `claude/run-c-tournament-improvements-pycdet`)
 
