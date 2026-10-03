@@ -367,11 +367,19 @@ class Sim:
         if not cancels and not places:
             return None
         urgent = t - m.state.get("ref_moved_at", -99) < 15
-        key = (0 if not places else 0.5 if urgent else 1, 0 if m.headline else 1, 1 if cancels else 0,
+        head = 0 if m.headline else 1
+        if head and getattr(cfg, "tilt_exit_priority", False):   # Package 8 mirror of Bot.change_key's 0.5 slot
+            head = self.tilt_exit_head(m, cancels, places)
+        key = (0 if not places else 0.5 if urgent else 1, head, 1 if cancels else 0,
                -max([w[2] for w in places] or [0]))
         if real and all(o.level > 0 for o in cancels) and all(w[3] > 0 for w in places):
             key = (0 if not places and any(ladder_unsafe(o, want) for o in cancels) else 2,) + key[1:]
         return key, m, cancels, places, fv, len(cancels) == len(mine)
+
+    def tilt_exit_head(self, m, cancels, places):
+        """Package 8 tilt_exit_priority: change_key's headline slot for an ordinary market (1 here: live_sim's
+        LiveSim asks the bot)."""
+        return 1
 
     def our_cycle(self, t, paths):
         """One bot cycle over all markets: plan each, then send in priority order within the write budget."""

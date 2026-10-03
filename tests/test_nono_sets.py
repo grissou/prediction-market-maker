@@ -99,8 +99,9 @@ check("defaults: no_set_aware_bids False, pair_no_unwind_max_cost -1 (off)",
 _p7b = ["pair_unwind_followup", "pair_unwind_followup_max_cost", "pair_unwind_followup_tries",   # Package 7 part 2
         "pair_no_unwind_max_per_cycle",                                                         # (red-team fix 3)
         "cash_gate_enabled", "cash_gate_reserve", "adding_factor_per_market"]                   # (then Package 8's)
-check("last in Config and OVERRIDABLE (then Package 7's pair unwind follow-up)",
-      _f[_f.index(A):] == [A, B] + _p7b and _ov[_ov.index(A):] == [A, B] + _p7b, (_f[-5:], _ov[-5:]))
+check("one contiguous block in Config and OVERRIDABLE (later packages may follow)",
+      _f[_f.index(A):_f.index(A) + 2] == [A, B] and _ov[_ov.index(A):_ov.index(A) + 2] == [A, B]
+      and all(k in _f and k in _ov for k in _p7b), (_f[-5:], _ov[-5:]))
 good, bad = M.validate_overrides({A: True, B: 0.003}, c)
 check("live overrides accepted (True, 0.003)", good == {A: True, B: 0.003} and not bad, (good, bad))
 good, bad = M.validate_overrides({B: -1.0}, c)

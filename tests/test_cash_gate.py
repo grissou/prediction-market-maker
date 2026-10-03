@@ -94,7 +94,8 @@ print("--- settings")
 c = M.Config()
 _f, _ov = list(M.Config.__dataclass_fields__), list(M.OVERRIDABLE)
 check("defaults: gate off, reserve 25, per-market off", (getattr(c, G), getattr(c, R), getattr(c, P)) == (False, 25.0, False))
-check("last in Config and OVERRIDABLE, in order", _f[-3:] == [G, R, P] and _ov[-3:] == [G, R, P], (_f[-3:], _ov[-3:]))
+check("one contiguous block in Config and OVERRIDABLE, in order", _f[_f.index(G):_f.index(G) + 3] == [G, R, P]
+      and _ov[_ov.index(G):_ov.index(G) + 3] == [G, R, P], (_f[-3:], _ov[-3:]))
 good, bad = M.validate_overrides({G: True, R: 10.0, P: True}, c)
 check("live overrides accepted", good == {G: True, R: 10.0, P: True} and not bad, (good, bad))
 
