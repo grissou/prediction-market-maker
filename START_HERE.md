@@ -1,9 +1,9 @@
 <!-- STATUS (Finisher 2b, updated on every push) -->
-**STATUS 21:45 UTC 3 Oct (branch claude/finisher-package8):** phase = Package 8 READY. READY: Package 8 ("READY: Package 8", PR PR_NUM), Package 7 (2ef6d12, PR #9, LIVE since 19:15), Package 6 (f4214f1, PR #8), Package 5 (c14c92b, PR #7).
+**STATUS 21:45 UTC 3 Oct (branch claude/finisher-package8):** phase = Package 8 READY. READY: Package 8 ("READY: Package 8", PR #10), Package 7 (2ef6d12, PR #9, LIVE since 19:15), Package 6 (f4214f1, PR #8), Package 5 (c14c92b, PR #7).
 Package 8 = item 1 `cash_gate_enabled` + `adding_factor_per_market` (every 400 refusal traced to the race-netted "adding" side; no order needing cash the exchange does not have is sent), item 2 pair sizing in sets / cheapest race first / owed-record age (verdict: keep 0.02, per-cycle 1), item 3 tilt exits (`tilt_exit_priority`, `tilt_exit_full_size`, `ref_guard_tilted`, `ref_guard_exits`): +206 ± 55 exchange-style / +275 ± 91 liquidation, tilt exposure -2,340 ± 920 (-30%) in 3 h, live-pinned world; adding factor: keep 0 for 3 h of stage 3, then 0.95 resume if exposure fell.
 Numbers: SIM_NOTES "Round 8" (8 x 3 h paired); items 1-2 unit-test evidence (live_sim has no cash / set collateral); flags off pinned identical to 2ef6d12 on the live config; red team 1 high / 4 medium, all fixed; 33 suites green + STRESS_LADDER 20/20.
 Deploy: code -> deploy/package8 stage1_cash_gate -> stage2_pair_sizing -> stage3_tilt_exits -> (b) by hand after 3 h; watch list in the Package 8 section.
-Next: owner deploys stage 1 and reads `cash_gated` / refusals; the executor stays subscribed to PRs #7/#8/#9/PR_NUM.
+Next: owner deploys stage 1 and reads `cash_gated` / refusals; the executor stays subscribed to PRs #7/#8/#9/#10.
 
 # START HERE (Team run, branch `claude/run-c-tournament-improvements-pycdet`)
 
@@ -12,7 +12,7 @@ The Builder's previous START_HERE is kept as `START_HERE_BUILDER.md`; Run A's no
 Plan: `PLAN.md`. Packages appear below as they become READY (commit messages start "READY: Package N").
 Deploy only commits whose message starts "READY"; the branch is cumulative.
 
-## Package 8 (READY, Finisher 2b, 3 Oct ~21:45 UTC; branch `claude/finisher-package8` from Package 7 2ef6d12; draft PR PR_NUM): the cash gate (ends the 400 refusals), pair-unwind sizing in sets, and the tilt exits (all OFF; staged files in `deploy/package8/`)
+## Package 8 (READY, Finisher 2b, 3 Oct ~21:45 UTC; branch `claude/finisher-package8` from Package 7 2ef6d12; draft PR #10): the cash gate (ends the 400 refusals), pair-unwind sizing in sets, and the tilt exits (all OFF; staged files in `deploy/package8/`)
 Live at the time of writing: Package 7 since 19:15 UTC with tilt on at `ref_tilt_max` 0.11 (`tilt_s` 0.110, +0.0036/h), headline on,
 `reduce_no_as_sell`, `no_set_aware_bids`, `pair_unwind_followup`, `pair_no_unwind_max_cost` 0.02, `capital_ceiling_adding_size_factor` 0;
 capital 100%, free cash ~0, tilt_exposure +34.3k (~356 marked per point), reduce-only most cycles, ~132 of 150 changes deferred per cycle.
