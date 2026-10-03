@@ -35,7 +35,10 @@ print("--- settings")
 c = M.Config()
 check("default 20 minutes (SIM_NOTES Round 5: same P&L as the step-on, smoother switch-on)", getattr(c, KEY, None) == 20.0)
 _ov, _f = list(M.OVERRIDABLE), list(M.Config.__dataclass_fields__)
-check("last in Config and in OVERRIDABLE", _f and _f[-1] == KEY and _ov and _ov[-1] == KEY, (_f[-1:], _ov[-1:]))
+_p6 = ["backstop_soft_frac"]                   # Package 6 candidate settings appended after it
+_f6, _ov6 = [k for k in _f if k not in _p6], [k for k in _ov if k not in _p6]
+check("last Package 5 key in Config and in OVERRIDABLE", _f6 and _f6[-1] == KEY and _ov6 and _ov6[-1] == KEY,
+      (_f6[-1:], _ov6[-1:]))
 check("range (0, 1440)", M.OVERRIDABLE.get(KEY) == (0.0, 1440.0))
 good, bad = M.validate_overrides({KEY: 30.0}, c)
 check("live-overridable", good == {KEY: 30.0} and not bad, (good, bad))

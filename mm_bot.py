@@ -797,6 +797,12 @@ class Config:
     # re-prices (+0.8 writes/min) and the same cost at the Polymarket mark. Default 20: the same P&L as the step-on,
     # the switch-on re-price wave (~157 markets) spread over ~10 cycles. Still: switch on in a quiet hour.
     ref_tilt_rampin_min: float = 20.0
+    # --- Package 6 candidate: backstop soft band ---
+    # With risk_model "correlated": in a band of this many x account value below worst_case_backstop_frac, the
+    # ADDING side's size shrinks linearly to 0 as the sum-of-maxima worst case nears the backstop (see
+    # backstop_soft_factor), so the worst case stops growing before the hard reduce-only cliff instead of flipping
+    # every adding side off and on. The reducing side is never shrunk. 0 = off (unchanged quotes).
+    backstop_soft_frac: float = 0.0
 
 
 CFG = Config()
@@ -959,6 +965,8 @@ OVERRIDABLE = {
     "take_tilted_ref": (False, True),
     # --- Package 5: T2.1 ramp-in ---
     "ref_tilt_rampin_min": (0.0, 1440.0),
+    # --- Package 6 candidate: backstop soft band ---
+    "backstop_soft_frac": (0.0, 0.3),
 }
 MAX_ORDER_TTL = 7200.0    # no order of ours lives longer than this (dead-man's switch), whatever the TTL settings
 LADDER_MAX_LEVELS = 8
@@ -2165,6 +2173,22 @@ def gap_size_factor(fv, book_fv, cfg=CFG):
     return max(cfg.gap_size_floor, 1.0 - abs(fv - book_fv) / cfg.gap_size_shrink)
 
 
+def backstop_soft_factor(worst, equity, cfg=CFG):
+    """Package 6 candidate (backstop soft band): the adding side's size factor as the sum-of-maxima worst case
+    nears the reduce-only backstop. 1 when off (backstop_soft_frac <= 0, risk_model not "correlated", no account
+    value) or worst <= (backstop - soft) x equity; 0 at or above backstop x equity; linear in between."""
+    soft = cfg.backstop_soft_frac
+    if soft <= 0 or cfg.risk_model != "correlated" or not equity or worst is None:
+        return 1.0
+    hi = cfg.worst_case_backstop_frac * equity
+    lo = (cfg.worst_case_backstop_frac - soft) * equity
+    if worst <= lo:
+        return 1.0
+    if worst >= hi:
+        return 0.0
+    return (hi - worst) / (hi - lo)
+
+
 def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=False, no_bid=False, no_ask=False,
                   bid_cap=None, ask_cap=None, kelly_p=None, bankroll=None, shift=0.0, order_size=None,
                   position_limit=None, min_edge=None, reduce_size=None, net_inv=None, age_hours=0.0,
@@ -3227,6 +3251,7 @@ class Bot:
         self.burst, self.burst_calm_since, self.burst_set = False, 0.0, set()
         self.trading_since = None         # monotonic time the trading loop started (burst_startup_grace_seconds)
         self.global_reduce = False
+        self.backstop_adding_factor = 1.0     # Package 6 candidate: backstop soft band (cycle step 6 sets it)
         self.ref_moved = set()            # eids whose Polymarket price moved >= urgent_ref_move at the latest reading
         self.unloads = {}                 # eid -> {"until", "side", "left"}: fast unload windows (note_unloads)
         self.ref_version_urgent = 0
@@ -3626,6 +3651,7 @@ class Bot:
             log.warning("%s reduce-only: risk %.0f, worst case %.0f, account %s", "ENTERING" if global_reduce
                         else "leaving", risk, worst, f"{equity:.0f}" if equity is not None else "?")
         self.global_reduce = global_reduce
+        self.backstop_adding_factor = backstop_soft_factor(worst, equity, cfg)   # Package 6 candidate: soft band
         capital = self.capital_in_positions(pos, inv, fvs)
         cap_frac = capital / equity if equity else None
         self.update_capital_ceiling(cap_frac, cfg)
@@ -4741,6 +4767,8 @@ class Bot:
             ex.turnover_tag = " dead"
         if cfg.gap_size_shrink > 0 and book_fv is not None and ex.eid not in self.ref_only:   # X5 gap-size shrink
             adding *= gap_size_factor(fv, book_fv, cfg)
+        if cfg.backstop_soft_frac > 0:            # Package 6 candidate: backstop soft band (set in cycle step 6)
+            adding *= self.backstop_adding_factor
         frag_limit = None
         if cfg.mark_frag_enabled:                 # mark-fragility cap: the adding side's limit, and the total cap
             if self.mark_frag_over:

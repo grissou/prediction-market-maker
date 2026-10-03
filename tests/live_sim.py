@@ -329,6 +329,7 @@ class LiveSim(Sim):
             hyst = min(cfg.reduce_only_hysteresis, cfg.max_worst_case_frac / 2) if self.global_reduce else 0.0
             self.global_reduce = worst > (cfg.worst_case_backstop_frac - hyst) * equity
             bot.global_reduce = self.global_reduce
+            bot.backstop_adding_factor = M.backstop_soft_factor(worst, equity, cfg)   # Package 6 candidate
             self.n_cycles += 1
             self.ro_cycles += self.global_reduce
         if t % 600 == 0:
