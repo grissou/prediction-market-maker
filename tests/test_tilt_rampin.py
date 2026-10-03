@@ -35,7 +35,9 @@ print("--- settings")
 c = M.Config()
 check("default 0 (no ramp; the setting stays available)", getattr(c, KEY, None) == 0.0)
 _ov, _f = list(M.OVERRIDABLE), list(M.Config.__dataclass_fields__)
-check("last in Config and in OVERRIDABLE", _f and _f[-1] == KEY and _ov and _ov[-1] == KEY, (_f[-1:], _ov[-1:]))
+check("its own block in Config and in OVERRIDABLE (after the X12 take_tilted_ref one)",
+      KEY in _f and KEY in _ov and _f[_f.index(KEY) - 1] == "take_tilted_ref" and _ov[_ov.index(KEY) - 1] == "take_tilted_ref",
+      (_f[-3:], _ov[-3:]))
 check("range (0, 1440)", M.OVERRIDABLE.get(KEY) == (0.0, 1440.0))
 good, bad = M.validate_overrides({KEY: 30.0}, c)
 check("live-overridable", good == {KEY: 30.0} and not bad, (good, bad))
