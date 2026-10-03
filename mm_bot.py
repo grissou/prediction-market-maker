@@ -841,8 +841,9 @@ class Config:
     # ONE leg breaks the set, the remaining lone NO then needs full collateral, i.e. cash. Selling the LONE part (NO
     # held beyond the race's smallest leg) is fine.
     # no_set_aware_bids True (with reduce_no_as_sell): a covered bid / take on such a leg is capped at its lone part,
-    # |inv| - min over the race's legs of |inv| (0 on the smallest leg: no bid there, it would need cash). The
-    # set part is only unwound as a pair (below). False = unchanged.
+    # max(0, NO held - the most NO held on any OTHER leg of the race; a leg without NO counts 0) - the worst-case
+    # (sum - max) collateral model, so [10, 8, 5] -> [2, 0, 0] and NO on 2 of 3 legs is capped too (0 = no bid
+    # there, it would need cash). The set part is only unwound as a pair (below). False = unchanged.
     no_set_aware_bids: bool = False
     # pair_no_unwind_max_cost >= 0 (with reduce_no_as_sell; live, after its own start-up check): the short-set
     # buy-back in arb_plan (buy YES on every leg = covered "sell NO" on every leg, ONE batch) also runs when the asks
@@ -861,6 +862,10 @@ class Config:
     pair_unwind_followup: bool = False
     pair_unwind_followup_max_cost: float = 0.01
     pair_unwind_followup_tries: int = 6
+    # pair_no_unwind_max_per_cycle: at most this many short-set unwinds that run only because of the widened
+    # pair_no_unwind_max_cost threshold per cycle (each costs 5 writes and a cooldown; up to 38 NO+NO races qualify
+    # at once when it is switched on); the rest wait for the next cycles. No effect with pair_no_unwind_max_cost -1.
+    pair_no_unwind_max_per_cycle: int = 2
 
 
 CFG = Config()
@@ -1040,6 +1045,7 @@ OVERRIDABLE = {
     "pair_unwind_followup": (False, True),
     "pair_unwind_followup_max_cost": (0.0, 0.05),
     "pair_unwind_followup_tries": (1, 50),
+    "pair_no_unwind_max_per_cycle": (1, 10),
 }
 MAX_ORDER_TTL = 7200.0    # no order of ours lives longer than this (dead-man's switch), whatever the TTL settings
 LADDER_MAX_LEVELS = 8
@@ -5812,14 +5818,20 @@ class Bot:
 
     # --- Package 7: NO+NO sets ---
     def nono_set_part(self, eid, inv=None):
-        """NO shares of eid locked in a NO+NO set: when EVERY leg of its race (2+ legs) holds >= 1 NO, the smallest
-        leg's NO held (min over legs of -inv; inv = this leg's position if given, else ex.inv); else 0."""
+        """NO shares of eid locked in NO+NO sets, worst-case collateral model (the exchange collateralises a race's NO
+        at sum - max): eid's NO held n_i less its LONE part, lone_i = max(0, n_i - max over the race's OTHER legs of
+        their NO held), a leg not holding NO counting 0 - i.e. min(n_i, max over the other legs). 0 if eid holds < 1
+        NO or is not in a 2+-leg race. inv = this leg's position if given, else ex.inv. For a 2-leg race this is the
+        smaller leg's NO when both hold NO, as before; with 3+ legs NO on only some legs is capped too."""
         ex = self.ex.get(eid)
         members = self.groups.get(ex.group) if ex is not None else None
         if not members or len(members) < 2 or any(m not in self.ex for m in members):
             return 0.0
-        held = [-float(inv if (m == eid and inv is not None) else self.ex[m].inv) for m in members]
-        return min(held) if min(held) >= 1 else 0.0
+        n = -float(inv if inv is not None else ex.inv)
+        if n < 1:
+            return 0.0
+        others = max(max(0.0, -float(self.ex[m].inv)) for m in members if m != eid)
+        return min(n, others) if others >= 1 else 0.0
 
     def set_blocked(self, eid, inv, level=None):
         """no_set_aware_bids in effect and a bid / take buying back NO on eid has no lone part left to sell as a
@@ -6154,6 +6166,8 @@ class Bot:
         done = set()
         if not (cfg.arb_enabled or cfg.pair_unwind_enabled):
             return done
+        b_left = int(getattr(cfg, "pair_no_unwind_max_per_cycle", 2))   # Package 7: B-only short-set unwinds
+        b_waiting = 0
         for race, members in self.groups.items():
             if (len(members) < 2 or not self.running or now_m < self.arb_cooldown.get(race, 0)
                     or race in getattr(self, "pair_owed", ())  # Package 7: its owed legs are evened up first
@@ -6163,6 +6177,9 @@ class Bot:
             # unwinding a held set only reduces them, so it still runs
             closing = any(self.hours_to_close(self.ex[e]) <= cfg.flatten_hours_before_close for e in members)
             if self.arb_plan(members, inv, fvs, closing) is None:     # quick check on the cached books
+                continue
+            if getattr(self, "arb_plan_b", False) and b_left < 1:     # Package 7: B's per-cycle cap: waits
+                b_waiting += 1
                 continue
             # Write budget: cancel our quotes on each leg, one batch, cancel the leftovers on each leg.
             if getattr(self.api, "writes_left", lambda: 10 ** 6)() < 2 * len(members) + 1:
@@ -6178,6 +6195,11 @@ class Bot:
             plan = self.arb_plan(members, inv, fvs, closing)
             if plan is None:
                 continue
+            if getattr(self, "arb_plan_b", False):
+                if b_left < 1:
+                    b_waiting += 1
+                    continue
+                b_left -= 1
             kind, action, levels, qty = plan
             self.arb_cooldown[race] = now_m + (cfg.pair_unwind_cooldown_seconds if kind == "unwind"
                                                else cfg.arb_cooldown_seconds)
@@ -6187,6 +6209,9 @@ class Bot:
                     self.arb_cooldown[race] = now_m + 4 * (cfg.pair_unwind_cooldown_seconds if kind == "unwind"
                                                            else cfg.arb_cooldown_seconds)
                 done.add(race)
+        if b_waiting:
+            log.info("short-set pair unwinds at a cost (pair_no_unwind_max_cost): %d more race(s) wait for the next "
+                     "cycles (pair_no_unwind_max_per_cycle %d)", b_waiting, cfg.pair_no_unwind_max_per_cycle)
         return done
 
     def top_levels(self, members, key):
@@ -6211,6 +6236,7 @@ class Bot:
         cfg = self.cfg
         bank = self.bankroll()
         bids, asks = self.top_levels(members, "bids"), self.top_levels(members, "asks")
+        self.arb_plan_b = False           # Package 7: True = the plan is a short-set unwind only B's threshold allows
         if cfg.pair_unwind_enabled:
             held = [inv.get(e, 0.0) for e in members]
             for sign, levels, action in ((+1, bids, "sell"), (-1, asks, "buy")):
@@ -6229,6 +6255,7 @@ class Bot:
                 qty = int(min([sets] + [size for _, size in levels.values()] +
                               [cfg.pair_unwind_max_frac * bank / max(p, TICK) for p, _ in levels.values()]))
                 if qty >= 1 and self.unwind_is_safe(inv, fvs, members, -sign * qty):
+                    self.arb_plan_b = edge < cfg.pair_unwind_min_profit - 1e-9
                     return "unwind", action, levels, qty
         if not cfg.arb_enabled or closing:
             return None
@@ -6306,6 +6333,12 @@ class Bot:
             return None
         return (round(gap, 6), round(-sign * (price + py), 6)), price, qty
 
+    def reduce_no_effective(self):
+        """reduce_no_as_sell as the bot runs it: reduce_no_on() (setting + start-up check) where the bot has it, else
+        the setting (Package 7 D keys on this, so a run whose sell-NO check failed keeps T2.5's short sets)."""
+        fn = getattr(self, "reduce_no_on", None)
+        return bool(fn()) if callable(fn) else bool(self.cfg.reduce_no_as_sell)
+
     def pair_passive_plan(self, members, inv, fvs, prefer=None):
         """A new passive slice for a 2-leg race holding a complete set (long or short both legs), or None.
         prefer = the leg that rested last: kept on a tie of how far behind the touch (no needless leg swaps)."""
@@ -6316,8 +6349,8 @@ class Bot:
         sign = 1 if min(ha, hb) >= 1 else -1 if max(ha, hb) <= -1 else 0
         if not sign:
             return None
-        if sign < 0 and self.cfg.reduce_no_as_sell:
-            # Package 7: with reduce_no_as_sell the resting bid is a covered "sell NO" on ONE leg of a NO+NO set,
+        if sign < 0 and self.reduce_no_effective():
+            # Package 7: with reduce_no_as_sell (in effect: reduce_no_on) the resting bid is a covered "sell NO" on ONE leg of a NO+NO set,
             # which breaks the set's collateral and is refused at 0 cash: short sets are unwound as a pair
             # (arb_plan, pair_no_unwind_max_cost), never passively. Long sets (YES+YES) as before.
             if not getattr(self, "pp_short_skip_logged", False):
@@ -6468,7 +6501,7 @@ class Bot:
         st = next((v for v in self.pp.values() if v["leg"] == ex.eid), None)
         if st is None or not self.cfg.pair_unwind_passive:
             return q
-        if st["sign"] < 0 and self.cfg.reduce_no_as_sell:
+        if st["sign"] < 0 and self.reduce_no_effective():
             return q                              # Package 7: a short-set slice never rests (see pair_passive_plan)
         side = "ask" if st["sign"] > 0 else "bid"
         if getattr(q, side) is None and not (self.cfg.pair_passive_in_reduce_only
@@ -6633,9 +6666,32 @@ class Bot:
 
     def pair_owe(self, race, orders, traded, action, now_m):
         """After a pair unwind batch whose legs filled unequally: the lagging leg(s) owe (most filled - their fill),
-        at their planned price. Evened up by pair_followup_step on the next cycles."""
+        at their planned price. Evened up by pair_followup_step on the next cycles.
+        Short-set buy-back (action "buy"): each lagging leg's owed is capped at its LONE part AFTER the fills (its NO
+        held then less the most NO held then on any other leg of the race; a leg without NO counts 0), and a leg whose
+        lone part is < 1 is dropped: the rest of its NO is still in a NO+NO set with the others, so a covered sale
+        there would break the set (refused at 0 cash) - nothing is owed. ex.inv is still the pre-batch position here
+        (positions are re-read next cycle), so the fills are added to it."""
         top = max(traded)
         legs = {o["exchangeId"]: int(round(top - f)) for o, f in zip(orders, traded) if top - f >= 1 - 1e-9}
+        if action == "buy" and legs:
+            fill = {o["exchangeId"]: f for o, f in zip(orders, traded)}
+            members = [m for m in (self.groups.get(self.ex[next(iter(legs))].group) or fill) if m in self.ex]
+            no_after = {m: max(0.0, -(self.ex[m].inv + fill.get(m, 0.0))) for m in members}
+            capped = {}
+            for e, q in legs.items():
+                lone = no_after.get(e, 0.0) - max([no_after[m] for m in members if m != e] or [0.0])
+                q = int(min(q, lone + 1e-9))
+                if q >= 1:
+                    capped[e] = q
+                else:
+                    log.info("pair unwind on %s: %s owes nothing (NO after the fills %.0f, none of it lone: still in a "
+                             "NO+NO set)", race, self.ex[e].label, no_after.get(e, 0.0))
+            legs = capped
+            if not legs:
+                log.warning("pair unwind on %s filled %s unequally: nothing owed (no lagging leg has a lone NO part "
+                            "after the fills; the rest is still held as NO+NO sets)", race, traded)
+                return
         self.pair_owed[race] = {"action": action, "legs": legs, "t": now_m, "tries": 0,
                                 "price": {o["exchangeId"]: o["price"] for o in orders}}
         log.warning("pair unwind on %s filled %s unequally: %s owed (follow-up up to %d cycles, at most %.3f a share "
@@ -6655,7 +6711,10 @@ class Bot:
         cfg, acted = self.cfg, set()
         for race in list(self.pair_owed):
             st = self.pair_owed[race]
-            lag = [e for e, q in st["legs"].items() if q >= 1 and e in self.ex]
+            for e in [e for e in st["legs"] if e not in self.ex]:   # a leg gone from the market list: dropped
+                log.warning("pair unwind follow-up on %s: %s owed on a market no longer listed - dropped", race,
+                            st["legs"].pop(e))
+            lag = [e for e, q in st["legs"].items() if q >= 1]
             if not lag:
                 del self.pair_owed[race]
                 continue
@@ -6666,15 +6725,24 @@ class Bot:
                 log.info("pair unwind follow-up on %s deferred: write budget busy (next cycle)", race)
                 continue
             st["tries"] += 1
-            acted.add(race)
+            st["sent"], st["cleared"] = False, []
             got = self.pair_followup_take(race, st, lag, fvs, now_m, mine_real)
+            sent, cleared = st.pop("sent", False), st.pop("cleared", [])
+            if sent:                              # writes went out: the race is not quoted this cycle
+                acted.add(race)
             if got is None:                       # never sent (write budget): not a try
                 st["tries"] -= 1
                 continue
+            if cleared and not sent and len(cleared) == len(lag):
+                st["tries"] -= 1                  # every lagging leg cleared (all its NO in a set): not a try
             for e, g in got.items():
                 st["legs"][e] = max(0, int(round(st["legs"][e] - g)))
             left = sum(st["legs"].values())
-            if left < 1:
+            if left < 1 and cleared and not got:
+                log.warning("pair unwind follow-up on %s: nothing left that can be sent (the lagging legs' NO is in "
+                            "NO+NO sets) - owed state cleared", race)
+                del self.pair_owed[race]
+            elif left < 1:
                 log.warning("pair unwind on %s: follow-up evened the legs after %d %s", race, st["tries"],
                             "try" if st["tries"] == 1 else "tries")
                 del self.pair_owed[race]
@@ -6725,13 +6793,16 @@ class Bot:
                      "price": price, "tournamentId": self.tid}
             if buy:                               # a covered "sell NO" of the lone NO left on this leg
                 order = self.no_sell_order(order, ex.inv)
-                if order is None:
-                    log.warning("pair unwind follow-up on %s: the NO on %s is all in a NO+NO set - not sent",
-                                race, ex.label)
+                if order is None:                 # no lone NO left there: nothing can ever be sent - leg cleared
+                    log.warning("pair unwind follow-up on %s: the NO on %s is all in a NO+NO set - not sent, %d owed "
+                                "there cleared", race, ex.label, st["legs"][e])
+                    st["legs"][e] = 0
+                    st.setdefault("cleared", []).append(e)
                     continue
             orders.append(order)
         if not orders:
             return {}
+        st["sent"] = True                         # from here on writes go out (cancels, the batch)
         if not all([self.cancel(o["exchangeId"], [], whole_exchange=True) for o in orders]):
             log.warning("pair unwind follow-up on %s: could not clear our own quotes - next cycle", race)
             return {}
@@ -8247,8 +8318,26 @@ class Bot:
                 or time.monotonic() < self.nosell_next):
             return
         held = [e for e in sorted(self.ex) if self.ex[e].inv <= -1]
+        # Note (Package 7): with no_set_aware_bids on, only legs with a LONE NO part are tested. If no market has one
+        # (e.g. after a restart every NO is held in NO+NO sets) this check never runs, so it never passes and
+        # reduce_no_on() stays False: no_set_aware_bids, pair_no_unwind_max_cost and the follow-up's covered sales
+        # stay inert for the run. Logged once (below) when that lasts more than 10 minutes.
         if getattr(cfg, "no_set_aware_bids", False):   # Package 7: a 1-share sale inside a NO+NO set breaks it and
-            held = [e for e in held if -self.ex[e].inv - self.nono_set_part(e) >= 1]   # is refused: lone parts only
+            lone = [e for e in held if -self.ex[e].inv - self.nono_set_part(e) >= 1]   # is refused: lone parts only
+            if held and not lone:
+                now = time.monotonic()
+                since = getattr(self, "nosell_nolone_since", None)
+                if since is None:
+                    self.nosell_nolone_since = now
+                elif now - since > 600 and not getattr(self, "nosell_nolone_logged", False):
+                    self.nosell_nolone_logged = True
+                    log.warning("reduce_no_as_sell start-up check still waiting after %.0f min: NO is held in %d "
+                                "market(s) but none has a lone NO part (all in NO+NO sets), so the check cannot run; "
+                                "no_set_aware_bids / pair_no_unwind_max_cost / covered follow-ups stay inert until "
+                                "one does", (now - since) / 60, len(held))
+            else:
+                self.nosell_nolone_since = None
+            held = lone
         if not held:
             return                                # nothing to reduce yet: nothing to check
         # The test order is a YES bid at PMIN: only where no other trader's ask (cached book) is at PMIN or below, so

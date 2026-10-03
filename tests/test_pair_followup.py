@@ -87,7 +87,9 @@ c = M.Config()
 _f, _ov = list(M.Config.__dataclass_fields__), list(M.OVERRIDABLE)
 check("defaults: off, max_cost 0.01, 6 tries", (c.pair_unwind_followup, c.pair_unwind_followup_max_cost,
                                                 c.pair_unwind_followup_tries) == (False, 0.01, 6))
-check("last in Config and OVERRIDABLE", _f[-3:] == [F, MC, TR] and _ov[-3:] == [F, MC, TR], (_f[-3:], _ov[-3:]))
+_NC = "pair_no_unwind_max_per_cycle"            # red-team fix 3, after these
+check("last in Config and OVERRIDABLE (then pair_no_unwind_max_per_cycle)",
+      _f[-4:] == [F, MC, TR, _NC] and _ov[-4:] == [F, MC, TR, _NC], (_f[-4:], _ov[-4:]))
 good, bad = M.validate_overrides({F: True, MC: 0.02, TR: 3}, c)
 check("live overrides accepted", good == {F: True, MC: 0.02, TR: 3} and not bad, (good, bad))
 
@@ -237,6 +239,79 @@ bt.health = {}
 bt.write_status(ok=True)
 st = json.load(open(M.bot_path(bt.cfg.status_file)))
 check("flag off: no pair_owed in status.json", "pair_owed" not in st)
+
+print("--- red-team 1: owed capped at the lagging leg's post-fill LONE part")
+
+
+def probe(n21, n22, a_on):
+    """Short set NO held n21 / n22, buy-back of 1000 sets at 0.49 + 0.50; the exchange has only 300 on leg 21."""
+    api, bt = bot({"21": -n21, "22": -n22}, cash=0.0)
+    bt.cfg.no_set_aware_bids = a_on
+    books(api, bt, {"21": {"asks": [(0.49, 5000)]}, "22": {"asks": [(0.50, 5000)]}},
+          {"21": {"bids": [(0.45, 1000)], "asks": [(0.49, 300), (0.495, 5000)]},
+           "22": {"bids": [(0.46, 1000)], "asks": [(0.50, 5000)]}})
+    traded = bt.execute_arbitrage(RACE, ["21", "22"], {"21": (0.49, 1000), "22": (0.50, 1000)}, 1000, FVS,
+                                  time.monotonic(), action="buy", kind="unwind")
+    return api, bt, traded
+
+
+for a_on in (False, True):
+    ALERTS.clear()
+    api, bt, traded = probe(1000, 2000, a_on)
+    check(f"probe NO 1000 / 2000 filled [300, 1000] -> -700 / -1000 (A {a_on}): leg 21 has no lone part, nothing owed",
+          traded == [300.0, 1000.0] and api.inv == {"21": -700, "22": -1000} and not bt.pair_owed,
+          (traded, api.inv, bt.pair_owed))
+    n_wire, n_calls = len(api.wire), len(api.calls)
+    for _ in range(8):
+        sync(api, bt)
+        acted = bt.pair_followup_step(FVS, time.monotonic(), {})
+    check(f"...8 cycles (A {a_on}): no follow-up order, no write, no alert, nothing acted",
+          len(api.wire) == n_wire and not [c for c in api.calls[n_calls:] if c[0] in ("batch", "cancel_all")]
+          and not ALERTS and not acted, (api.wire[n_wire:], ALERTS))
+ALERTS.clear()
+api, bt, traded = probe(1000, 1200, False)
+check("NO 1000 / 1200 filled [300, 1000] -> -700 / -200: owed capped 700 -> 500 (its lone part)",
+      traded == [300.0, 1000.0] and bt.pair_owed.get(RACE, {}).get("legs") == {"21": 500}, bt.pair_owed)
+sync(api, bt)
+n_wire = len(api.wire)
+bt.pair_followup_step(FVS, time.monotonic(), {})
+fu = api.wire[n_wire:]
+check("...follow-up: one covered sell NO x500, accepted at 0 cash, legs -200 / -200, state cleared",
+      len(fu) == 1 and (fu[0]["side"], fu[0]["quantity"]) == ("no", 500) and api.inv == {"21": -200, "22": -200}
+      and not bt.pair_owed and not ALERTS, (fu, api.inv, bt.pair_owed, ALERTS))
+
+print("--- red-team 1: follow-up leg whose NO is all in a set: cleared, not a try, race not acted")
+ALERTS.clear()
+api, bt = bot({"21": -700, "22": -1000}, cash=0.0)
+bt.cfg.no_set_aware_bids = True
+books(api, bt, {}, {"21": {"bids": [(0.45, 1000)], "asks": [(0.49, 5000)]},
+                    "22": {"bids": [(0.46, 1000)], "asks": [(0.50, 5000)]}})
+bt.pair_owed[RACE] = {"action": "buy", "legs": {"21": 700}, "t": time.monotonic(), "tries": 0,
+                      "price": {"21": 0.49, "22": 0.50}}
+n_calls = len(api.calls)
+acted = bt.pair_followup_step(FVS, time.monotonic(), {})
+check("no_sell_order None -> leg cleared at once: state dropped, no write, not acted, no alert",
+      not bt.pair_owed and not api.wire and RACE not in acted and not ALERTS
+      and not [c for c in api.calls[n_calls:] if c[0] in ("batch", "cancel_all")],
+      (bt.pair_owed, api.wire, acted, ALERTS))
+
+print("--- red-team 4: a lagging leg leaves the market list while another stays")
+ALERTS.clear()
+api, bt = bot({"21": 100, "22": 100})
+books(api, bt, {}, {"21": {"bids": [(0.30, 1000)], "asks": [(0.60, 1000)]},
+                    "22": {"bids": [(0.30, 1000)], "asks": [(0.60, 1000)]}})
+bt.pair_owed[RACE] = {"action": "sell", "legs": {"21": 40, "22": 30}, "t": time.monotonic(), "tries": 0,
+                      "price": {"21": 0.51, "22": 0.50}}
+del bt.ex["22"]
+err = None
+try:
+    for _ in range(8):
+        bt.pair_followup_step(FVS, time.monotonic(), {})
+except Exception as e:                            # the old code: KeyError in the alert every cycle
+    err = e
+check("no error; the gone leg dropped; after 6 tries ONE alert naming 40 on leg 21 only, state cleared",
+      err is None and len(ALERTS) == 1 and "left 40 shares unpaired after 6 tries" in ALERTS[0]
+      and not bt.pair_owed, (repr(err), ALERTS, bt.pair_owed))
 
 print("--- 3. live_sim mirror (scripted race with unequal depth)")
 import live_sim as L                                    # noqa: E402

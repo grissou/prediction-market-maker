@@ -96,7 +96,8 @@ c = M.Config()
 _f, _ov = list(M.Config.__dataclass_fields__), list(M.OVERRIDABLE)
 check("defaults: no_set_aware_bids False, pair_no_unwind_max_cost -1 (off)",
       c.no_set_aware_bids is False and c.pair_no_unwind_max_cost == -1.0)
-_p7b = ["pair_unwind_followup", "pair_unwind_followup_max_cost", "pair_unwind_followup_tries"]   # Package 7 part 2
+_p7b = ["pair_unwind_followup", "pair_unwind_followup_max_cost", "pair_unwind_followup_tries",   # Package 7 part 2
+        "pair_no_unwind_max_per_cycle"]                                                         # (red-team fix 3)
 check("last in Config and OVERRIDABLE (then Package 7's pair unwind follow-up)",
       _f[_f.index(A):] == [A, B] + _p7b and _ov[_ov.index(A):] == [A, B] + _p7b, (_f[-5:], _ov[-5:]))
 good, bad = M.validate_overrides({A: True, B: 0.003}, c)
@@ -118,12 +119,21 @@ check("smallest leg is set-blocked, the other is not", bt.set_blocked("21", -817
 api, bt = bot({"21": -817, "22": -975}, a=False)
 check("flag off: 817 and 975 (Package 6)", (bt.cover_no_qty("21", -817, 0), bt.cover_no_qty("22", -975, 0)) == (817, 975))
 api, bt = bot({"11": -300, "12": -500, "13": -200}, a=True, three=True)
-check("3-leg race -300 / -500 / -200: 100, 300, 0",
-      [bt.cover_no_qty(e, bt.ex[e].inv, 0) for e in ("11", "12", "13")] == [100, 300, 0],
+check("3-leg race -300 / -500 / -200 (worst-case model, lone = n - max other): 0, 200, 0",
+      [bt.cover_no_qty(e, bt.ex[e].inv, 0) for e in ("11", "12", "13")] == [0, 200, 0],
+      [bt.cover_no_qty(e, bt.ex[e].inv, 0) for e in ("11", "12", "13")])
+api, bt = bot({"11": -10, "12": -8, "13": -5}, a=True, three=True)
+check("3-leg race [10, 8, 5]: lone [2, 0, 0] (the middle leg sells nothing)",
+      [bt.cover_no_qty(e, bt.ex[e].inv, 0) for e in ("11", "12", "13")] == [2, 0, 0],
       [bt.cover_no_qty(e, bt.ex[e].inv, 0) for e in ("11", "12", "13")])
 api, bt = bot({"11": -300, "12": -500, "13": 50}, a=True, three=True)
-check("3-leg race with one long leg: unchanged (300, 500)",
-      [bt.cover_no_qty(e, bt.ex[e].inv, 0) for e in ("11", "12")] == [300, 500])
+check("3-leg race, NO on 2 of 3 legs (the third long): capped too (0, 200)",
+      [bt.cover_no_qty(e, bt.ex[e].inv, 0) for e in ("11", "12")] == [0, 200],
+      [bt.cover_no_qty(e, bt.ex[e].inv, 0) for e in ("11", "12")])
+api, bt = bot({"11": -300, "12": -500}, a=True, three=True)
+check("3-leg race, NO on 2 of 3 legs (the third flat): capped (0, 200)",
+      [bt.cover_no_qty(e, bt.ex[e].inv, 0) for e in ("11", "12")] == [0, 200]
+      and bt.set_blocked("11", -300.0) and not bt.set_blocked("12", -500.0))
 api, bt = bot({"21": -817, "22": 975}, a=True)
 check("2-leg race with one long leg: unchanged (817)", bt.cover_no_qty("21", -817, 0) == 817)
 api, bt = bot({"21": -817}, a=True)
@@ -278,6 +288,45 @@ api.writes_left = lambda: 3
 done = bt.take_arbitrage({e: bt.ex[e].inv for e in bt.ex}, FVS, {}, time.monotonic())
 check("write budget short: deferred, nothing sent", not done and not api.wire)
 
+print("--- B: at most pair_no_unwind_max_per_cycle short-set unwinds (B only) per cycle")
+EXTRA = (market("6", "31", "Republican", "Texas Senate"), market("7", "32", "Democratic", "Texas Senate"),
+         market("8", "41", "Republican", "Iowa Senate"), market("9", "42", "Democratic", "Iowa Senate"))
+FVS4 = dict(FVS, **{"31": 0.5, "32": 0.5, "41": 0.5, "42": 0.5})
+
+
+def b_cap_bot(cap=None, b=0.003):
+    api, bt = make_bot(live=True, extra_markets=EXTRA)
+    bt.cfg.reduce_no_as_sell, bt.cfg.pair_no_unwind_max_cost, bt.cfg.selftest_enabled = True, b, False
+    if cap is not None:
+        bt.cfg.pair_no_unwind_max_per_cycle = cap
+    api.inv = {"11": -100, "12": -100, "21": -100, "22": -100, "31": -100, "32": -100, "41": -100, "42": -100}
+    api.cash, api.set_collateral = 0.0, True
+    for e, q in api.inv.items():
+        bt.ex[e].inv = float(q)
+    for e, p in (("11", 0.50), ("12", 0.502), ("21", 0.50), ("22", 0.502), ("31", 0.50), ("32", 0.502)):
+        api.books[e] = {"bids": [lvl(0.40, 1000)], "asks": [lvl(p, 1000)]}
+    for e in ("41", "42"):                       # asks 0.90: a profitable buy-back, not B's: never counted
+        api.books[e] = {"bids": [lvl(0.40, 1000)], "asks": [lvl(0.45, 1000)]}
+    return api, with_books(bt)
+
+
+api, bt = b_cap_bot()
+check("default pair_no_unwind_max_per_cycle 2", bt.cfg.pair_no_unwind_max_per_cycle == 2)
+done1 = bt.take_arbitrage({e: bt.ex[e].inv for e in bt.ex}, FVS4, {}, time.monotonic())
+b_races = {"Ohio Senate", "Utah Senate", "Texas Senate"}
+check("cycle 1: 2 of the 3 B races unwound + the profitable one (not counted), 1 B race waits, no cooldown on it",
+      len(done1 & b_races) == 2 and "Iowa Senate" in done1 and len(done1) == 3
+      and next(iter(b_races - done1), None) not in bt.arb_cooldown, (done1, bt.arb_cooldown))
+done2 = bt.take_arbitrage({e: float(api.inv.get(e, 0)) for e in bt.ex}, FVS4, {}, time.monotonic())
+check("cycle 2: the waiting B race goes", done2 == b_races - done1, done2)
+api, bt = b_cap_bot(cap=10)
+done = bt.take_arbitrage({e: bt.ex[e].inv for e in bt.ex}, FVS4, {}, time.monotonic())
+check("cap 10: all 4 in one cycle", len(done) == 4, done)
+good, bad = M.validate_overrides({"pair_no_unwind_max_per_cycle": 3}, c)
+bad2 = M.validate_overrides({"pair_no_unwind_max_per_cycle": 11}, c)[1]
+check("pair_no_unwind_max_per_cycle live override 3 accepted, 11 refused (1-10)",
+      good == {"pair_no_unwind_max_per_cycle": 3} and not bad and bad2, (good, bad, bad2))
+
 print("--- fake exchange: set-collateral rule")
 api, bt = bot({"21": -817, "22": -975}, cash=0.0)
 exp_ = M.iso(M.utcnow() + M.timedelta(seconds=600))
@@ -305,6 +354,23 @@ api, bt = bot({"21": -817, "22": -975}, cash=0.0)
 api.set_collateral = False
 res = api.place_batch([sell_no("21", 1)])
 check("rule off (default for older suites): accepted as in Package 6", res[0]["ok"], res)
+api, bt = bot({"11": -10, "12": -8, "13": -5}, cash=0.0, three=True)
+res = api.place_batch([sell_no("12", 3)])
+check("worst-case model: [10, 8, 5] selling 3 on the middle leg: refused (lone [2, 0, 0])", not res[0]["ok"], res)
+api.orders.clear()
+res = api.place_batch([sell_no("11", 2)])
+check("...2 on the biggest leg (its lone part): accepted", res[0]["ok"], res)
+api.orders.clear()
+res = api.place_batch([sell_no("11", 3)])
+check("...3 on the biggest leg: refused", not res[0]["ok"], res)
+api, bt = bot({"11": -300, "12": -500}, cash=0.0, three=True)
+res = api.place_batch([sell_no("11", 1)])
+check("NO on 2 of 3 legs: 1 on the smaller leg refused (no lone part)", not res[0]["ok"], res)
+res = api.place_batch([sell_no("12", 200)])
+check("...200 on the bigger leg (its lone part) accepted", res[0]["ok"], res)
+api.orders.clear()
+res = api.place_batch([sell_no("11", 50), sell_no("12", 50)])
+check("...both NO legs in one batch (closes whole sets): accepted", all(r["ok"] for r in res), res)
 
 print("--- C: start-up check (paired NO sale)")
 
@@ -447,6 +513,43 @@ for a_on, want in ((False, "21"), (True, "11")):
                                                                  " (the biggest NO, as Package 6)"),
           len(legs) == 1 and legs[0]["exchangeId"] == want, legs)
 
+print("--- A: no lone NO part anywhere for > 10 min: logged once")
+
+
+class _Cap(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.msgs = []
+
+    def emit(self, r):
+        self.msgs.append(r.getMessage())
+
+
+cap_ = _Cap()
+M.log.addHandler(cap_)
+M.log.setLevel(logging.WARNING)
+M.log.propagate = False
+api, bt = bot({"21": -50, "22": -50}, cash=0.0, a=True)
+bt.cfg.selftest_enabled = True
+with_books(bt)
+bt.nosell_tick()
+t0 = getattr(bt, "nosell_nolone_since", None)
+bt.nosell_nolone_since = (t0 or time.monotonic()) - 601
+for _ in range(3):
+    bt.nosell_tick()
+waits = [m for m in cap_.msgs if "start-up check still waiting" in m]
+check("all NO in sets: one log line after 10 min (not repeated), nothing sent",
+      t0 is not None and len(waits) == 1 and not api.wire and bt.nosell_state is None, (waits, api.wire))
+api, bt = bot({"21": -50, "22": -50}, cash=0.0, a=True)
+bt.cfg.selftest_enabled = True
+bt.nosell_tick()
+bt.nosell_nolone_since = (getattr(bt, "nosell_nolone_since", None) or time.monotonic()) - 300
+bt.nosell_tick()
+check("...not before 10 min", len([m for m in cap_.msgs if "start-up check still waiting" in m]) == 1)
+M.log.removeHandler(cap_)
+M.log.setLevel(logging.NOTSET)
+M.log.propagate = True
+
 print("--- D: T2.5 passive short sets skipped with reduce_no_as_sell")
 for reduce in (False, True):
     api, bt = bot({"21": -40, "22": -40}, reduce=reduce)
@@ -469,6 +572,19 @@ bt.pp = {"Utah Senate": {"leg": "21", "other": "22", "sign": -1, "price": 0.47, 
                          "base_x": -40, "base_y": -40}}
 q = M.Quote(0.45, 10, 0.55, 10)
 check("an old short-set slice never rests its bid (quote unchanged)", bt.pair_passive_quote(bt.ex["21"], q) == q)
+for state, want in (("off", "planned"), ("ok", "skipped"), (None, "planned")):
+    api, bt = bot({"21": -40, "22": -40})
+    bt.cfg.pair_unwind_passive, bt.cfg.selftest_enabled, bt.nosell_state = True, True, state
+    with_books(bt)
+    plan = bt.pair_passive_plan(["21", "22"], {e: bt.ex[e].inv for e in bt.ex}, FVS)
+    check(f"D keys on the effective state: setting on, sell-NO check {state!r} -> short-set slice {want}",
+          (plan is None) == (want == "skipped"), plan)
+api, bt = bot({"21": -40, "22": -40})
+bt.cfg.pair_unwind_passive, bt.cfg.selftest_enabled, bt.nosell_state = True, True, "off"
+bt.pp = {"Utah Senate": {"leg": "21", "other": "22", "sign": -1, "price": 0.47, "slice": 40, "left": 40,
+                         "base_x": -40, "base_y": -40}}
+check("...and the slice rests its bid when the sell-NO check failed",
+      bt.pair_passive_quote(bt.ex["21"], M.Quote(0.45, 10, 0.55, 10)).bid == 0.47)
 
 print("--- E: status")
 api, bt = bot({"21": -817, "22": -975, "11": -5})
