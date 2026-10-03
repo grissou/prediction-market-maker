@@ -335,7 +335,9 @@ class _Cfg:
 
 class _Sim:
     def __init__(self, on):
-        self.cfg, self.free = _Cfg(on), 0.0
+        self.cfg, self.free, self.short_locks = _Cfg(on), 0.0, True   # the pre-fix live cash world
+
+    free_short = L.LiveSim.free_short
 
 
 class _Mk:
