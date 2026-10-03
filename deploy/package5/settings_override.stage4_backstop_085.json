@@ -1,0 +1,11 @@
+{
+  "arb_two_sided": false,
+  "worst_case_backstop_frac": 0.85,
+  "capital_ceiling_adding_size_factor": 0.5,
+  "writes_per_minute": 28,
+  "writes_per_minute_max": 28,
+  "burst_cycle_seconds": 60,
+  "ref_tilt_enabled": true,
+  "take_tilted_ref": true,
+  "ref_tilt_headline": true
+}

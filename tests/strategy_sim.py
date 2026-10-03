@@ -206,6 +206,10 @@ class Sim:
             c[t] = min(0.99, max(0.01, cur + m.bias + x))
         return p, c
 
+    def informed_px(self, m, t, p):
+        """The price informed takers trade toward after a Polymarket jump (live_sim's anchored world overrides it)."""
+        return p[t]
+
     def lat(self):
         lo, hi = self.reg["lat"]
         r = self.lrng
@@ -342,7 +346,11 @@ class Sim:
         book = self.book_dict(m)
         bfv = fair_value(book, cfg)
         ref = m.ref_seen
-        fv = (1 - cfg.ref_weight) * bfv + cfg.ref_weight * ref if bfv is not None else None
+        bref = ref                                   # T2.1 mirror of mm_bot blend_fv: the blend alone sees r'
+        if cfg.ref_tilt_enabled and (cfg.ref_tilt_headline or not m.headline):
+            self.tilt_s_applied = self.tilt.s * M.rampin_factor(t, self.tilt_on_at, cfg.ref_tilt_rampin_min)  # ramp-in
+            bref = M.tilted_ref(ref, self.tilt_s_applied, getattr(self, "legs_of", lambda m: 2)(m))
+        fv = (1 - cfg.ref_weight) * bfv + cfg.ref_weight * bref if bfv is not None else None
         m.state["fv"] = fv
         if self.bias_hl and bfv is not None:
             # T1 prototype: Polymarket + exponentially weighted average of (book price - Polymarket)
@@ -374,6 +382,17 @@ class Sim:
             o.qty * (o.price if o.is_bid else 1 - o.price) for m in self.mkts for o in m.orders
             if o.owner == "us" and o.level == 0)
         spare = self.wcap - sum(c for _, c in self.wlog)
+        if self.cfg.ref_tilt_enabled:                # T2.1 mirror: mm_bot's estimator, once per cycle, before the plans
+            if getattr(self, "tilt", None) is None:
+                self.tilt = M.TiltEstimator(self.cfg)
+            if getattr(self, "tilt_on_at", None) is None:
+                self.tilt_on_at = t                  # T2.1 ramp-in mirror: the first cycle the flag is on
+            legs_of, samples = getattr(self, "legs_of", lambda m: 2), []
+            for m, p, c in paths:
+                bfv = fair_value(self.book_dict(m), self.cfg) if m.ref_seen is not None else None
+                if bfv is not None and not m.headline and not t < m.cooldown_until:
+                    samples.append((m.ref_seen, bfv, legs_of(m)))
+            self.tilt.update(samples, t)
         plans = sorted((x for x in (self.our_step(m, t, p) for m, p, c in paths) if x),
                        key=lambda x: x[0])
         bs, n, used = self.cfg.batch_size, 0, 0.0
@@ -445,7 +464,7 @@ class Sim:
             for m, p, c in self.paths:
                 jump_due = due[id(m)]
                 if t > 0 and abs(p[t] - p[t - 1]) >= 0.009:
-                    jump_due.append((t + self.rng.uniform(5, 60), p[t] > p[t - 1], p[t]))
+                    jump_due.append((t + self.rng.uniform(5, 60), p[t] > p[t - 1], self.informed_px(m, t, p)))
                     for rv in m.rivals:                  # rivals react to a Polymarket move after their lag
                         rv.next_t = min(rv.next_t, t + rv.lag + 1)
                 self.humans(m, t, c[t])
@@ -547,21 +566,69 @@ def hold(cfg, m, cur, w, t):
     return t - o.t < cfg.min_quote_life_seconds or len(hist) >= cfg.churn_max_reprices
 
 
+SIM_EPOCH = M.datetime(2026, 10, 1, tzinfo=M.timezone.utc)   # sim second t = SIM_EPOCH + t (order expiry)
+
+
 def plan_changes(cfg, mine, want, t, m=None):
     """Reconcile our resting orders with the wanted list [(is_bid, price, size, level)]: same rules as
     Bot.reconcile (keep an order a tick off if still safe, churn control, cancel before placing).
+    Order expiry as live (Round 4): each order expires order_ttl after it was planned (the TTL saver's tier TTL with
+    ttl_tiers_enabled, level 0) and is refreshed refresh_before_expiry before that (or, with ttl_expire_as_cancel,
+    left to expire and its side re-quoted ttl_expire_grace_seconds later, as Bot.expiry_wait); an expired order
+    leaves the book here. No-chase as Bot.side_fix (mm_bot.no_chase_needs_change, level 0).
     Returns (cancels, places)."""
     cancels, places = [], []
+    st = m.state if m is not None else {}
+    now = SIM_EPOCH + M.timedelta(seconds=t)
+    # Per order: (order, expiry t, inventory and size when planned). Planned values wait in "pend" for the order.
+    pend, known, live, gone = st.setdefault("pend", {}), st.get("exp", {}), {}, set()
+    last_exp = st.setdefault("last_exp", {})
+    for o in mine:
+        rec = known.get(id(o))
+        if rec is None or rec[0] is not o:
+            inv0, qty0, exp_t = pend.pop((o.is_bid, o.level), (None, None, o.t + cfg.order_ttl))
+            rec = (o, exp_t, inv0, qty0)
+        if rec[1] <= t:
+            gone.add(id(o))                                  # expired: the engine drops it
+            last_exp[(o.is_bid, o.level)] = rec[1]
+        else:
+            live[id(o)] = rec
+    st["exp"] = live
+    if gone:
+        mine = [o for o in mine if id(o) not in gone]
+        if m is not None:
+            m.orders = [o for o in m.orders if id(o) not in gone]
     for lvl_key in {(w[0], w[3]) for w in want} | {(o.is_bid, o.level) for o in mine}:
         is_bid, lvl = lvl_key
         cur = [o for o in mine if o.is_bid == is_bid and o.level == lvl]
         w = next((w for w in want if w[0] == is_bid and w[3] == lvl), None)
         price, size, limit = (w[1], w[2], w[4] if len(w) > 4 else None) if w else (None, 0, None)
-        rest = [Resting(0, "", o.is_bid, o.price, o.qty, None) for o in cur]
-        if side_needs_change(rest, price, size, cfg, None, limit, is_bid=is_bid) and not hold(cfg, m, cur, w, t):
+        rest = [Resting(0, "", o.is_bid, o.price, o.qty, SIM_EPOCH + M.timedelta(seconds=live[id(o)][1]))
+                for o in cur]
+        eac = cfg.ttl_expire_as_cancel and lvl == 0
+        if lvl == 0 and len(cur) == 1:
+            rec = live[id(cur[0])]
+            fix = M.no_chase_needs_change(rest, price, size, cfg, now, limit, is_bid, None, st.get("fv"), cur[0].fv,
+                                          m.inv if m is not None else None, rec[2], rec[3], expire_as_cancel=eac)
+        else:
+            fix = side_needs_change(rest, price, size, cfg, now, limit, is_bid=is_bid, expire_as_cancel=eac)
+        if eac:                                              # Bot.expiry_wait
+            le = last_exp.get((is_bid, lvl))
+            if cur or le is None or t >= le + cfg.ttl_expire_grace_seconds:
+                last_exp.pop((is_bid, lvl), None)
+            elif le <= t:
+                fix = False                                  # just expired: re-quote after the grace
+        expiring = any(r.expires and (r.expires - now).total_seconds() < cfg.refresh_before_expiry for r in rest)
+        if fix and (expiring or not hold(cfg, m, cur, w, t)):   # (Bot.hold_side never holds an expiring order)
             cancels += cur
             if w is not None:
                 places.append((is_bid, price, size, lvl))
+                ttl = cfg.order_ttl
+                if lvl == 0 and m is not None:
+                    rng = st.get("ttl_rng") or st.setdefault("ttl_rng", random.Random(f"{m.kind}{m.p0:.6f}"))
+                    frac = cfg.size_max_frac if m.kind == "busy" else cfg.size_min_frac
+                    ttl = M.order_ttl_for(cfg, M.ttl_tier(m.headline, frac, 1.0, cfg), rng.random())
+                pend[(is_bid, lvl)] = (m.inv if m is not None else None, size, t + ttl)
     return cancels, places
 
 

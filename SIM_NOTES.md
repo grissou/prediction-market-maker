@@ -418,3 +418,322 @@ of arbitrage (+314). 0 outsider fills.
   checking its live dead-market list.
 - **ladder_enabled off at today's cash.** At 10% minimum free cash it barely places anything and adds 2 writes/min.
 - **refill cooldown:** either (no effect).
+
+## Round 4 (Finisher): item 3, ladder review and gate diagnosis
+
+Base 42bf407 (team HEAD 58adcac plus the plan). The ladder is still OFF by default. Commit 67f2d58 holds the fixes, the tests and the sim counters.
+
+### Review of a77c8cb (L1-L4) against the spec
+| # | Severity | Finding | Fix |
+|---|---|---|---|
+| R4a | **High** (write loop) | `want` was sized against level 0's *factored* size, but `allowed` (the keep limit) against `bid_max`. With a position limit binding, level 3 was placed at 150 shares with only 100 allowed. It was then pulled the next cycle as too big (an urgent pull, outside the write budget) and placed again, every cycle. | ladder_targets clips every wanted level to `allowed` before charging cash |
+| R4b | **High** (pull storm, when on) | L4's per-order cash cap was also applied to `allowed`. The cap is `max(max_order_cash_frac x account, quote)`, so any dip in account value or quote size made every cash-capped level 2/3 an *urgent* pull, on every ladder market in the same cycle. | the cash cap now sizes new levels only; the keep limit is the position limits alone (as hot-fix 2.2 does for level 0) |
+| R4c | Medium (duplicate quotes) | L3's min_quote_life exemption also kept a young *duplicate* at a level that was already kept, so two orders sat on one level for up to 5 s. | the exemption applies only to a level that isn't kept, and to at most one order per level |
+| R4d | Medium | L2: a ladder-only Change with `whole=True` (exchange cancel-all, level 0 absent) still counted 1 toward `pulls_cancel_all_over`. 26 such markets would trigger a tournament-wide cancel-all. | it now counts only its non-ladder orders |
+| - | ok | L1 (stale, not urgent, one tick behind the resting touch; urgent beyond level 0's limit), L2 (the non-whole case) and L3 (1-tick tolerance via reprice_tolerance_ticks, 2c ladder_move, ladder_min_writes left after the ladder's own writes in send_changes) all match the spec. | - |
+| - | Low, not changed | A young order whose level is no longer wanted (cash ran out) stays up to min_quote_life without being charged to lad_cash_left. Any change in quote size makes L1/L2 orders bigger than wanted, so they are re-placed as stale (tier 2, budget-gated). strategy_sim's `ladder_unsafe` judges against the *wanted* level 0, not the resting touch, so the sim pulls slightly more eagerly than the bot. Fixing that needs the `our_step` call site, which is outside this item's scope. | - |
+
+Tests R4a-R4d are added to tests/test_mm_bot.py. All four FAIL on 42bf407 and pass now. Suites: test_mm_bot 600/600,
+behind_best 36/36, fast_unload 61/61, mark_frag 52/52, recorder_refill 37/37, ref_prices 37/37, strategy 114/114,
+stress 20/20, turnover 94/94. `STRESS_LADDER=1 python tests/test_stress.py`: 20/20, with 0 duplicate or self-crossing quotes.
+
+### Gate diagnosis (2 seeds x 0.5 h quiet, ladder on in BASE, Round 3 BASE_JSON + `_start_cap`)
+The sim has a new output, `lg_*` (tests/live_sim.py). It counts per market-cycle where level 0 quotes. `wgate` is
+counted on its own; the other buckets are exclusive, in this order. A counter bug, fixed after this run, made the
+run's own `lg_cash` too low. So the `cash` column is computed as calls - mkt - geo - caps - ok. With early = 0, that
+remainder is exactly the cash bucket.
+
+| start_cap | market-cycles | write gate shut | not a ladder market | geometry | limits | **cash** | ok (any level) | ok and writes open | lad_cash_left avg | ladder fills |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 0.90 | 61.1k | 46.5k (76%) | 44.6k (73%) | 0.65k | 1.79k | **14.1k (85% of ladder markets)** | 1 | 1 | 0 | 0 |
+| 0.80 | 61.6k | 40.3k (65%) | 45.2k (73%) | 0.56k | 2.48k | **13.3k (81%)** | 93 | 50 | 32 | 0 |
+| 0.70 | 61.7k | 44.4k (72%) | 45.2k (73%) | 0.55k | 0.71k | **14.2k (86%)** | 1,030 | 232 | 451 | 8 sh |
+
+The per-order cash cap never cut a level (lg_cap1 = 0). Short probes (1 seed x 0.03 h) measured the free cash as
+ladder_setup counts it (equity - positions - level-0 locks): on average 0.8k, 8.5k and 5.0k at 0.90, 0.80 and 0.70.
+
+**What binds, in order:**
+1. **Cash (lad_cash_left) binds on ~85% of ladder-market cycles at every start_cap.** The ladder gets
+   `free - ladder_min_cash_frac x equity`, where free is measured after *level-0 resting orders* (~12-25k locked in the sim).
+   Lowering the capital in positions does not help. Level 0 is planned first and its orders take the freed cash, so
+   free cash after level 0 stays below the 10.15k floor (0.1 x 101.5k).
+2. **The write gate (ladder_min_writes 10) is shut in 65-76% of cycles** at 28 writes/min. The bot uses ~21-23 writes/min,
+   so fewer than 10 are left most of the time. Of the cycles where some level fits the cash, only 23-54% have writes left.
+3. **ladder_markets "headline,busy": 73% of market-cycles are quiet markets**, which never get a ladder (by design).
+   Position limits (1-4%) and geometry (1%) matter little.
+
+**Free cash the ladder needs:** to place anything, free cash after positions AND level-0 locks must exceed
+0.1 x equity (~10.15k) plus the cheapest wanted level. That level measured 190-230. A busy market's level 1 is one
+quote, ~1,015 sh x price (~250-500). A headline level 1 is 2,500 sh x price (~1,250). A full ladder costs ~5k per busy
+market (levels 2/3 capped at ~1,015 cash each, both sides) and ~15k per headline market. Live, ~90% of capital is in
+positions and ~10k is free before level-0 locks, which is already below the floor before level 0 locks anything. To
+place one level, capital in positions must be <= ~78-80% of equity, with the level-0 locks also covered.
+
+### Commands for the lead's P&L runs (item 3, 8 x 3 quiet, after the write savers are merged; paired variant form)
+```
+BASE='{"arb_two_sided": false, "worst_case_backstop_frac": 0.8, "capital_ceiling_adding_size_factor": 0.5, "writes_per_minute": 28, "writes_per_minute_max": 28, "burst_cycle_seconds": 60, "_start_cap": 0.90}'
+SIM_PROCS=4 python tests/live_sim.py 8 3 quiet "$BASE" '{"ladder_enabled": true}' > r4_ladder_090.txt 2>&1
+BASE='{"arb_two_sided": false, "worst_case_backstop_frac": 0.8, "capital_ceiling_adding_size_factor": 0.5, "writes_per_minute": 28, "writes_per_minute_max": 28, "burst_cycle_seconds": 60, "_start_cap": 0.80}'
+SIM_PROCS=4 python tests/live_sim.py 8 3 quiet "$BASE" '{"ladder_enabled": true}' > r4_ladder_080.txt 2>&1
+```
+If the merged savers' settings are not Config defaults, add them to BASE. The variant line now also shows `dlg_ok_w`
+and `dlg_sh` (ladder activity). For the spare slot, if the lead wants to test the gates rather than the defaults,
+append `'{"ladder_enabled": true, "ladder_min_cash_frac": 0.05, "ladder_min_writes": 5}'` as a second variant to the
+0.80 command (+2 CPU-min). Expect the defaults at 0.90 to do nothing (the ladder places almost nothing).
+
+Sim behaviour change: live_sim now runs ladder_targets in write-gated cycles too, as Bot.plan_exchange does (anchor and
+cash bookkeeping). In these runs P&L was identical before and after the change.
+
+CPU: gate diagnosis 47 s + 56 s (re-run after adding counters) + ~15 s probes = ~2 CPU-min.
+
+## Round 4 (Finisher): item 2, write savers
+Code eeaf290 (both OFF by default). `tests/live_sim.py`, BASE_JSON = the owner's live overrides (arb_two_sided false,
+worst_case_backstop_frac 0.8, capital_ceiling_adding_size_factor 0.5, writes_per_minute(_max) 28, burst_cycle 60).
+Simulator change: `strategy_sim.plan_changes` now models order expiry as live (order_ttl 1800 s, refresh 180 s before,
+expired orders leave the book), in the base too; without it the TTL saver cannot show anything. So base numbers here
+are not comparable with earlier rounds (base: 22.1 writes/min, 6,760 deferred changes/h, P&L +1,660 per 3 h).
+
+S1, 8 seeds x 3 h quiet, paired seeds (raw: `tests/live_sim_round4_savers_S1_quiet_8x3.txt`):
+
+| Variant | dP&L | d lagged | d writes/min | d deferred/h | d capital at end | d freed | verdict |
+|---|---|---|---|---|---|---|---|
+| (a) no-chase (`no_chase_enabled`, 2 ticks, eps 0.25c) | -43 ± 62 | -125 ± 91 | -0.26 ± 0.40 | -685 ± 780 | +0.035 ± 0.013 | -3.5k ± 1.4k | nominal pass (writes down, P&L -0.7 se), but the writes drop is noise |
+| (b) TTL saver (`ttl_tiers_enabled` + `ttl_expire_as_cancel`) | -43 ± 39 | -50 ± 57 | **-1.10 ± 0.35** | -206 ± 280 | +0.027 ± 0.015 | -2.75k ± 1.5k | fails narrowly (P&L -1.1 se); the only clear write saving |
+
+- The simulator is write-starved: writes freed are spent at once on deferred changes, so writes/min understates the
+  saving (deferred/h falls more). A 2-seed x 0.25 h smoke showed no-chase at -2.15 writes/min before the backlog builds.
+- Both savers leave more capital in positions at the end (+3 points) and free less cash (-3k): the freed writes go to
+  deferred changes, which in this world are mostly adding quotes. Worth knowing before switching either on.
+- S2 (16 x 6 quiet, 8 x 3 news) **not run**: S1 cost 17.5 CPU-min (~14.6 CPU-s per seed-hour, 2.9x the 5 s estimate),
+  so S2 would cost ~58 CPU-min against the 26 CPU-min cap. Total used: ~18 CPU-min (S1 + a 2 x 0.25 h smoke).
+
+Recommended defaults: **both OFF** (neither passed S2, which was not run). If the owner wants writes back now, (b) is the
+better candidate (3 se fewer writes, P&L within noise); confirm on 16 x 6 quiet first. At the measured cost a base +
+1 variant run is ~47 CPU-min at 16 x 6, ~23 at 8 x 6 (not the 16 planned).
+
+# Round 5 (Package 5, Finisher 2b): the Polymarket-bias yardstick (PLAN_POLY_BIAS.md v2)
+Simulator: tests/live_sim.py, new world knobs `_rival_anchor`, `_world_tilt`, `_world_tilt_growth` and fields pnl_liq, pnl_mid,
+mk15_mid, exit_ratio, hold_med (+ pick_cost, wc_end in KEYS); pins in tests/test_live_sim_marks.py (knobs 0 = identical numbers).
+pnl_liq: start AND end at liquidation (longs at the best other bid, shorts at the best other ask, no quote = consensus -/+ 2c).
+pnl_mid: start and end at the other traders' mid. Deviation from the plan: the residual-bias decomposition (the real starting gap
+already holds the live tilt, so per-market bias = gap + s0 (p0 - 0.5); the start book matches the real one in every world), and
+informed takers trade toward the anchored price (Polymarket + anchor x (bias + tilt term)), not raw Polymarket.
+"Tilt world" (the judge) = `_rival_anchor` 1, `_world_tilt` 0.05, `_world_tilt_growth` 0.002. NOTE (found 23:15 UTC): the start book is
+the REAL book either way, so `_world_tilt` only names the part of the real gap that is the tilt (the part that grows); the level of the tilt
+in the 74-market world is the real one (~7% here, ~6.3% cross-section live). `_world_tilt_add` adds tilt on top (the ref_tilt_max test). BASE = Package 4 defaults + live
+overrides (arb_two_sided false, worst_case_backstop_frac 0.8, ceiling factor 0.5, writes 28/28, burst 60), `_start_cap` 0.90.
+8 seeds x 3 h quiet, paired; deltas ± 1 SE. Machine: 1 CPU. Raw output: tests/live_sim_round5_*.txt.
+
+## Bases (8 x 3 quiet)
+| World | pnl_liq | pnl_mid | pnl (Polymarket) | exit_ratio | hold_med h | cap_end | wc_end | writes_pm | deferred_h |
+|---|---|---|---|---|---|---|---|---|---|
+| tilt (judge) | +1,150 | +1,250 | +1,590 | 1.00 | 2.35 | 0.912 | 48.3k | 21.7 | 6,080 |
+| old (anchor 0, no tilt) | +152 | +382 | +1,590 | 1.09 | 2.65 | 0.860 | 44.2k | 22.2 | 7,380 |
+Reading: in the old world the Polymarket mark overstates P&L by ~1,440 per 3 h (pnl 1,590 vs liquidation 152): the yardstick
+the earlier rounds used counted the gap as profit. The tilt world's own level is not comparable with the old one (rivals priced
+differently); only deltas within a world are.
+
+## Re-score of the earlier decisions (tilt world, d vs BASE)
+| Variant | Old verdict (Polymarket mark) | d pnl_liq | d pnl (Poly) | d exit_ratio | d cap_end | d wc_end | d writes_pm | d deferred_h | d pick_cost | New verdict |
+|---|---|---|---|---|---|---|---|---|---|---|
+| fast_unload_enabled | -165 ± 110: reject | -22 ± 100 | +10 ± 48 | -0.005 ± 0.034 | -0.006 ± 0.015 | -1.3k ± 0.9k | +0.06 ± 0.46 | +206 ± 590 | +0.5 ± 3.9 | neutral: the loss was the mark; still no gain, keep OFF |
+| reduce_join_best | -48 ± 81: reject | -23 ± 120 | -43 ± 46 | +0.043 ± 0.033 | -0.020 ± 0.011 | -1.2k ± 0.9k | -0.82 ± 0.62 | -897 ± 440 | +2.9 ± 4.4 | neutral, fewer writes/deferred; not a pass (cap_end -2 pts, not -5) |
+| turnover_control_enabled | +49 ± 62: weak | +67 ± 120 | +10 ± 43 | +0.025 ± 0.025 | -0.012 ± 0.011 | -1.0k ± 1.0k | -0.31 ± 0.80 | +200 ± 510 | -4.6 ± 5.0 | neutral-positive (pnl_mid +106 ± 110); not a pass |
+| ceiling factor 0.25 (vs 0.5) | 0.5 better by 262 ± 100 | -162 ± 110 | -159 ± 96 | +0.004 ± 0.036 | -0.004 ± 0.012 | -1.7k ± 0.6k | -0.79 ± 0.47 | -914 ± 600 | +5.1 ± 6.4 | still worse (-1.5 SE): keep 0.5 |
+Flipped: none outright. fast_unload goes from a -1.5 SE loser to neutral (its loss was the Polymarket mark); the other three
+keep their sign. No old flag passes the new rule (none moves cap_end by 5 points).
+
+## Design screens, tilt world, 8 x 3 quiet, d vs BASE (± 1 SE). Pass rule (PLAN_POLY_BIAS 5): d pnl_liq >= -1 SE, cap_end -5 pts,
+## wc_end down, writes_pm <= 28 and deferred_h not up > 20%, pick-offs not worse (judge: mk15_mid, the consensus markout;
+## pick_cost is Polymarket-marked and reported alongside), exit_ratio up.
+| Variant | d pnl_liq | d pnl_mid | d pnl (Poly) | d exit_ratio | d hold_med | d cap_end | d wc_end | d writes_pm | d deferred_h | d mk15_mid c | d pick_cost | Verdict |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| T2.1 `ref_tilt_enabled` | **+163 ± 60** | +101 ± 58 | -131 ± 51 | +0.105 ± 0.039 | +0.55 ± 0.48 | **-0.076 ± 0.015** | -8.3k ± 1.0k | -1.17 ± 0.46 | +71 ± 550 | +0.054 ± 0.031 | +38 ± 14 | **PASS** (2.7 SE; the Polymarket mark says -131: the "lost" P&L is the gap it no longer buys) |
+| T2.1 + `ref_weight` 0.5 (T2.2) | +176 ± 50 | +87 ± 62 | -272 ± 66 | +0.141 ± 0.027 | +0.58 ± 0.45 | -0.097 ± 0.011 | -10.8k ± 0.7k | -0.04 ± 0.43 | +1,070 ± 780 (+18%) | -0.056 ± 0.032 | +60 ± 16 | no-go: not >= 1 SE over T2.1 alone; markout worse |
+| T2.1 + `ref_weight` 0.35 (T2.2) | +186 ± 100 | +90 ± 100 | -401 ± 85 | +0.201 ± 0.029 | +0.77 ± 0.62 | -0.131 ± 0.013 | -13.6k ± 1.4k | -0.42 ± 0.38 | +1,330 ± 470 (+22%) | -0.076 ± 0.039 | +70 ± 14 | no-go: deferred over +20%, markout worse, noisier |
+| A `reduce_from_book` | +91 ± 130 | -2 ± 130 | -362 ± 71 | +0.195 ± 0.040 | -1.23 ± 1.2 | -0.120 ± 0.017 | -10.7k ± 1.6k | -0.49 ± 0.62 | -210 ± 890 | **-0.229 ± 0.031** | +51 ± 8 | FAIL on pick-offs (sells to informed flow); P&L neutral |
+| T2.1 + A | +124 ± 90 | +27 ± 93 | -434 ± 69 | +0.237 ± 0.042 | -0.29 ± 0.30 | -0.141 ± 0.014 | -14.1k ± 1.2k | -1.53 ± 0.57 | -220 ± 820 | -0.168 ± 0.030 | +75 ± 9 | FAIL: not better than T2.1 alone, markout worse |
+| B `kelly_edge_cap` 0.01 + `kelly_max_market_frac` 0.01 + `headline_position_frac` 0.05 | **-216 ± 19** (stopped at 4 seeds) | -285 ± 46 | -510 ± 75 | +0.188 ± 0.043 | +0.25 ± 0.37 | -0.069 ± 0.011 | -6.9k ± 0.7k | -4.0 ± 0.6 | -2,990 ± 980 | +0.005 ± 0.038 | +6 ± 12 | FAIL (-11 SE): too little size where the spread pays |
+| T2.1 + B | -89 ± 100 | -226 ± 95 | -634 ± 81 | +0.359 ± 0.046 | +3.7 ± 1.6 | -0.140 ± 0.014 | -12.4k ± 0.7k | -6.2 ± 0.4 | -3,780 ± 540 | -0.026 ± 0.027 | +47 ± 12 | FAIL: 250 below T2.1 alone |
+| T2.1 + T2.4 `tilt_exposure_max_frac` 0.10 | **-331 ± 86** (stopped at 4) | -401 ± 140 | -867 ± 98 | +0.293 ± 0.077 | +7.6 ± 2.4 | -0.120 ± 0.014 | -12.2k ± 0.4k | -12.3 ± 0.9 | -5,220 ± 860 | -0.025 ± 0.021 | +56 ± 10 | FAIL: the live book starts at 15% exposure, the cap binds everywhere (writes -12/min = most adding off) |
+Old world (anchor 0, no tilt), 8 x 3 quiet: T2.1 d pnl_liq **+244 ± 94**, d pnl_mid +211 ± 77, d pnl (Poly) +72 ± 80, d cap_end -0.040 ± 0.015,
+d wc_end -6.2k ± 1.5k, d writes_pm -0.23 ± 0.27, d mk15_mid -0.014 ± 0.028, d pick_cost +3 ± 6: T2.1 does not lose where there is no
+tilt to remove (the plan's no-harm test: must not lose more than 1 SE).
+Reading: removing the tilt from fair value is the one change that pays at liquidation AND at the mid, frees capital and saves writes.
+Everything that only makes the exit more aggressive (A, lower ref_weight) sells into informed flow (mk15_mid) for no extra P&L; everything
+that only shrinks size (B, T2.4 at 0.10) gives up spread income. The 8 x 3 "+163" is 3 h on 74 markets: about +1,300 per day on the sim's
+share of the book, before anything the sim does not model.
+
+## The pinned world (`_bg_wc` 38000): the live reduce-only backstop, added 21:00 UTC after the owner's live findings
+Live since Package 3 (16:26 UTC) the bot is reduce-only in 81% of cycles: the sum-of-maxima worst case (77-82k) cycles against the
+backstop (0.80 x account, exit at 0.77). live_sim covered only the 74 biggest markets (worst case ~41k) and passed `global_reduce=False`,
+so no earlier round saw this. `_bg_wc` adds the rest of the account's worst case (38k -> total 79.5k at the start) and applies mm_bot's
+rule (cycle step 6, backstop part, with `reduce_only_hysteresis`); `ro_frac` = share of cycles in reduce-only. Pinned BASE (tilt world +
+`_bg_wc` 38000, 8 x 3 quiet): pnl_liq +1,004, pnl_mid +1,098, exit_ratio 1.13, hold_med 7.7 h, cap_end 0.853, writes_pm 16.1, ro_frac 0.42.
+The pinned world is noisier (SE 130-200 vs 60): reduce-only flips are chaotic. Effective tilt of the 74-market world is ~7% (the
+biggest positions sit where the gaps are biggest: residual bias slope -1.9% on top of the 5% + growth), and the estimator reads 6.1-7.2%.
+| Variant (pinned, 8 x 3 quiet) | d pnl_liq | d pnl_mid | d pnl_lag (exchange-style) | d ro_frac | d cap_end | d wc_end | d writes_pm | d deferred_h | d mk15_mid | d pick_cost | Verdict |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| T2.1 `ref_tilt_enabled` | +129 ± 190 | +147 ± 150 | +98 ± 140 | -0.33 ± 0.10 | -0.023 ± 0.017 | -3.4k ± 1.1k | +2.7 ± 1.2 | -740 ± 860 | -0.04 ± 0.07 | +35 ± 9 | positive, under-powered here (0.7 SE); frees the bot from reduce-only a third of the time |
+| `reduce_only_hysteresis` 0.01 (owner's candidate) | +22 ± 140 | +90 ± 110 | +98 ± 110 | -0.10 ± 0.06 | +0.020 ± 0.010 | +0.4k ± 0.6k | +2.6 ± 1.0 | **+2,390 ± 750 (+37%)** | -0.03 ± 0.05 | -5 ± 8 | neutral P&L, fails the deferred rule (more flips = more writes) |
+| `worst_case_backstop_frac` 0.85 (owner's candidate) | +72 ± 200 | +99 ± 190 | +139 ± 190 | -0.27 ± 0.09 | +0.034 ± 0.014 | +2.8k ± 1.1k | +3.6 ± 1.1 | +80 ± 760 | -0.01 ± 0.06 | -8 ± 5 | neutral; +3.4 pts capital, +2.8k worst case |
+| T2.1 + hysteresis 0.01 | +236 ± 130 | +190 ± 140 | +172 ± 140 | -0.31 ± 0.09 | -0.013 ± 0.013 | -1.3k ± 0.8k | +3.5 ± 1.2 | -430 ± 520 | +0.02 ± 0.08 | +35 ± 10 | positive (1.8 SE) |
+| **T2.1 + backstop 0.85** | **+311 ± 130** | +257 ± 120 | +285 ± 130 | **-0.42 ± 0.11** | -0.017 ± 0.020 | -2.1k ± 1.4k | +4.4 ± 1.2 (16.1 -> 20.5) | -260 ± 800 | +0.04 ± 0.07 | +26 ± 13 | **best (2.4 SE)**: T2.1 stops the worst case growing, 0.85 stops the churn; the bot is almost never reduce-only |
+Reading for the owner's tonight question: 0.85 alone or hysteresis alone buy little (both within noise, hysteresis costs writes). With T2.1 on,
+0.85 is worth ~+180 over T2.1 alone per 3 h here (noisy). Order: T2.1 first, then 0.85; not 0.85 alone, which adds worst-case room to a bot
+that still buys the tilt.
+
+## Switch-on with existing inventory: step vs ramp-in (owner's question, tilt world, d vs BASE)
+The live start IS a switch-on: 74 markets, 90% of capital in positions, most of it bought against the tournament. `ref_tilt_rampin_min`
+ramps the applied s from 0 to the estimate (blend and takes). Base 8 x 2 quiet: exit_ratio 0.92, shares 83k, pnl_liq +423, pnl +995 (Polymarket).
+| Run | d pnl_lag | d pnl_liq | d pnl (Polymarket) | d exit_ratio | d shares | d cap_end | d writes_pm | d deferred_h |
+|---|---|---|---|---|---|---|---|---|
+| 8 x 2 h, step-on (ramp 0) | +70 ± 39 | +174 ± 55 | -107 ± 25 | +0.163 ± 0.041 | +3.2k ± 1.9k | -0.066 ± 0.009 | -0.90 ± 0.77 | -360 ± 700 |
+| 8 x 2 h, ramp 120 min | -33 ± 39 | +38 ± 71 | -112 ± 28 | +0.110 ± 0.028 | -0.7k ± 2.0k | -0.044 ± 0.007 | -0.46 ± 0.59 | -340 ± 820 |
+| 8 x 3 h, step-on | +166 ± 72 | +163 ± 60 | -131 ± 51 | +0.105 ± 0.039 | +15k ± 4.3k | -0.076 ± 0.015 | -1.17 ± 0.46 | +70 ± 550 |
+| 8 x 3 h, ramp 120 min | -36 ± 150 | -70 ± 130 | -195 ± 86 | +0.069 ± 0.032 | +3.4k ± 5k | -0.047 ± 0.011 | +0.79 ± 0.53 | +1,070 ± 570 |
+The unwind in the first 2 h after a step-on: reduces up ~+5k shares and adds down ~-2k (from the exit ratio and share totals), i.e. the
+bot sells ~5k shares of inventory at tournament prices ~2c under Polymarket: -107 at the Polymarket mark, +174 at liquidation, +70 at the
+exchange-style mark. The ramp does NOT reduce the Polymarket-marked cost (-112 vs -107); it delays the gain, keeps the bot buying the tilt
+at a falling rate for 2 h, and re-prices continuously as fair value drifts (+0.8 writes/min, deferred +1,070/h at 3 h). Default set to 0
+(no ramp); the setting stays for the owner. The one-step switch-on re-prices ~157 of 229 live markets by >= 1c once (red team): ~10 min of
+the 28/min budget; do it in a quiet hour. (A 20-min ramp is screened below for the record.)
+
+## News regime and flat tilt (T2.1 step-on, d vs BASE)
+| World | Seeds x h | d pnl_lag | d pnl_liq | d pnl_mid | d pnl (Poly) | d exit_ratio | d cap_end | d wc_end | d writes_pm | d deferred_h | d mk15_mid | d pick_cost |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| tilt world, news (Polymarket jumps 0.6/market-hour, common news) | 6 x 6 | **+670 ± 180** | **+761 ± 160** | +664 ± 140 | +197 ± 120 | +0.063 ± 0.025 | -0.105 ± 0.026 | -10.6k ± 2.3k | -0.94 ± 0.70 | +680 ± 690 (+10%) | -0.015 ± 0.028 | +171 ± 46 |
+| tilt flat (growth 0), quiet | 6 x 3 | -60 ± 59 | +100 ± 84 | +46 ± 81 | -179 ± 65 | +0.046 ± 0.053 | -0.054 ± 0.023 | -8.1k ± 2.2k | -1.10 ± 0.40 | -580 ± 660 | -0.020 ± 0.016 | +55 ± 8 |
+| old world (anchor 0, no tilt), quiet | 8 x 3 | +215 ± 74 | +244 ± 94 | +211 ± 77 | +72 ± 80 | +0.024 ± 0.025 | -0.040 ± 0.015 | -6.2k ± 1.5k | -0.23 ± 0.27 | +530 ± 650 | -0.014 ± 0.028 | +3 ± 6 |
+Reading: in news T2.1 gains most (the base bot's quotes lean toward Polymarket moves the tournament follows only partly, and T2.1's lean
+is 6-7% smaller); with the tilt flat the gain shrinks to +100 ± 84 at liquidation and ~0 at the exchange-style mark (the growth is what
+T2.1 protects against); it never loses.
+
+## ref_tilt_max: does the cap bind, and does it matter? (owner's question; high-tilt pinned world)
+World: tilt world + `_world_tilt_add` 0.08 + growth 0.004/h + `_bg_wc` 38000: the real book's gaps plus 8 points of tilt (~15% total),
+pinned. Base is reduce-only 94% of cycles here (the extra tilt raises the worst case): writes 4.8/min, pnl_liq -61. 8 x 3 quiet, d vs BASE.
+| Variant | d pnl_lag | d pnl_liq | d pnl_mid | d pnl (Poly) | d exit_ratio | d cap_end | d wc_end | d writes_pm | d deferred_h | d mk15_mid | d pick_cost | d ro_frac | estimator s at the end |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| T2.1, `ref_tilt_max` 0.12 | +316 ± 78 | +299 ± 84 | +306 ± 73 | +469 ± 67 | -0.319 ± 0.209 | -0.008 ± 0.009 | +1,885 ± 493 | +5.80 ± 0.75 | +1,541 ± 274 | +0.130 ± 0.082 | +53 ± 10 | -0.297 ± 0.042 | 0.120 (clipped) |
+| T2.1, `ref_tilt_max` 0.20 | +351 ± 89 | +302 ± 54 | +315 ± 69 | +484 ± 83 | -0.259 ± 0.271 | -0.015 ± 0.016 | +1,378 ± 395 | +8.51 ± 1.19 | +2,080 ± 374 | +0.117 ± 0.086 | +65 ± 12 | -0.430 ± 0.068 | 0.151 (tracks) |
+Reading: at a 15% tilt the 0.12 clip binds (the estimate sits at 0.12 while the world is at 0.15) and the bot keeps buying 3 points of tilt;
+the 3-h P&L is the same either way (+302 vs +299 at liquidation, +351 vs +316 at the exchange-style mark, within noise), the 0.20 cap costs
++2.7 writes/min (more adding, less reduce-only) and keeps the estimate readable. The slow mark bleed of the untracked 3 points (-327 per
+point per day live) is outside a 3-h run. Default set to 0.20 (live s is 6.3%; alarm if `tilt_s` passes 0.12: re-measure with
+analysis/poly_bias/snapshot02b.py before trusting it). Earlier run in a "growth 0.004 only" world (no added level; 8 x 3, ramp 120):
+T2.1 +133 ± 75 pnl_lag / +151 ± 120 pnl_liq, cap 0.2 within noise of it (tests/live_sim_round5_hightilt_8x3.txt holds the final world only).
+
+## New ideas screened (tilt world, 8 x 3 quiet, all on top of T2.1; d vs BASE, T2.1 alone = +166 ± 72 pnl_lag / +163 ± 60 pnl_liq)
+| Variant | d pnl_lag | d pnl_liq | d pnl_mid | d pnl (Poly) | d exit_ratio | d cap_end | d writes_pm | d deferred_h | d mk15_mid | d pick_cost | Verdict |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| X5 `gap_size_shrink` 0.03 (adding size shrinks with the gap) | +110 ± 118 | +64 ± 85 | +45 ± 82 | -212 ± 74 | +0.124 ± 0.047 | -0.078 ± 0.017 | **+3.58 ± 0.41** | **+4,337 ± 752** | -0.018 ± 0.020 | +45 ± 10 | FAIL: below T2.1 alone, +3.6 writes/min (smaller orders re-price more) |
+| X11 A dead-only (`reduce_from_book_dead_only`) | -45 ± 109 | -26 ± 109 | -93 ± 92 | -284 ± 77 | +0.162 ± 0.033 | -0.092 ± 0.014 | -0.82 ± 0.57 | +198 ± 581 | -0.019 ± 0.046 | +62 ± 15 | FAIL: ~200 below T2.1 alone; dead markets still get picked off |
+| ladder_enabled | +155 ± 77 | +135 ± 66 | +87 ± 70 | -135 ± 51 | +0.102 ± 0.039 | -0.075 ± 0.015 | -1.01 ± 0.52 | +187 ± 583 | +0.048 ± 0.032 | +39 ± 14 | no gain over T2.1 alone (cash still binds); OFF |
+| `ref_tilt_rampin_min` 20 | +176 ± 110 | **+199 ± 83** | +133 ± 87 | -166 ± 62 | +0.153 ± 0.031 | -0.097 ± 0.012 | -1.22 ± 0.63 | +642 ± 650 | +0.061 ± 0.057 | **+9 ± 9** | same P&L as the step-on, less pick-off, smoother switch-on: DEFAULT 20 |
+
+## Confirmation, pinned world (live backstop), 16 seeds x 6 h quiet, T2.1 with `ref_tilt_rampin_min` 0 (d vs BASE; base: pnl_lag +366,
+## pnl_liq +2,084, cap_end 0.831, writes 16.6/min, reduce-only 25% of cycles)
+| Variant | d pnl_lag (exchange-style) | d pnl_liq | d pnl_mid | d pnl (Poly) | d exit_ratio | d cap_end | d wc_end | d writes_pm | d deferred_h | d mk15_mid | d pick_cost | d ro_frac |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| **T2.1** | **+509 ± 110** | **+601 ± 107** | +554 ± 107 | +341 ± 94 | +0.020 ± 0.020 | -0.064 ± 0.012 | -6.8k ± 0.7k | +2.44 ± 0.35 (16.6 -> 19.0) | +507 ± 453 (+9%) | -0.024 ± 0.025 | +40 ± 18 | -0.20 ± 0.04 |
+| T2.1 + backstop 0.85 | +587 ± 112 | +649 ± 101 | +610 ± 104 | +412 ± 103 | +0.017 ± 0.022 | -0.060 ± 0.014 | -6.7k ± 0.8k | +3.11 ± 0.43 | +596 ± 424 | -0.020 ± 0.026 | +56 ± 18 | -0.25 ± 0.04 |
+| T2.1 + hysteresis 0.01 | +456 ± 123 | +523 ± 117 | +487 ± 122 | +292 ± 117 | +0.015 ± 0.021 | -0.057 ± 0.013 | -6.3k ± 0.7k | +2.74 ± 0.44 | +561 ± 488 | -0.034 ± 0.028 | +43 ± 18 | -0.22 ± 0.04 |
+Paired against T2.1 alone (same seeds): backstop 0.85 **+78 ± 86 pnl_lag, +48 ± 81 pnl_liq**, writes +0.67 ± 0.24, reduce-only -0.05 ± 0.02;
+hysteresis 0.01 **-57 ± 60 pnl_lag, -83 ± 66 pnl_liq**, writes +0.32 ± 0.19.
+Verdicts: T2.1 CONFIRMED at 16 x 6 in the live-like world (4.6 SE at the exchange-style mark, 5.6 SE at liquidation; positive even at the
+Polymarket mark over 6 h: the positions it declines to add are the ones that bleed). Backstop 0.85 with T2.1: not clearly positive (the 8 x 3
++180 was noise; the live data says cash binds before the backstop and the reduce-only churn cost -87 net): STAYS 0.80, revisit after a day of
+T2.1. Hysteresis 0.01 with T2.1: negative within noise and more writes: STAYS 0.03.
+
+## Confirmation, tilt world (no backstop), 16 x 6 quiet, T2.1 ramp 0 (d vs BASE; base pnl_lag +623, pnl_liq +2,308, cap_end 0.862, writes 20.3)
+| Variant | d pnl_lag | d pnl_liq | d pnl_mid | d pnl (Poly) | d exit_ratio | d cap_end | d wc_end | d writes_pm | d deferred_h | d mk15_mid | d pick_cost |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| **T2.1** | **+330 ± 64** | **+426 ± 63** | +351 ± 61 | +54 ± 58 | +0.061 ± 0.013 | -0.091 ± 0.009 | -10.0k ± 0.8k | -0.63 ± 0.27 | +464 ± 362 (+8%) | -0.054 ± 0.019 | +52 ± 16 |
+The one rule T2.1 misses: the consensus markout `mk15_mid` is 0.054c per share worse (2.8 SE; the Polymarket-marked `pick_cost` +52): the
+bot's quotes sit nearer the book, so it is picked off a little more per share, ~-150 on 280k shares in 6 h, already inside the +426. Every
+other rule passes (P&L at both marks, capital -9 points, worst case -10k, writes down, deferred +8%, exit ratio up).
+
+## Round 5 summary tables (generated from the per-seed cache tests/live_sim_round5_cache.jsonl by the executor's tables script; d vs BASE, ± 1 SE)
+### Tilt world (anchor 1, tilt 0.05 + 0.002/h), 8 x 3 quiet
+| Variant | d pnl_lag (exchange-style) | d pnl_liq | d pnl_mid | d pnl (Polymarket) | d exit_ratio | d cap_end | d wc_end | d writes_pm | d deferred_h | d mk15_mid c | d pick_cost | d ro_frac |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| BASE (8 seeds) | pnl_lag -753 | pnl_liq 1,152 | pnl_mid 1,254 | pnl 1,591 | exit_ratio 1.003 | cap_end 0.912 | wc_end 48,295 | writes_pm 21.71 | deferred_h 6,084 | mk15_mid 1.089 | pick_cost -61 | ro_frac 0.000 |
+| T2.1 ref_tilt_enabled (n=8) | +166 ± 72 | +163 ± 60 | +101 ± 58 | -131 ± 51 | +0.105 ± 0.039 | -0.076 ± 0.015 | -8,261 ± 967 | -1.17 ± 0.46 | +71 ± 551 | +0.054 ± 0.031 | +38 ± 14 | +0.000 ± 0.000 |
+| T2.1 ramp-in 120 min (n=8) | -36 ± 152 | -70 ± 131 | -98 ± 131 | -195 ± 86 | +0.069 ± 0.032 | -0.047 ± 0.011 | -5,611 ± 1,265 | +0.79 ± 0.53 | +1,070 ± 569 | -0.016 ± 0.048 | +1 ± 7 | +0.000 ± 0.000 |
+| T2.1 ramp-in 20 min (n=8) | +176 ± 110 | +199 ± 83 | +133 ± 87 | -166 ± 62 | +0.153 ± 0.031 | -0.097 ± 0.012 | -9,122 ± 1,370 | -1.22 ± 0.63 | +642 ± 650 | +0.061 ± 0.057 | +9 ± 9 | +0.000 ± 0.000 |
+| T2.2: T2.1 + ref_weight 0.5 (n=8) | +87 ± 82 | +176 ± 50 | +87 ± 62 | -272 ± 66 | +0.141 ± 0.027 | -0.097 ± 0.011 | -10,788 ± 716 | -0.03 ± 0.43 | +1,072 ± 784 | -0.056 ± 0.032 | +60 ± 16 | +0.000 ± 0.000 |
+| T2.2: T2.1 + ref_weight 0.35 (n=8) | +139 ± 130 | +186 ± 103 | +90 ± 103 | -401 ± 85 | +0.201 ± 0.029 | -0.131 ± 0.013 | -13,550 ± 1,376 | -0.42 ± 0.38 | +1,330 ± 467 | -0.076 ± 0.039 | +70 ± 14 | +0.000 ± 0.000 |
+| A reduce_from_book (n=8) | +36 ± 150 | +91 ± 135 | -2 ± 125 | -362 ± 71 | +0.195 ± 0.040 | -0.120 ± 0.017 | -10,700 ± 1,599 | -0.49 ± 0.62 | -210 ± 891 | -0.229 ± 0.031 | +51 ± 8 | +0.000 ± 0.000 |
+| T2.1 + A (n=8) | +42 ± 113 | +124 ± 90 | +27 ± 93 | -434 ± 69 | +0.237 ± 0.042 | -0.141 ± 0.014 | -14,052 ± 1,152 | -1.53 ± 0.57 | -220 ± 820 | -0.168 ± 0.030 | +75 ± 9 | +0.000 ± 0.000 |
+| T2.1 + X11 (A dead-only) (n=8) | -45 ± 109 | -26 ± 109 | -93 ± 92 | -284 ± 77 | +0.162 ± 0.033 | -0.092 ± 0.014 | -8,651 ± 1,472 | -0.82 ± 0.57 | +198 ± 581 | -0.019 ± 0.046 | +62 ± 15 | +0.000 ± 0.000 |
+| B (edge cap 0.01, market 0.01, headline 0.05) (n=4) | -312 ± 61 | -216 ± 19 | -285 ± 46 | -510 ± 75 | +0.188 ± 0.043 | -0.069 ± 0.011 | -6,932 ± 719 | -4.04 ± 0.57 | -2,990 ± 979 | +0.005 ± 0.038 | +6 ± 12 | +0.000 ± 0.000 |
+| T2.1 + B (n=8) | -215 ± 119 | -89 ± 102 | -226 ± 95 | -634 ± 81 | +0.359 ± 0.046 | -0.140 ± 0.014 | -12,375 ± 703 | -6.21 ± 0.43 | -3,778 ± 538 | -0.026 ± 0.027 | +47 ± 12 | +0.000 ± 0.000 |
+| T2.1 + X5 gap_size_shrink 0.03 (n=8) | +110 ± 118 | +64 ± 85 | +45 ± 82 | -212 ± 74 | +0.124 ± 0.047 | -0.078 ± 0.017 | -8,999 ± 1,401 | +3.58 ± 0.41 | +4,337 ± 752 | -0.018 ± 0.020 | +45 ± 10 | +0.000 ± 0.000 |
+| T2.1 + C hold_target 4 h | (not run) |
+| T2.1 + T2.5 pair_unwind_passive | (not run) |
+| T2.1 + T2.4 exposure cap 0.10 (n=4) | -326 ± 96 | -331 ± 86 | -401 ± 135 | -867 ± 98 | +0.293 ± 0.077 | -0.120 ± 0.014 | -12,188 ± 425 | -12.26 ± 0.94 | -5,222 ± 861 | -0.025 ± 0.021 | +56 ± 10 | +0.000 ± 0.000 |
+| T2.1 + T2.4 exposure cap 0.25 (n=8) | +166 ± 72 | +163 ± 60 | +101 ± 58 | -131 ± 51 | +0.105 ± 0.039 | -0.076 ± 0.015 | -8,261 ± 967 | -1.17 ± 0.46 | +71 ± 551 | +0.054 ± 0.031 | +38 ± 14 | +0.000 ± 0.000 |
+| T2.1 + ladder_enabled (n=8) | +155 ± 77 | +135 ± 66 | +87 ± 70 | -135 ± 51 | +0.102 ± 0.039 | -0.075 ± 0.015 | -8,612 ± 858 | -1.01 ± 0.52 | +187 ± 583 | +0.048 ± 0.032 | +39 ± 14 | +0.000 ± 0.000 |
+| fast_unload_enabled (n=8) | +120 ± 95 | -22 ± 102 | +21 ± 76 | +10 ± 48 | -0.005 ± 0.034 | -0.006 ± 0.015 | -1,310 ± 944 | +0.06 ± 0.46 | +206 ± 585 | +0.011 ± 0.051 | +0 ± 4 | +0.000 ± 0.000 |
+| reduce_join_best (n=8) | +40 ± 111 | -23 ± 122 | -9 ± 122 | -43 ± 46 | +0.043 ± 0.033 | -0.020 ± 0.011 | -1,208 ± 878 | -0.82 ± 0.62 | -897 ± 437 | +0.042 ± 0.059 | +3 ± 4 | +0.000 ± 0.000 |
+| turnover_control_enabled (n=8) | +170 ± 106 | +67 ± 121 | +106 ± 110 | +10 ± 43 | +0.025 ± 0.025 | -0.012 ± 0.011 | -994 ± 1,022 | -0.31 ± 0.80 | +200 ± 515 | +0.030 ± 0.055 | -5 ± 5 | +0.000 ± 0.000 |
+| ceiling adding factor 0.25 (n=8) | -100 ± 112 | -162 ± 108 | -117 ± 91 | -159 ± 96 | +0.004 ± 0.036 | -0.004 ± 0.012 | -1,660 ± 600 | -0.79 ± 0.47 | -914 ± 602 | +0.006 ± 0.050 | +5 ± 6 | +0.000 ± 0.000 |
+
+### Pinned world (tilt world + the live reduce-only backstop, _bg_wc 38000), 8 x 3 quiet
+| Variant | d pnl_lag (exchange-style) | d pnl_liq | d pnl_mid | d pnl (Polymarket) | d exit_ratio | d cap_end | d wc_end | d writes_pm | d deferred_h | d mk15_mid c | d pick_cost | d ro_frac |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| BASE (8 seeds) | pnl_lag -872 | pnl_liq 1,004 | pnl_mid 1,098 | pnl 1,186 | exit_ratio 1.126 | cap_end 0.853 | wc_end 42,106 | writes_pm 16.15 | deferred_h 6,416 | mk15_mid 1.103 | pick_cost -48 | ro_frac 0.418 |
+| T2.1 (n=8) | +98 ± 138 | +129 ± 193 | +147 ± 153 | +88 ± 117 | -0.009 ± 0.045 | -0.023 ± 0.017 | -3,407 ± 1,097 | +2.70 ± 1.23 | -740 ± 859 | -0.043 ± 0.070 | +35 ± 9 | -0.327 ± 0.100 |
+| reduce_only_hysteresis 0.01 (n=8) | +98 ± 112 | +22 ± 143 | +90 ± 107 | +102 ± 88 | -0.067 ± 0.029 | +0.020 ± 0.010 | +394 ± 575 | +2.64 ± 0.95 | +2,386 ± 753 | -0.030 ± 0.052 | -5 ± 8 | -0.100 ± 0.055 |
+| worst_case_backstop_frac 0.85 (n=8) | +139 ± 191 | +72 ± 200 | +99 ± 187 | +236 ± 118 | -0.089 ± 0.040 | +0.034 ± 0.014 | +2,836 ± 1,102 | +3.61 ± 1.14 | +78 ± 760 | -0.009 ± 0.064 | -8 ± 5 | -0.265 ± 0.088 |
+| T2.1 + hysteresis 0.01 (n=8) | +172 ± 145 | +236 ± 128 | +190 ± 138 | +245 ± 118 | -0.016 ± 0.040 | -0.012 ± 0.013 | -1,314 ± 840 | +3.50 ± 1.19 | -432 ± 519 | +0.016 ± 0.076 | +35 ± 10 | -0.306 ± 0.091 |
+| T2.1 + backstop 0.85 (n=8) | +285 ± 134 | +311 ± 127 | +257 ± 116 | +275 ± 112 | -0.017 ± 0.045 | -0.017 ± 0.020 | -2,072 ± 1,356 | +4.39 ± 1.22 | -260 ± 798 | +0.040 ± 0.073 | +26 ± 13 | -0.418 ± 0.106 |
+| T2.1 + X5 | (not run) |
+| T2.1 + X11 | (not run) |
+| T2.1 + C 4 h | (not run) |
+
+### Pinned world, 16 x 6 quiet (confirmation)
+| Variant | d pnl_lag (exchange-style) | d pnl_liq | d pnl_mid | d pnl (Polymarket) | d exit_ratio | d cap_end | d wc_end | d writes_pm | d deferred_h | d mk15_mid c | d pick_cost | d ro_frac |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| BASE (16 seeds) | pnl_lag 366 | pnl_liq 2,084 | pnl_mid 2,155 | pnl 2,357 | exit_ratio 1.090 | cap_end 0.831 | wc_end 41,495 | writes_pm 16.58 | deferred_h 5,440 | mk15_mid 1.145 | pick_cost -57 | ro_frac 0.250 |
+| T2.1 (n=16) | +509 ± 110 | +601 ± 107 | +554 ± 107 | +341 ± 94 | +0.020 ± 0.020 | -0.064 ± 0.012 | -6,765 ± 706 | +2.44 ± 0.35 | +507 ± 453 | -0.024 ± 0.025 | +40 ± 18 | -0.201 ± 0.036 |
+| T2.1 + backstop 0.85 (n=16) | +587 ± 112 | +649 ± 101 | +610 ± 104 | +412 ± 103 | +0.017 ± 0.022 | -0.060 ± 0.014 | -6,667 ± 798 | +3.11 ± 0.43 | +596 ± 424 | -0.020 ± 0.026 | +56 ± 18 | -0.250 ± 0.044 |
+| T2.1 + hysteresis 0.01 (n=16) | +456 ± 123 | +523 ± 117 | +487 ± 122 | +292 ± 117 | +0.015 ± 0.021 | -0.057 ± 0.013 | -6,268 ± 741 | +2.74 ± 0.44 | +561 ± 488 | -0.034 ± 0.028 | +43 ± 18 | -0.217 ± 0.041 |
+
+### Tilt world, 16 x 6 quiet (confirmation)
+| Variant | d pnl_lag (exchange-style) | d pnl_liq | d pnl_mid | d pnl (Polymarket) | d exit_ratio | d cap_end | d wc_end | d writes_pm | d deferred_h | d mk15_mid c | d pick_cost | d ro_frac |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| BASE (16 seeds) | pnl_lag 623 | pnl_liq 2,308 | pnl_mid 2,414 | pnl 2,715 | exit_ratio 1.046 | cap_end 0.862 | wc_end 44,846 | writes_pm 20.32 | deferred_h 5,572 | mk15_mid 1.179 | pick_cost -53 | ro_frac 0.000 |
+| T2.1 (n=16) | +330 ± 64 | +426 ± 63 | +351 ± 61 | +54 ± 58 | +0.061 ± 0.013 | -0.091 ± 0.009 | -10,018 ± 750 | -0.63 ± 0.27 | +464 ± 362 | -0.054 ± 0.019 | +52 ± 16 | +0.000 ± 0.000 |
+
+### Tilt world, 6 x 6 news
+| Variant | d pnl_lag (exchange-style) | d pnl_liq | d pnl_mid | d pnl (Polymarket) | d exit_ratio | d cap_end | d wc_end | d writes_pm | d deferred_h | d mk15_mid c | d pick_cost | d ro_frac |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| BASE (6 seeds) | pnl_lag -78 | pnl_liq 1,663 | pnl_mid 1,752 | pnl 2,286 | exit_ratio 1.039 | cap_end 0.889 | wc_end 47,976 | writes_pm 21.09 | deferred_h 6,514 | mk15_mid 1.102 | pick_cost 47 | ro_frac 0.000 |
+| T2.1 (n=6) | +670 ± 183 | +761 ± 163 | +664 ± 140 | +197 ± 119 | +0.063 ± 0.025 | -0.105 ± 0.026 | -10,643 ± 2,343 | -0.94 ± 0.70 | +684 ± 687 | -0.015 ± 0.028 | +171 ± 46 | +0.000 ± 0.000 |
+
+### Tilt flat (growth 0), 6 x 3 quiet
+| Variant | d pnl_lag (exchange-style) | d pnl_liq | d pnl_mid | d pnl (Polymarket) | d exit_ratio | d cap_end | d wc_end | d writes_pm | d deferred_h | d mk15_mid c | d pick_cost | d ro_frac |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| BASE (6 seeds) | pnl_lag -536 | pnl_liq 1,160 | pnl_mid 1,282 | pnl 1,578 | exit_ratio 1.064 | cap_end 0.884 | wc_end 46,814 | writes_pm 20.94 | deferred_h 5,986 | mk15_mid 1.163 | pick_cost -73 | ro_frac 0.000 |
+| T2.1 (n=6) | -64 ± 108 | -2 ± 156 | -36 ± 137 | -151 ± 46 | +0.055 ± 0.038 | -0.054 ± 0.020 | -6,962 ± 2,119 | -0.05 ± 0.74 | +337 ± 718 | -0.077 ± 0.062 | +52 ± 11 | +0.000 ± 0.000 |
+
+### Old world (anchor 0, no tilt knobs), 8 x 3 quiet
+| Variant | d pnl_lag (exchange-style) | d pnl_liq | d pnl_mid | d pnl (Polymarket) | d exit_ratio | d cap_end | d wc_end | d writes_pm | d deferred_h | d mk15_mid c | d pick_cost | d ro_frac |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| BASE (8 seeds) | pnl_lag -251 | pnl_liq 152 | pnl_mid 382 | pnl 1,595 | exit_ratio 1.086 | cap_end 0.860 | wc_end 44,197 | writes_pm 22.21 | deferred_h 7,378 | mk15_mid 1.137 | pick_cost -37 | ro_frac 0.000 |
+| T2.1 (n=8) | +215 ± 74 | +244 ± 94 | +211 ± 77 | +72 ± 80 | +0.024 ± 0.025 | -0.040 ± 0.015 | -6,194 ± 1,523 | -0.22 ± 0.27 | +529 ± 655 | -0.014 ± 0.028 | +3 ± 6 | +0.000 ± 0.000 |
+
+### Calibrated growth (tilt 0.063 + 0.0016/h, pinned), 8 x 3 quiet
+| Variant | d pnl_lag (exchange-style) | d pnl_liq | d pnl_mid | d pnl (Polymarket) | d exit_ratio | d cap_end | d wc_end | d writes_pm | d deferred_h | d mk15_mid c | d pick_cost | d ro_frac |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+
+### First 2 h after switch-on (tilt world), 8 x 2 quiet
+| Variant | d pnl_lag (exchange-style) | d pnl_liq | d pnl_mid | d pnl (Polymarket) | d exit_ratio | d cap_end | d wc_end | d writes_pm | d deferred_h | d mk15_mid c | d pick_cost | d ro_frac |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| BASE (8 seeds) | pnl_lag -1,352 | pnl_liq 423 | pnl_mid 590 | pnl 995 | exit_ratio 0.922 | cap_end 0.935 | wc_end 48,377 | writes_pm 22.87 | deferred_h 7,388 | mk15_mid 1.021 | pick_cost -51 | ro_frac 0.000 |
+| T2.1 step-on (n=8) | +70 ± 39 | +174 ± 55 | +100 ± 32 | -107 ± 25 | +0.163 ± 0.041 | -0.066 ± 0.009 | -5,717 ± 818 | -0.90 ± 0.77 | -361 ± 695 | +0.124 ± 0.065 | +36 ± 9 | +0.000 ± 0.000 |
+| T2.1 ramp 120 (n=8) | -33 ± 39 | +38 ± 71 | -19 ± 50 | -112 ± 28 | +0.110 ± 0.028 | -0.044 ± 0.007 | -3,890 ± 555 | -0.46 ± 0.59 | -336 ± 820 | +0.103 ± 0.067 | +16 ± 9 | +0.000 ± 0.000 |
+
+Simulation spent in Round 5: 400 seed-runs, 1,500 seed-hours, ~440 CPU-minutes at the measured 17.5 s per seed-hour (plus ~40 lost to two
+sandbox reboots before per-seed caching existed). Every configuration ran once; the cache holds every seed result.

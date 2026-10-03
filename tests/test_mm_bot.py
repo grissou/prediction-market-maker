@@ -1634,20 +1634,20 @@ a, b = make_bot(); b.cfg.burst_protection = False
 b.write_log.extend([(time.monotonic(), 30.0, True)] * 5); b.update_burst(time.monotonic())
 check("burst_protection = False: never enters burst mode", not b.burst)
 
-# Start-up: the first cycles are long because of our own throttled book downloads (2 Oct 08:08: 21 s -> burst for
+# Start-up: the first cycles are long because of our own throttled book downloads (2 Oct 08:08: 61 s -> burst for
 # 2 min with a 0.4 s write median). The cycle-length trigger waits out burst_startup_grace_seconds and the first
 # download of every book; slow writes and timeouts still count.
 a, b = make_bot(); b.cycle()
 now_m = time.monotonic()
-b.trading_since, b.last_cycle_seconds = now_m - 5, 21.0
+b.trading_since, b.last_cycle_seconds = now_m - 5, 61.0
 b.update_burst(now_m)
-check("start-up: a 21 s first cycle doesn't trigger burst mode", not b.burst)
+check("start-up: a 61 s first cycle doesn't trigger burst mode", not b.burst)
 b.write_log.extend([(now_m, 18.0, True), (now_m, 16.0, True)])
 b.update_burst(now_m)
 check("...but 2 write timeouts during the start-up grace still do", b.burst)
 a, b = make_bot(); b.cycle()
 now_m = time.monotonic()
-b.trading_since, b.last_cycle_seconds = now_m - 200, 21.0
+b.trading_since, b.last_cycle_seconds = now_m - 200, 61.0
 b.ex["11"].book = None                                     # still downloading the first books
 b.update_burst(now_m)
 check("past the grace, while the first download of every book is still running: no burst from cycle length",
@@ -1657,12 +1657,12 @@ b.update_burst(now_m)
 check("...that part of the grace ends after BURST_LOADING_MAX_SECONDS (a book that never loads can't block it)", b.burst)
 a, b = make_bot(); b.cycle()
 now_m = time.monotonic()
-b.trading_since, b.last_cycle_seconds = now_m - 91, 21.0
+b.trading_since, b.last_cycle_seconds = now_m - 91, 61.0
 b.update_burst(now_m)
-check("past the grace with every book loaded: a 21 s cycle triggers burst mode as before", b.burst)
+check("past the grace with every book loaded: a 61 s cycle triggers burst mode as before", b.burst)
 a, b = make_bot(); b.cycle(); b.cfg.burst_startup_grace_seconds = 0
 now_m = time.monotonic()
-b.trading_since, b.last_cycle_seconds = now_m - 1, 21.0
+b.trading_since, b.last_cycle_seconds = now_m - 1, 61.0
 b.update_burst(now_m)
 check("burst_startup_grace_seconds = 0: the old behaviour (a long first cycle triggers it)", b.burst)
 a, b = make_bot(); b.cfg.selftest_enabled = False
@@ -2113,9 +2113,10 @@ check("write budget: separate from reads (3 writes + 5 reads go at once)", time.
       wapi.writes_left())
 wapi.throttle(write=True)
 check("...a 4th write in the window waits for it", time.monotonic() - t0 >= 0.9, time.monotonic() - t0)
-check("default write budget: starts at 45/min, may grow to 50/min (1-2 Oct: no 429 at >= 40 writes/min; 429s "
-      "seen after 33-53 writes in 60 s, and 60 would starve book reads under the 80/min cap)",
-      Config().writes_per_minute == 45 and Config().writes_per_minute_max == 50 and Config().write_budget_cut == 0.75)
+check("default write budget: 28/min flat (2 Oct live: 4 x 429 while the budget climbed to 36-50/min, 0 at 28), "
+      "burst cycle trigger 60 s (normal cycles take 20-30 s)",
+      Config().writes_per_minute == 28 and Config().writes_per_minute_max == 28 and Config().write_budget_cut == 0.75
+      and Config().burst_cycle_seconds == 60.0)
 check("the positions-409 fallback is bounded by time only by default (120 s): cycles can be 0.5 s apart",
       Config().positions_stale_max_cycles == 0 and Config().positions_stale_max_seconds == 120)
 check("default batch: 10 orders (full 20-order batches were 273 of the 417 '409 in flight' failures)",
@@ -2164,7 +2165,7 @@ check("429 -> request gap doubled (0.4 -> 0.8, then drifts down 1%) and counted"
 # budget that has grown above its start value; a budget at or below the start value is left alone.
 for start_w, want in ((50.0, 37.5), (45.0, 45.0)):
     answers = [Resp(429, {"Retry-After": "0.05"}), Resp(200)]
-    read_api = Api(CFG, False); read_api.wbudget = start_w
+    read_api = Api(__import__("dataclasses").replace(CFG, writes_per_minute=45, writes_per_minute_max=50), False); read_api.wbudget = start_w
     read_api.s.request = lambda *a, **k: answers.pop(0)
     read_api.call("GET", "/x")
     check(f"a read 429 with the write budget at {start_w:g}: budget now {want:g} (cut only above its start value)",
@@ -2868,7 +2869,7 @@ try:
           a.sent("batch") == [("batch", 1)] and placed == [0.06], (a.calls, placed))
     a.writes_left = lambda: 10 ** 6
 
-    # Anchor: re-priced only when fair value moves >= ladder_move.
+    # Anchor: re-priced only when fair value moves >= ladder_move (2c); a 1-tick difference is kept (tolerance).
     a, b = ladder_bot(ladder_offsets=(0.02, 0.03, 0.04))
     b.cycle(); b.cycle()
     ids = lad_ids(a, b)
@@ -2878,12 +2879,21 @@ try:
     b.cycle(); b.cycle()
     check("anchor: a 0.25c fair-value move leaves the ladder where it is",
           len(ids) == 16 and lad_ids(a, b) == ids and abs(b.ex["21"].lad_fv - 0.52) < 1e-9, (b.ex["21"].lad_fv, lad(a, b, "21")))
-    a.books["21"] = {"bids": [lvl(0.52, 1000)], "asks": [lvl(0.54, 1000)]}      # fair value +1c
-    a.books["22"] = {"bids": [lvl(0.46, 1000)], "asks": [lvl(0.48, 1000)]}
-    b.cycle(); b.cycle()
-    check("anchor: a 1c move re-prices every level around the new anchor (0.53)",
-          abs(b.ex["21"].lad_fv - 0.53) < 1e-9 and [x[1] for x in lad(a, b, "21")] == [0.55, 0.56, 0.57, 0.49, 0.5, 0.51]
+    a.books["21"] = {"bids": [lvl(0.53, 1000)], "asks": [lvl(0.55, 1000)]}      # fair value +2c
+    a.books["22"] = {"bids": [lvl(0.45, 1000)], "asks": [lvl(0.47, 1000)]}
+    b.cycle(); b.cycle(); b.cycle()
+    check("anchor: a 2c move re-prices every level around the new anchor (0.54)",
+          abs(b.ex["21"].lad_fv - 0.54) < 1e-9 and [x[1] for x in lad(a, b, "21")] == [0.56, 0.57, 0.58, 0.5, 0.51, 0.52]
           and not (lad_ids(a, b) & ids21), lad(a, b, "21"))
+    a, b = ladder_bot()
+    ex21, q21 = b.ex["21"], Quote(0.50, 100, 0.53, 100)
+    b.lad_cash_left = 10 ** 9
+    anchors = []
+    for k in range(20):                                  # fair value wobbling 0.50 / 0.51 / 0.515
+        b.ladder_targets(ex21, q21, (0.50, 0.51, 0.515)[k % 3], 1000.0 + k)
+        anchors.append(ex21.lad_fv)
+    check("anchor: fair value oscillating within 1.5c never re-anchors (at most once per 2c)",
+          len(set(anchors)) == 1, sorted(set(anchors)))
 
     # Pull on a Polymarket jump, back after ladder_pull_seconds.
     a, b = ladder_bot()
@@ -3034,6 +3044,110 @@ try:
     check("a tighter limit: the ladder level now too big is pulled at once, the one within it stays",
           ("bid", 0.495, 200, 2) not in l21 and ("bid", 0.505, 100, 1) in l21 and ("bid", 0.485, 300, 3) not in l21,
           l21)
+
+    # Review fixes (L1-L4).
+    want, _ = ladder_levels(0.52, Quote(0.51, 1000, 0.53, 1000), 0.51, 0.53, L3, (1, 2, 3), 1000, _big, max_cash=1000)
+    check("ladder: per-order cash cap (3,000 sh at 0.485 = 1,455 > 1,000 -> 2,061 sh)",
+          want[(True, 3)] == (0.485, int(1000 / 0.485)) and want[(True, 1)] == (0.505, 1000)
+          and want[(False, 3)][1] == int(1000 / (1 - 0.555)), want)
+    a, b = ladder_bot()
+    b.cycle(); b.cycle()
+    ex21 = b.ex["21"]
+    rest21 = b.orders_by_eid(utcnow())["21"]
+    q_dip = replace(ex21.quote, bid=0.505)               # wanted level 0 one tick lower; the resting 0.51 is kept
+    a.calls.clear()
+    ch = b.plan_exchange(ex21, q_dip, rest21, 0.515, utcnow(), time.monotonic())
+    check("hair trigger: level 1 == the wanted level 0 but behind the RESTING touch -> no urgent pull",
+          ch is None or (ch.key[0] == LADDER_TIER), ch and (ch.key, [(o.is_bid, o.price) for o in ch.doomed]))
+    b.lad_cash_left = 10 ** 9
+    _w, _, _ = b.ladder_targets(ex21, Quote(0.505, 100, 0.53, 100), 0.52, time.monotonic(), {True: 0.51, False: 0.535})
+    check("...and no level is placed at a resting touch kept a tick off its target either (it'd be pulled next cycle)",
+          (True, 1) not in _w and _w[(True, 2)][0] == 0.495 and (False, 1) not in _w and _w[(False, 2)][0] == 0.545, _w)
+    b.cfg.reprice_tolerance_ticks = 0
+    ch = b.plan_exchange(ex21, replace(ex21.quote, bid=0.50, bid_limit=0.50), rest21, 0.515, utcnow(), time.monotonic())
+    check("...but a ladder order beyond level 0's limit price IS urgent (rides with the level-0 change)",
+          ch is not None and ch.key[0] < LADDER_TIER and any(o.price == 0.505 and b.order_level(o) == 1 for o in ch.doomed),
+          ch and ch.key)
+    b.cfg.reprice_tolerance_ticks = 1
+    _lad_pulls = []
+    for k in range(9):                                   # 9 markets x 3 ladder levels = 27 ladder-only pulls
+        _os = [Resting(9000 + 3 * k + j, "21", True, 0.4 - 0.01 * j, 100, None) for j in range(3)]
+        _lad_pulls.append(Change(ex21, _os, False, [], b.change_key(ex21, pull=True), count=False, unsafe=True,
+                                 ladder={o.order_id for o in _os}))
+    a.calls.clear()
+    check("pull storm: 27 ladder-only pulls never become a tournament-wide cancel-all",
+          b.pull_storm(_lad_pulls) is False and not a.sent("cancel_all"), a.calls)
+    # min_quote_life: a stale, safe ladder order younger than it stays.
+    a, b = ladder_bot(churn_control=True, min_quote_life_seconds=1e9)
+    b.cycle(); b.cycle()
+    oid2 = next(oid for oid, o in a.orders.items() if o["exchangeId"] == "21" and b.order_meta[oid].get("level") == 2
+                and a.yes_view(o)[0])
+    a.orders[oid2]["quantity"] = 50
+    a.calls.clear()
+    b.cycle()
+    check("churn control: a young ladder order isn't re-priced (min_quote_life_seconds)",
+          oid2 in a.orders and not a.sent("cancel_order") and not a.sent("batch"), a.calls)
+    # The writes gate counts the ladder's own writes: 12 writes left, a 6-order ladder (1 batch) -> 11 >= 10 goes;
+    # with a 1-order batch size it costs 6 -> 6 < 10 left after it -> deferred.
+    a, b = ladder_bot(batch_size=1)
+    b.cycle()
+    a.writes_left = lambda: 12
+    b.cycle()
+    check("writes gate: ladder_min_writes stay free AFTER the ladder's own writes",
+          not {oid for oid in lad_ids(a, b) if a.orders[oid]["exchangeId"] == "21"}, lad(a, b, "21"))
+    a.writes_left = lambda: 10 ** 6
+
+    # Round 4 review (Finisher). R4a: a level is never placed bigger than a resting order there may keep (allowed
+    # counts level 0 at its unscaled size bid_max; with the position limit binding the old code placed level 3
+    # at 150 with 100 allowed: placed, pulled as too big next cycle, placed again - a write loop).
+    a, b = ladder_bot()
+    b.cycle(); b.cycle()
+    ex21 = b.ex["21"]
+    _q = ex21.quote
+    b.ladder_caps = lambda ex, fv, quote, factors=True: {True: lambda px: 5 * quote, False: lambda px: 5 * quote}
+    b.lad_cash_left = 10 ** 9
+    _w, _al, _ = b.ladder_targets(ex21, replace(_q, bid_size=_q.bid_size // 2, bid_max=_q.bid_size), ex21.lad_fv,
+                                  time.monotonic())
+    check("R4a: no ladder level is placed above what may rest there (level 0 shrunk below bid_max, limit binding)",
+          _w and all(_w[k][1] <= _al[k] for k in _w) and _w[(True, 3)][1] == 100, (_w, _al))
+    del b.ladder_caps
+    # R4b: the per-order cash cap is a sizing rule, not a keep limit: when it shrinks under a resting order (the
+    # account value or the quote size moved) that order is no urgent pull (it was: on every market at once).
+    a, b = ladder_bot()
+    b.cycle(); b.cycle()
+    ex21 = b.ex["21"]
+    b.cfg.max_order_cash_frac = 1e-6                     # cash cap now one quote's worth: 100 / 0.485 = 206 < 300
+    b.lad_cash_left = 10 ** 9
+    _w, _al, _ = b.ladder_targets(ex21, ex21.quote, ex21.lad_fv, time.monotonic())
+    b.lad_cash_left = 10 ** 9
+    ch = b.plan_exchange(ex21, ex21.quote, b.orders_by_eid(utcnow())["21"], ex21.lad_fv, utcnow(), time.monotonic())
+    check("R4b: cash cap shrinks under resting level 3 (300 sh, cap now 206) -> no urgent pull, it stays",
+          ("bid", 0.485, 300, 3) in lad(a, b, "21") and _w.get((True, 3), (0, 0))[1] == 206
+          and (ch is None or (ch.key[0] == LADDER_TIER and not any(b.order_level(o) == 3 for o in ch.doomed))),
+          (_w, ch and (ch.key, [(o.price, o.qty, b.order_level(o)) for o in ch.doomed])))
+    # R4c: min_quote_life never keeps a DUPLICATE of a kept level (two orders at one level = a duplicate quote).
+    a, b = ladder_bot(churn_control=True, min_quote_life_seconds=1e9)
+    b.cycle(); b.cycle()
+    ex21, _now_m = b.ex["21"], time.monotonic()
+    rest21 = b.orders_by_eid(utcnow())["21"]
+    _l1 = next(o for o in rest21 if o.is_bid and b.order_level(o) == 1)
+    _dup = Resting(99999, "21", True, _l1.price, _l1.qty, None)
+    b.order_meta[99999] = {"level": 1, "eid": "21"}
+    b.lad_placed[99999] = _now_m
+    ch = b.plan_exchange(ex21, ex21.quote, rest21 + [_dup], ex21.lad_fv, utcnow(), _now_m)
+    check("R4c: a young duplicate at a kept ladder level still goes",
+          ch is not None and len([o for o in ch.doomed if o.is_bid and b.order_level(o) == 1]) == 1
+          and not ch.new, ch and [(o.order_id, o.price, b.order_level(o)) for o in ch.doomed])
+    # R4d: a ladder-only cancel-all of one exchange (whole=True) is a ladder-only pull: 30 of them are no
+    # tournament-wide cancel-all (pulls_cancel_all_over 25).
+    _lad_pulls = []
+    for k in range(30):
+        _os = [Resting(9100 + 2 * k + j, "21", True, 0.4 - 0.01 * j, 100, None) for j in range(2)]
+        _lad_pulls.append(Change(ex21, _os, True, [], b.change_key(ex21, pull=True), count=False, unsafe=True,
+                                 ladder={o.order_id for o in _os}))
+    a.calls.clear()
+    check("R4d: 30 whole-exchange ladder-only pulls never become a tournament-wide cancel-all",
+          b.pull_storm(_lad_pulls) is False and not a.sent("cancel_all"), a.calls)
 
     # Turning the ladder off pulls it; level 0 stays.
     a, b = ladder_bot()
@@ -3186,7 +3300,7 @@ class _Grab(logging.Handler):
     def __init__(s): super().__init__(); s.msgs = []
     def emit(s, r): s.msgs.append(r.getMessage())
 grab = _Grab(); M.log.addHandler(grab); _lvl = M.log.level; M.log.setLevel(logging.WARNING); M.log.propagate = False
-r_api = _Api(_rp(M.CFG, writes_per_minute=45, write_budget_cut=0.75), False)
+r_api = _Api(_rp(M.CFG, writes_per_minute=45, writes_per_minute_max=50, write_budget_cut=0.75), False)
 r_api.gap = 0.0
 def inside_pause(*a, **k):
     # another thread's 429 started a pause just before this request's answer arrives
