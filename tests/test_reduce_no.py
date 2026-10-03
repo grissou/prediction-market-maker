@@ -50,7 +50,9 @@ print("--- settings")
 c = M.Config()
 _ov, _f = list(M.OVERRIDABLE), list(M.Config.__dataclass_fields__)
 check("default off", getattr(c, KEY, None) is False)
-check("last in Config and OVERRIDABLE", _f[-1] == KEY and _ov[-1] == KEY, (_f[-2:], _ov[-2:]))
+_p7 = ["no_set_aware_bids", "pair_no_unwind_max_cost"]      # Package 7's settings come after it
+check("last of Package 6 in Config and OVERRIDABLE (then Package 7's)",
+      _f[_f.index(KEY) + 1:] == _p7 and _ov[_ov.index(KEY) + 1:] == _p7, (_f[-3:], _ov[-3:]))
 check("bool override", M.OVERRIDABLE.get(KEY) == (False, True))
 good, bad = M.validate_overrides({KEY: True}, c)
 check("True accepted live", good == {KEY: True} and not bad, bad)
