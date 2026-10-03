@@ -800,3 +800,26 @@ Reading: where the bot may trade, the fix is worth ~+400 per 3 h at every mark (
 redeployed at once: capital unchanged, shares +30k); where it stays pinned reduce-only it is neutral-positive and frees 2 points of capital.
 Nothing here is "capital freed per hour" as such: the freed cash is spent the same cycle. PASS (the first design to be positive at the
 Polymarket mark too: covering shorts near the tournament's price is cheaper than the mark).
+
+# Round 8 (Package 8, branch claude/finisher-package8, 3 Oct 20:29-21:24 UTC): tilt exits and the adding-factor resume threshold
+World = the live state of 3 Oct 19:56: `_rival_anchor` 1, `_world_tilt` 0.11 + 0.0036/h, live-pinned (`_bg_wc` 39000 + 40000/h - 4000/h),
+`_start_cap` 1.0 (0 free cash); BASE = the live overrides (tilt on at max 0.11, headline on, reduce_no_as_sell, backstop 0.8, writes 28,
+`capital_ceiling_adding_size_factor` 0). 8 seeds x 3 h quiet, paired, d vs BASE. Base: pnl_lag -1,910, pnl_liq +129, tilt_exposure_end
++7.9k (the sim's 74 markets), cap_end 0.764, writes 4.2/min (the factor-0 bot barely quotes), deferred ~41/h (so `tilt_exit_priority`,
+an ordering of DEFERRED changes, cannot show anything here: live defers 132 of 150 changes per cycle).
+| Variant | d pnl_lag | d pnl_liq | d tilt_exposure_end | d cap_end | d writes_pm | d deferred_h | d mk15_mid | Verdict |
+|---|---|---|---|---|---|---|---|---|
+| `tilt_exit_priority` | +14 ± 21 | +1 ± 53 | +342 ± 530 | -0.003 ± 0.015 | +0.18 ± 0.15 | +57 ± 61 | +0.01 ± 0.07 | untestable here (no deferrals); pure ordering, no risk |
+| + `tilt_exit_full_size` | +64 ± 42 | +67 ± 69 | -638 ± 890 | -0.032 ± 0.015 | +0.37 ± 0.36 | +421 ± 180 | +0.02 ± 0.12 | positive, frees 3 points |
+| `ref_guard_tilted` | +110 ± 49 | +130 ± 100 | -615 ± 1,100 | -0.036 ± 0.025 | +0.65 ± 0.38 | +366 ± 170 | +0.13 ± 0.11 | positive (2.2 SE at the exchange mark) |
+| `ref_guard_exits` | **+139 ± 37** | **+177 ± 68** | -712 ± 1,000 | -0.038 ± 0.021 | +0.74 ± 0.44 | +406 ± 250 | +0.12 ± 0.09 | positive (3.8 SE) |
+| **all four together** | **+206 ± 55** | **+275 ± 91** | **-2,340 ± 920** | **-0.071 ± 0.021** | +1.48 ± 0.45 (4.2 -> 5.7) | +1,180 ± 260 | +0.02 ± 0.16 | **PASS: the Package 8 recommendation** (exposure -30% of the sim's 7.9k in 3 h; markout not worse) |
+| `adding_factor_capital_on` 0.90 (+ resume 0.5) | +263 ± 79 | +214 ± 100 | **+2,440 ± 580** | +0.030 ± 0.010 | +5.4 ± 0.6 | - | +0.18 ± 0.14 | adds earn spread but rebuild tilt exposure and worst case (+5.8k) |
+| `adding_factor_capital_on` 0.95 | +255 ± 60 | +242 ± 46 | +2,270 ± 670 | +0.028 ± 0.011 | +7.2 ± 0.3 | - | +0.26 ± 0.12 | same picture |
+| `adding_factor_capital_on` 0.98 | +343 ± 110 | +283 ± 110 | +2,210 ± 610 | +0.039 ± 0.015 | +7.6 ± 0.3 | - | +0.32 ± 0.15 | same picture |
+Reading (b): resuming adds at factor 0.5 earns ~+250 per 3 h at both marks in this world but rebuilds ~+2.3k of tilt exposure and +6k of
+worst case in 3 h, because the estimator capped at 0.11 under-corrects a tilt that is already above it. The threshold hardly matters (the
+base already frees to 76% here). Owner's call: the money says resume at 0.95; the risk the owner is managing (the one-sided tilt bleed at
+-356 per point) says keep 0 until the exits (stage 3) have cut the exposure and `ref_tilt_max` tracks the tilt (0.12+). Recommendation:
+keep 0 for the first 3 h of stage 3, then resume at 0.95 with hysteresis if tilt_exposure has fallen and tilt_s is below ref_tilt_max.
+Cash gate (item 1) and the pair sizing (item 2) are not simulated (live_sim does not model the exchange's cash or set collateral): unit tests.
