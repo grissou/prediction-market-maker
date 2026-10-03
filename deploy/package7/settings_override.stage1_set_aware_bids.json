@@ -1,0 +1,13 @@
+{
+  "arb_two_sided": false,
+  "worst_case_backstop_frac": 0.8,
+  "capital_ceiling_adding_size_factor": 0.5,
+  "writes_per_minute": 28,
+  "writes_per_minute_max": 28,
+  "burst_cycle_seconds": 60,
+  "ref_tilt_enabled": true,
+  "ref_tilt_max": 0.11,
+  "reduce_no_as_sell": true,
+  "no_set_aware_bids": true,
+  "pair_unwind_followup": true
+}
