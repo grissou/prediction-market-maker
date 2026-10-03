@@ -37,6 +37,13 @@ check("backstop pinned: reduce-only every cycle", r["ro_frac"] == 1.0 and r["wc_
 rq = L._one((1, 0.02, "quiet", {}))
 check("backstop off: ro_frac 0, wc_start 0", rq["ro_frac"] == 0.0 and rq["wc_start"] == 0)
 
+# 1b2. Growing background worst case: off = constant; on = climbs outside reduce-only, falls inside it
+rg = L._one((1, 0.02, "quiet", {"_bg_wc": 1000.0, "_bg_wc_growth": 36000.0}))
+check("growth: background climbs (1000 + 36000/h x 0.02 h = 1720)", abs(rg["bg_wc_end"] - 1720) < 60)
+rd = L._one((1, 0.02, "quiet", {"_bg_wc": 1e6, "_bg_wc_decay": 36000.0}))
+check("decay inside reduce-only: background falls by ~720", abs(rd["bg_wc_end"] - (1e6 - 720)) < 60)
+check("knobs off: constant", L._one((1, 0.02, "quiet", {"_bg_wc": 1000.0}))["bg_wc_end"] == 1000)
+
 # 1c. Package 5 mirrors charge a take's writes (3) and refuse without room
 st0 = L.LiveSim(1, 0.01, "quiet", S.make_cfg({}))
 st0.wlog, st0.writes = [], 0

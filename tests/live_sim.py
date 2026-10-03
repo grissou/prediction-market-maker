@@ -30,6 +30,10 @@ Run:  python tests/live_sim.py SEEDS HOURS REGIME '{overrides}' ['{variant}' ...
       as before.
       Liquidation-marked fields: pnl_mid, pnl_liq, mk15_mid, exit_ratio, hold_med (see LiveSim.metrics).
       Env LIVE_SIM_CACHE=file: per-(seed, hours, regime, config, LIVE_SIM_TAG) results cached, never run twice.
+      "_bg_wc_growth" G and "_bg_wc_decay" D (per hour, default 0): the background worst case CLIMBS by G while the bot
+      is not reduce-only (the other ~160 markets keep adding, as live: +280-570/min for the whole account between
+      episodes) and FALLS by D while it is (they reduce too); calibrated so the base bot is reduce-only ~80% of cycles
+      as live (SIM_NOTES Round 6b). Metric bg_wc_end.
       "_bg_wc" W (default 0 = as before): the rest of the account's sum-of-maxima worst case, so the live reduce-only
       backstop binds as live (mm_bot cycle step 6: worst > (worst_case_backstop_frac - hysteresis) x equity ->
       Bot.decide(global_reduce=True)); live 2 Oct evening: total 77.7-81.6k, backstop 0.8 x ~101k. Metrics wc_start,
@@ -76,8 +80,10 @@ def all_off():
 
 class LiveSim(Sim):
     def __init__(self, seed, hours, regime, cfg, n=40, start_cap=0.90, house="0945", outsiders=3,
-                 rival_anchor=0.0, world_tilt=0.0, world_tilt_growth=0.0, bg_wc=0.0, world_tilt_add=0.0):
+                 rival_anchor=0.0, world_tilt=0.0, world_tilt_growth=0.0, bg_wc=0.0, world_tilt_add=0.0,
+                 bg_wc_growth=0.0, bg_wc_decay=0.0):
         super().__init__(seed, hours, regime, cfg, share=SHARE)
+        self.bg_wc0, self.bg_g, self.bg_d, self.t_prev_bg = float(bg_wc), float(bg_wc_growth), float(bg_wc_decay), 0
         self.tilt_add = float(world_tilt_add)
         self.bg_wc, self.global_reduce, self.ro_cycles, self.n_cycles, self.wc_start = float(bg_wc), False, 0, 0, None
         self.anchor, self.tilt0, self.tilt_g = float(rival_anchor), float(world_tilt), float(world_tilt_growth)
@@ -323,6 +329,10 @@ class LiveSim(Sim):
         if cfg.hold_target_hours > 0 and t % 5 == 0:    # Package 5 C (isolated mirror, see hold_take)
             self.hold_take(t, inv)
         if self.bg_wc:                            # the live backstop (mm_bot cycle step 6, sum-of-maxima part only)
+            if self.bg_g or self.bg_d:            # the rest of the account adds between episodes, reduces inside them
+                dt_h = (t - self.t_prev_bg) / 3600.0
+                self.bg_wc = max(0.0, self.bg_wc + (-self.bg_d if self.global_reduce else self.bg_g) * dt_h)
+                self.t_prev_bg = t
             worst = self.bg_wc + bot.total_worst_case(inv, fvs)
             if self.wc_start is None:
                 self.wc_start = worst
@@ -623,7 +633,7 @@ class LiveSim(Sim):
                    dead=sum(1 for e in self.bot.ex.values() if e.turnover_dead),
                    tx_bind_frac=round(self.tx_bind / max(1, self.tx_quoted), 3),   # Package 5 T2.4
                    hold_take_sh=round(getattr(self, "hold_take_sh", 0.0)),
-                   ro_frac=round(self.ro_cycles / max(1, self.n_cycles), 3),
+                   ro_frac=round(self.ro_cycles / max(1, self.n_cycles), 3), bg_wc_end=round(self.bg_wc),
                    wc_start=round(self.wc_start) if self.wc_start is not None else 0,
                    tilt_s_end=round(getattr(getattr(self, "tilt", None), "s", 0.0), 4),
                    take_refused=getattr(self, "take_refused", 0))
@@ -745,7 +755,8 @@ def _one(args):
     kw = dict(n=int(ov.pop("_n", 40)), start_cap=float(ov.pop("_start_cap", 0.90)), house=str(ov.pop("_house", "0945")),
               outsiders=int(ov.pop("_outsiders", 3)), rival_anchor=float(ov.pop("_rival_anchor", 0.0)),
               world_tilt=float(ov.pop("_world_tilt", 0.0)), world_tilt_growth=float(ov.pop("_world_tilt_growth", 0.0)),
-              bg_wc=float(ov.pop("_bg_wc", 0.0)), world_tilt_add=float(ov.pop("_world_tilt_add", 0.0)))
+              bg_wc=float(ov.pop("_bg_wc", 0.0)), world_tilt_add=float(ov.pop("_world_tilt_add", 0.0)),
+              bg_wc_growth=float(ov.pop("_bg_wc_growth", 0.0)), bg_wc_decay=float(ov.pop("_bg_wc_decay", 0.0)))
     sim = LiveSim(seed, hours, regime, S.make_cfg(ov), **kw)
     return sim.run()
 
