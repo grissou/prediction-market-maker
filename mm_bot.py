@@ -711,6 +711,11 @@ class Config:
                                           #   points of tilt for the same 3-h P&L (SIM_NOTES Round 5), so the cap is set
                                           #   where it does not bind and the estimate stays readable; alarm above 0.12
     ref_tilt_winsor: float = 0.08         # each market's gap (Polymarket - book) clipped to +-this
+    ref_tilt_estimator: str = "slope"     # how s is read from the cross-section (x = r - c, g = winsorised gap):
+                                          #   "slope": sum x g / sum x^2 (x^2 weights: the |x| > 0.45 tails carry ~60%
+                                          #   of the weight); "median": median of per-market g / x over |x| > 0.1
+                                          #   (a block of tail markets pinned at the winsor cannot drag it); "wls":
+                                          #   their mean (= least squares weighted 1 / x^2). TILT_ESTIMATOR.md
     # --- Package 5: B kelly_edge_cap, A reduce_from_book ---
     # B: Kelly sizes on at most this much edge (0 = off; try 0.015 / 0.01): size on the spread, not on a persistent
     #   tournament-vs-Polymarket gap (otherwise the bet is biggest exactly where the tournament disagrees most).
@@ -957,6 +962,7 @@ OVERRIDABLE = {
     "ref_tilt_halflife_min": (0.5, 1440.0),
     "ref_tilt_max": (0.0, 0.3),
     "ref_tilt_winsor": (0.005, 0.3),
+    "ref_tilt_estimator": ("slope", "median", "wls"),     # ONE of these (ONE_OF_SETTINGS)
     # --- Package 5: B kelly_edge_cap, A reduce_from_book ---
     "kelly_edge_cap": (0.0, 0.10),
     "reduce_from_book": (False, True),
@@ -994,6 +1000,7 @@ OVERRIDABLE = {
 }
 MAX_ORDER_TTL = 7200.0    # no order of ours lives longer than this (dead-man's switch), whatever the TTL settings
 LADDER_MAX_LEVELS = 8
+ONE_OF_SETTINGS = {"ref_tilt_estimator"}   # string settings that take exactly one of their OVERRIDABLE names
 
 
 def validate_overrides(raw, cfg):
@@ -1009,6 +1016,10 @@ def validate_overrides(raw, cfg):
         cur = getattr(cfg, k)
         if isinstance(cur, str):                           # a comma list of allowed names (ladder_markets)
             names = [x.strip() for x in v.split(",")] if isinstance(v, str) else None
+            if k in ONE_OF_SETTINGS:                       # exactly one allowed name (ref_tilt_estimator)
+                if names is None or len(names) != 1 or names[0] not in OVERRIDABLE[k]:
+                    bad.append(f"{k}: must be one of {', '.join(OVERRIDABLE[k])}")
+                    continue
             if names is None or any(x not in OVERRIDABLE[k] for x in names if x):
                 bad.append(f"{k}: must be a comma list of {', '.join(OVERRIDABLE[k])}")
                 continue
@@ -1919,9 +1930,14 @@ def blend_fv(book_fv, r, cfg, s=0.0, legs=2, headline=False, hours_to_close=floa
     return (1 - cfg.ref_weight) * book_fv + cfg.ref_weight * r
 
 
+TILT_RATIO_MIN_X = 0.1   # T2.1 "median"/"wls" estimators: only markets with |r - c| above this give a ratio g / x
+
+
 class TiltEstimator:
     """Cross-sectional estimate of the tilt s: least squares of the gap (r - book_fv, winsorised at
-    +-ref_tilt_winsor) on (r - c), through the origin. Fewer than ref_tilt_min_markets samples: hold the last value.
+    +-ref_tilt_winsor) on (r - c), through the origin (ref_tilt_estimator "slope"); or the median ("median") or
+    mean ("wls") of the per-market ratios gap / (r - c) over |r - c| > TILT_RATIO_MIN_X (fewer such markets than
+    ref_tilt_min_markets: hold). Fewer than ref_tilt_min_markets samples: hold the last value.
     Smoothed by an EMA with half-life ref_tilt_halflife_min (time-based; the first estimate is taken as is) and
     clipped to [0, ref_tilt_max]."""
 
@@ -1931,22 +1947,46 @@ class TiltEstimator:
         self.n = 0            # samples in the last update
         self.ready = False    # a valid estimate has been taken (or restored)
         self.t = None         # time of the last valid estimate (seconds; None after a restore)
+        self.diag = {}        # the last update's raw readings by every estimator (see update)
 
     def update(self, samples, now):
-        """samples: [(r, book_fv, legs), ...]; now: seconds (any clock, as long as it is always the same one)."""
+        """samples: [(r, book_fv, legs), ...]; now: seconds (any clock, as long as it is always the same one).
+        Also leaves self.diag: this cycle's raw (unclipped, unsmoothed) reading by every estimator, the sample
+        counts and the share of the slope's x^2 weight in markets whose gap is at the winsor (status tilt_diag)."""
         cfg = self.cfg
         self.n = len(samples)
-        if self.n < max(1, cfg.ref_tilt_min_markets):
-            return self.s
         w = cfg.ref_tilt_winsor
-        num = den = 0.0
+        kind = getattr(cfg, "ref_tilt_estimator", "slope")
+        num = den = pinned = 0.0
+        ratios = []
         for r, bfv, legs in samples:
             x = r - (1.0 / legs if legs and legs > 1 else 0.5)
-            num += x * max(-w, min(w, r - bfv))
+            g = max(-w, min(w, r - bfv))
+            num += x * g
             den += x * x
-        if den <= 1e-12:
+            if abs(r - bfv) >= w - 1e-9:
+                pinned += x * x
+            if abs(x) > TILT_RATIO_MIN_X:
+                ratios.append(g / x)              # this market's own implied tilt
+        ratios.sort()
+        h = len(ratios) // 2
+        alt = {"slope": num / den if den > 1e-12 else None,
+               "median": (ratios[h] if len(ratios) % 2 else 0.5 * (ratios[h - 1] + ratios[h])) if ratios else None,
+               "wls": sum(ratios) / len(ratios) if ratios else None}
+        self.diag = {"n": self.n, "n_ratio": len(ratios),
+                     "pinned_weight": round(pinned / den, 3) if den > 1e-12 else None,
+                     **{k: (round(v, 4) if v is not None else None) for k, v in alt.items()}}
+        if self.n < max(1, cfg.ref_tilt_min_markets):
             return self.s
-        raw = max(0.0, min(cfg.ref_tilt_max, num / den))
+        if kind in ("median", "wls"):
+            if len(ratios) < max(1, cfg.ref_tilt_min_markets):
+                return self.s
+            est = alt[kind]
+        elif den <= 1e-12:
+            return self.s
+        else:                                     # "slope" (and any unknown value)
+            est = num / den
+        raw = max(0.0, min(cfg.ref_tilt_max, est))
         if not self.ready:
             self.s, self.ready = raw, True        # first valid estimate: taken as is
         else:                                     # after a restore (t None) the first update only sets the clock
@@ -7220,6 +7260,8 @@ class Bot:
                 "tilt_s_applied_headline": round(self.tilt_s_applied_headline, 4),
                 "tilt_exposure": round(self.tilt_exposure),
                 "tilt_state": self.tilt_state_dict(),
+                "tilt_diag": {**getattr(self.tilt, "diag", {}),
+                              "estimator": getattr(self.cfg, "ref_tilt_estimator", "slope")},
                 "seconds_since_cycle": round(time.monotonic() - self.last_cycle_done, 1)
                 if self.last_cycle_done is not None else None})
         except OSError as e:
