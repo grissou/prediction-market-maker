@@ -1,9 +1,9 @@
 <!-- STATUS (Finisher 2b, updated on every push) -->
-**STATUS 22:58 UTC 3 Oct (branch claude/finisher-package9):** phase = Package 9 Phase 1 (explore, to ~02:30). READY: Package 8 (7b298a4, PR #10, LIVE since 22:42 with stages 1-3), Package 7 (PR #9), Package 6 (PR #8), Package 5 (PR #7).
-Package 9 = the catch-up package: objective P(account >= 150k by 4 Nov) first, P(>= 200k) second, P(<= 85k) < ~10%, max drawdown < ~20% (owner 22:5x); plan in PLAN_P9.md; snapshot ops-snapshot-2026-10-03 (to 22:47) is the data.
-Numbers: none yet (4 opus explorers writing analysis/p9/ideas_*.md; screens from 02:30; build from 04:30).
-Deploy: nothing new; Package 8 stages 1-3 live.
-Next: ideas -> ranked table (analysis/p9/RANKED.md) -> top 3-5 built behind OFF flags with kill-switches -> "READY: Package 9" by 07:00.
+**STATUS 00:15 UTC 4 Oct (branch claude/finisher-package9):** phase = Package 9 Phase 1 done (78 ideas, analysis/p9/ideas_A-D.md + SYNTHESIS.md); Phase 3 build starting. READY: Package 8 (7b298a4, PR #10, LIVE), 7 (PR #9), 6 (PR #8), 5 (PR #7).
+Package 9 = the catch-up package. Finding: the leader's +600% = LONG the favourite-longshot tilt (longshot YES / favourite NO, x3.9 since 28 Sep); our +35.9k toward-Polymarket book is the OTHER side (-356/point; +15k of it from stale-quote takes measured from raw Polymarket). Only a cushion-sized long-tilt basket reaches 150k: P(>=150k) 42-46% bought at once (P(<=85k) 1-2.5%, DD>20% 4-7%), ~27% if deployed in the morning and built over 12 h; 0% for anything we run now.
+Numbers: analysis/p9/SYNTHESIS.md section 2 (B_mc.py / D_mc.py Monte Carlo on a logistic tilt with judgement priors; K ceiling dominates: 7% at K 0.15, 47% at 0.30).
+Deploy: nothing new yet. Config-only hygiene recommended now: take_tilted_ref true (+ take_edge 0.08), ref_tilt_max 0.20, pair_no_unwind_max_cost 0.
+Next: build F1 tilt_basket planner (+ stress risk model, kill-switches), F2 tilt_exit_take, F5 set carousel/arb cash rule; red team; "READY: Package 9" by 07:00 with the catch-up plan.
 
 # START HERE (Team run, branch `claude/run-c-tournament-improvements-pycdet`)
 
