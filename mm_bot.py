@@ -815,6 +815,13 @@ class Config:
     # pp_candidate's, one slice, the other leg taken on fill as usual, cost capped by pair_unwind_max_cost.
     exit_quotes_in_reduce_only: bool = False
     pair_passive_in_reduce_only: bool = False
+    # --- Package 6 candidate: tail adding-size factor ---
+    # In tail markets (raw Polymarket reference r below tail_low or above tail_high) the Polymarket-vs-tournament gap
+    # is mostly the systematic favourite-longshot tilt, so Kelly sizing on that "edge" buys most where it is least
+    # real. There the ADDING side's size is multiplied by this factor (the shared adding factor in Bot.decide); the
+    # reducing side is never shrunk. Uses the raw Polymarket price (decide's ref), not the tilted one; no ref ->
+    # unchanged. 1.0 = off (unchanged quotes); candidate 0.25.
+    tail_adding_factor: float = 1.0
 
 
 CFG = Config()
@@ -982,6 +989,8 @@ OVERRIDABLE = {
     # --- Package 6 candidate: exits keep quoting in reduce-only ---
     "exit_quotes_in_reduce_only": (False, True),
     "pair_passive_in_reduce_only": (False, True),
+    # --- Package 6 candidate: tail adding-size factor ---
+    "tail_adding_factor": (0.0, 1.0),
 }
 MAX_ORDER_TTL = 7200.0    # no order of ours lives longer than this (dead-man's switch), whatever the TTL settings
 LADDER_MAX_LEVELS = 8
@@ -4797,6 +4806,8 @@ class Bot:
             adding *= gap_size_factor(fv, book_fv, cfg)
         if cfg.backstop_soft_frac > 0:            # Package 6 candidate: backstop soft band (set in cycle step 6)
             adding *= self.backstop_adding_factor
+        if cfg.tail_adding_factor != 1.0 and ref is not None and (ref < cfg.tail_low or ref > cfg.tail_high):
+            adding *= cfg.tail_adding_factor      # Package 6 candidate: tail adding-size factor (raw Polymarket r)
         frag_limit = None
         if cfg.mark_frag_enabled:                 # mark-fragility cap: the adding side's limit, and the total cap
             if self.mark_frag_over:
