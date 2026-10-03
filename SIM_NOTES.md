@@ -789,3 +789,14 @@ Reading: in a world pinned like live, T2.1 alone is NEUTRAL (-163 ± 125 / -30 �
 nearer the tournament's prices re-marks what is still held at the trade-average mark. Package 5's +509/+601 came from the freer pinned
 world; live is between the two. None of the turnover flags is clearly positive here either (all within noise of T2.1 alone; min_edge 0.5c and
 the tail factor not completed when the deadlock brief arrived). The real exit blocker turned out to be live, not in the sim: see below.
+
+## The deadlock fix `reduce_no_as_sell` (owner's item 1), measured from the live start: `_start_cap` 1.0, 0 free cash, the pre-fix cash
+## model (`_short_reduce_locks_cash` 1: a bid buying back a short locks cash, as live until 3 Oct), T2.1 on at `ref_tilt_max` 0.09; 8 x 3 quiet
+| World | d pnl_lag | d pnl_liq | d pnl_mid | d pnl (Poly) | d shares | d exit_ratio | d cap_end | d wc_end | d writes_pm | d deferred_h | d mk15_mid |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| tilt world (base: pnl_lag -1,340, pnl_liq +632, writes 16.2, 25M share-cycles of reducing bids refused for cash) | **+420 ± 90** | **+384 ± 90** | +401 ± 96 | +333 ± 38 | +30.5k ± 5.5k | -0.18 ± 0.08 | -0.003 ± 0.010 | -2.0k ± 1.1k | +2.1 ± 1.3 | +720 ± 790 | +0.09 ± 0.04 |
+| live-pinned world (base reduce-only ~83%; pnl_lag -1,600, pnl_liq +402, writes 10.3) | +34 ± 78 | +66 ± 82 | - | +72 ± 56 | +6.6k ± 6.5k | -0.05 ± 0.28 | -0.021 ± 0.010 | -0.7k ± 0.8k | +0.3 ± 0.4 | -300 ± 210 | -0.01 ± 0.06 |
+Reading: where the bot may trade, the fix is worth ~+400 per 3 h at every mark (the shorts it could not cover get covered and the cash is
+redeployed at once: capital unchanged, shares +30k); where it stays pinned reduce-only it is neutral-positive and frees 2 points of capital.
+Nothing here is "capital freed per hour" as such: the freed cash is spent the same cycle. PASS (the first design to be positive at the
+Polymarket mark too: covering shorts near the tournament's price is cheaper than the mark).
