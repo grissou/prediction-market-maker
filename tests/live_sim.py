@@ -30,6 +30,10 @@ Run:  python tests/live_sim.py SEEDS HOURS REGIME '{overrides}' ['{variant}' ...
       as before.
       Liquidation-marked fields: pnl_mid, pnl_liq, mk15_mid, exit_ratio, hold_med (see LiveSim.metrics).
       Env LIVE_SIM_CACHE=file: per-(seed, hours, regime, config, LIVE_SIM_TAG) results cached, never run twice.
+      "_bg_wc_growth" G and "_bg_wc_decay" D (per hour, default 0): the background worst case CLIMBS by G while the bot
+      is not reduce-only (the other ~160 markets keep adding, as live: +280-570/min for the whole account between
+      episodes) and FALLS by D while it is (they reduce too); calibrated so the base bot is reduce-only ~80% of cycles
+      as live (SIM_NOTES Round 6b). Metric bg_wc_end.
       "_bg_wc" W (default 0 = as before): the rest of the account's sum-of-maxima worst case, so the live reduce-only
       backstop binds as live (mm_bot cycle step 6: worst > (worst_case_backstop_frac - hysteresis) x equity ->
       Bot.decide(global_reduce=True)); live 2 Oct evening: total 77.7-81.6k, backstop 0.8 x ~101k. Metrics wc_start,
@@ -76,8 +80,14 @@ def all_off():
 
 class LiveSim(Sim):
     def __init__(self, seed, hours, regime, cfg, n=40, start_cap=0.90, house="0945", outsiders=3,
-                 rival_anchor=0.0, world_tilt=0.0, world_tilt_growth=0.0, bg_wc=0.0, world_tilt_add=0.0):
+                 rival_anchor=0.0, world_tilt=0.0, world_tilt_growth=0.0, bg_wc=0.0, world_tilt_add=0.0,
+                 bg_wc_growth=0.0, bg_wc_decay=0.0, short_reduce_locks_cash=0.0):
         super().__init__(seed, hours, regime, cfg, share=SHARE)
+        # Package 6: live until 3 Oct a bid buying back a short was "buy YES" and locked cash for all of it (the
+        # deadlock). "_short_reduce_locks_cash" 1 models that world when cfg.reduce_no_as_sell is off; the default 0
+        # keeps every earlier round's world (a reducing bid needs no cash = the fixed behaviour).
+        self.short_locks = bool(short_reduce_locks_cash)
+        self.bg_wc0, self.bg_g, self.bg_d, self.t_prev_bg = float(bg_wc), float(bg_wc_growth), float(bg_wc_decay), 0
         self.tilt_add = float(world_tilt_add)
         self.bg_wc, self.global_reduce, self.ro_cycles, self.n_cycles, self.wc_start = float(bg_wc), False, 0, 0, None
         self.anchor, self.tilt0, self.tilt_g = float(rival_anchor), float(world_tilt), float(world_tilt_growth)
@@ -296,7 +306,7 @@ class LiveSim(Sim):
         # Cash: account value now (start + P&L at Polymarket) - positions - what our resting orders lock. An order
         # only locks cash for the part that ADDS to a position (selling YES we hold, or buying back a short, frees it).
         equity = ACCOUNT + sum(m.cash + m.inv * pnow[m.eid] for m in self.mkts)
-        locked = sum(order_lock(o, m.inv) for m in self.mkts for o in m.orders if o.owner == "us")
+        locked = sum(order_lock(o, m.inv, self.free_short()) for m in self.mkts for o in m.orders if o.owner == "us")
         self.free = equity - capital - locked
         self.free_min = min(getattr(self, "free_min", 1e18), self.free)
         bot.update_capital_ceiling(self.cap_frac, cfg)
@@ -305,7 +315,8 @@ class LiveSim(Sim):
         if cfg.tilt_exposure_max_frac > 0:        # Package 5 T2.4 feed (Bot.update_tilt's exposure, sim markets, legs 2)
             bot.tilt_exposure = sum(m.inv * (m.ref_seen - 0.5) for m in self.mkts if m.inv and m.ref_seen is not None)
         if cfg.ladder_enabled:                    # Bot.ladder_setup: what the ladder may lock this cycle
-            other = sum(order_lock(o, m.inv) for m in self.mkts for o in m.orders if o.owner == "us" and o.level == 0)
+            other = sum(order_lock(o, m.inv, self.free_short()) for m in self.mkts for o in m.orders
+                        if o.owner == "us" and o.level == 0)
             eq = equity
             bot.lad_liquid, bot.lad_party_delta = set(bot.cur_refs), self.party_delta
             bot.lad_cash_left = max(0.0, min(eq - capital - other - cfg.ladder_min_cash_frac * eq,
@@ -323,12 +334,17 @@ class LiveSim(Sim):
         if cfg.hold_target_hours > 0 and t % 5 == 0:    # Package 5 C (isolated mirror, see hold_take)
             self.hold_take(t, inv)
         if self.bg_wc:                            # the live backstop (mm_bot cycle step 6, sum-of-maxima part only)
+            if self.bg_g or self.bg_d:            # the rest of the account adds between episodes, reduces inside them
+                dt_h = (t - self.t_prev_bg) / 3600.0
+                self.bg_wc = max(0.0, self.bg_wc + (-self.bg_d if self.global_reduce else self.bg_g) * dt_h)
+                self.t_prev_bg = t
             worst = self.bg_wc + bot.total_worst_case(inv, fvs)
             if self.wc_start is None:
                 self.wc_start = worst
             hyst = min(cfg.reduce_only_hysteresis, cfg.max_worst_case_frac / 2) if self.global_reduce else 0.0
             self.global_reduce = worst > (cfg.worst_case_backstop_frac - hyst) * equity
             bot.global_reduce = self.global_reduce
+            bot.backstop_adding_factor = M.backstop_soft_factor(worst, equity, cfg)   # Package 6 candidate
             self.n_cycles += 1
             self.ro_cycles += self.global_reduce
         if t % 600 == 0:
@@ -501,6 +517,11 @@ class LiveSim(Sim):
                 self.bidsum["race_min"] += 1
                 self.bidsum["asksum_lo"] += sum(asks) < 0.98
 
+    def free_short(self):
+        """Does a bid that buys back a short need no cash? Yes with cfg.reduce_no_as_sell (covered "sell NO"), and
+        also in every earlier round's world unless "_short_reduce_locks_cash" 1 asks for the pre-fix live behaviour."""
+        return bool(self.cfg.reduce_no_as_sell) or not self.short_locks
+
     # ---------------------------------------------------------------- metrics
     def mid_px(self, m, c):
         """Other traders' mid; one side missing -> the consensus value."""
@@ -622,10 +643,11 @@ class LiveSim(Sim):
                    dead=sum(1 for e in self.bot.ex.values() if e.turnover_dead),
                    tx_bind_frac=round(self.tx_bind / max(1, self.tx_quoted), 3),   # Package 5 T2.4
                    hold_take_sh=round(getattr(self, "hold_take_sh", 0.0)),
-                   ro_frac=round(self.ro_cycles / max(1, self.n_cycles), 3),
+                   ro_frac=round(self.ro_cycles / max(1, self.n_cycles), 3), bg_wc_end=round(self.bg_wc),
                    wc_start=round(self.wc_start) if self.wc_start is not None else 0,
                    tilt_s_end=round(getattr(getattr(self, "tilt", None), "s", 0.0), 4),
-                   take_refused=getattr(self, "take_refused", 0))
+                   take_refused=getattr(self, "take_refused", 0),
+                   cash_refused_sh=round(getattr(self, "cash_refused_sh", 0.0)))   # Package 6 (see cash_clip)
         return out
 
 
@@ -711,10 +733,12 @@ class _Clock:
         return getattr(time, k)
 
 
-def order_lock(o, inv):
-    """Cash an order of ours locks: only its part that adds to the position."""
+def order_lock(o, inv, no_sell=True):
+    """Cash an order of ours locks: only its part that adds to the position. Package 6: a bid that buys back a short
+    is free only when it goes out as a covered "sell NO" (cfg.reduce_no_as_sell); otherwise (live until 3 Oct) it is
+    "buy YES @ p" and the exchange locks cash for ALL of it (no_sell False)."""
     if o.is_bid:
-        return o.price * max(0.0, o.qty - max(0.0, -inv))
+        return o.price * max(0.0, o.qty - (max(0.0, -inv) if no_sell else 0.0))
     return (1 - o.price) * max(0.0, o.qty - max(0.0, inv))
 
 
@@ -722,14 +746,20 @@ def cash_clip(sim, m, want):
     """The exchange takes an order only if the cash it locks is there: clip each adding side to the free cash
     (the order it replaces gives its lock back). Reducing shares need none."""
     out = []
+    ns = sim.free_short()                        # Package 6 (see order_lock / free_short)
+    cap = bool(sim.cfg.reduce_no_as_sell)        # Package 6: Bot.plan_change caps the covered bid at the NO held
     for w in want:
         is_bid, price, qty = w[0], w[1], w[2]
         lock_ps = price if is_bid else 1 - price
-        reduce = max(0.0, -m.inv) if is_bid else max(0.0, m.inv)
-        back = sum(order_lock(o, m.inv) for o in m.orders if o.owner == "us" and o.is_bid == is_bid and o.level == w[3])
+        short = max(0.0, -m.inv) if is_bid else 0.0
+        if cap and short >= 1 and qty > short:   #   (the part going long waits)
+            qty = int(short)
+        reduce = (short if ns else 0.0) if is_bid else max(0.0, m.inv)
+        back = sum(order_lock(o, m.inv, ns) for o in m.orders if o.owner == "us" and o.is_bid == is_bid and o.level == w[3])
         room = max(0.0, sim.free + back)
         allowed = reduce + room / max(lock_ps, 0.005)
         if qty > allowed:
+            sim.cash_refused_sh = getattr(sim, "cash_refused_sh", 0.0) + min(qty, short) - min(int(allowed), short)
             qty = int(allowed)
             sim.clipped = getattr(sim, "clipped", 0) + 1
         if qty >= 1:
@@ -744,7 +774,9 @@ def _one(args):
     kw = dict(n=int(ov.pop("_n", 40)), start_cap=float(ov.pop("_start_cap", 0.90)), house=str(ov.pop("_house", "0945")),
               outsiders=int(ov.pop("_outsiders", 3)), rival_anchor=float(ov.pop("_rival_anchor", 0.0)),
               world_tilt=float(ov.pop("_world_tilt", 0.0)), world_tilt_growth=float(ov.pop("_world_tilt_growth", 0.0)),
-              bg_wc=float(ov.pop("_bg_wc", 0.0)), world_tilt_add=float(ov.pop("_world_tilt_add", 0.0)))
+              bg_wc=float(ov.pop("_bg_wc", 0.0)), world_tilt_add=float(ov.pop("_world_tilt_add", 0.0)),
+              bg_wc_growth=float(ov.pop("_bg_wc_growth", 0.0)), bg_wc_decay=float(ov.pop("_bg_wc_decay", 0.0)),
+              short_reduce_locks_cash=float(ov.pop("_short_reduce_locks_cash", 0.0)))
     sim = LiveSim(seed, hours, regime, S.make_cfg(ov), **kw)
     return sim.run()
 
@@ -781,7 +813,7 @@ def run_many(seeds, hours, regime, ov, first=1):
 
 
 KEYS = ("pnl_liq", "pnl_mid", "pnl", "pnl_lag", "exit_ratio", "hold_med", "mk15_mid", "pick_cost", "wc_end", "writes_pm", "deferred_h", "lvl_sh", "lvl_pnl", "lad_gate", "lg_ok_w", "lg_sh", "dead", "free_min", "clipped", "cap_end", "cap_peak", "freed", "age_end", "unwind_sh", "arb_sh", "outsider_arb_sh",
-        "arb_pnl", "wc_peak", "shares")
+        "arb_pnl", "wc_peak", "shares", "cash_refused_sh")
 
 
 def stats(d):

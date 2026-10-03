@@ -116,6 +116,61 @@ check("EMA: dt 0 -> no change", abs(e_h.s - s1) < 1e-12)
 e_h.update(synth(100, 0.06, noise=0.0), 90 * 60.0)        # two more half-lives: 3/4 of the remaining gap
 check("EMA: two half-lives close 3/4 of the gap", abs(e_h.s - (s1 + 0.75 * (0.06 - s1))) < 1e-6, e_h.s)
 
+print("--- ref_tilt_estimator (slope / median / wls)")
+c = M.Config()
+check("default 'slope', live-overridable right after ref_tilt_winsor",
+      c.ref_tilt_estimator == "slope" and _ov[_ov.index("ref_tilt_winsor") + 1] == "ref_tilt_estimator")
+for v in ("slope", "median", "wls"):
+    good, bad = M.validate_overrides({"ref_tilt_estimator": v}, c)
+    check(f"override '{v}' accepted", good == {"ref_tilt_estimator": v} and not bad, (good, bad))
+for v in ("slope,median", "mean", "", 3, None, ["median"]):
+    good, bad = M.validate_overrides({"ref_tilt_estimator": v}, c)
+    check(f"override {v!r} refused (exactly one of slope, median, wls)", not good and len(bad) == 1, (good, bad))
+good, bad = M.validate_overrides({"ladder_markets": "headline,busy"}, c)
+check("ladder_markets still takes a comma list", good == {"ladder_markets": "headline,busy"} and not bad, (good, bad))
+
+
+def est_with(kind, samples, **kw):
+    cf = M.Config()
+    cf.ref_tilt_estimator = kind
+    for k, v in kw.items():
+        setattr(cf, k, v)
+    e = M.TiltEstimator(cf)
+    e.update(samples, 0.0)
+    return e
+
+
+lin = synth(200, 0.05)
+for kind in ("median", "wls"):
+    check(f"{kind}: recovers s = 0.05 on a linear cross-section", abs(est_with(kind, lin).s - 0.05) < 0.004,
+          est_with(kind, lin).s)
+# 3 Oct shape: the tournament tilt is 0.09, but a third of the far tails (|x| > 0.45) read a gap pinned at the winsor
+rng2 = random.Random(11)
+pin = []
+for i in range(225):
+    r = rng2.choice([rng2.uniform(0.005, 0.05), rng2.uniform(0.95, 0.995), rng2.uniform(0.05, 0.95)])
+    x = r - 0.5
+    gap = 0.08 * (1 if x > 0 else -1) if abs(x) > 0.45 and i % 3 == 0 else 0.09 * x + rng2.gauss(0, 0.003)
+    pin.append((r, r - gap, 2))
+s_sl, s_md, s_wl = (est_with(k, pin).s for k in ("slope", "median", "wls"))
+check("pinned tails: the slope over-reads 0.09 by > 1 point", s_sl > 0.10, s_sl)
+check("pinned tails: the median stays within 0.5 point of 0.09", abs(s_md - 0.09) < 0.005, s_md)
+check("pinned tails: wls in between (closer than the slope)", abs(s_wl - 0.09) < abs(s_sl - 0.09), (s_wl, s_sl))
+mid_only = [(r, r - 0.05 * (r - 0.5), 2) for r in [0.42 + 0.0025 * i for i in range(60)]]   # all |x| < 0.1
+e_sl, e_md = est_with("slope", mid_only), est_with("median", mid_only)
+check("median: markets with |x| <= 0.1 give no ratio -> fewer than min_markets -> holds (the slope estimates)",
+      not e_md.ready and e_md.s == 0.0 and e_sl.ready and e_md.diag["n_ratio"] == 0, (e_md.s, e_md.diag))
+check("odd/even median: middle value, mean of the two middle values",
+      close(est_with("median", [(0.9, 0.9 - 0.4 * k, 2) for k in (0.01, 0.02, 0.06)], ref_tilt_min_markets=1,
+                     ref_tilt_winsor=1.0).s, 0.02)
+      and close(est_with("median", [(0.9, 0.9 - 0.4 * k, 2) for k in (0.01, 0.02, 0.04, 0.06)],
+                         ref_tilt_min_markets=1, ref_tilt_winsor=1.0).s, 0.03))
+dg = est_with("slope", pin).diag
+check("diag: every estimator's raw reading, n, the pinned share of the slope's weight",
+      dg["n"] == 225 and close(dg["slope"], s_sl, 1e-4) and close(dg["median"], s_md, 1e-4)
+      and close(dg["wls"], s_wl, 1e-4) and 0.1 < dg["pinned_weight"] < 0.5, dg)
+check("an unknown value (set in code) falls back to the slope", close(est_with("x", pin).s, s_sl))
+
 print("--- persistence")
 d = est.to_dict()
 r1 = M.TiltEstimator(M.Config()).from_dict(json.loads(json.dumps(d)))
@@ -189,6 +244,9 @@ with open(b.cfg.status_file) as f:
     st = json.load(f)
 check("status.json: tilt_s (4 places) and tilt_exposure (whole shares)",
       st.get("tilt_s") == 0.0613 and st.get("tilt_exposure") == -40, {k: st.get(k) for k in ("tilt_s", "tilt_exposure")})
+check("status.json: tilt_diag with the estimator in use and every estimator's raw reading",
+      isinstance(st.get("tilt_diag"), dict) and st["tilt_diag"].get("estimator") == "slope"
+      and {"n", "n_ratio", "pinned_weight", "slope", "median", "wls"} <= set(st["tilt_diag"]), st.get("tilt_diag"))
 b2 = M.Bot(a, b.cfg)
 check("restart restores s from status.json", b2.tilt.s == 0.0613 and b2.tilt.ready and b2.tilt_s == 0.0613, b2.tilt.s)
 with open(b.cfg.status_file, "w") as f:
