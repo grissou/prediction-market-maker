@@ -1,9 +1,9 @@
 <!-- STATUS (Finisher 2b, updated on every push) -->
-**STATUS 08:30 UTC 3 Oct (branch claude/finisher-package6):** phase = Package 6 cycle, second pass (owner: prioritise faster entering and exiting). READY: **Package 5** (c14c92b, PR #7, frozen).
-Simulator: live-pinned world added (`_bg_wc_growth` 40000 / `_bg_wc_decay` 4000 with `_bg_wc` 39000: base reduce-only 73-88% of cycles, as live 81%).
-Screening in it on top of T2.1: exits in reduce-only (+ hold target 4 h / 2 h, + reduce_join_best), pair unwind in reduce-only, both together, min_edge 0.75c / 0.5c, tail adding factor 0.25 (built, 48 tests).
-Next: passers to 16 x 6, red-team, "READY: Package 6" + draft PR if clearly positive.
-ETA: screens ~09:50, confirmation ~11:00, READY ~11:45 UTC.
+**STATUS 10:40 UTC 3 Oct (branch claude/finisher-package6):** phase = Package 6 READY (deadlock fix). READY: **Package 6** ("READY: Package 6" commit, draft PR #8) and Package 5 (c14c92b, PR #7).
+Package 6 = Package 5 + `reduce_no_as_sell` (covered "sell NO" for bids that buy back a NO holding: the live 400 "Insufficient funds" deadlock) + the self-test funds-refusal hot-fix with back-off + `ref_tilt_estimator` / `tilt_diag` + the House no-quote diagnosis + 4 more flags OFF.
+Numbers (deadlock fix from the live start, capital 1.0, 0 cash, T2.1 at 0.09, 8 x 3): exchange-style +420 ± 90, liquidation +384 ± 90, Polymarket +333 ± 38, shares +30k; live-pinned world +34 ± 78 / +66 ± 82, capital -2 pts. Tilt estimator: 0.14 vs 0.09 not reproducible on 2 Oct data (bot path 0.067 vs plain 0.062); suspect: tail books at the 8c winsor; `tilt_diag` in status.json decides.
+Deploy: code (handover restart; all new flags off = Package 5 + hot-fix) -> deploy/package6/stage1 (`reduce_no_as_sell`); watch the self-test leg, covered bids on NO holdings, 400 refusals falling, fills on the biggest shorts.
+Next: none from the executor; the owner reads `tilt_diag` on live books to settle the estimator (median vs slope, `ref_tilt_max`).
 
 # START HERE (Team run, branch `claude/run-c-tournament-improvements-pycdet`)
 
@@ -12,32 +12,76 @@ The Builder's previous START_HERE is kept as `START_HERE_BUILDER.md`; Run A's no
 Plan: `PLAN.md`. Packages appear below as they become READY (commit messages start "READY: Package N").
 Deploy only commits whose message starts "READY"; the branch is cumulative.
 
-## Package 6 (NO CHANGE SHIPPED, Finisher 2b second cycle, 3 Oct 02:30-03:40 UTC; branch `claude/finisher-package6` from the Package 5 READY commit c14c92b)
-Aim (owner): the live bottlenecks: (a) backstop pinning (reduce-only ~81% of cycles), (b) capital lock-up (positions 99.9k of a 101.0k account,
-84 dead + 49 quiet held markets with 44k), (c) the exchange mark vs fair value. Evidence: `analysis/poly_bias/P6_RESEARCH.md`,
-`analysis/poly_bias/NO_REDUCE_QUOTE.md`, `PLAN_P6.md`, `SIM_NOTES.md` "Round 6".
-**What the 02b data says.** (a) The reduce-only churn is not a cost (-87 net over 7 episodes; 3% of reduced shares re-added within 30 min); 23k
-of the 27k shares added in reduce-only were arbitrage sets; cash binds before the backstop; a 0.85 backstop would re-pin within 15-30 min as the
-worst case climbs 280-570/min between episodes. (b) In 85 of the 133 dead/quiet held markets the bot rests NO reducing quote: 74 are complete-set
-legs whose exit side the race-netted reduce-only clip zeroes (11.8k), 9 are blocked by the reference guard (13.8k; the guard is right); and in
-reduce-only EVERY exit feature was switched off (reduce_join_best, hold_quote, fast unload). Every held market has other traders' quotes on the
-exit side deep enough for 97-100% of the position at a 0.6-0.7c spread. (c) The exchange's mark lags the mid by ~2 h (1.5k below it; our fills
-move it ~0.05c each): a reporting gap, no lever; trading to move a mark would be manipulation. (d) Pass-through after 16:26: 0.14 / 0.23 median
-(15 min / 1 h), fat tail, n = 11. Also: `snapshots.our_bid/our_ask` are the WANTED quote, not the resting orders; 30% of sells in fills.csv carry
-the YES price; the `trades` table is empty.
-**Built (OFF, unit-tested, on this branch only):** `exit_quotes_in_reduce_only` (hold_quote and reduce_join_best keep working in reduce-only; the
-reducing side only, size <= the race-netted position), `pair_passive_in_reduce_only` (a complete-set leg may rest its slice when only the
-reduce-only clip emptied the side; `ex.ro_clip` records why a side is empty), `backstop_soft_frac` (adding size shrinks to 0 across a band under
-the backstop). Tests: test_exit_in_ro 40, test_backstop_soft 35; every other suite green.
-**Screened (pinned worlds, on top of T2.1, 8 x 3 quiet, d pnl_lag / d pnl_liq vs base; T2.1 alone +98 ± 138 / +129 ± 193 and +304 ± 96 / +299 ± 91):**
-C 4 h + exits in reduce-only +201 ± 152 / +290 ± 169 and +253 ± 84 / +220 ± 124 (+100/+160 then -50/-80 vs T2.1: not clearly positive);
-pair passive in reduce-only -26 ± 149 / +50 ± 166 and +146 ± 106 / +61 ± 144 (below T2.1, +4 writes/min: no); backstop soft band +97 ± 107 /
-+153 ± 127 and +244 ± 100 / +215 ± 99 but **+7-8 writes/min and deferred changes +19-21k/h** (shrinking sizes re-price every cycle: FAIL).
-**Why the sim is weak here:** its rivals bid for our exits, so the bot leaves reduce-only easily (42-47% of base cycles pinned vs 81% live); the
-exit-in-reduce-only effect is under-weighted. Next step for a later cycle: a background worst case that GROWS between episodes as live does
-(+280-570/min), then re-screen `exit_quotes_in_reduce_only` + `hold_target_hours`; if it passes there, it is the capital lever (44k).
-**Decision:** nothing clearly positive -> no "READY: Package 6"; deploy Package 5 on its own evidence. Owner options without code: none that the
-data supports tonight (0.85 and hysteresis 0.01 were judged in Package 5).
+## Package 6 (READY, Finisher 2b, 3 Oct ~10:40 UTC; branch `claude/finisher-package6` from Package 5 c14c92b; draft PR #8): the live deadlock fix (`reduce_no_as_sell`), the self-test funds hot-fix, the tilt-estimator diagnosis, and five more flags OFF
+Evidence: `SIM_NOTES.md` "Round 6" and "Round 6b", `analysis/poly_bias/` (P6_RESEARCH.md, NO_REDUCE_QUOTE.md, TILT_ESTIMATOR.md), `PLAN_P6.md`.
+Staged override files: `deploy/package6/`. Live at the time of writing: Package 5 c14c92b + the owner's self-test hot-fix, stage 1 on (`ref_tilt_enabled`,
+`ref_tilt_max` 0.09), capital 100%, 0 free cash.
+
+**1. The deadlock (owner's item 1) and its fix.** Every order the bot built used `"side": "yes"`, so reducing a NO (short) holding was sent as
+"buy YES @ p", a cash purchase, and at 0 free cash the exchange refused it (459 refusals with 400 "Insufficient available funds" in 30 min,
+351 of them on NO holdings; the biggest shorts had no quote resting; the refusals also ate the write budget: 132 of 150 changes deferred per
+cycle). `reduce_no_as_sell` (OFF by default; the owner switches it on): a bid that buys back a NO holding goes out as a covered
+`{"side": "no", "action": "sell", "price": 1 - p, "quantity": min(qty, NO held)}` through one send point (`Bot.wire_order` / `place_orders`); the
+part beyond the NO held waits (capped, not split); the take paths (`execute_take`, `take_aged`, pair-passive second leg) are capped the same way;
+arbitrage / short-set legs become covered sales only if the whole leg fits. Orders stay in YES terms inside the bot: `parse_order` already read
+"sell NO @ q" as our bid at 1-q, so order notes, adoption at handover, duplicate detection, keep/replace and the recorder see a bid (tested, not
+changed); 1-p is exact on the 0.5c grid (no re-price churn); fills.csv keeps its columns (`our_side` bid, `fill_price` the NO price as before).
+**The API does not document whether "sell NO" on a held NO position needs cash**: it is inferred by symmetry from "selling shares we already
+hold locks no cash" and "the engine turns sell YES into buy NO when we don't hold the YES". So a start-up leg guards it: one 1-share
+"sell NO @ 0.995" on the biggest NO holding whose book has no ask at or below 0.005 (it cannot fill), cancelled at once; refused -> alert,
+feature off for this run, bot keeps running; busy -> retry. Covered sales start one cycle after the leg passes. The fake exchange models the
+cash rule (a "sell NO" beyond the NO held is refused like a purchase). Simulator: `_short_reduce_locks_cash` 1 reproduces today's live cash
+model (every earlier round's world is the fixed one, so Round 5's T2.1 numbers assume this fix). **Measured from the live start, capital 1.0,
+0 free cash, T2.1 on at 0.09, 8 x 3 quiet (d vs the deadlocked bot): exchange-style +420 ± 90, liquidation +384 ± 90, Polymarket mark
++333 ± 38, shares +30k ± 5.5k, worst case -2.0k ± 1.1k, writes +2.1 ± 1.3 (16.2 -> 18.3), capital unchanged (freed cash is redeployed at once);
+live-pinned world (reduce-only ~83%): +34 ± 78 / +66 ± 82, capital -2.1 ± 1.0 points, writes +0.3.** Red-teamed (opus): 0 high, 1 medium (the funds-refusal retry loop: fixed with back-off), 4 low (all fixed).
+**2. The owner's live hot-fix, re-implemented** (`Bot.selftest_funds_refusal`): a self-test batch refusal whose message contains "insufficient"
+and "fund" (string or dict error, top-level error) counts as busy, retry with back-off 60 s doubling to 30 min, one alert per doubling,
+`selftest_state` "waiting_funds" in status.json; busy only if EVERY refused order is a funds refusal (a real rejection still exits 3).
+tests/test_selftest_funds.py 49.
+**3. The tilt estimator reads 0.14 live vs ~0.09 rebuilt (owner's item 3).** On the newest data here (2 Oct 20:37) the bot's exact sample and
+formula read 0.067 vs 0.062 from the plain mid: +8%, not +50%; race normalisation adds +0.004 (the 3-leg Dem RI Governor the most), depth
+filtering +0.001; `r` is the raw Polymarket mid. The ONE mechanism found that turns 0.09 into 0.14 is tail markets whose book price sits at
+the ±8c winsor (each reads an implied tilt ~0.17, and markets with |x| > 0.45 carry 59% of the slope's weight; pinning half / all of them
+gives 0.097 / 0.128). The bot prices from full-depth books while the recorder keeps 3 levels, so a thin tail book that is None in a rebuild
+can be a far-out price in the bot. NOT proven: it needs 3 Oct books. The "fresh 0.14 after a restart" is the saved estimate restored from
+status.json (the EMA takes ~2 h to forget it), not a new reading. Added: `ref_tilt_estimator` "slope" (default, unchanged) / "median" (median
+per-market implied tilt over |x| > 0.1) / "wls"; status.json `tilt_diag` (raw slope / median / wls, n, `pinned_weight`). **Which is right for
+quoting:** the five biggest live positions (Dem House 0.925, Rep House 0.075, Rep RI Senate, Rep NH Governor, Rep GA Senate) each imply a tilt
+of 0.12-0.15, so s = 0.14 puts the bot's fair value roughly AT their mid, while 0.09 leaves it 1.3-2.4c on the Polymarket side (the exit
+quote still behind the book). Recommendation: keep `ref_tilt_max` 0.09 until `tilt_diag` is read on live books; if it shows slope - median
+> 0.02 with `pinned_weight` > 0.2, switch `ref_tilt_estimator` to "median" (live-overridable); if slope and median agree near 0.14, raise
+`ref_tilt_max` to 0.15.
+**4. Dem U.S. House with no quote on either side (owner's item 4): cause found, nothing changed.** The reference guard (`decide` ~4763-4766,
+`ref_guard_gap` 0.05) compares Polymarket with the race-normalised book (0.861 / 0.139 vs 0.925 / 0.075: 6.4c on both legs) and sets `no_ask`
+on Dem House and `no_bid` on Rep House, exactly the reducing sides; reduce-only blocks the adding sides, so nothing rests. Reproduced and
+pinned (tests/test_house_quote.py 19). The guard blocking exits is documented design ("don't sell it to anyone here, they probably know").
+Not the race-net clip (long Dem + short Rep is one bet: eff ±19,272), not the write budget (headline first), not the headline limits. Also:
+with the guard off, the Dem ask would be 10,000 shares against a 9,876 position, so 124 would be a "buy NO" needing cash (refused at 0 cash).
+Owner options: `ref_guard_gap` 0.07 (overridable) lets both House exits rest; or a flag exempting the side that shrinks THIS market's own position
+from the guard in reduce-only (~3 lines, not built: it is a judgement about informed flow, not a bug).
+**5. Also on the branch, all OFF, none clearly positive in the simulator (SIM_NOTES Round 6 / 6b):** `exit_quotes_in_reduce_only`,
+`pair_passive_in_reduce_only`, `backstop_soft_frac` (fails on writes), `tail_adding_factor`. Live-pinned world (base reduce-only 83% of cycles):
+T2.1 alone is neutral there (-163 ± 125 / -30 ± 111), so Package 5's gain depends on how pinned the live bot stays; the deadlock fix is what
+lets it stop being pinned.
+
+**Deploy (owner):** code by handover restart (all new flags off = Package 5 + the hot-fix), then `deploy/package6/settings_override.stage1_reduce_no_as_sell.json`.
+**Watch, first 10 minutes:** the journal's self-test leg line ("sell NO" placed and cancelled, or the refusal alert: if refused, the feature is off
+for the run and nothing else changes); `selftest_state` "passed"; then covered bids appearing on the NO holdings (orders listed as side no /
+action sell at 1-p; the recorder's `our_bid` = p); 400 "Insufficient available funds" refusals falling toward zero; deferred changes per cycle
+falling from ~130; writes <= 28; no own bid >= own ask. **First hour:** fills on NO holdings (the biggest shorts shrinking: Rep House -9,396,
+NH Governor, GA Senate, HI Governor, NH Senate, NM Governor, RI Senate); free cash above 0; capital share below 100%; account on the exchange's
+number not below start - 300. **After 3 h:** exit ratio >= 1.0 bot-wide, capital share down >= 3 points, reduce-only share down, account not
+below start - 500. **Rollback triggers:** a covered sale that increased a NO holding (position more negative after a fill of ours on that side:
+it must never happen), any 400 refusal of a covered sale with cash free, fills.csv `our_side` wrong for these fills, own bid >= own ask, 429s,
+account below start - 1,000 in 3 h. Rollback = the stage0 file (note: that re-sends "buy YES" for the small covered bids, refused at 0 cash).
+**Untested:** the real exchange's treatment of "sell NO" on a held NO position (the leg is the guard); the simulator's take and arbitrage mirrors
+do not model cash; the ladder (off) with covered bids; a stale `ex.inv` within a cycle can over-size one covered sale (refused, re-placed).
+**Suites (28 files, all green):** test_mm_bot 600, test_live_sim_marks 115, test_strategy 114, test_turnover 94, test_write_savers 75, test_hold_target
+71, test_reduce_no 69, test_fast_unload 61, test_pair_passive 57, test_tilt_rampin 54, test_mark_frag 52, test_selftest_funds 49, test_reduce_book 49,
+test_tail_factor 48, test_tilt 69, test_exit_in_ro 40, test_ops_liq 39, test_recorder_refill 37, test_ref_prices 37, test_behind_best 36,
+test_backstop_soft 35, test_tilt_limit 33, test_take_tilted 31, test_carry_ramp 29, test_reduce_book_scope 26, test_gap_shrink 25, test_house_quote 19,
+test_stress 20 + STRESS_LADDER=1 20/20; py_compile under Python 3.10.
 
 ## Package 5 (READY, Finisher 2b executor, 3 Oct ~03:00 UTC; branch `claude/finisher-package5`, draft PR #7): the Polymarket-bias fix. Package 4 (c29f762) + a tilt-corrected reference (T2.1) and nine more settings, ALL OFF by default + an honest simulator yardstick + ops fields. Code deploy by handover restart, then flags by settings_override.json (deploy/package5/).
 Plan: `PLAN_POLY_BIAS.md` (v2). Evidence: `SIM_NOTES.md` "Round 5" (every run, with error bars) and `analysis/poly_bias/` (RESULTS.md,
