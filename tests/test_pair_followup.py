@@ -89,7 +89,9 @@ check("defaults: off, max_cost 0.01, 6 tries", (c.pair_unwind_followup, c.pair_u
                                                 c.pair_unwind_followup_tries) == (False, 0.01, 6))
 _NC = "pair_no_unwind_max_per_cycle"            # red-team fix 3, after these
 check("last in Config and OVERRIDABLE (then pair_no_unwind_max_per_cycle)",
-      _f[-4:] == [F, MC, TR, _NC] and _ov[-4:] == [F, MC, TR, _NC], (_f[-4:], _ov[-4:]))
+      _f[_f.index(F):_f.index(F) + 4] == [F, MC, TR, _NC] and _ov[_ov.index(F):_ov.index(F) + 4] == [F, MC, TR, _NC]
+      and _f[_f.index(_NC) + 1:] == _ov[_ov.index(_NC) + 1:]   # (then Package 8's, the same in both)
+      == ["cash_gate_enabled", "cash_gate_reserve", "adding_factor_per_market"], (_f[-4:], _ov[-4:]))
 good, bad = M.validate_overrides({F: True, MC: 0.02, TR: 3}, c)
 check("live overrides accepted", good == {F: True, MC: 0.02, TR: 3} and not bad, (good, bad))
 
