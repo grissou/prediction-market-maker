@@ -767,3 +767,25 @@ Verdicts: C + exits in reduce-only: +100 / +160 over T2.1 in the first world, -5
 +7 to +8 writes/min and deferred changes +19-21k/h (shrinking adding sizes re-price every cycle): FAIL. Nothing passes: Package 6 ships nothing;
 the three settings stay on the branch, OFF and tested, for a later cycle with a simulator that reproduces the live pinning (next step: a
 `_bg_wc` that GROWS like live, +280-570 per minute between episodes, instead of a constant).
+
+# Round 6b (3 Oct 08:20-10:10 UTC, branch claude/finisher-package6): the live-pinned world, turnover screens, and the deadlock fix
+## Live-pinned world: `_bg_wc` 39000 + `_bg_wc_growth` 40000/h (outside reduce-only) + `_bg_wc_decay` 4000/h (inside): the rest of the account keeps
+## adding between episodes as live; base reduce-only 73-88% of cycles (live 81%), writes 12-16/min (live 16). Harsher than live in one way: the
+## background keeps adding tilt even when T2.1 is on for the whole bot. 8 x 3 quiet, d vs BASE (base pnl_lag -1,366, pnl_liq +586, cap_end 0.758, ro 0.83).
+| Variant | d pnl_lag (exchange-style) | d pnl_liq | d pnl_mid | d pnl (Polymarket) | d exit_ratio | d cap_end | d wc_end | d writes_pm | d deferred_h | d mk15_mid c | d pick_cost | d ro_frac |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| BASE (8 seeds) | pnl_lag -1,366 | pnl_liq 586 | pnl_mid 556 | pnl 274 | exit_ratio 1.687 | cap_end 0.758 | wc_end 30,962 | writes_pm 11.89 | deferred_h 7,829 | mk15_mid 0.956 | pick_cost -14 | ro_frac 0.832 |
+| T2.1 alone (n=8) | -163 ± 125 | -30 ± 111 | -126 ± 119 | -168 ± 59 | +0.366 ± 0.123 | -0.056 ± 0.013 | -2,335 ± 888 | -0.60 ± 0.27 | -3,364 ± 605 | -0.100 ± 0.116 | +24 ± 8 | -0.019 ± 0.007 |
+| T2.1 + C 4 h + exit_quotes_in_reduce_only (n=8) | -204 ± 125 | -105 ± 104 | -183 ± 111 | -258 ± 91 | +0.272 ± 0.193 | -0.057 ± 0.024 | -3,254 ± 1,450 | +0.42 ± 0.43 | -4,024 ± 619 | -0.130 ± 0.108 | +23 ± 10 | -0.029 ± 0.010 |
+| T2.1 + C 2 h + exit_quotes_in_reduce_only (n=2) | +100 ± 338 | +58 ± 296 | +108 ± 267 | -248 ± 98 | -0.394 ± 0.277 | -0.034 ± 0.009 | -6,990 ± 1,074 | +1.30 ± 1.12 | -3,652 ± 526 | -0.060 ± 0.010 | +32 ± 11 | -0.050 ± 0.019 |
+| T2.1 + C 4 h alone (n=8) | -126 ± 121 | +7 ± 98 | -84 ± 112 | -226 ± 51 | +0.206 ± 0.123 | -0.068 ± 0.014 | -3,583 ± 913 | +0.38 ± 0.40 | -3,981 ± 658 | -0.078 ± 0.097 | +29 ± 10 | -0.031 ± 0.009 |
+| T2.1 + C 4 h + exits in RO + reduce_join_best | (not run) |
+| T2.1 + pair_unwind_passive + pair_passive_in_reduce_only (n=8) | -116 ± 136 | -6 ± 127 | -89 ± 127 | -138 ± 79 | +0.428 ± 0.149 | -0.052 ± 0.013 | -1,384 ± 895 | +1.48 ± 0.44 | -3,578 ± 591 | +0.014 ± 0.108 | +8 ± 9 | -0.017 ± 0.009 |
+| T2.1 + C 4 h + exits in RO + pair passive in RO (n=8) | -157 ± 147 | -87 ± 124 | -162 ± 134 | -247 ± 49 | +0.399 ± 0.203 | -0.075 ± 0.014 | -3,067 ± 1,390 | +2.27 ± 0.41 | -4,099 ± 659 | -0.014 ± 0.088 | +19 ± 11 | -0.026 ± 0.011 |
+| T2.1 + min_edge 0.0075 (n=8) | -90 ± 153 | -24 ± 104 | -72 ± 119 | -188 ± 61 | +0.173 ± 0.160 | -0.041 ± 0.015 | -3,918 ± 1,210 | -0.43 ± 0.37 | -3,315 ± 620 | -0.057 ± 0.100 | +27 ± 12 | -0.030 ± 0.011 |
+| T2.1 + min_edge 0.005 (n=8) | -41 ± 155 | -47 ± 128 | -67 ± 133 | -157 ± 76 | -0.116 ± 0.175 | -0.026 ± 0.021 | -3,096 ± 1,312 | +0.36 ± 0.33 | -2,283 ± 600 | -0.244 ± 0.097 | +16 ± 10 | -0.032 ± 0.011 |
+| T2.1 + tail_adding_factor 0.25 | (not run) |
+Reading: in a world pinned like live, T2.1 alone is NEUTRAL (-163 ± 125 / -30 ± 111): there is nothing to stop adding, and selling inventory
+nearer the tournament's prices re-marks what is still held at the trade-average mark. Package 5's +509/+601 came from the freer pinned
+world; live is between the two. None of the turnover flags is clearly positive here either (all within noise of T2.1 alone; min_edge 0.5c and
+the tail factor not completed when the deadlock brief arrived). The real exit blocker turned out to be live, not in the sim: see below.
