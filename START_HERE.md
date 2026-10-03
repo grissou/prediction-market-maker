@@ -32,7 +32,7 @@ the backstop). Tests: test_exit_in_ro 40, test_backstop_soft 35; every other sui
 **Screened (pinned worlds, on top of T2.1, 8 x 3 quiet, d pnl_lag / d pnl_liq vs base; T2.1 alone +98 ± 138 / +129 ± 193 and +304 ± 96 / +299 ± 91):**
 C 4 h + exits in reduce-only +201 ± 152 / +290 ± 169 and +253 ± 84 / +220 ± 124 (+100/+160 then -50/-80 vs T2.1: not clearly positive);
 pair passive in reduce-only -26 ± 149 / +50 ± 166 and +146 ± 106 / +61 ± 144 (below T2.1, +4 writes/min: no); backstop soft band +97 ± 107 /
-+153 ± 127 and +217 ± 128 / +197 ± 123 but **+7-8 writes/min and deferred changes +19-21k/h** (shrinking sizes re-price every cycle: FAIL).
++153 ± 127 and +244 ± 100 / +215 ± 99 but **+7-8 writes/min and deferred changes +19-21k/h** (shrinking sizes re-price every cycle: FAIL).
 **Why the sim is weak here:** its rivals bid for our exits, so the bot leaves reduce-only easily (42-47% of base cycles pinned vs 81% live); the
 exit-in-reduce-only effect is under-weighted. Next step for a later cycle: a background worst case that GROWS between episodes as live does
 (+280-570/min), then re-screen `exit_quotes_in_reduce_only` + `hold_target_hours`; if it passes there, it is the capital lever (44k).
