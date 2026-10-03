@@ -1,9 +1,9 @@
 <!-- STATUS (Finisher 2b, updated on every push) -->
-**STATUS 15:30 UTC 3 Oct (branch claude/finisher-package7):** phase = Package 7 READY. READY: Package 7 ("READY: Package 7", PR #9), Package 6 (f4214f1, PR #8, LIVE with `reduce_no_as_sell`), Package 5 (c14c92b, PR #7).
-Package 7 = NO+NO sets: `no_set_aware_bids` (covered bids capped at the leg's lone part: stops the remaining 400 refusals), `pair_no_unwind_max_cost` (sets unwound as a pair in one covered-sale batch at asks <= 1.003, after a start-up pair check), `pair_unwind_followup` (unequal fills followed up: no one-sided inventory), T2.5 short-set branch skipped; all OFF.
-Numbers: unit-test evidence only (the simulator does not model set collateral); flags off pinned byte-identical to Package 6; red team 0 high / 1 medium / 5 low, all fixed; 30 suites green.
-Deploy: code -> deploy/package7 stage1 (A + F) -> stage2 (+ B); watch list in the Package 7 section.
-Next: owner reads `pairno_state` and the first "PAIR UNWIND (short set)" lines; the executor stays subscribed to PRs #7/#8/#9.
+**STATUS 21:45 UTC 3 Oct (branch claude/finisher-package8):** phase = Package 8 READY. READY: Package 8 ("READY: Package 8", PR PR_NUM), Package 7 (2ef6d12, PR #9, LIVE since 19:15), Package 6 (f4214f1, PR #8), Package 5 (c14c92b, PR #7).
+Package 8 = item 1 `cash_gate_enabled` + `adding_factor_per_market` (every 400 refusal traced to the race-netted "adding" side; no order needing cash the exchange does not have is sent), item 2 pair sizing in sets / cheapest race first / owed-record age (verdict: keep 0.02, per-cycle 1), item 3 tilt exits (`tilt_exit_priority`, `tilt_exit_full_size`, `ref_guard_tilted`, `ref_guard_exits`): +206 ± 55 exchange-style / +275 ± 91 liquidation, tilt exposure -2,340 ± 920 (-30%) in 3 h, live-pinned world; adding factor: keep 0 for 3 h of stage 3, then 0.95 resume if exposure fell.
+Numbers: SIM_NOTES "Round 8" (8 x 3 h paired); items 1-2 unit-test evidence (live_sim has no cash / set collateral); flags off pinned identical to 2ef6d12 on the live config; red team 1 high / 4 medium, all fixed; 33 suites green + STRESS_LADDER 20/20.
+Deploy: code -> deploy/package8 stage1_cash_gate -> stage2_pair_sizing -> stage3_tilt_exits -> (b) by hand after 3 h; watch list in the Package 8 section.
+Next: owner deploys stage 1 and reads `cash_gated` / refusals; the executor stays subscribed to PRs #7/#8/#9/PR_NUM.
 
 # START HERE (Team run, branch `claude/run-c-tournament-improvements-pycdet`)
 
@@ -11,6 +11,96 @@ Status: **complete** (Team complete at 14:45 UTC) (started 2026-10-02 08:50 UTC;
 The Builder's previous START_HERE is kept as `START_HERE_BUILDER.md`; Run A's notes are `ENGINEERING_NOTES.md`.
 Plan: `PLAN.md`. Packages appear below as they become READY (commit messages start "READY: Package N").
 Deploy only commits whose message starts "READY"; the branch is cumulative.
+
+## Package 8 (READY, Finisher 2b, 3 Oct ~21:45 UTC; branch `claude/finisher-package8` from Package 7 2ef6d12; draft PR PR_NUM): the cash gate (ends the 400 refusals), pair-unwind sizing in sets, and the tilt exits (all OFF; staged files in `deploy/package8/`)
+Live at the time of writing: Package 7 since 19:15 UTC with tilt on at `ref_tilt_max` 0.11 (`tilt_s` 0.110, +0.0036/h), headline on,
+`reduce_no_as_sell`, `no_set_aware_bids`, `pair_unwind_followup`, `pair_no_unwind_max_cost` 0.02, `capital_ceiling_adding_size_factor` 0;
+capital 100%, free cash ~0, tilt_exposure +34.3k (~356 marked per point), reduce-only most cycles, ~132 of 150 changes deferred per cycle.
+**The brief (owner, 19:56):** (1) 299 refusals with 400 "Insufficient available funds" an hour, each a write: 85 on NO+NO races despite the
+set-aware bids, 44 on FLAT markets with the adding factor at 0, 5 on YES holdings; (2) is the 0.02 pair-unwind cap right (`unwind_is_safe`,
+per-cycle limit 2, 30 s cooldown, follow-up; ~24 races qualify; PA-10 unwound 82 of 897 offered); (3) in the live-pinned world with 0 cash:
+(a) the fastest non-crossing way to cut unpaired tilt exposure, (b) when to switch the adding factor back from 0 to 0.5, (c) whether the
+reference guard should stop blocking reducing quotes when the tilt explains the gap.
+
+**Item 1, root cause and fix (`cash_gate_enabled`, `adding_factor_per_market`; tests/test_cash_gate.py 83).** Every refused order came from
+the same place: the "adding" side for the size factors (capital ceiling, turnover-dead, X5, backstop band, tail, mark-fragility, the ladder's
+factor block) is picked by the RACE-NETTED position eff_i = x_i - mean(others), not by the market's own. A NO+NO leg -817 / -975 reads "net
+long", so its bid is "reducing" and goes out at full size although buying YES there costs cash (the set-aware cap only limits COVERED bids);
+a flat market whose other leg is long reads "net short", so its YES bid is "reducing" (that is the 44 flat markets, factor 0 notwithstanding);
+a small YES holding the same. All three categories are reproduced on the fake exchange at 0 cash (flags off: sent and refused; flags on: none).
+- `cash_gate_enabled` (+ `cash_gate_reserve` 25): no order needing more cash than the exchange's `cashBalance` (less the reserve) is SENT.
+  One gate at the single send point (`place_orders`, computed on the main thread in `submit_write`: bid = price x qty, ask = (1 - price) x qty
+  beyond the YES held, covered NO sale = 0), the same cap at plan time (`plan_exchange`, so quotes are not placed-then-refused), pre-checks in
+  `execute_take` / `take_aged` / `pair_passive_take` / `execute_arbitrage` (every leg alike) / `pair_followup_take` BEFORE our quotes are
+  pulled; orders capped to the part the cash allows, dropped below 1 share; the need of anything not placed (batch error, write-budget wait,
+  refusal, cancelled future) is given back; the self-tests' 1-share orders are exempt. A failed P&L read / no cash figure alerts once; after
+  5 min without a good read the gate stops gating (logged once) until one is read. status.json `cash_gated`, `cash_trimmed`, `cash_capped_quotes`,
+  `cash_gate_left`, `cash_gate_read_age`.
+- `adding_factor_per_market`: the adding side for the size factors is the side that grows THIS market's |position| (and the part of a reducing
+  order beyond it), so your factor 0 means no new per-market positions, hedges included. Skew, the reduce-only clip and the risk limits still
+  use the race-netted position. (Also needed by `tilt_exit_full_size`, below.)
+Flags off: identical to 2ef6d12 on a grid (`cover_no_qty`, `plan_exchange`, two full cycles).
+
+**Item 2, verdict on the 0.02 cap (tests/test_pair_sizing.py 29): stay at 0.02; set `pair_no_unwind_max_per_cycle` 1 while the 24 races drain.**
+A set bought back at asks sum 1.02 costs 2c per set vs holding it to the close; 0.03 pays ~3.7c per MARGINAL set for cash that the factor-0 bot
+cannot redeploy (adding is off), so the cap buys nothing until adding resumes; revisit 0.03 only with (b). PA-10's 82 of 897: the pair is sized
+to the SMALLER leg's NO holding and to the joint depth (the caps allowed 1,262 by cash and 4,810 by `pair_unwind_max_frac`), so 82 is either
+the smaller leg's holding or the partial fill the follow-up then owed (both legs sell NO x the same quantity in one batch; `pair_owed` shows
+which). Three things found and fixed, each behind its own OFF flag (the live config already satisfies Package 7's gate, so nothing here changes
+until switched on; identity test vs 2ef6d12 on the live config): `pair_no_unwind_max_sets` (0 = the old cash cap; 1000 staged: the cap was
+cash-per-order measured on the YES ask while the legs are covered NO sales that RECEIVE 1 - ask and lock nothing); `pair_unwind_race_order`
+(NO+NO races visited cheapest asks sum first, then most capital; and `unwind_is_safe` no longer refuses a NO+NO buy-back because the legs'
+risk fair values add up to > 1, a worst-case MARK artefact of d x (s - 1): party delta and settlement risk still checked); `pair_unwind_followup_max_age`
+(0 = off; 600 staged: an owed record the write budget defers every cycle is alerted and cleared instead of blocking its race for ever). A leg
+REFUSED inside the batch is owed like a zero fill and followed up as a covered sale of its lone part.
+
+**Item 3, the tilt exits (tests/test_tilt_exit.py 62; measured in SIM_NOTES "Round 8": the live state as the world, `_rival_anchor` 1, tilt 0.11
++ 0.0036/h, `_bg_wc` 39000 + 40000/h - 4000/h, 0 free cash, BASE = the live overrides, 8 seeds x 3 h quiet, paired, d vs BASE, judge `pnl_lag`
+then `pnl_liq`).** A "tilt exit" = the side shrinking a position whose pos x (r - c) has the sign of tilt_exposure (live: sign(pos) = sign(r - c)).
+Nothing crosses: priority is ordering only, full size changes size only (race-net clip, position / cash / covered-NO caps still apply), the guard
+flags only unblock a side, capped at the position.
+| Flag | d pnl_lag | d pnl_liq | d tilt_exposure_end | d cap_end | d writes_pm | Verdict |
+|---|---|---|---|---|---|---|
+| (a) `tilt_exit_priority` (tilt exits sort after headline, before other deferred changes) | +14 ± 21 | +1 ± 53 | +342 ± 530 | -0.003 | +0.18 | untestable in the sim (it defers 41/h, live 132 per CYCLE); no risk |
+| (a) + `tilt_exit_full_size` (the exit sized at the whole position) | +64 ± 42 | +67 ± 69 | -638 ± 890 | -0.032 ± 0.015 | +0.37 | positive, frees 3 points |
+| (c) `ref_guard_tilted` (guard gap from r', not raw Polymarket) | +110 ± 49 | +130 ± 100 | -615 ± 1,100 | -0.036 ± 0.025 | +0.65 | positive (2.2 SE at the exchange mark) |
+| (c) `ref_guard_exits` (the guard never blocks this market's own exit) | **+139 ± 37** | **+177 ± 68** | -712 ± 1,000 | -0.038 ± 0.021 | +0.74 | positive (3.8 SE) |
+| **all four together** | **+206 ± 55** | **+275 ± 91** | **-2,340 ± 920** (-30% of the sim's 7.9k) | **-0.071 ± 0.021** | +1.48 (4.2 -> 5.7) | **PASS: stage 3** |
+| (b) `adding_factor_capital_on` 0.90 / 0.95 / 0.98 (+ resume 0.5) | +263 / +255 / +343 (± 60-110) | +214 / +242 / +283 | **+2,440 / +2,270 / +2,210** | +0.03 / +0.03 / +0.04 | +5.4 / +7.2 / +7.6 | earns spread, rebuilds exposure and +6k worst case |
+mk15_mid not worse for any of the exit flags (+0.02 ± 0.16 together): the exits are not picked off. (a) `tilt_exit_full_size` must go with
+`adding_factor_per_market` (without it the race-netted adding side can zero a tilt exit at factor 0; a start-up warning says so). (c)
+`ref_guard_exits` keeps the guard within `ref_jump_cooldown_seconds` of a Polymarket move/jump and when the (tilted) gap exceeds 2 x
+`ref_guard_gap`: Dem House (r 0.925, s 0.11 -> r' 0.878 vs book ~0.87) rests its exit; a real 8c move still trips it.
+**Answer to (a):** the four flags together (stage 3). **Answer to (c):** yes, both ways (measure the gap from r' AND exempt the exit), with the
+jump limits above. **Answer to (b), the recommendation:** keep the adding factor at 0 for the first 3 h of stage 3; then, if `tilt_exposure`
+has fallen and `tilt_s` < `ref_tilt_max` (the estimator at the clip under-corrects a tilt that is above it, which is why adds rebuild exposure
+here), resume at 0.95 (`adding_factor_capital_on` 0.95, `capital_ceiling_adding_size_factor_resume` 0.5, hysteresis 0.01: adds come back below
+95% capital, stop again at 96%); the threshold itself hardly matters (0.90-0.98 within noise); the money says resume, the one-sided tilt
+bleed (-356 per point) says not before the exits have cut it. `capital_ceiling_adding_size_factor` stays 0 in every staged file.
+
+**Red team (opus) on the merged branch: 1 high (item 2's changes were not behind flags while the live config satisfied Package 7's gate -> own
+OFF flags + identity test), 4 medium (cash gate bookkeeping: refunds for orders not placed, stale-read handling, log throttling; `ref_guard_exits`
+without jump limits; `tilt_exit_full_size` without per-market), all fixed. 33 suites green: test_cash_gate 83, test_tilt_exit 62, test_pair_sizing
+29, test_nono_sets 103, test_pair_followup 42, test_reduce_no 69, test_mm_bot 600, test_live_sim_marks 115, test_stress 20 + STRESS_LADDER=1
+20/20, the rest as Package 7; settings-order checks are now contiguity checks; py_compile under Python 3.10.
+**Deploy (owner; files in `deploy/package8/`, base = your live overrides, nothing resets the adding factor or drops `ref_tilt_headline`):** code by
+handover restart (stage0: every new flag off = Package 7 + status fields) -> stage1_cash_gate (`cash_gate_enabled`, `adding_factor_per_market`)
+-> stage2_pair_sizing (+ `pair_no_unwind_max_per_cycle` 1, `pair_unwind_race_order`, `pair_no_unwind_max_sets` 1000, `pair_unwind_followup_max_age`
+600) -> stage3_tilt_exits (+ `tilt_exit_priority`, `tilt_exit_full_size`, `ref_guard_tilted`, `ref_guard_exits`) -> after 3 h, (b) as above by hand.
+**Watch. Stage 1, first 10 min:** 400 refusals -> ~0 within a cycle (any that remain: the journal names the order; send it to the executor);
+`cash_gated` / `cash_trimmed` counting, `cash_gate_read_age` < 60 s; covered sales and pair batches still going out; no quote lost on a market
+whose order needs no cash (asks on YES holdings, covered NO sales); writes freed (~5/min). **Stage 2, first hour:** "PAIR UNWIND (short set)"
+once per cycle, cheapest race first, sets up to the smaller leg; `pair_owed` clearing; an "owed record cleared" alert only on a stalled race.
+**Stage 3, first hour:** Dem House / Rep House and the biggest toward-Polymarket positions have an exit RESTING at the book (recorder our_ask /
+our_bid present); `tilt_exposure` falling (sim: -30% in 3 h on its share); capital share falling (sim -7 points); no own bid >= own ask; writes
+<= 28; account on the exchange's number not below start - 300; `mk15`-type pick-off not visible (fills on exits within 2 min of a >= 3c
+Polymarket move should stay rare: the jump limits hold). **Rollback (previous stage's file) on:** refusals not falling at stage 1 (then the
+gate's cash read is wrong: `cash_gate_read_age` growing or the alert); a covered sale or pair leg blocked by the gate (it should never be:
+need 0); an exit filled through a Polymarket jump repeatedly; account below start - 1,000 in 3 h; 429s.
+**Untested:** the exchange's `cashBalance` as the gate's input against the real exchange (the fake API's cash model is the evidence; the gate reads availableBalance / cashBalance
+/ cash / balance, else account value - positions' market value, less the cash our resting orders lock; no figure -> alert, cash-free orders
+only, gating stops after 5 min); set collateral and cash are not in live_sim
+(items 1-2 are unit-test evidence); `tilt_exit_priority` under the live deferral load; the (b) resume live.
 
 ## Package 7 (READY, Finisher 2b, 3 Oct ~15:30 UTC; branch `claude/finisher-package7` from Package 6 706e763; draft PR #9): NO+NO sets unwound as a pair, set-aware covered bids, pair-unwind follow-up (all OFF; staged files in `deploy/package7/`)
 Live at the time of writing: Package 6 with `reduce_no_as_sell` on since 14:01:54 UTC (the covered-sale check accepted 14:02:24); `ref_tilt_max`
