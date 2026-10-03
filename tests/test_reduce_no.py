@@ -52,7 +52,8 @@ _ov, _f = list(M.OVERRIDABLE), list(M.Config.__dataclass_fields__)
 check("default off", getattr(c, KEY, None) is False)
 _p7 = ["no_set_aware_bids", "pair_no_unwind_max_cost",      # Package 7's settings come after it
        "pair_unwind_followup", "pair_unwind_followup_max_cost", "pair_unwind_followup_tries",
-       "pair_no_unwind_max_per_cycle"]
+       "pair_no_unwind_max_per_cycle",
+       "cash_gate_enabled", "cash_gate_reserve", "adding_factor_per_market"]   # (then Package 8's)
 check("last of Package 6 in Config and OVERRIDABLE (then Package 7's)",
       _f[_f.index(KEY) + 1:] == _p7 and _ov[_ov.index(KEY) + 1:] == _p7, (_f[-3:], _ov[-3:]))
 check("bool override", M.OVERRIDABLE.get(KEY) == (False, True))
