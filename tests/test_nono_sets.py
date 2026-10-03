@@ -97,7 +97,9 @@ _f, _ov = list(M.Config.__dataclass_fields__), list(M.OVERRIDABLE)
 check("defaults: no_set_aware_bids False, pair_no_unwind_max_cost -1 (off)",
       c.no_set_aware_bids is False and c.pair_no_unwind_max_cost == -1.0)
 _p7b = ["pair_unwind_followup", "pair_unwind_followup_max_cost", "pair_unwind_followup_tries",   # Package 7 part 2
-        "pair_no_unwind_max_per_cycle"]                                                         # (red-team fix 3)
+        "pair_no_unwind_max_per_cycle",                                                         # (red-team fix 3)
+        "tilt_exit_priority", "tilt_exit_full_size", "adding_factor_capital_on",                 # then Package 8's
+        "capital_ceiling_adding_size_factor_resume", "ref_guard_tilted", "ref_guard_exits"]
 check("last in Config and OVERRIDABLE (then Package 7's pair unwind follow-up)",
       _f[_f.index(A):] == [A, B] + _p7b and _ov[_ov.index(A):] == [A, B] + _p7b, (_f[-5:], _ov[-5:]))
 good, bad = M.validate_overrides({A: True, B: 0.003}, c)

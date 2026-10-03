@@ -310,9 +310,10 @@ class LiveSim(Sim):
         self.free = equity - capital - locked
         self.free_min = min(getattr(self, "free_min", 1e18), self.free)
         bot.update_capital_ceiling(self.cap_frac, cfg)
+        bot.update_adding_resume(self.cap_frac, cfg)       # Package 8 adding_factor_capital_on (no-op when 0)
         self.party_delta = self.bg_party + sum(M.PARTY_SIGN.get(bot.ex[e].party, 0) * q for e, q in inv.items())
         self.eff = bot.effective_inventory(inv)
-        if cfg.tilt_exposure_max_frac > 0:        # Package 5 T2.4 feed (Bot.update_tilt's exposure, sim markets, legs 2)
+        if cfg.tilt_exposure_max_frac > 0 or cfg.tilt_exit_priority or cfg.tilt_exit_full_size:   # T2.4 / Package 8 feed
             bot.tilt_exposure = sum(m.inv * (m.ref_seen - 0.5) for m in self.mkts if m.inv and m.ref_seen is not None)
         if cfg.ladder_enabled:                    # Bot.ladder_setup: what the ladder may lock this cycle
             other = sum(order_lock(o, m.inv, self.free_short()) for m in self.mkts for o in m.orders
@@ -486,6 +487,14 @@ class LiveSim(Sim):
             return got
         return bot.take_aged(inv, bfvs, {}, t, execute=execute)
     # ---- end Package 5 C mirror ----
+
+    def tilt_exit_head(self, m, cancels, places):
+        """Package 8 tilt_exit_priority (Bot.change_key): 0.5 when this change touches the market's tilt exit."""
+        side = self.bot.tilt_exit_side(self.bot.ex[m.eid])
+        if side is None:
+            return 1
+        b = side == "bid"
+        return 0.5 if any(o.is_bid == b for o in cancels) or any(w[0] == b for w in places) else 1
 
     def take_writes_ok(self, t, n=3):
         """Package 5 mirrors (T2.5 second leg, C takes): a take costs n writes as live (pull our quotes, the IOC
@@ -669,7 +678,9 @@ class LiveSim(Sim):
                    tilt_s_end=round(getattr(getattr(self, "tilt", None), "s", 0.0), 4),
                    take_refused=getattr(self, "take_refused", 0),
                    pair_followup_sh=round(getattr(self, "pair_followup_sh", 0.0)),   # Package 7 follow-up
-                   cash_refused_sh=round(getattr(self, "cash_refused_sh", 0.0)))   # Package 6 (see cash_clip)
+                   cash_refused_sh=round(getattr(self, "cash_refused_sh", 0.0)),   # Package 6 (see cash_clip)
+                   tilt_exposure_end=round(sum(m.inv * (m.ref_seen - 0.5)          # Package 8: sum pos x (ref - 0.5)
+                                               for m in self.mkts if m.inv and m.ref_seen is not None)))
         return out
 
 
@@ -684,6 +695,8 @@ def bot_strategy(sim, m, t, fv, bfv, ref, book):
         # reference_jump_guard sets: feed it the sim's Polymarket jump (see_ref sets cooldown_until = jump + cooldown)
         ex.ref_jump_at = max(ex.ref_jump_at, m.cooldown_until - sim.cfg.ref_jump_cooldown_seconds)
     inv = {x.eid: x.inv for x in sim.mkts}
+    if sim.cfg.ref_guard_tilted and getattr(sim, "tilt", None) is not None:   # Package 8: the guard's tilted_ref_for
+        bot.tilt_s, bot.tilt_on_at = sim.tilt.s, sim.tilt_on_at              # reads the sim's estimate (sim seconds)
     q = bot.decide(ex, fv, inv, sim.eff, sim.global_reduce, sim.party_delta, t, ref=ref, book_fv=bfv, ref_liquid=True)
     if sim.cfg.tilt_exposure_max_frac > 0:         # Package 5 T2.4: market-cycles where the tilt limit binds
         sim.tx_quoted += 1
@@ -835,7 +848,7 @@ def run_many(seeds, hours, regime, ov, first=1):
 
 
 KEYS = ("pnl_liq", "pnl_mid", "pnl", "pnl_lag", "exit_ratio", "hold_med", "mk15_mid", "pick_cost", "wc_end", "writes_pm", "deferred_h", "lvl_sh", "lvl_pnl", "lad_gate", "lg_ok_w", "lg_sh", "dead", "free_min", "clipped", "cap_end", "cap_peak", "freed", "age_end", "unwind_sh", "arb_sh", "outsider_arb_sh",
-        "arb_pnl", "wc_peak", "shares", "cash_refused_sh")
+        "arb_pnl", "wc_peak", "shares", "cash_refused_sh", "tilt_exposure_end")
 
 
 def stats(d):

@@ -866,6 +866,30 @@ class Config:
     # pair_no_unwind_max_cost threshold per cycle (each costs 5 writes and a cooldown; up to 38 NO+NO races qualify
     # at once when it is switched on); the rest wait for the next cycles. No effect with pair_no_unwind_max_cost -1.
     pair_no_unwind_max_per_cycle: int = 2
+    # --- Package 8: cut UNPAIRED tilt exposure faster, never crossing ---
+    # A market's position "adds to |tilt_exposure|" when its contribution pos x (raw Polymarket - c), c = 1/legs,
+    # has the sign of the total tilt_exposure (live 3 Oct: +34k, so sign(pos) == sign(r - c)); its tilt exit is the
+    # side that shrinks THIS market's own position (long -> ask, short -> bid). NO+NO sets carry ~0 exposure.
+    # tilt_exit_priority True: in the write budget (change_key) a change touching a tilt exit sorts after the
+    # headline markets and before every other ordinary change (pure ordering: no price or size change).
+    tilt_exit_priority: bool = False
+    # tilt_exit_full_size True: on those markets the tilt exit's size is the whole position, not the planned order
+    # size (compute_quote's reduce_size: still capped by the race-net clip, position / cash limits and, for a
+    # covered NO sale, the NO free to sell / its lone part).
+    tilt_exit_full_size: bool = False
+    # adding_factor_capital_on > 0: while the capital ceiling is on, capital in positions / account below this ->
+    # the adding side is sized by max(capital_ceiling_adding_size_factor, capital_ceiling_adding_size_factor_resume)
+    # (owner live: the configured factor 0 = no adding at all); back to the configured factor at >= this + 0.01
+    # (hysteresis). status.json capital_ceiling_adding_factor = the factor in force. 0 = off.
+    adding_factor_capital_on: float = 0.0
+    capital_ceiling_adding_size_factor_resume: float = 0.5
+    # ref_guard_tilted True (with T2.1 on in that market): the reference guard measures its gap from the tilted
+    # reference tilted_ref_for(r) instead of raw Polymarket (Dem House: r 0.925, s 0.11 -> 0.878 vs book ~0.87: the
+    # exit rests; a real 8c Polymarket move still moves r' ~7c and trips it).
+    ref_guard_tilted: bool = False
+    # ref_guard_exits True: the guard never blocks the side that shrinks THIS market's own position; that side is then
+    # capped at the position (never flips it); the adding side is still blocked.
+    ref_guard_exits: bool = False
 
 
 CFG = Config()
@@ -1046,6 +1070,13 @@ OVERRIDABLE = {
     "pair_unwind_followup_max_cost": (0.0, 0.05),
     "pair_unwind_followup_tries": (1, 50),
     "pair_no_unwind_max_per_cycle": (1, 10),
+    # --- Package 8: tilt exits ---
+    "tilt_exit_priority": (False, True),
+    "tilt_exit_full_size": (False, True),
+    "adding_factor_capital_on": (0.0, 1.0),
+    "capital_ceiling_adding_size_factor_resume": (0.0, 1.0),
+    "ref_guard_tilted": (False, True),
+    "ref_guard_exits": (False, True),
 }
 MAX_ORDER_TTL = 7200.0    # no order of ours lives longer than this (dead-man's switch), whatever the TTL settings
 LADDER_MAX_LEVELS = 8
@@ -3317,6 +3348,7 @@ class Bot:
         self.lots_seeded = False          # first reconcile rebuilds missing ones from fills.csv
         self.lots_dirty = False
         self.capital_over = False         # capital ceiling active (capital_in_positions_max_frac)
+        self.adding_resume = False        # Package 8 adding_factor_capital_on: the resume factor is in force
         self.cur_refs, self.cur_liquid = {}, set()   # this cycle's Polymarket prices (for risk_fv)
         _tilt_saved = self.load_tilt()
         self.tilt = TiltEstimator(cfg).from_dict(_tilt_saved)   # T2.1: tournament tilt s (see update_tilt)
@@ -3805,6 +3837,7 @@ class Bot:
         capital = self.capital_in_positions(pos, inv, fvs)
         cap_frac = capital / equity if equity else None
         self.update_capital_ceiling(cap_frac, cfg)
+        self.update_adding_resume(cap_frac, cfg)
         self.refresh_mark_sd(now_m)
         frag = self.update_mark_frag(inv, cfg)
         ages = self.portfolio_age(time.time())
@@ -3844,6 +3877,8 @@ class Bot:
                        "capital_in_positions": round(capital),
                        "capital_in_positions_frac": round(cap_frac, 3) if cap_frac is not None else None,
                        "capital_ceiling_active": self.capital_over,
+                       "capital_ceiling_adding_factor": self.ceiling_adding_factor(cfg),
+                       "capital_ceiling_adding_resume": self.adding_resume,
                        "portfolio_age_hours": round(ages[0], 2), "positions_over_3h": ages[1],
                        "positions_over_12h": ages[2],
                        **frag,
@@ -4701,6 +4736,35 @@ class Bot:
                         100 * cap, f"at x{cfg.capital_ceiling_adding_size_factor:g}" if on else "back to normal")
         self.capital_over = on
 
+    def update_adding_resume(self, frac, cfg):
+        """Package 8 adding_factor_capital_on (> 0): with the capital ceiling on, capital in positions / account
+        below it -> the resume factor is in force (adding_resume); off again at >= it + 0.01, or when the ceiling
+        or the setting is off. An unknown account value keeps the current state. Each change logged once."""
+        thr = cfg.adding_factor_capital_on
+        if thr <= 0 or not self.capital_over:
+            on = False
+        elif frac is None:
+            on = self.adding_resume
+        elif self.adding_resume:
+            on = frac < thr + 0.01
+        else:
+            on = frac < thr
+        if on != self.adding_resume:
+            log.warning("capital ceiling adding factor: %s in positions (resume below %.0f%%) - adding sides at x%g",
+                        f"{100 * frac:.1f}%" if frac is not None else "?", 100 * thr,
+                        max(cfg.capital_ceiling_adding_size_factor, cfg.capital_ceiling_adding_size_factor_resume)
+                        if on else cfg.capital_ceiling_adding_size_factor)
+        self.adding_resume = on
+
+    def ceiling_adding_factor(self, cfg):
+        """The capital ceiling's adding-side factor in force: 1 (ceiling off), the configured factor, or (Package 8
+        adding_factor_capital_on) the larger of it and capital_ceiling_adding_size_factor_resume."""
+        if not self.capital_over:
+            return 1.0
+        if self.adding_resume:
+            return max(cfg.capital_ceiling_adding_size_factor, cfg.capital_ceiling_adding_size_factor_resume)
+        return cfg.capital_ceiling_adding_size_factor
+
     def risk_fv(self, e, fvs, members=None):
         """The probability the risk model uses for market e: this cycle's fair value when there is one; else, for
         a market we hold, in this order: the liquid Polymarket reference; 1 minus the other leg's fair value in a
@@ -4875,10 +4939,17 @@ class Bot:
         # Reference-price guard: if Polymarket says this contract is worth clearly MORE than the
         # tournament book does, don't sell it to anyone here (they probably know); clearly LESS -> don't
         # buy. Compared with the book's own price, not the leaned fair value (see cycle step 3).
+        exempt_bid = exempt_ask = False
         if ref is not None:
             base = book_fv if book_fv is not None else fv
-            no_ask = no_ask or ref - base > cfg.ref_guard_gap
-            no_bid = no_bid or base - ref > cfg.ref_guard_gap
+            # Package 8 ref_guard_tilted: the gap from the tilted reference (T2.1 on here), not raw Polymarket
+            gref = self.tilted_ref_for(ex, ref, now_m) if cfg.ref_guard_tilted else ref
+            g_ask, g_bid = gref - base > cfg.ref_guard_gap, base - gref > cfg.ref_guard_gap
+            if cfg.ref_guard_exits:               # Package 8: never block the side shrinking THIS market's position
+                exempt_ask, exempt_bid = g_ask and ex.inv >= 1, g_bid and ex.inv <= -1
+                g_ask, g_bid = g_ask and not exempt_ask, g_bid and not exempt_bid
+            no_ask = no_ask or g_ask
+            no_bid = no_bid or g_bid
 
         # Tail guard: near 0 or 1, one side risks ~1 a share to earn ~1c, and a single upset wipes out
         # many fills. Don't take that side, except to shrink a position we already hold.
@@ -4887,6 +4958,10 @@ class Bot:
             ask_cap = max(0, int(ex.inv))         # selling YES near 0 = buying NO near 1
         if fv > cfg.tail_high:
             bid_cap = max(0, int(-ex.inv))        # buying YES near 1
+        if exempt_ask:                            # (ref_guard_exits: the exempted exit never flips the position)
+            ask_cap = int(ex.inv) if ask_cap is None else min(ask_cap, int(ex.inv))
+        if exempt_bid:
+            bid_cap = int(-ex.inv) if bid_cap is None else min(bid_cap, int(-ex.inv))
 
         reduce_only = global_reduce or hrs <= cfg.flatten_hours_before_close
         # From flatten_per_market_hours: flatten each market on its own, i.e. judge (and skew) by this
@@ -4905,11 +4980,15 @@ class Bot:
             planned = min(full, max(1.0, cfg.ref_only_size_frac * self.bankroll()))
             if cfg.ref_only_reduce_full:          # ...but a held position leaves at the market's normal size
                 reduce_size = full
+        if cfg.tilt_exit_full_size and self.tilt_exit_side(ex) is not None:   # Package 8: the whole position
+            reduce_size = max(reduce_size or 0, abs(ex.inv))
         if cfg.market_edge_enabled and ex.eid in self.market_edge:   # rival-floor map: this market's own floor
             own = max(cfg.min_edge, min(self.market_edge[ex.eid], cfg.market_edge_max))
             edge = own if edge is None else max(edge, own)
         ex.age = self.age_hours(ex)
         adding = cfg.capital_ceiling_adding_size_factor if self.capital_over else 1.0
+        if self.adding_resume:                    # Package 8 adding_factor_capital_on: the resume factor
+            adding = self.ceiling_adding_factor(cfg)
         adding_limit = 1.0
         ex.turnover_dead = self.turnover_dead(ex, planned if planned is not None
                                               else cfg.order_size_frac * self.bankroll(), cfg)
@@ -5127,7 +5206,8 @@ class Bot:
                    if fix_ask and q.ask is not None and not asks and not cool_ask else []))
             if not doomed and not new:
                 return None
-            return Change(ex, doomed, False, new, self.change_key(ex, pull=bool(doomed) or not new, reprice=bool(doomed)),
+            return Change(ex, doomed, False, new, self.change_key(ex, pull=bool(doomed) or not new, reprice=bool(doomed),
+                                                                  sides=(fix_bid, fix_ask)),
                           unsafe=bool(doomed))
         # Cancel the wrong side(s). Both wrong -> one cancel-all for the exchange; else per order.
         doomed = (bids if fix_bid else []) + (asks if fix_ask else [])
@@ -5151,7 +5231,7 @@ class Bot:
                   or (fix_ask and any(unsafe_order(o, q.ask, full_ask, q.ask_limit, False) for o in asks)))
         urgent = self.cfg.never_defer_unsafe and unsafe
         return Change(ex, doomed, fix_bid and fix_ask, new,
-                      self.change_key(ex, pull=not new or urgent, reprice=bool(doomed)),
+                      self.change_key(ex, pull=not new or urgent, reprice=bool(doomed), sides=(fix_bid, fix_ask)),
                       unsafe=unsafe or (not new and bool(doomed)))
 
     def hold_side(self, ex, resting, price, limit, size, is_bid, now, now_m):
@@ -5184,13 +5264,33 @@ class Bot:
             for side in ch.reprice_sides():
                 ch.ex.reprices.setdefault(side, deque()).append(now_m)
 
-    def change_key(self, ex, pull, reprice=False):
+    def change_key(self, ex, pull, reprice=False, sides=None):
         """Sending order: pulls first, then the party-control markets, then quotes for empty sides (cheap: a
-        share of one batch), then reprices (a cancel each), biggest quotes first within each."""
+        share of one batch), then reprices (a cancel each), biggest quotes first within each. Package 8
+        tilt_exit_priority: an ordinary market's change touching its tilt exit (sides = (bid changes, ask changes))
+        sorts between the party-control markets and the other ordinary ones."""
         urgent = ex.eid in self.ref_moved or self.unload_urgent(ex, time.monotonic())   # (unload: first placement)
-        return (0 if pull else 0.5 if urgent else 1, 0 if ex.group in self.cfg.headline_races else 1,
+        head = 0 if ex.group in self.cfg.headline_races else 1
+        if head and sides is not None and self.cfg.tilt_exit_priority:
+            side = self.tilt_exit_side(ex)
+            if side is not None and sides[0 if side == "bid" else 1]:
+                head = 0.5
+        return (0 if pull else 0.5 if urgent else 1, head,
                 1 if reprice else 0,
                 -self.size_plan.get(ex.eid, 0))
+
+    def tilt_exit_side(self, ex):
+        """Package 8: "bid" / "ask" = the side shrinking this market's own position when that position adds to
+        |tilt_exposure| (its contribution pos x (raw Polymarket - c), c = 1/legs, has the sign of the total, or is
+        positive while the total is 0); None otherwise. Reads ex.inv / ex.ref as decide() set them this cycle."""
+        r, pos = getattr(ex, "ref", None), ex.inv
+        if r is None or not pos:
+            return None
+        contrib = pos * (r - tilted_ref(r, 1.0, self.legs(ex)))     # tilted_ref(r, 1, legs) = c
+        total = getattr(self, "tilt_exposure", 0.0) or 0.0
+        if contrib == 0 or (contrib > 0) != (total > 0 if total else True):
+            return None
+        return "ask" if pos > 0 else "bid"
 
     def reconcile(self, ex, q, resting, fv, now, now_m):
         """One write at a time (parallel_writes = 1): make the orders resting on this exchange match quote q.
