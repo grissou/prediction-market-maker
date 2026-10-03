@@ -21,19 +21,23 @@ def check(name, cond):
 
 
 # 1. Knobs at 0 = the simulator before Package 5 (numbers recorded at fd28b0a + this file's parent, seed 1/2, 0.05 h)
-# Package 6 re-pin: the sim's cash model is now honest about live (reduce_no_as_sell False): a bid that buys back a
-# short locks cash like an add, so at the start's ~0 free cash most reducing bids are clipped (cash_refused_sh). The
-# numbers before (23, 0.878, 37.97, 6024, -341, 43294) / (26, 0.883, 31.87, 2601) were the FIXED cash model without
-# the cap at the NO held that Bot.plan_change applies with the flag on.
+# Package 6: the default world keeps the fixed cash model (a bid buying back a short needs no cash); the pre-fix
+# live world (it locked cash: the 3 Oct deadlock) is "_short_reduce_locks_cash" 1, pinned below.
 r = L._one((1, 0.05, "quiet", {}))
 check("pin quiet", (r["pnl"], r["cap_end"], r["writes_pm"], r["shares"], r["pnl_lag"], r["wc_end"])
-      == (-16, 0.857, 35.23, 6704, -390, 44074))
+      == (23, 0.878, 37.97, 6024, -341, 43294))
 r0 = L._one((1, 0.05, "quiet", {"_rival_anchor": 0, "_world_tilt": 0, "_world_tilt_growth": 0}))
 check("explicit zeros identical", {k: r0[k] for k in r} == r)
 r = L._one((2, 0.05, "news", {}))
-check("pin news", (r["pnl"], r["cap_end"], r["writes_pm"], r["shares"]) == (21, 0.881, 31.43, 2373))
+check("pin news", (r["pnl"], r["cap_end"], r["writes_pm"], r["shares"]) == (26, 0.883, 31.87, 2601))
 for k in ("pnl_mid", "pnl_liq", "mk15_mid", "exit_ratio", "hold_med", "pick_cost", "wc_end"):
     check(f"key {k} printed", k in L.KEYS and k in r)
+
+# 1a. The pre-fix cash world: reducing bids on shorts are clipped for cash (cash_refused_sh > 0); the fix frees them
+rl = L._one((1, 0.05, "quiet", {"_short_reduce_locks_cash": 1}))
+rf = L._one((1, 0.05, "quiet", {"_short_reduce_locks_cash": 1, "reduce_no_as_sell": True}))
+check("pre-fix world clips reducing bids for cash", rl["cash_refused_sh"] > 0 and rl["shares"] != r["shares"])
+check("the fix frees them", rf["cash_refused_sh"] == 0)
 
 # 1b. The live reduce-only backstop (_bg_wc): 0 = never; huge = reduce-only every cycle, so nothing is added
 r = L._one((1, 0.02, "quiet", {"_bg_wc": 1e6, "worst_case_backstop_frac": 0.8}))
@@ -55,7 +59,7 @@ check("take charged 3 writes", st0.take_writes_ok(10) and st0.writes == 3 and st
 st0.wlog = [(5, st0.wcap - 2)]
 check("no room: refused", not st0.take_writes_ok(10) and st0.take_refused == 1)
 rp = L._one((1, 0.05, "quiet", {}))
-check("base unchanged by the charge (flags off)", rp["pnl"] == -16 and rp["writes_pm"] == 35.23)   # (Package 6 re-pin)
+check("base unchanged by the charge (flags off)", rp["pnl"] == 23 and rp["writes_pm"] == 37.97)
 
 # 2. The tilt world: start consensus unchanged (residual bias), tilt grows, rivals anchored
 cfg = S.make_cfg({})

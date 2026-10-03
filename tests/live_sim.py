@@ -81,8 +81,12 @@ def all_off():
 class LiveSim(Sim):
     def __init__(self, seed, hours, regime, cfg, n=40, start_cap=0.90, house="0945", outsiders=3,
                  rival_anchor=0.0, world_tilt=0.0, world_tilt_growth=0.0, bg_wc=0.0, world_tilt_add=0.0,
-                 bg_wc_growth=0.0, bg_wc_decay=0.0):
+                 bg_wc_growth=0.0, bg_wc_decay=0.0, short_reduce_locks_cash=0.0):
         super().__init__(seed, hours, regime, cfg, share=SHARE)
+        # Package 6: live until 3 Oct a bid buying back a short was "buy YES" and locked cash for all of it (the
+        # deadlock). "_short_reduce_locks_cash" 1 models that world when cfg.reduce_no_as_sell is off; the default 0
+        # keeps every earlier round's world (a reducing bid needs no cash = the fixed behaviour).
+        self.short_locks = bool(short_reduce_locks_cash)
         self.bg_wc0, self.bg_g, self.bg_d, self.t_prev_bg = float(bg_wc), float(bg_wc_growth), float(bg_wc_decay), 0
         self.tilt_add = float(world_tilt_add)
         self.bg_wc, self.global_reduce, self.ro_cycles, self.n_cycles, self.wc_start = float(bg_wc), False, 0, 0, None
@@ -302,7 +306,7 @@ class LiveSim(Sim):
         # Cash: account value now (start + P&L at Polymarket) - positions - what our resting orders lock. An order
         # only locks cash for the part that ADDS to a position (selling YES we hold, or buying back a short, frees it).
         equity = ACCOUNT + sum(m.cash + m.inv * pnow[m.eid] for m in self.mkts)
-        locked = sum(order_lock(o, m.inv, cfg.reduce_no_as_sell) for m in self.mkts for o in m.orders if o.owner == "us")
+        locked = sum(order_lock(o, m.inv, self.free_short()) for m in self.mkts for o in m.orders if o.owner == "us")
         self.free = equity - capital - locked
         self.free_min = min(getattr(self, "free_min", 1e18), self.free)
         bot.update_capital_ceiling(self.cap_frac, cfg)
@@ -311,7 +315,7 @@ class LiveSim(Sim):
         if cfg.tilt_exposure_max_frac > 0:        # Package 5 T2.4 feed (Bot.update_tilt's exposure, sim markets, legs 2)
             bot.tilt_exposure = sum(m.inv * (m.ref_seen - 0.5) for m in self.mkts if m.inv and m.ref_seen is not None)
         if cfg.ladder_enabled:                    # Bot.ladder_setup: what the ladder may lock this cycle
-            other = sum(order_lock(o, m.inv, cfg.reduce_no_as_sell) for m in self.mkts for o in m.orders
+            other = sum(order_lock(o, m.inv, self.free_short()) for m in self.mkts for o in m.orders
                         if o.owner == "us" and o.level == 0)
             eq = equity
             bot.lad_liquid, bot.lad_party_delta = set(bot.cur_refs), self.party_delta
@@ -512,6 +516,11 @@ class LiveSim(Sim):
             if None not in asks and not race.startswith("Outsider"):
                 self.bidsum["race_min"] += 1
                 self.bidsum["asksum_lo"] += sum(asks) < 0.98
+
+    def free_short(self):
+        """Does a bid that buys back a short need no cash? Yes with cfg.reduce_no_as_sell (covered "sell NO"), and
+        also in every earlier round's world unless "_short_reduce_locks_cash" 1 asks for the pre-fix live behaviour."""
+        return bool(self.cfg.reduce_no_as_sell) or not self.short_locks
 
     # ---------------------------------------------------------------- metrics
     def mid_px(self, m, c):
@@ -737,13 +746,14 @@ def cash_clip(sim, m, want):
     """The exchange takes an order only if the cash it locks is there: clip each adding side to the free cash
     (the order it replaces gives its lock back). Reducing shares need none."""
     out = []
-    ns = sim.cfg.reduce_no_as_sell               # Package 6 (see order_lock)
+    ns = sim.free_short()                        # Package 6 (see order_lock / free_short)
+    cap = bool(sim.cfg.reduce_no_as_sell)        # Package 6: Bot.plan_change caps the covered bid at the NO held
     for w in want:
         is_bid, price, qty = w[0], w[1], w[2]
         lock_ps = price if is_bid else 1 - price
         short = max(0.0, -m.inv) if is_bid else 0.0
-        if ns and short >= 1 and qty > short:    # Package 6: as Bot.plan_change, the covered bid is capped at the
-            qty = int(short)                     #   NO held (the part going long waits)
+        if cap and short >= 1 and qty > short:   #   (the part going long waits)
+            qty = int(short)
         reduce = (short if ns else 0.0) if is_bid else max(0.0, m.inv)
         back = sum(order_lock(o, m.inv, ns) for o in m.orders if o.owner == "us" and o.is_bid == is_bid and o.level == w[3])
         room = max(0.0, sim.free + back)
@@ -765,7 +775,8 @@ def _one(args):
               outsiders=int(ov.pop("_outsiders", 3)), rival_anchor=float(ov.pop("_rival_anchor", 0.0)),
               world_tilt=float(ov.pop("_world_tilt", 0.0)), world_tilt_growth=float(ov.pop("_world_tilt_growth", 0.0)),
               bg_wc=float(ov.pop("_bg_wc", 0.0)), world_tilt_add=float(ov.pop("_world_tilt_add", 0.0)),
-              bg_wc_growth=float(ov.pop("_bg_wc_growth", 0.0)), bg_wc_decay=float(ov.pop("_bg_wc_decay", 0.0)))
+              bg_wc_growth=float(ov.pop("_bg_wc_growth", 0.0)), bg_wc_decay=float(ov.pop("_bg_wc_decay", 0.0)),
+              short_reduce_locks_cash=float(ov.pop("_short_reduce_locks_cash", 0.0)))
     sim = LiveSim(seed, hours, regime, S.make_cfg(ov), **kw)
     return sim.run()
 
