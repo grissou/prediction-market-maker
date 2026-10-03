@@ -1,8 +1,8 @@
 <!-- STATUS (Finisher 2b, updated on every push) -->
-**STATUS 23:58 UTC 2 Oct:** phase = Package 5 confirmations running (not READY yet; code frozen except fixes). READY so far: Package 4 (c29f762).
-Key numbers (judge: exchange-style mark / liquidation): T2.1 `ref_tilt_enabled` +166 ± 72 / +163 ± 60 (8 x 3 quiet), +670 ± 180 / +761 ± 160 (news), pinned +98 ± 140 / +129 ± 190; T2.1 + backstop 0.85 pinned +285 ± 130 / +311 ± 130. Ramp-in not needed (default 0); `ref_tilt_max` 0.20. A, B, C, T2.2, T2.4, T2.5, X5, X11, ladder: not positive, OFF.
-Next: pinned 16 x 6 (T2.1 / +0.85 / +hysteresis 0.01), free 16 x 6, C/T2.5 re-screen, calibrated growth, pinned X5/X11; then START_HERE write-up, STRESS_LADDER run, READY commit, draft PR.
-ETA: READY: Package 5 ~04:00 UTC 3 Oct; Package 6 cycle (branch claude/finisher-package6: reduce-only exit quoting, backstop soft band) after that, research to ~06:30, implementation to ~08:45.
+**STATUS 02:30 UTC 3 Oct:** phase = Package 5 READY (frozen at the "READY: Package 5" commit; draft PR #7). Next phase: Package 6 cycle on `claude/finisher-package6`.
+Key numbers (d vs base, exchange-style mark / liquidation): T2.1 `ref_tilt_enabled` pinned 16 x 6 **+509 ± 110 / +601 ± 107**, free 16 x 6 +330 ± 64 / +426 ± 63, news 6 x 6 +670 ± 180 / +761 ± 160. Backstop 0.85 and hysteresis 0.01 with T2.1: not clearly positive (stay 0.80 / 0.03). Ramp-in 20 min, `ref_tilt_max` 0.20. Everything else OFF.
+Deploy: code (all flags off) -> deploy/package5/stage1 (`ref_tilt_enabled`) -> stage2 (+ `take_tilted_ref`) -> stage3 (+ `ref_tilt_headline`); go/no-go rules in the Package 5 section.
+Next: Package 6 research (exits that keep quoting in reduce-only, pair unwind in reduce-only, backstop soft band) screened in the pinned world; READY: Package 6 only if clearly positive. ETA: research to ~05:00, implementation/write-up to ~07:30 UTC.
 
 # START HERE (Team run, branch `claude/run-c-tournament-improvements-pycdet`)
 
