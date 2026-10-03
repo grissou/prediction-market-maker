@@ -7567,6 +7567,9 @@ class Bot:
                 problems.append(f"batch response not as expected: {str(results)[:300]}")
                 rejected = len(results) == 2 and not any(r.get("ok") for r in results)
                 busy = any(r.get("status") in self.SELFTEST_BUSY for r in results)
+                # 3 Oct live: at 100% capital the 1-share test order was refused "Insufficient available funds"
+                # (HTTP 400) and the bot stopped twice. No cash free is not an API surprise: retry later.
+                busy = busy or any(self.selftest_funds_refusal(r) for r in results)
             else:
                 # The open-orders list can lag the exchange (up to recent_order_grace_seconds): keep looking.
                 # Test orders that never show up at all are reported as "not listed" (busy the first time).
@@ -7594,6 +7597,31 @@ class Bot:
         return ("busy" if busy else "rejected" if rejected else "failed"), problems
 
     SELFTEST_NOT_LISTED = "neither test order is in our open orders"
+
+    @staticmethod
+    def selftest_funds_refusal(r):
+        """True if one batch result is a refusal for lack of cash ("Insufficient available funds"): the
+        account is fully deployed, not an API that behaves differently from what we assume. The message may
+        sit in r["data"]["error"] (a string, or a dict with it under message / error / detail) or r["error"]."""
+        if not isinstance(r, dict) or r.get("ok"):
+            return False
+        texts = []
+
+        def add(err):
+            if isinstance(err, str):
+                texts.append(err)
+            elif isinstance(err, dict):
+                for k in ("message", "error", "detail"):
+                    v = err.get(k)
+                    if isinstance(v, str):
+                        texts.append(v)
+                    elif isinstance(v, dict):
+                        add(v)
+        data = r.get("data")
+        if isinstance(data, dict):
+            add(data.get("error"))
+        add(r.get("error"))
+        return any("insufficient" in t.lower() and "fund" in t.lower() for t in texts)
 
     @classmethod
     def selftest_check(cls, raw):
