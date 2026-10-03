@@ -96,7 +96,9 @@ c = M.Config()
 _f, _ov = list(M.Config.__dataclass_fields__), list(M.OVERRIDABLE)
 check("defaults: no_set_aware_bids False, pair_no_unwind_max_cost -1 (off)",
       c.no_set_aware_bids is False and c.pair_no_unwind_max_cost == -1.0)
-check("last in Config and OVERRIDABLE", _f[-2:] == [A, B] and _ov[-2:] == [A, B], (_f[-2:], _ov[-2:]))
+_p7b = ["pair_unwind_followup", "pair_unwind_followup_max_cost", "pair_unwind_followup_tries"]   # Package 7 part 2
+check("last in Config and OVERRIDABLE (then Package 7's pair unwind follow-up)",
+      _f[_f.index(A):] == [A, B] + _p7b and _ov[_ov.index(A):] == [A, B] + _p7b, (_f[-5:], _ov[-5:]))
 good, bad = M.validate_overrides({A: True, B: 0.003}, c)
 check("live overrides accepted (True, 0.003)", good == {A: True, B: 0.003} and not bad, (good, bad))
 good, bad = M.validate_overrides({B: -1.0}, c)

@@ -849,6 +849,18 @@ class Config:
     # add up to <= 1 + this (a cost of at most this per set to free the set's capital), not only <= 1 -
     # pair_unwind_min_profit. Both legs go out as covered sales in one batch or the batch is not sent. -1 = off.
     pair_no_unwind_max_cost: float = -1.0
+    # --- Package 7: pair unwind follow-up ---
+    # Live 3 Oct 14:11: a short-set pair unwind on Hawaii Governor filled [314, 1069] - 755 shares of a hedged set
+    # became one-sided inventory. pair_unwind_followup True: (1) every leg of a pair unwind is sized to what can fill
+    # together (the least, over legs, of the cached book's depth at or better than the planned price, and the sets);
+    # (2) legs that still fill unequally leave the lagging leg(s) OWED the difference: on the next cycles (up to
+    # pair_unwind_followup_tries) one immediate-or-cancel order per lagging leg for what is owed, at a limit up to
+    # pair_unwind_followup_max_cost per share past the planned price (buy-back legs as a covered "sell NO" with
+    # reduce_no_as_sell), then one alert with what is left. The owed state is in memory only (a restart drops it,
+    # logged) and in status.json pair_owed. False = unchanged.
+    pair_unwind_followup: bool = False
+    pair_unwind_followup_max_cost: float = 0.01
+    pair_unwind_followup_tries: int = 6
 
 
 CFG = Config()
@@ -1024,6 +1036,10 @@ OVERRIDABLE = {
     # --- Package 7: NO+NO sets ---
     "no_set_aware_bids": (False, True),
     "pair_no_unwind_max_cost": (-1.0, 0.05),
+    # --- Package 7: pair unwind follow-up ---
+    "pair_unwind_followup": (False, True),
+    "pair_unwind_followup_max_cost": (0.0, 0.05),
+    "pair_unwind_followup_tries": (1, 50),
 }
 MAX_ORDER_TTL = 7200.0    # no order of ours lives longer than this (dead-man's switch), whatever the TTL settings
 LADDER_MAX_LEVELS = 8
@@ -3385,6 +3401,7 @@ class Bot:
         self.arbs_total = 0               # arbitrages / takes since start (summaries report the change)
         self.unwinds_total = 0            # pair unwinds since start (status.json pair_unwinds_total)
         self.pp = {}                      # T2.5 passive pair unwind: race -> slice state (pair_passive_step)
+        self.pair_owed = {}               # Package 7 pair_unwind_followup: race -> owed legs (pair_followup_step)
         self.pp_sets_total = 0            # ...complete sets closed by it since start (status.json)
         self.hold_takes = deque()         # C hold target: (now_m, notional) of takes in the last hour (take_aged)
         self.hold_open_at = None          # ...now_m from which takes may start (first enabled call + 1 h: restart-safe)
@@ -3753,7 +3770,10 @@ class Bot:
         self.refresh_turnover(now_m)
 
         # 5. Guaranteed arbitrage inside races (takes liquidity; our quotes there are pulled first) --
+        # Package 7 pair_unwind_followup: legs an earlier pair unwind left unequal are evened up first
+        owed_races = self.pair_followup_step(fvs, now_m, mine_real) if getattr(self, "pair_owed", None) else set()
         arb_races = self.take_arbitrage(inv, fvs, mine_real, now_m) if self.running else set()
+        arb_races |= owed_races
         if cfg.pair_unwind_passive or self.pp:    # T2.5: a passive slice filled -> the other leg is taken now
             arb_races |= self.pair_passive_step(inv, fvs, now_m, skip=arb_races, mine_real=mine_real)
 
@@ -6136,6 +6156,7 @@ class Bot:
             return done
         for race, members in self.groups.items():
             if (len(members) < 2 or not self.running or now_m < self.arb_cooldown.get(race, 0)
+                    or race in getattr(self, "pair_owed", ())  # Package 7: its owed legs are evened up first
                     or any(busy(self.ex[e], now_m) for e in members)):
                 continue
             # pre-close window: arbitrage would open positions the per-market flatten then pays to unwind;
@@ -6496,6 +6517,16 @@ class Bot:
             log.info("%s on %s skipped: write budget busy (next cycle)", "pair unwind" if kind == "unwind"
                      else "arbitrage", race)
             return
+        followup = kind == "unwind" and getattr(cfg, "pair_unwind_followup", False)
+        if followup:                              # Package 7: every leg sized to what can fill together
+            joint = self.joint_unwind_qty(members, levels, qty, action)
+            if joint < 1:
+                log.info("pair unwind on %s not sent: the legs' depth at the planned prices does not fill one set "
+                         "together", race)
+                return
+            if joint < qty:
+                log.info("pair unwind on %s: sized %d -> %d sets (joint depth at the planned prices)", race, qty, joint)
+            qty = joint
         # The legs (the batch), built first: a short-set unwind whose legs cannot ALL go out as covered "sell NO"
         # is not sent at all (Package 7: a half-converted batch breaks the NO+NO set and needs cash). The expiry is
         # set after our quotes are pulled (below).
@@ -6567,12 +6598,183 @@ class Bot:
                                                     "eid": o["exchangeId"],
                                                     **({"no_sell": True} if o.get("_no_sell") else {})}
                 self.notes_dirty = True
-        if len(set(traded)) > 1:
+        if len(set(traded)) > 1 and followup:     # Package 7: the lagging leg(s) owe the difference
+            self.pair_owe(race, orders, traded, action, now_m)
+        elif len(set(traded)) > 1:
             alert(f"arbitrage on {race} only partly filled {traded}: the difference is now ordinary "
                   f"inventory, which the quoting will work off")
         else:
             log.info("arbitrage on %s: every leg filled %.0f", race, traded[0] if traded else 0)
         return traded
+
+    # --- Package 7: pair unwind follow-up (pair_unwind_followup) ---
+    @staticmethod
+    def depth_within(book, key, limit):
+        """Shares on one side of a book ("bids"/"asks", several levels) at or better than limit: asks at <= limit,
+        bids at >= limit. 0 without a book."""
+        out = 0.0
+        for lv in (book or {}).get(key) or []:
+            p = lv["price"]
+            if (p <= limit + 1e-9) if key == "asks" else (p >= limit - 1e-9):
+                out += lv["quantity"]
+        return out
+
+    def joint_unwind_qty(self, members, levels, qty, action):
+        """A pair unwind's sets sized to what can fill on every leg together: the least of the planned sets, each
+        leg's cached book depth at or better than its planned price, and the smaller leg's position (YES held for a
+        long-set sale, NO held for a short-set buy-back)."""
+        key, sign = ("bids", 1) if action == "sell" else ("asks", -1)
+        sizes = [qty]
+        for e in members:
+            ex = self.ex[e]
+            sizes.append(self.depth_within(ex.book, key, levels[e][0]))
+            sizes.append(sign * ex.inv)
+        return max(0, int(min(sizes) + 1e-9))
+
+    def pair_owe(self, race, orders, traded, action, now_m):
+        """After a pair unwind batch whose legs filled unequally: the lagging leg(s) owe (most filled - their fill),
+        at their planned price. Evened up by pair_followup_step on the next cycles."""
+        top = max(traded)
+        legs = {o["exchangeId"]: int(round(top - f)) for o, f in zip(orders, traded) if top - f >= 1 - 1e-9}
+        self.pair_owed[race] = {"action": action, "legs": legs, "t": now_m, "tries": 0,
+                                "price": {o["exchangeId"]: o["price"] for o in orders}}
+        log.warning("pair unwind on %s filled %s unequally: %s owed (follow-up up to %d cycles, at most %.3f a share "
+                    "past the planned price; in memory only, a restart drops it)", race, traded,
+                    ", ".join(f"{self.ex[e].label} {q}" for e, q in legs.items()),
+                    self.cfg.pair_unwind_followup_tries, self.cfg.pair_unwind_followup_max_cost)
+
+    def pair_owed_status(self):
+        """status.json pair_owed: {race: shares still owed (summed over its lagging legs)}."""
+        return {r: int(sum(st["legs"].values())) for r, st in getattr(self, "pair_owed", {}).items()}
+
+    def pair_followup_step(self, fvs, now_m, mine_real=None):
+        """Once a cycle, before take_arbitrage: per race with owed legs, one immediate-or-cancel order on each lagging
+        leg (pair_followup_take). The owed shares shrink by what fills; the state is dropped once even, or after
+        pair_unwind_followup_tries cycles that sent (or tried to send) the follow-up, with one alert of what is left.
+        A cycle the write budget defers is not a try. Returns the races acted on (not quoted this cycle)."""
+        cfg, acted = self.cfg, set()
+        for race in list(self.pair_owed):
+            st = self.pair_owed[race]
+            lag = [e for e, q in st["legs"].items() if q >= 1 and e in self.ex]
+            if not lag:
+                del self.pair_owed[race]
+                continue
+            if not self.running or not self.api.live:
+                continue
+            if not self.writes_ready(2 * len(lag) + 1):   # pull our quotes + the orders + leftover cancels
+                self.arbs_skipped_budget += 1
+                log.info("pair unwind follow-up on %s deferred: write budget busy (next cycle)", race)
+                continue
+            st["tries"] += 1
+            acted.add(race)
+            got = self.pair_followup_take(race, st, lag, fvs, now_m, mine_real)
+            if got is None:                       # never sent (write budget): not a try
+                st["tries"] -= 1
+                continue
+            for e, g in got.items():
+                st["legs"][e] = max(0, int(round(st["legs"][e] - g)))
+            left = sum(st["legs"].values())
+            if left < 1:
+                log.warning("pair unwind on %s: follow-up evened the legs after %d %s", race, st["tries"],
+                            "try" if st["tries"] == 1 else "tries")
+                del self.pair_owed[race]
+            elif st["tries"] >= cfg.pair_unwind_followup_tries:
+                alert(f"pair unwind on {race} left {left} shares unpaired after {st['tries']} tries "
+                      f"({', '.join(f'{self.ex[e].label} {q}' for e, q in st['legs'].items() if q >= 1)}): "
+                      f"now ordinary inventory, which the quoting will work off")
+                del self.pair_owed[race]
+        return acted
+
+    def pair_followup_take(self, race, st, lag, fvs, now_m, mine_real=None):
+        """One immediate-or-cancel order per lagging leg for what it owes, at a limit up to
+        pair_unwind_followup_max_cost past its planned price (short-set buy-back: buy YES at the asks, a covered
+        "sell NO" with reduce_no_as_sell; long-set sale: sell YES at the bids), sized to the fresh book's depth within
+        that limit (never more than held). Our quotes on those legs are pulled first, leftovers cancelled after.
+        Returns {eid: shares filled}, or None if the batch was never sent (write budget)."""
+        cfg = self.cfg
+        buy = st["action"] == "buy"
+        key = "asks" if buy else "bids"
+        orders = []
+        for e in lag:
+            ex = self.ex[e]
+            try:                                  # the cached book may be old
+                ex.book = strip_own(self.api.book(e, self.tid), (mine_real or {}).get(e, []))
+                ex.book_time = ex.verified = time.monotonic()
+            except ApiError as err:
+                log.warning("pair unwind follow-up on %s: book download failed (%s) - cached book", race, err)
+            planned = st["price"][e]
+            limit = (floor_tick(planned + cfg.pair_unwind_followup_max_cost) if buy
+                     else ceil_tick(planned - cfg.pair_unwind_followup_max_cost))
+            held = -ex.inv if buy else ex.inv
+            want = int(min(st["legs"][e], max(0.0, held) + 1e-9))
+            # walk the book to the worst level needed (never past the limit): the order's price
+            price, depth = None, 0.0
+            for lv in (ex.book or {}).get(key) or []:
+                if (lv["price"] > limit + 1e-9) if buy else (lv["price"] < limit - 1e-9):
+                    break
+                if depth >= want:
+                    break
+                price, depth = lv["price"], depth + lv["quantity"]
+            qty = int(min(want, depth))
+            if qty < 1 or price is None:
+                log.warning("pair unwind follow-up on %s: nothing on %s within %.3f (planned %.3f) - %d owed, "
+                            "try %d of %d", race, ex.label, limit, planned, st["legs"][e], st["tries"],
+                            cfg.pair_unwind_followup_tries)
+                continue
+            order = {"exchangeId": e, "side": "yes", "action": "buy" if buy else "sell", "quantity": qty,
+                     "price": price, "tournamentId": self.tid}
+            if buy:                               # a covered "sell NO" of the lone NO left on this leg
+                order = self.no_sell_order(order, ex.inv)
+                if order is None:
+                    log.warning("pair unwind follow-up on %s: the NO on %s is all in a NO+NO set - not sent",
+                                race, ex.label)
+                    continue
+            orders.append(order)
+        if not orders:
+            return {}
+        if not all([self.cancel(o["exchangeId"], [], whole_exchange=True) for o in orders]):
+            log.warning("pair unwind follow-up on %s: could not clear our own quotes - next cycle", race)
+            return {}
+        exp = iso(utcnow() + timedelta(seconds=cfg.arb_order_ttl))
+        for o in orders:
+            o["expirationDate"] = exp
+        log.warning("PAIR UNWIND follow-up %s: %s", race, ", ".join(
+            f"{'buying' if buy else 'selling'} {o['quantity']} YES on {self.ex[o['exchangeId']].label} at "
+            f"{o['price']:.3f}{' (sell NO)' if o.get('_no_sell') else ''}" for o in orders))
+        self.orders_stale = True
+        try:
+            results = self.place_orders(orders)
+        except ApiError as err:
+            if err.code == "WRITE_BUDGET_WAIT":
+                self.arbs_skipped_budget += 1
+                return None
+            for o in orders:
+                self.ex[o["exchangeId"]].pending_until = now_m + cfg.pending_seconds
+            alert(f"pair unwind follow-up on {race}: placement failed ({err}) - check positions")
+            if err.code in FATAL_API_CODES:
+                fatal(f"orders rejected with {err.code}")
+            return {}
+        by_index = {r.get("index", k): r for k, r in enumerate(results)}
+        for k, o in enumerate(orders):
+            if (by_index.get(k) or {}).get("ok"):
+                self.remember_order(o, (by_index.get(k) or {}).get("data") or {}, now_m)
+        for o in orders:
+            self.cancel(o["exchangeId"], [], whole_exchange=True, quiet=True)
+        got = {}
+        for k, o in enumerate(orders):
+            res = by_index.get(k) or {}
+            data = res.get("data") or {}
+            if not res.get("ok"):
+                log.warning("pair unwind follow-up on %s: %s refused (%s)", race, self.ex[o["exchangeId"]].label,
+                            (data.get("error") or {}).get("message") or data.get("error"))
+            got[o["exchangeId"]] = float(data.get("quantityTraded") or 0)
+            if data.get("orderId") is not None:
+                self.order_meta[data["orderId"]] = {"our_side": "bid" if buy else "ask", "price": o["price"],
+                                                    "arb": True, "fv": fvs.get(o["exchangeId"]), "t": time.time(),
+                                                    "eid": o["exchangeId"],
+                                                    **({"no_sell": True} if o.get("_no_sell") else {})}
+                self.notes_dirty = True
+        return got
 
     # ------------------------------------------------------------------------------ taking stale quotes
     def take_stale_quotes(self, refs, liquid, fvs, inv, mine_real, global_reduce, party_delta, now_m):
@@ -7481,6 +7683,8 @@ class Bot:
         """status.json: a one-glance health check, e.g. `cat status.json` over ssh."""
         self.ops_last = self.safe_ops_fields()
         try:
+            owed = ({"pair_owed": self.pair_owed_status()}
+                    if getattr(self.cfg, "pair_unwind_followup", False) or getattr(self, "pair_owed", None) else {})
             write_json(bot_path(self.cfg.status_file), {
                 "updated": iso(utcnow()), "mode": "live" if self.api.live else "dry run",
                 "last_cycle_ok": ok, "failed_cycles_in_a_row": self.failed_cycles,
@@ -7496,6 +7700,7 @@ class Bot:
                               "estimator": getattr(self.cfg, "ref_tilt_estimator", "slope")},
                 # Package 7: NO+NO sets held (races, sets, capital at k - 1 per set) and the paired-unwind check
                 "nono_sets": self.safe_nono_sets(), "pairno_state": getattr(self, "pairno_state", None),
+                **owed,                                   # Package 7: pair unwind legs still owed {race: shares}
                 "seconds_since_cycle": round(time.monotonic() - self.last_cycle_done, 1)
                 if self.last_cycle_done is not None else None})
         except OSError as e:
@@ -8423,6 +8628,9 @@ class Bot:
 
     def shutdown(self):
         """Always runs on exit (Ctrl+C, kill switch, crash): cancel every order we have."""
+        if getattr(self, "pair_owed", None):          # Package 7: in memory only, never carried over
+            log.warning("pair unwind follow-up: owed legs dropped at exit (a restart does not resume them): %s",
+                        self.pair_owed_status())
         if not self.api.live:
             log.info("dry run finished (no real orders to cancel)")
             return
