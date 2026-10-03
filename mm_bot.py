@@ -866,6 +866,75 @@ class Config:
     # pair_no_unwind_max_cost threshold per cycle (each costs 5 writes and a cooldown; up to 38 NO+NO races qualify
     # at once when it is switched on); the rest wait for the next cycles. No effect with pair_no_unwind_max_cost -1.
     pair_no_unwind_max_per_cycle: int = 2
+    # --- Package 8: cash gate and per-market adding side ---
+    # Live 3 Oct 19:56: at 100% capital / ~0 free cash still 299 refusals an hour with 400 "Insufficient available
+    # funds" (85 on NO+NO races, 44 on FLAT markets, 5 on YES holdings), each one a wasted write.
+    # cash_gate_enabled True (live only): no order goes out that needs more cash than is available. An order's cash
+    # need (YES terms): a bid = price x shares (buying YES is a purchase, also on a NO holding - live 3 Oct), except a
+    # covered "sell NO" (reduce_no_as_sell): 0 up to the NO free to sell there less the part locked in NO+NO sets
+    # (1 a share beyond); an ask = (1 - price) x the shares beyond the YES free to sell there (beyond = buying NO);
+    # a batch selling NO on every NO-holding leg of a race closes sets (0). Available = the exchange's cash figure
+    # (P&L read: an "available..." field as is, else "cash..."/"balance..." less the cash our resting orders lock,
+    # else account value - market value less that lock) - cash_gate_reserve, less what this bot has sent since that
+    # read (confirmed cancels give theirs back, and so do orders not placed: batch failed / refused / never sent).
+    # Each order is capped at the part the cash allows (the cash-free part always goes), dropped below 1 share (no
+    # request at all when a whole batch is dropped); joint batches (arbitrage, pair unwinds) shrink every leg alike.
+    # Quotes are capped the same way when planned (no churn). Takes / arbitrage / follow-ups are pre-checked before
+    # our quotes are pulled. The self-tests' 1-share orders are exempt. A P&L read that fails / has no cash figure
+    # alerts once (again after a good read); with no good read for 5 minutes the gate stops gating (logged once)
+    # until one is read. status.json cash_gated / cash_trimmed (orders) / cash_capped_quotes (this cycle) /
+    # cash_gate_left / cash_gate_read_age (s since the last good read). False = off.
+    cash_gate_enabled: bool = False
+    cash_gate_reserve: float = 25.0
+    # adding_factor_per_market True: the "adding" side for the size factors (capital ceiling, turnover-dead, X5 gap
+    # shrink, backstop band, tail factor, mark-fragility over) and for the ladder's factor block is the side that
+    # grows THIS market's |position| (and the part of a reducing order beyond the position), not the race-netted
+    # one, so capital_ceiling_adding_size_factor 0 means no new per-market positions (no hedge purchases). The
+    # race-netted position still drives skew, the reduce-only clip and the risk limits. False = unchanged.
+    adding_factor_per_market: bool = False
+    # --- Package 8 item 2 (all OFF at the defaults, also with the live Package 7 flags pair_no_unwind_max_cost /
+    # reduce_no_as_sell / no_set_aware_bids / pair_unwind_followup ON: each needs its own setting below) ---
+    # pair_no_unwind_max_sets: > 0 and pair_no_unwind_max_cost in effect: a short-set (NO+NO) buy-back is capped at
+    # this many SETS per race per unwind instead of pair_unwind_max_frac x account / YES ask per leg (a cash-per-order
+    # cap measured on the YES price, while the legs are covered "sell NO" orders that lock no cash and RECEIVE 1 - ask).
+    # 0 = off: the old cash cap (pair_unwind_max_frac) for every unwind.
+    pair_no_unwind_max_sets: int = 0
+    # pair_unwind_race_order True (with pair_no_unwind_max_cost in effect): take_arbitrage visits the NO+NO races
+    # cheapest first (see arb_race_order) and a NO+NO buy-back's unwind_is_safe allows the worst-case MARK artefact
+    # (set_slack). False = off: self.groups order and the old strict unwind_is_safe.
+    pair_unwind_race_order: bool = False
+    # pair_unwind_followup_max_age: > 0: an owed record older than this (seconds) is alerted and cleared, so a
+    # follow-up the write budget defers every cycle (not counted as a try) cannot block take_arbitrage on that race
+    # for ever. 0 = off (owed records are kept until resolved).
+    pair_unwind_followup_max_age: float = 0.0
+    # --- Package 8: cut UNPAIRED tilt exposure faster, never crossing ---
+    # A market's position "adds to |tilt_exposure|" when its contribution pos x (raw Polymarket - c), c = 1/legs,
+    # has the sign of the total tilt_exposure (live 3 Oct: +34k, so sign(pos) == sign(r - c)); its tilt exit is the
+    # side that shrinks THIS market's own position (long -> ask, short -> bid). NO+NO sets carry ~0 exposure.
+    # tilt_exit_priority True: in the write budget (change_key) a change touching a tilt exit sorts after the
+    # headline markets and before every other ordinary change (pure ordering: no price or size change).
+    tilt_exit_priority: bool = False
+    # tilt_exit_full_size True: on those markets the tilt exit's size is the whole position, not the planned order
+    # size (compute_quote's reduce_size: still capped by the race-net clip, position / cash limits and, for a
+    # covered NO sale, the NO free to sell / its lone part). Enable it TOGETHER with adding_factor_per_market:
+    # without it the adding side is race-netted, so a tilt exit can count as "adding" and the capital ceiling's
+    # adding factor 0 zeroes it (a start-up warning is logged when full_size is on without per-market).
+    tilt_exit_full_size: bool = False
+    # adding_factor_capital_on > 0: while the capital ceiling is on, capital in positions / account below this ->
+    # the adding side is sized by max(capital_ceiling_adding_size_factor, capital_ceiling_adding_size_factor_resume)
+    # (owner live: the configured factor 0 = no adding at all); back to the configured factor at >= this + 0.01
+    # (hysteresis). status.json capital_ceiling_adding_factor = the factor in force. 0 = off.
+    adding_factor_capital_on: float = 0.0
+    capital_ceiling_adding_size_factor_resume: float = 0.5
+    # ref_guard_tilted True (with T2.1 on in that market): the reference guard measures its gap from the tilted
+    # reference tilted_ref_for(r) instead of raw Polymarket (Dem House: r 0.925, s 0.11 -> 0.878 vs book ~0.87: the
+    # exit rests; a real 8c Polymarket move still moves r' ~7c and trips it).
+    ref_guard_tilted: bool = False
+    # ref_guard_exits True: the guard does not block the side that shrinks THIS market's own position; that side is
+    # then capped at the position (never flips it); the adding side is still blocked. No exemption (the guard blocks
+    # the exit as before) while Polymarket just moved (urgent_ref_move or ref_jump_threshold within
+    # ref_jump_cooldown_seconds) or when the gap (tilted with ref_guard_tilted) exceeds 2 x ref_guard_gap.
+    ref_guard_exits: bool = False
 
 
 CFG = Config()
@@ -1046,6 +1115,21 @@ OVERRIDABLE = {
     "pair_unwind_followup_max_cost": (0.0, 0.05),
     "pair_unwind_followup_tries": (1, 50),
     "pair_no_unwind_max_per_cycle": (1, 10),
+    # --- Package 8: cash gate and per-market adding side ---
+    "cash_gate_enabled": (False, True),
+    "cash_gate_reserve": (0.0, 10000.0),
+    "adding_factor_per_market": (False, True),
+    # --- Package 8 item 2 ---
+    "pair_no_unwind_max_sets": (0, 100000),
+    "pair_unwind_race_order": (False, True),
+    "pair_unwind_followup_max_age": (0.0, 7200.0),
+    # --- Package 8: tilt exits ---
+    "tilt_exit_priority": (False, True),
+    "tilt_exit_full_size": (False, True),
+    "adding_factor_capital_on": (0.0, 1.0),
+    "capital_ceiling_adding_size_factor_resume": (0.0, 1.0),
+    "ref_guard_tilted": (False, True),
+    "ref_guard_exits": (False, True),
 }
 MAX_ORDER_TTL = 7200.0    # no order of ours lives longer than this (dead-man's switch), whatever the TTL settings
 LADDER_MAX_LEVELS = 8
@@ -1865,10 +1949,10 @@ def wire_order(o):
     price) -> the request body actually sent. Only an order marked "_no_sell" (a bid that buys back NO we hold, see
     Bot.cover_no_qty) changes: "buy YES @ p" goes out as the covered sale "sell NO @ 1-p", which needs no cash. It
     reads back through parse_order as our bid at p, so everything after the send keeps working in YES terms."""
-    if "_no_sell" not in o:
+    if "_no_sell" not in o and "_cash_need" not in o:
         return o
-    w = {k: v for k, v in o.items() if k != "_no_sell"}
-    if o["_no_sell"]:
+    w = {k: v for k, v in o.items() if k not in ("_no_sell", "_cash_need")}   # _cash_need: Package 8 gate's note
+    if o.get("_no_sell"):
         w.update(side="no", action="sell", price=round(1 - o["price"], 3))
     return w
 
@@ -2320,7 +2404,7 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
                   position_limit=None, min_edge=None, reduce_size=None, net_inv=None, age_hours=0.0,
                   adding_factor=1.0, bias_side=None, bias_edge=0.0, bias_size=1.0, unload_side=None,
                   unload_edge=0.0, unload_size=None, adding_limit_factor=1.0, frag_limit=None, behind_best=True,
-                  reduce_fv=None, why=None):
+                  reduce_fv=None, why=None, adding_per_market=False):
     """
     fv         fair YES probability
     inv        our net YES shares on THIS exchange (negative = net NO); drives the hard position limit
@@ -2365,6 +2449,9 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
                        our own order
     why                optional dict, filled with why["ro_clip"] = "", "bid", "ask" or "bid ask": the side(s) that
                        ONLY the reduce-only race-net clip emptied (no no_bid / no_ask block, no zero cap on it)
+    adding_per_market  Package 8 (adding_factor_per_market): adding_factor and adding_limit_factor pick the adding side
+                       by THIS exchange's position inv (the side growing |inv|; of a side that shrinks it, the part
+                       beyond the position is adding too), not by net_inv. False = race-netted, as before
     """
     bankroll = bankroll or DEFAULT_BANKROLL
     max_order_cash = cfg.max_order_cash_frac * bankroll
@@ -2540,19 +2627,25 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
     # bid_max / ask_max above keep the normal limits, so an order already resting within them stays). A side the
     # normal limits would quote keeps at least 1 share, so its resting order is not pulled when a market turns dead.
     hold_bid = hold_ask = False
+    sel = inv if adding_per_market else net       # Package 8: which position decides the adding side
     if adding_limit_factor < 1.0:
         f = max(0.0, adding_limit_factor)
-        if net > 0 and bid_size >= 1:
+        if sel > 0 and bid_size >= 1:
             room = long_limit * f - inv
             if cfg.limits_use_race_net:
                 room = min(room, long_limit * f - net)
             bid_size, hold_bid = max(1, min(bid_size, room)), True
-        elif net < 0 and ask_size >= 1:
+        elif sel < 0 and ask_size >= 1:
             room = short_limit * f + inv
             if cfg.limits_use_race_net:
                 room = min(room, short_limit * f + net)
             ask_size, hold_ask = max(1, min(ask_size, room)), True
-    if adding_factor < 1.0:                   # capital ceiling: the side growing |net| shrinks (0 = not quoted)
+    if adding_factor < 1.0 and adding_per_market:   # Package 8: by this market's own position; the part of a
+        f = max(0.0, adding_factor)                 # reducing side beyond the position (it flips it) shrinks too
+        red_bid, red_ask = max(0.0, -inv), max(0.0, inv)
+        bid_size = min(bid_size, red_bid + max(0.0, bid_size - red_bid) * f)
+        ask_size = min(ask_size, red_ask + max(0.0, ask_size - red_ask) * f)
+    elif adding_factor < 1.0:                 # capital ceiling: the side growing |net| shrinks (0 = not quoted)
         if net >= 0:
             bid_size = min(bid_size, bid_size * adding_factor)
         if net <= 0:
@@ -3288,11 +3381,12 @@ class Change:
 
 class Write:
     """One order write running on a writer thread: kind "cancel" (eid, orders, whole) or "batch" (chunk)."""
-    __slots__ = ("kind", "eids", "payload", "future", "sent", "change", "payload_ok", "done_at")
+    __slots__ = ("kind", "eids", "payload", "future", "sent", "change", "payload_ok", "done_at", "cash_need")
 
     def __init__(self, kind, eids, payload, sent, change=None):
         self.kind, self.eids, self.payload, self.sent, self.change = kind, eids, payload, sent, change
         self.future, self.payload_ok, self.done_at = None, False, None   # payload_ok: a cancel confirmed
+        self.cash_need = 0.0          # Package 8 cash gate: what this batch's orders need (counted as sent)
 
 
 def fmt(price, size):
@@ -3317,6 +3411,7 @@ class Bot:
         self.lots_seeded = False          # first reconcile rebuilds missing ones from fills.csv
         self.lots_dirty = False
         self.capital_over = False         # capital ceiling active (capital_in_positions_max_frac)
+        self.adding_resume = False        # Package 8 adding_factor_capital_on: the resume factor is in force
         self.cur_refs, self.cur_liquid = {}, set()   # this cycle's Polymarket prices (for risk_fv)
         _tilt_saved = self.load_tilt()
         self.tilt = TiltEstimator(cfg).from_dict(_tilt_saved)   # T2.1: tournament tilt s (see update_tilt)
@@ -3707,6 +3802,8 @@ class Bot:
             for r in filter(None, map(parse_order, raw_orders)):
                 mine_real[r.eid].append(r)
         resting = mine_real if self.api.live else self.sim_by_eid()
+        if getattr(cfg, "cash_gate_enabled", False) and self.api.live:   # Package 8: this cycle's cash budget
+            self.cash_gate_cycle(f_pnl, pos, raw_orders)     # (also while stale: a good read resumes the gate)
 
         # 2. Order books (only the ones that changed) ------------------------------------------
         if full or len(self.pending_dirty) > cfg.bulk_check_over:
@@ -3805,6 +3902,7 @@ class Bot:
         capital = self.capital_in_positions(pos, inv, fvs)
         cap_frac = capital / equity if equity else None
         self.update_capital_ceiling(cap_frac, cfg)
+        self.update_adding_resume(cap_frac, cfg)
         self.refresh_mark_sd(now_m)
         frag = self.update_mark_frag(inv, cfg)
         ages = self.portfolio_age(time.time())
@@ -3844,6 +3942,8 @@ class Bot:
                        "capital_in_positions": round(capital),
                        "capital_in_positions_frac": round(cap_frac, 3) if cap_frac is not None else None,
                        "capital_ceiling_active": self.capital_over,
+                       "capital_ceiling_adding_factor": self.ceiling_adding_factor(cfg),
+                       "capital_ceiling_adding_resume": self.adding_resume,
                        "portfolio_age_hours": round(ages[0], 2), "positions_over_3h": ages[1],
                        "positions_over_12h": ages[2],
                        **frag,
@@ -3863,6 +3963,8 @@ class Bot:
         # 7. Decide + reconcile each exchange. One write at a time (parallel_writes = 1): cancels happen now,
         #    new orders are batched after. Otherwise every change is planned first, then sent in parallel.
         new_orders, changes = [], []
+        if self.cash_gate_on():                   # Package 8: the quotes' plan budget, after this cycle's takes
+            self.cg_plan_left, self.cg_capped_now = self.cash_left(), 0
         self.ladder_setup(equity, capital, raw_orders, liquid, party_delta, resting)
         for eid, ex in list(self.ex.items()):
             if not self.running:          # Ctrl+C: stop touching the book immediately
@@ -3893,6 +3995,13 @@ class Bot:
         # Orders resting NOW, after this cycle's changes (the health snapshot above was taken before them).
         self.health["orders_resting"] = len(self.my_orders) if self.api.live else len(self.sim)
         self.health["selftest_state"] = self.selftest_state()
+        if getattr(cfg, "cash_gate_enabled", False):   # Package 8 (absent while the gate is off)
+            self.health["cash_gated"] = getattr(self, "cash_gated", 0)
+            self.health["cash_trimmed"] = getattr(self, "cash_trimmed", 0)
+            self.health["cash_capped_quotes"] = getattr(self, "cg_capped_now", 0)
+            self.health["cash_gate_left"] = round(self.cash_left(), 2) if getattr(self, "cg_cash", None) is not None else None
+            age = self.cash_read_age()
+            self.health["cash_gate_read_age"] = round(age, 1) if age is not None else None   # s since a good read
         self.health["fast_unload_windows"] = sum(1 for e in list(self.unloads)
                                                  if e in self.ex and self.unload_side(self.ex[e], now_m))
         self.health["fl_bias_markets"] = {k: sum(1 for x in self.ex.values() if x.fl_tag.startswith(f" fl:{k}"))
@@ -4701,6 +4810,35 @@ class Bot:
                         100 * cap, f"at x{cfg.capital_ceiling_adding_size_factor:g}" if on else "back to normal")
         self.capital_over = on
 
+    def update_adding_resume(self, frac, cfg):
+        """Package 8 adding_factor_capital_on (> 0): with the capital ceiling on, capital in positions / account
+        below it -> the resume factor is in force (adding_resume); off again at >= it + 0.01, or when the ceiling
+        or the setting is off. An unknown account value keeps the current state. Each change logged once."""
+        thr = cfg.adding_factor_capital_on
+        if thr <= 0 or not self.capital_over:
+            on = False
+        elif frac is None:
+            on = self.adding_resume
+        elif self.adding_resume:
+            on = frac < thr + 0.01
+        else:
+            on = frac < thr
+        if on != self.adding_resume:
+            log.warning("capital ceiling adding factor: %s in positions (resume below %.0f%%) - adding sides at x%g",
+                        f"{100 * frac:.1f}%" if frac is not None else "?", 100 * thr,
+                        max(cfg.capital_ceiling_adding_size_factor, cfg.capital_ceiling_adding_size_factor_resume)
+                        if on else cfg.capital_ceiling_adding_size_factor)
+        self.adding_resume = on
+
+    def ceiling_adding_factor(self, cfg):
+        """The capital ceiling's adding-side factor in force: 1 (ceiling off), the configured factor, or (Package 8
+        adding_factor_capital_on) the larger of it and capital_ceiling_adding_size_factor_resume."""
+        if not self.capital_over:
+            return 1.0
+        if self.adding_resume:
+            return max(cfg.capital_ceiling_adding_size_factor, cfg.capital_ceiling_adding_size_factor_resume)
+        return cfg.capital_ceiling_adding_size_factor
+
     def risk_fv(self, e, fvs, members=None):
         """The probability the risk model uses for market e: this cycle's fair value when there is one; else, for
         a market we hold, in this order: the liquid Polymarket reference; 1 minus the other leg's fair value in a
@@ -4875,10 +5013,23 @@ class Bot:
         # Reference-price guard: if Polymarket says this contract is worth clearly MORE than the
         # tournament book does, don't sell it to anyone here (they probably know); clearly LESS -> don't
         # buy. Compared with the book's own price, not the leaned fair value (see cycle step 3).
+        exempt_bid = exempt_ask = False
         if ref is not None:
             base = book_fv if book_fv is not None else fv
-            no_ask = no_ask or ref - base > cfg.ref_guard_gap
-            no_bid = no_bid or base - ref > cfg.ref_guard_gap
+            # Package 8 ref_guard_tilted: the gap from the tilted reference (T2.1 on here), not raw Polymarket
+            gref = self.tilted_ref_for(ex, ref, now_m) if cfg.ref_guard_tilted else ref
+            g_ask, g_bid = gref - base > cfg.ref_guard_gap, base - gref > cfg.ref_guard_gap
+            if cfg.ref_guard_exits:               # Package 8: never block the side shrinking THIS market's position
+                # ...unless Polymarket just moved (within ref_jump_cooldown_seconds of an urgent move or a jump) or
+                # the gap is more than 2 x ref_guard_gap: a real jump still pulls the exit off the book
+                recent = now_m - max(ex.ref_moved_at, ex.ref_jump_at) < cfg.ref_jump_cooldown_seconds
+                wide = abs(gref - base) > 2 * cfg.ref_guard_gap
+                ok_exempt = not recent and not wide
+                exempt_ask = g_ask and ex.inv >= 1 and ok_exempt
+                exempt_bid = g_bid and ex.inv <= -1 and ok_exempt
+                g_ask, g_bid = g_ask and not exempt_ask, g_bid and not exempt_bid
+            no_ask = no_ask or g_ask
+            no_bid = no_bid or g_bid
 
         # Tail guard: near 0 or 1, one side risks ~1 a share to earn ~1c, and a single upset wipes out
         # many fills. Don't take that side, except to shrink a position we already hold.
@@ -4887,6 +5038,10 @@ class Bot:
             ask_cap = max(0, int(ex.inv))         # selling YES near 0 = buying NO near 1
         if fv > cfg.tail_high:
             bid_cap = max(0, int(-ex.inv))        # buying YES near 1
+        if exempt_ask:                            # (ref_guard_exits: the exempted exit never flips the position)
+            ask_cap = int(ex.inv) if ask_cap is None else min(ask_cap, int(ex.inv))
+        if exempt_bid:
+            bid_cap = int(-ex.inv) if bid_cap is None else min(bid_cap, int(-ex.inv))
 
         reduce_only = global_reduce or hrs <= cfg.flatten_hours_before_close
         # From flatten_per_market_hours: flatten each market on its own, i.e. judge (and skew) by this
@@ -4905,11 +5060,15 @@ class Bot:
             planned = min(full, max(1.0, cfg.ref_only_size_frac * self.bankroll()))
             if cfg.ref_only_reduce_full:          # ...but a held position leaves at the market's normal size
                 reduce_size = full
+        if cfg.tilt_exit_full_size and self.tilt_exit_side(ex) is not None:   # Package 8: the whole position
+            reduce_size = max(reduce_size or 0, abs(ex.inv))
         if cfg.market_edge_enabled and ex.eid in self.market_edge:   # rival-floor map: this market's own floor
             own = max(cfg.min_edge, min(self.market_edge[ex.eid], cfg.market_edge_max))
             edge = own if edge is None else max(edge, own)
         ex.age = self.age_hours(ex)
         adding = cfg.capital_ceiling_adding_size_factor if self.capital_over else 1.0
+        if self.adding_resume:                    # Package 8 adding_factor_capital_on: the resume factor
+            adding = self.ceiling_adding_factor(cfg)
         adding_limit = 1.0
         ex.turnover_dead = self.turnover_dead(ex, planned if planned is not None
                                               else cfg.order_size_frac * self.bankroll(), cfg)
@@ -4957,7 +5116,8 @@ class Bot:
                              adding_factor=adding, bias_side=side, bias_edge=bias_edge, bias_size=bias_size,
                              unload_side=u_side, unload_edge=cfg.fast_unload_edge, unload_size=u_size,
                              adding_limit_factor=adding_limit, frag_limit=frag_limit,
-                             behind_best=ex.eid not in self.ref_only, reduce_fv=reduce_fv, why=why)
+                             behind_best=ex.eid not in self.ref_only, reduce_fv=reduce_fv, why=why,
+                             adding_per_market=bool(getattr(cfg, "adding_factor_per_market", False)))
         ex.ro_clip = why.get("ro_clip", "")
         ex.bb_tag = " bb" if q.behind else ""
         ex.lad_ctx = (adding, adding_limit, frag_limit)   # (R3 ladder: the same factors and limits)
@@ -5127,7 +5287,8 @@ class Bot:
                    if fix_ask and q.ask is not None and not asks and not cool_ask else []))
             if not doomed and not new:
                 return None
-            return Change(ex, doomed, False, new, self.change_key(ex, pull=bool(doomed) or not new, reprice=bool(doomed)),
+            return Change(ex, doomed, False, new, self.change_key(ex, pull=bool(doomed) or not new, reprice=bool(doomed),
+                                                                  sides=(fix_bid, fix_ask)),
                           unsafe=bool(doomed))
         # Cancel the wrong side(s). Both wrong -> one cancel-all for the exchange; else per order.
         doomed = (bids if fix_bid else []) + (asks if fix_ask else [])
@@ -5151,7 +5312,7 @@ class Bot:
                   or (fix_ask and any(unsafe_order(o, q.ask, full_ask, q.ask_limit, False) for o in asks)))
         urgent = self.cfg.never_defer_unsafe and unsafe
         return Change(ex, doomed, fix_bid and fix_ask, new,
-                      self.change_key(ex, pull=not new or urgent, reprice=bool(doomed)),
+                      self.change_key(ex, pull=not new or urgent, reprice=bool(doomed), sides=(fix_bid, fix_ask)),
                       unsafe=unsafe or (not new and bool(doomed)))
 
     def hold_side(self, ex, resting, price, limit, size, is_bid, now, now_m):
@@ -5184,13 +5345,33 @@ class Bot:
             for side in ch.reprice_sides():
                 ch.ex.reprices.setdefault(side, deque()).append(now_m)
 
-    def change_key(self, ex, pull, reprice=False):
+    def change_key(self, ex, pull, reprice=False, sides=None):
         """Sending order: pulls first, then the party-control markets, then quotes for empty sides (cheap: a
-        share of one batch), then reprices (a cancel each), biggest quotes first within each."""
+        share of one batch), then reprices (a cancel each), biggest quotes first within each. Package 8
+        tilt_exit_priority: an ordinary market's change touching its tilt exit (sides = (bid changes, ask changes))
+        sorts between the party-control markets and the other ordinary ones."""
         urgent = ex.eid in self.ref_moved or self.unload_urgent(ex, time.monotonic())   # (unload: first placement)
-        return (0 if pull else 0.5 if urgent else 1, 0 if ex.group in self.cfg.headline_races else 1,
+        head = 0 if ex.group in self.cfg.headline_races else 1
+        if head and sides is not None and self.cfg.tilt_exit_priority:
+            side = self.tilt_exit_side(ex)
+            if side is not None and sides[0 if side == "bid" else 1]:
+                head = 0.5
+        return (0 if pull else 0.5 if urgent else 1, head,
                 1 if reprice else 0,
                 -self.size_plan.get(ex.eid, 0))
+
+    def tilt_exit_side(self, ex):
+        """Package 8: "bid" / "ask" = the side shrinking this market's own position when that position adds to
+        |tilt_exposure| (its contribution pos x (raw Polymarket - c), c = 1/legs, has the sign of the total, or is
+        positive while the total is 0); None otherwise. Reads ex.inv / ex.ref as decide() set them this cycle."""
+        r, pos = getattr(ex, "ref", None), ex.inv
+        if r is None or not pos:
+            return None
+        contrib = pos * (r - tilted_ref(r, 1.0, self.legs(ex)))     # tilted_ref(r, 1, legs) = c
+        total = getattr(self, "tilt_exposure", 0.0) or 0.0
+        if contrib == 0 or (contrib > 0) != (total > 0 if total else True):
+            return None
+        return "ask" if pos > 0 else "bid"
 
     def reconcile(self, ex, q, resting, fv, now, now_m):
         """One write at a time (parallel_writes = 1): make the orders resting on this exchange match quote q.
@@ -5284,10 +5465,14 @@ class Bot:
         adding, adding_limit, frag_limit = ex.lad_ctx
         if factors and (adding < 1.0 or adding_limit < 1.0 or (self.capital_over
                                                                and cfg.capital_ceiling_adding_size_factor < 1.0)):
-            if net >= 0:
-                extra[True].append(0)                      # (the touch quote shrinks there; no ladder there)
-            if net <= 0:
-                extra[False].append(0)
+            if getattr(cfg, "adding_factor_per_market", False):   # Package 8: by this market's own position:
+                extra[True].append(max(0.0, -inv))                #   only the part that reduces it
+                extra[False].append(max(0.0, inv))
+            else:
+                if net >= 0:
+                    extra[True].append(0)                  # (the touch quote shrinks there; no ladder there)
+                if net <= 0:
+                    extra[False].append(0)
         if frag_limit is not None:                         # mark-fragility: the side growing |inv| here
             if inv >= 0:
                 extra[True].append(frag_limit - inv)
@@ -5396,6 +5581,8 @@ class Bot:
             # Package 7 no_set_aware_bids: every NO share here is in a NO+NO set - a bid would be a covered sale that
             # breaks the set (or a cash purchase): refused at 0 cash. No bid (the ladder's bids are blocked too).
             q = replace(q, bid=None, bid_size=0, bid_limit=None, bid_max=None)
+        if self.cash_gate_on():                   # Package 8: each side at most what the cash allows (planned so)
+            q = self.cash_gate_quote(ex, q, resting)
         lad = [o for o in resting if self.order_level(o) > 0]
         if not lad and not cfg.ladder_enabled:
             ex.lad_tag = ""
@@ -5673,6 +5860,10 @@ class Bot:
             if whole and eid == self.selftest_eid:
                 self.cancel_gen += 1      # also removes any self-test orders there (see selftest_finish)
             w.future = self.writer.submit(self.cancel_request, eid, orders, whole)
+        elif self.cash_gate_on():             # Package 8: the gate runs here, on the main thread (its budget)
+            orders = [o for o, _ in payload]
+            gate, w.cash_need = self.cash_gate_orders(orders)
+            w.future = self.writer.submit(self.place_orders, orders, gate=gate)
         else:
             w.future = self.writer.submit(self.place_orders, [o for o, _ in payload])
         def done(_f, w=w):
@@ -5706,8 +5897,10 @@ class Bot:
                     if w.kind == "cancel":
                         ex.cancelling = False
         for w in done:
-            if w.future.cancelled():
-                continue                  # never sent (dropped from the queue by stop_queued_writes)
+            if w.future.cancelled():      # never sent (dropped from the queue by stop_queued_writes)
+                if w.kind != "cancel":
+                    self.cash_refund([o for o, _ in w.payload])   # Package 8: its cash need back to the gate
+                continue
             try:
                 self.apply_write(w, now_m)
             except Exception:
@@ -5728,6 +5921,8 @@ class Bot:
                 if not self.api.live:
                     for o in orders:
                         self.sim.pop(o.order_id, None)
+                self.cash_credit([o for o in self.my_orders.values() if o.eid == eid] if whole else
+                                 [o for o in orders if o.order_id in self.my_orders])   # Package 8 (gate on only)
                 self.forget_orders([oid for oid, o in self.my_orders.items() if o.eid == eid] if whole
                                    else [o.order_id for o in orders])
             else:
@@ -5863,9 +6058,329 @@ class Bot:
                 races, sets, cap = races + 1, sets + int(n), cap + int(n) * (len(members) - 1)
         return {"races": races, "sets": sets, "capital": round(cap, 2)}
 
-    def place_orders(self, orders):
-        """POST /orders/batch with each order in its wire form (wire_order): every placement goes through here."""
-        return self.api.place_batch([wire_order(o) for o in orders])
+    # --- Package 8: cash gate (cash_gate_enabled) ---
+    CASH_KEYS_NET = ("availableBalance", "availableCash", "availableFunds", "available")   # already net of locks
+    CASH_KEYS = ("cashBalance", "cash", "balance", "myBalance")                            # locks still in them
+    CASH_LOG_SECONDS = 600.0
+    CASH_STALE_SECONDS = 300.0    # no good cash read for this long (since the last one, or the gate's first cycle):
+    #                               stop gating (logged once) rather than gate every order on a stale / missing figure
+
+    def cash_gate_on(self):
+        if not (bool(getattr(self.cfg, "cash_gate_enabled", False)) and self.api.live):
+            return False
+        age = self.cash_read_age()
+        if age is not None and age > self.CASH_STALE_SECONDS:
+            if not getattr(self, "cg_stale_logged", False):
+                self.cg_stale_logged = True
+                log.warning("cash gate: no good cash read for %.0f s (> %.0f s) - NOT gating until one is read",
+                            age, self.CASH_STALE_SECONDS)
+            return False
+        return True
+
+    def cash_read_age(self):
+        """Seconds since the last good cash read (or since the gate's first cycle, before any), None before that."""
+        t = getattr(self, "cg_read_at", None)
+        return None if t is None else max(0.0, time.monotonic() - t)
+
+    def cash_gate_log(self, eid, msg, *args):
+        """Package 8: a "cash gated" info log on the take / follow-up paths, at most once per market per
+        CASH_LOG_SECONDS (as the quote path)."""
+        now_m, seen = time.monotonic(), self.__dict__.setdefault("cg_logged_take", {})
+        if now_m - seen.get(eid, -1e18) >= self.CASH_LOG_SECONDS:
+            seen[eid] = now_m
+            log.info(msg, *args)
+
+    def cash_figure(self, reply, pos):
+        """(cash, already_net) from the P&L reply: a known "available" field (net of what our orders lock), else a
+        known cash / balance field, else account value - the positions' market value; (None, False) if none."""
+        if isinstance(reply, dict):
+            for keys, net in ((self.CASH_KEYS_NET, True), (self.CASH_KEYS, False)):
+                for k in keys:
+                    v = reply.get(k)
+                    if not isinstance(v, bool) and _num(v) is not None:
+                        return _num(v), net
+            acct = _num(reply.get("totalAccountValue"))
+            mv = _num(((pos or {}).get("summary") or {}).get("totalMarketValue")) if isinstance(pos, dict) else None
+            if acct is not None and mv is not None:
+                return acct - mv, False
+        return None, False
+
+    def cash_gate_cycle(self, f_pnl, pos, raw_orders):
+        """Once a cycle (live, gate on): on a cycle that read the P&L, take the cash figure and the cash our resting
+        orders locked at that read (from the same cycle's open-orders read); what the bot sends from then on is
+        counted in cg_spent (writes still in flight at the read count as sent). Then the plan's budget.
+        A failed read / one without a cash figure alerts once (again after a good read); cg_read_at is the last good
+        read (the first cycle's time before any), see cash_gate_on for a read older than CASH_STALE_SECONDS."""
+        if getattr(self, "cg_read_at", None) is None:
+            self.cg_read_at = time.monotonic()
+        if f_pnl is not None:
+            try:
+                reply = f_pnl.result()
+            except Exception:
+                reply = None
+            cash, net = self.cash_figure(reply, pos)
+            if cash is not None:
+                self.cg_cash = cash
+                self.cg_reserved = 0.0 if net else reserved_cash(raw_orders or [])
+                self.cg_spent = sum(getattr(w, "cash_need", 0.0) for w in getattr(self, "writes", []))
+                self.cg_read_at = time.monotonic()
+                if getattr(self, "cg_warned", False) or getattr(self, "cg_stale_logged", False):
+                    log.info("cash gate: cash figure read again (%.2f) - gating as normal", cash)
+                self.cg_warned = self.cg_stale_logged = False
+            elif not getattr(self, "cg_warned", False):
+                self.cg_warned = True
+                alert("cash gate: the P&L read failed or has no cash figure - only cash-free orders go out until one "
+                      f"is read (gating stops after {self.CASH_STALE_SECONDS:.0f} s without one)")
+        self.cg_plan_left = self.cash_left()
+
+    def cash_left(self):
+        """Cash the gate may still spend now (>= 0); 0 while no cash figure has been read."""
+        cash = getattr(self, "cg_cash", None)
+        if cash is None:
+            return 0.0
+        return max(0.0, cash - getattr(self, "cg_reserved", 0.0) - getattr(self, "cg_spent", 0.0)
+                   - self.cfg.cash_gate_reserve)
+
+    def resting_lock(self, o):
+        """Cash a resting order of ours (YES terms) locks: a bid its price a share (a covered "sell NO": 0); an ask
+        1 - price a share for the part beyond the YES held (that part is a NO purchase)."""
+        if o.is_bid:
+            return 0.0 if (self.order_meta.get(o.order_id) or {}).get("no_sell") else o.price * o.qty
+        ex = self.ex.get(o.eid)
+        held = max(0.0, ex.inv) if ex is not None else 0.0
+        return (1 - o.price) * max(0.0, o.qty - held)
+
+    def cash_credit(self, orders):
+        """A confirmed cancel gives the cash those orders locked back to the gate (until the next cash read)."""
+        if self.cash_gate_on() and getattr(self, "cg_cash", None) is not None:
+            self.cg_spent = getattr(self, "cg_spent", 0.0) - sum(self.resting_lock(o) for o in orders)
+
+    def cash_free(self, eid, skip=lambda o: False):
+        """{"yes", "lone", "set"}: YES free to sell on eid, and the NO free to sell as covered sales, split into its
+        lone part and the part locked in NO+NO sets - each less what our resting orders there already sell
+        (except those `skip` says are being replaced)."""
+        ex = self.ex.get(eid)
+        inv = ex.inv if ex is not None else 0.0
+        rest = [o for o in list(self.my_orders.values()) if o.eid == eid and not skip(o)]
+        yes = max(0.0, inv) - sum(o.qty for o in rest if not o.is_bid)
+        no = max(0.0, -inv) - sum(o.qty for o in rest
+                                  if o.is_bid and (self.order_meta.get(o.order_id) or {}).get("no_sell"))
+        sets = min(max(0.0, no), self.nono_set_part(eid, inv)) if ex is not None and inv <= -1 else 0.0
+        return {"yes": max(0.0, yes), "lone": max(0.0, no - sets), "set": sets}
+
+    @staticmethod
+    def cash_tiers(free, is_bid, price, no_sell, sets_closed=False):
+        """[(shares, cash a share)] an order fills in turn: its cash-free part first."""
+        inf = float("inf")
+        if is_bid and no_sell:                    # covered "sell NO": lone part free, set part breaks sets
+            return [(free["lone"], 0.0), (free["set"], 0.0 if sets_closed else 1.0), (inf, price)]
+        if is_bid:
+            return [(inf, price)]                 # buying YES is a purchase (also on a NO holding: live 3 Oct)
+        return [(free["yes"], 0.0), (inf, 1 - price)]   # beyond the YES held: buying NO at 1 - price
+
+    @staticmethod
+    def tier_need(tiers, qty):
+        need, left = 0.0, float(qty)
+        for amt, cost in tiers:
+            take = min(left, amt)
+            need, left = need + take * cost, left - take
+            if left <= 1e-9:
+                break
+        return need
+
+    @staticmethod
+    def tier_max(tiers, budget):
+        q = 0.0
+        for amt, cost in tiers:
+            take = amt if cost <= 0 else min(amt, max(0, math.floor(max(0.0, budget) / cost + 1e-9)))
+            q += take
+            budget -= take * cost
+            if take < amt:
+                break
+        return q
+
+    @staticmethod
+    def tier_consume(free, is_bid, no_sell, qty):
+        if is_bid and no_sell:
+            a = min(free["lone"], qty)
+            free["lone"] -= a
+            free["set"] = max(0.0, free["set"] - (qty - a))
+        elif not is_bid:
+            free["yes"] = max(0.0, free["yes"] - qty)
+
+    def cash_gate_orders(self, orders, joint=False, commit=True, skip_eids=()):
+        """The gate over one batch (orders in YES terms, as built): returns ([keep], cash needed). commit: shrink
+        each order's quantity in place to what the cash allows (its cash-free part always), mark the ones left
+        with < 1 share as not kept, and count the cash as spent. joint (arbitrage / pair unwinds): every leg
+        shrinks to the same number of shares, all or none. skip_eids: our resting orders there are ignored
+        (cancelled before this batch goes: takes)."""
+        left = self.cash_left()
+        free = {}
+        sets_closed = joint and all(o.get("_no_sell") for o in orders)
+        plan = []
+        for o in orders:
+            eid = o["exchangeId"]
+            if eid not in free:
+                free[eid] = self.cash_free(eid, skip=(lambda r: True) if eid in skip_eids else (lambda r: False))
+            plan.append((o, o["action"] == "buy", bool(o.get("_no_sell"))))
+        if joint:
+            qty = int(min(o["quantity"] for o in orders)) if orders else 0
+
+            def need_at(n, per_order=False):
+                fr = {e: dict(v) for e, v in free.items()}
+                each = []
+                for o, b, ns in plan:
+                    each.append(self.tier_need(self.cash_tiers(fr[o["exchangeId"]], b, o["price"], ns, sets_closed), n))
+                    self.tier_consume(fr[o["exchangeId"]], b, ns, n)
+                return each if per_order else sum(each)
+            lo, hi = 0, qty
+            if need_at(qty) <= left + 1e-9:
+                lo = qty
+            else:
+                while lo < hi:                    # the most sets every leg can take within the cash
+                    mid = (lo + hi + 1) // 2
+                    if need_at(mid) <= left + 1e-9:
+                        lo = mid
+                    else:
+                        hi = mid - 1
+            allowed = [lo] * len(orders)
+            needs = need_at(lo, per_order=True)
+        else:
+            allowed, needs = [], []
+            for o, b, ns in plan:
+                tiers = self.cash_tiers(free[o["exchangeId"]], b, o["price"], ns)
+                q = int(min(o["quantity"], self.tier_max(tiers, left)))
+                n = self.tier_need(tiers, q) if q >= 1 else 0.0
+                if q >= 1:
+                    self.tier_consume(free[o["exchangeId"]], b, ns, q)
+                    left -= n
+                allowed.append(q)
+                needs.append(n)
+        keep = [q >= 1 for q in allowed]
+        need = sum(needs) if all(keep) or not joint else 0.0
+        if not commit:
+            return keep, need
+        now_m = time.monotonic()
+        seen = self.__dict__.setdefault("cg_logged", {})
+        for o, q, k in zip(orders, allowed, keep):
+            if q >= o["quantity"]:
+                continue
+            if k:
+                self.cash_trimmed = getattr(self, "cash_trimmed", 0) + 1
+            else:
+                self.cash_gated = getattr(self, "cash_gated", 0) + 1
+            eid = o["exchangeId"]
+            if now_m - seen.get(eid, -1e18) >= self.CASH_LOG_SECONDS:
+                seen[eid] = now_m
+                ex = self.ex.get(eid)
+                log.info("CASH GATE %s: %s %d @ %.3f%s -> %s (cash left %.2f, reserve %.0f)",
+                         ex.label if ex else eid, "bid" if o["action"] == "buy" else "ask", o["quantity"],
+                         o["price"], " (sell NO)" if o.get("_no_sell") else "",
+                         f"{q} shares" if k else "not sent", self.cash_left(), self.cfg.cash_gate_reserve)
+            if k:
+                o["quantity"] = int(q)
+        if need:
+            for o, k, n in zip(orders, keep, needs):   # each sent order's need: given back if it is not placed
+                if k and n > 0:
+                    o["_cash_need"] = float(n)
+        self.cg_spent = getattr(self, "cg_spent", 0.0) + need
+        return keep, need
+
+    def cash_refund(self, orders):
+        """Package 8: give back to the gate the cash need counted as spent when these orders were sent, as they were
+        not placed (batch failed / refused / never sent). Each order's need is given back once."""
+        back = sum(float(o.pop("_cash_need", 0.0) or 0.0) for o in orders if isinstance(o, dict))
+        if back > 0 and getattr(self, "cg_cash", None) is not None:
+            self.cg_spent = getattr(self, "cg_spent", 0.0) - back
+        return back
+
+    def cash_gate_blocks(self, orders, joint=False):
+        """Pre-check before a take / arbitrage pulls our quotes: True if the gate would send none of these orders
+        (our resting orders on their exchanges are ignored: they are cancelled first). False with the gate off."""
+        if not self.cash_gate_on() or not orders:
+            return False
+        keep, _ = self.cash_gate_orders(orders, joint=joint, commit=False,
+                                        skip_eids={o["exchangeId"] for o in orders})
+        if not any(keep):
+            self.cash_gated = getattr(self, "cash_gated", 0) + len(orders)
+            return True
+        return False
+
+    def cash_gate_quote(self, ex, q, resting):
+        """Plan-time cap (plan_exchange): each side's wanted size at most what the cash allows (the resting level-0
+        order on that side counts as available: it is kept or replaced), so a capped quote is planned as such
+        (no churn against the send-time gate). bid_max / ask_max keep the uncapped size: a resting order is never
+        pulled for cash. The plan's budget (cg_plan_left) shrinks by what is planned."""
+        left = max(0.0, getattr(self, "cg_plan_left", 0.0))
+        lvl0 = [o for o in resting if self.order_level(o) == 0]
+        for is_bid in (True, False):
+            price, size = (q.bid, q.bid_size) if is_bid else (q.ask, q.ask_size)
+            if price is None or size < 1:
+                continue
+            same = [o for o in lvl0 if o.is_bid == is_bid]
+            ids = {o.order_id for o in same}
+            free = self.cash_free(ex.eid, skip=lambda o: o.order_id in ids)
+            no_sell = is_bid and self.cover_no_qty(ex.eid, ex.inv, 0) >= 1
+            own = sum(self.resting_lock(o) for o in same)
+            tiers = self.cash_tiers(free, is_bid, price, no_sell)
+            cap = int(min(size, self.tier_max(tiers, left + own)))
+            left = max(0.0, left - max(0.0, self.tier_need(tiers, cap) - own))
+            if cap >= size:
+                continue
+            self.cg_capped_now = getattr(self, "cg_capped_now", 0) + 1   # status: quote sides capped this cycle
+            now_m, seen = time.monotonic(), self.__dict__.setdefault("cg_logged", {})
+            if now_m - seen.get(ex.eid, -1e18) >= self.CASH_LOG_SECONDS:
+                seen[ex.eid] = now_m
+                log.info("CASH GATE %s: %s quote %d @ %.3f -> %s (cash left %.2f, reserve %.0f)", ex.label,
+                         "bid" if is_bid else "ask", size, price, f"{cap} shares" if cap >= 1 else "not quoted",
+                         left, self.cfg.cash_gate_reserve)
+            if is_bid:
+                q = (replace(q, bid_size=cap, bid_max=q.bid_max if q.bid_max is not None else size) if cap >= 1
+                     else replace(q, bid=None, bid_size=0, bid_limit=None, bid_max=None))
+            else:
+                q = (replace(q, ask_size=cap, ask_max=q.ask_max if q.ask_max is not None else size) if cap >= 1
+                     else replace(q, ask=None, ask_size=0, ask_limit=None, ask_max=None))
+        self.cg_plan_left = left
+        return q
+
+    def place_orders(self, orders, joint=False, gate=None):
+        """POST /orders/batch with each order in its wire form (wire_order): every placement goes through here.
+        Package 8 cash gate (live, cash_gate_enabled): orders are capped / dropped first (gate: the keep flags if
+        the main thread already ran it, see submit_write); a dropped order gets a result {"ok": False,
+        "cash_gated": True} in its place, and a batch dropped whole sends no request.
+        When the gate runs HERE (the main thread's takes / arbitrage / follow-ups), the cash need of an order not
+        placed (the batch raised, or its result is not ok) is given back to the gate before returning / raising."""
+        own_gate = gate is None and self.cash_gate_on()
+        if own_gate:
+            gate, _ = self.cash_gate_orders(orders, joint=joint)
+        try:
+            out = self.place_gated(orders, gate)
+        except Exception:
+            if own_gate:
+                self.cash_refund(orders)
+            raise
+        if own_gate:
+            by_index = {r.get("index", k): r for k, r in enumerate(out or []) if isinstance(r, dict)}
+            self.cash_refund([o for k, o in enumerate(orders) if not (by_index.get(k) or {}).get("ok")])
+        return out
+
+    def place_gated(self, orders, gate):
+        if gate is None or all(gate):
+            return self.api.place_batch([wire_order(o) for o in orders])
+        send = [o for o, k in zip(orders, gate) if k]
+        res = self.api.place_batch([wire_order(o) for o in send]) if send else []
+        by_index = {r.get("index", j): r for j, r in enumerate(res or [])}
+        out, j = [], 0
+        for k, keep in enumerate(gate):
+            if keep:
+                r = dict(by_index.get(j) or {})
+                r["index"] = k
+                j += 1
+            else:
+                r = {"index": k, "ok": False, "status": 0, "cash_gated": True,
+                     "data": {"error": {"code": "CASH_GATED", "message": "cash gate: not enough available cash"}}}
+            out.append(r)
+        return out
 
     def order_ttl(self, ex, level=0):
         """Seconds a new order lives: order_ttl, or with ttl_tiers_enabled its market tier's (level 0 only; the
@@ -6064,6 +6579,8 @@ class Bot:
                 log.error("cancel on %s failed: %s", eid, e)
             ok = False
         if ok:                                # gone: update our record of what's resting
+            self.cash_credit([o for o in self.my_orders.values() if o.eid == eid] if whole_exchange else
+                             [o for o in orders if o.order_id in self.my_orders])   # Package 8 (gate on only)
             self.forget_orders([oid for oid, o in self.my_orders.items() if o.eid == eid] if whole_exchange
                                else [o.order_id for o in orders])
         else:
@@ -6086,6 +6603,7 @@ class Bot:
         order was for (fill attribution), our record of resting orders, and back-offs."""
         cfg = self.cfg
         if isinstance(results, Exception):
+            self.cash_refund([o for o, _ in chunk])   # Package 8: their cash need back (WRITE_BUDGET_WAIT, errors)
             e = results if isinstance(results, ApiError) else ApiError(0, "NETWORK", str(results))
             # Unknown outcome (network, 409 in flight, 502/503 after retries): some orders may
             # exist, so leave these exchanges alone until they show up. Clear rejection: back off.
@@ -6110,6 +6628,7 @@ class Bot:
             r, ex = by_index.get(k, {}), self.ex.get(order["exchangeId"])
             data = r.get("data") or {}
             if r.get("ok"):
+                order.pop("_cash_need", None)             # placed: its cash stays spent until the next read
                 oid = data.get("orderId")
                 if not self.api.live:                     # dry run: remember it as if it were resting
                     oid, self.next_sim_id = self.next_sim_id, self.next_sim_id - 1
@@ -6124,6 +6643,9 @@ class Bot:
                 if data.get("quantityTraded"):
                     log.info("order on %s traded %s immediately", order["exchangeId"], data["quantityTraded"])
                     self.orders_stale = True          # positions changed: re-read them next cycle
+                continue
+            self.cash_refund([order])                 # Package 8: not placed: its cash need back to the gate
+            if r.get("cash_gated"):                   # Package 8: never sent (cash gate, logged there): no back-off
                 continue
             err = data.get("error") or {}
             if not isinstance(err, dict):             # plain-text error: {"error": "Not found"}
@@ -6168,7 +6690,7 @@ class Bot:
             return done
         b_left = int(getattr(cfg, "pair_no_unwind_max_per_cycle", 2))   # Package 7: B-only short-set unwinds
         b_waiting = 0
-        for race, members in self.groups.items():
+        for race, members in self.arb_race_order(inv):
             if (len(members) < 2 or not self.running or now_m < self.arb_cooldown.get(race, 0)
                     or race in getattr(self, "pair_owed", ())  # Package 7: its owed legs are evened up first
                     or any(busy(self.ex[e], now_m) for e in members)):
@@ -6214,6 +6736,28 @@ class Bot:
                      "cycles (pair_no_unwind_max_per_cycle %d)", b_waiting, cfg.pair_no_unwind_max_per_cycle)
         return done
 
+    def arb_race_order(self, inv):
+        """The order take_arbitrage visits races in. Unchanged (self.groups order) unless pair_no_unwind_max_cost is in
+        effect; then (Package 8) the races not held NO on every leg keep their order and come first (they are not
+        under pair_no_unwind_max_per_cycle), and the NO+NO races follow, cheapest first: the cached YES asks' sum
+        ascending (no full ask book last), then the capital the sets lock descending (sets x (legs - 1)), then the
+        race name - deterministic, so with the per-cycle cap the cheapest sets go first and the rest wait."""
+        items = list(self.groups.items())
+        if not (self.pair_no_unwind_on() and getattr(self.cfg, "pair_unwind_race_order", False)):
+            return items
+        head, nono = [], []
+        for race, members in items:
+            sets = (min(-float(inv.get(e, 0.0)) for e in members)
+                    if len(members) >= 2 and all(e in self.ex for e in members) else 0.0)
+            if sets < 1:
+                head.append((race, members))
+                continue
+            asks = self.top_levels(members, "asks")
+            total = sum(p for p, _ in asks.values()) if asks else float("inf")
+            nono.append(((round(total, 6), -int(sets) * (len(members) - 1), str(race)), race, members))
+        nono.sort(key=lambda t: t[0])
+        return head + [(race, members) for _, race, members in nono]
+
     def top_levels(self, members, key):
         """{eid: (price, size)} of the best OTHER-trader level ("bids"/"asks") on every leg, or None if a leg has none."""
         out = {}
@@ -6246,15 +6790,23 @@ class Bot:
                 total = sum(p for p, _ in levels.values())
                 edge = total - 1 if sign > 0 else 1 - total
                 floor = cfg.pair_unwind_min_profit
-                if sign < 0 and self.pair_no_unwind_on():
+                nono = sign < 0 and self.pair_no_unwind_on()
+                if nono:
                     # Package 7: a NO+NO set is unwound as a pair even at a small cost (asks <= 1 + max_cost): the
                     # only way to free it without cash (selling one leg breaks the set's collateral)
                     floor = min(floor, -cfg.pair_no_unwind_max_cost)
                 if edge < floor - 1e-9:   # (buying back a short set below 0.90 only cuts risk)
                     continue
-                qty = int(min([sets] + [size for _, size in levels.values()] +
-                              [cfg.pair_unwind_max_frac * bank / max(p, TICK) for p, _ in levels.values()]))
-                if qty >= 1 and self.unwind_is_safe(inv, fvs, members, -sign * qty):
+                max_sets = int(getattr(cfg, "pair_no_unwind_max_sets", 0) or 0)
+                if nono and max_sets > 0:
+                    # Package 8: every leg is a covered "sell NO" (no cash locked, 1 - ask received), so the cap is in
+                    # SETS per race, not cash per order at the YES ask (0 = off: the old cash cap)
+                    caps = [max_sets]
+                else:
+                    caps = [cfg.pair_unwind_max_frac * bank / max(p, TICK) for p, _ in levels.values()]
+                qty = int(min([sets] + [size for _, size in levels.values()] + caps))
+                slack_kw = {"set_slack": True} if nono and getattr(cfg, "pair_unwind_race_order", False) else {}
+                if qty >= 1 and self.unwind_is_safe(inv, fvs, members, -sign * qty, **slack_kw):
                     self.arb_plan_b = edge < cfg.pair_unwind_min_profit - 1e-9
                     return "unwind", action, levels, qty
         if not cfg.arb_enabled or closing:
@@ -6279,13 +6831,22 @@ class Bot:
             return "arb", "buy", asks, qty
         return None
 
-    def unwind_is_safe(self, inv, fvs, members, delta):
+    def unwind_is_safe(self, inv, fvs, members, delta, set_slack=False):
         """Would adding `delta` YES shares on every leg of a race leave the party delta within its cap (or no
         further past it) and the settlement risk and the worst case no higher? A complete set is riskless,
-        so this holds by construction; it guards against the set being part of a hedge the risk logic relies on."""
+        so this holds by construction; it guards against the set being part of a hedge the risk logic relies on.
+        set_slack (Package 8, a NO+NO buy-back with pair_no_unwind_max_cost in effect and pair_unwind_race_order
+        on; arb_plan passes it only then): the worst case is a MARK, so
+        when the legs' risk fair values add up to s > 1 buying back d short sets raises it by d x (s - 1) although
+        the set pays the same in every outcome; that mark artefact is allowed (the party delta and the settlement
+        risk are still checked)."""
         after = dict(inv)
         for e in members:
             after[e] = after.get(e, 0.0) + delta
+        slack = 1e-6
+        if set_slack and delta > 0 and all(inv.get(e, 0.0) <= -delta + 1e-9 for e in members):
+            s = sum(self.risk_fv(e, fvs, members) for e in members)
+            slack += delta * max(0.0, s - 1.0)
 
         def pdelta(pos):
             return sum(PARTY_SIGN.get(ex.party, 0) * pos.get(eid, 0.0) for eid, ex in self.ex.items())
@@ -6294,7 +6855,7 @@ class Bot:
         cap = self.cfg.max_party_delta_frac * self.bankroll()
         if abs(after_pd) > cap and abs(after_pd) > abs(before_pd) + 1e-6:
             return False
-        if self.total_worst_case(after, fvs) > self.total_worst_case(inv, fvs) + 1e-6:
+        if self.total_worst_case(after, fvs) > self.total_worst_case(inv, fvs) + slack:
             return False
         return self.settlement_risk(after, fvs, after_pd) <= self.settlement_risk(inv, fvs, before_pd) + 1e-6
 
@@ -6458,6 +7019,13 @@ class Bot:
             return execute(y, buy, qty, price)
         if not self.api.live:
             return 0.0
+        if self.cash_gate_on():                   # Package 8: nothing of it fits the cash -> retried next cycle
+            prov = self.no_sell_order({"exchangeId": y, "side": "yes", "action": "buy" if buy else "sell",
+                                       "quantity": int(qty), "price": price, "tournamentId": self.tid}, ex.inv)
+            if prov is not None and self.cash_gate_blocks([prov]):
+                self.cash_gate_log(y, "pair unwind second leg on %s deferred: not enough available cash (cash gate)",
+                                   race)
+                return 0.0
         if not self.cancel(y, [], whole_exchange=True):   # our own quotes there first: never trade with ourselves
             return 0.0
         order = self.no_sell_order({"exchangeId": y, "side": "yes", "action": "buy" if buy else "sell",
@@ -6575,6 +7143,10 @@ class Bot:
                         race, ", ".join(f"{self.ex[o['exchangeId']].label} x{o['quantity']} NO held "
                                         f"{-self.ex[o['exchangeId']].inv:.0f}" for o in orders))
             return
+        if self.cash_gate_blocks(orders, joint=True):   # Package 8: not one set fits the cash (gate on only)
+            self.cash_gate_log(f"race:{race}", "%s on %s not sent: not enough available cash for one set (cash gate)",
+                               "pair unwind" if kind == "unwind" else "arbitrage", race)
+            return
         total = sum(p for p, _ in levels.values())
         per_set = total - 1 if action == "sell" else 1 - total
         legs = ", ".join(f"{self.ex[e].label} @{p:.3f} x{s:.0f}" for e, (p, s) in levels.items())
@@ -6599,7 +7171,7 @@ class Bot:
             o["expirationDate"] = exp
         self.orders_stale = True                  # positions and orders change: re-read next cycle
         try:
-            results = self.place_orders(orders)
+            results = self.place_orders(orders, joint=True)   # (cash gate: every leg shrinks alike)
         except ApiError as e:
             if e.code == "WRITE_BUDGET_WAIT":             # never sent: nothing can have traded, no hold, no alert
                 self.arbs_skipped_budget += 1
@@ -6718,6 +7290,13 @@ class Bot:
             if not lag:
                 del self.pair_owed[race]
                 continue
+            max_age = float(getattr(cfg, "pair_unwind_followup_max_age", 0.0) or 0.0)
+            if max_age > 0 and now_m - st.get("t", now_m) >= max_age:   # Package 8 (0 = off): never blocks for ever
+                owed = ", ".join(f"{self.ex[e].label} {st['legs'][e]}" for e in lag)
+                alert(f"pair unwind on {race}: owed legs not evened up within {max_age:.0f} s ({st['tries']} tries; "
+                      f"{owed}): owed state cleared, now ordinary inventory, which the quoting will work off")
+                del self.pair_owed[race]
+                continue
             if not self.running or not self.api.live:
                 continue
             if not self.writes_ready(2 * len(lag) + 1):   # pull our quotes + the orders + leftover cancels
@@ -6800,6 +7379,13 @@ class Bot:
                     st.setdefault("cleared", []).append(e)
                     continue
             orders.append(order)
+        if orders and self.cash_gate_on():        # Package 8: a leg none of which fits the cash waits (a try)
+            fits = [o for o in orders if not self.cash_gate_blocks([o])]
+            for o in orders:
+                if o not in fits:
+                    self.cash_gate_log(o["exchangeId"], "pair unwind follow-up on %s: %s not sent - not enough "
+                                       "available cash (cash gate)", race, self.ex[o["exchangeId"]].label)
+            orders = fits
         if not orders:
             return {}
         st["sent"] = True                         # from here on writes go out (cancels, the batch)
@@ -6945,6 +7531,12 @@ class Bot:
         if buy and self.set_blocked(ex.eid, ex.inv):       # Package 7: all NO here in a NO+NO set: nothing to send
             log.info("take on %s skipped: all its NO is in a NO+NO set (no_set_aware_bids)", ex.label)
             return False
+        if self.cash_gate_on():                   # Package 8: nothing of it fits the cash -> our quote stays put
+            prov = self.no_sell_order({"exchangeId": ex.eid, "side": "yes", "action": "buy" if buy else "sell",
+                                       "quantity": qty, "price": price, "tournamentId": self.tid}, ex.inv)
+            if prov is not None and self.cash_gate_blocks([prov]):
+                self.cash_gate_log(ex.eid, "take on %s skipped: not enough available cash (cash gate)", ex.label)
+                return False
         log.warning("%sTAKE %s: Polymarket %.3f vs stale %s %.3f -> %s %d YES at %.3f",
                     "" if self.api.live else "[dry] ", ex.label, p, "ask" if buy else "bid", price,
                     "buying" if buy else "selling", qty, price)
@@ -7146,6 +7738,13 @@ class Bot:
                 p = again[0]
             if p["buy"] and self.set_blocked(eid, ex.inv):     # Package 7: all NO here in a NO+NO set
                 continue
+            if self.cash_gate_on():               # Package 8: nothing of it fits the cash -> not taken
+                prov = self.no_sell_order({"exchangeId": eid, "side": "yes", "action": "buy" if p["buy"] else "sell",
+                                           "quantity": p["qty"], "price": p["price"], "tournamentId": self.tid}, ex.inv)
+                if prov is not None and self.cash_gate_blocks([prov]):
+                    self.cash_gate_log(eid, "aged take on %s skipped: not enough available cash (cash gate)",
+                                       ex.label)
+                    continue
             self.hold_takes.append((now_m, p["notional"]))     # counted when sent (an IOC may do less: safe side)
             self.hold_takes_total += 1
             taken.add(eid)
@@ -7833,6 +8432,16 @@ class Bot:
                     self.size_plan_time = -1e9                 # re-plan sizes now
         self.overrides = good
         self.health["overrides"] = dict(good)
+        self.warn_settings()
+
+    def warn_settings(self):
+        """One-line warnings for setting combinations that work against each other (once per time they turn on)."""
+        bad = bool(getattr(self.cfg, "tilt_exit_full_size", False)) and not getattr(self.cfg, "adding_factor_per_market",
+                                                                                    False)
+        if bad and not getattr(self, "warned_full_size", False):
+            log.warning("tilt_exit_full_size is on without adding_factor_per_market: the race-netted adding factor "
+                        "(0) can zero a tilt exit - turn both on together")
+        self.warned_full_size = bad
 
     def check_market_edge(self, force=False):
         """Every market_edge_reload_seconds: re-read market_edge.json (rival-floor map) if it changed. Bad entries
@@ -8638,6 +9247,7 @@ class Bot:
                          kill_file)
             self.exit_code = EXIT_KILLED
             return
+        self.warn_settings()                               # start-up: settings that work against each other
         try:
             # Started before the open, so both are warm at the first cycle: Polymarket prices refresh in
             # the background from now on, and the realtime feed is connected.
