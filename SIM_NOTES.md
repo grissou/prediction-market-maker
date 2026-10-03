@@ -630,3 +630,17 @@ T2.1 +133 ± 75 pnl_lag / +151 ± 120 pnl_liq, cap 0.2 within noise of it (tests
 | X11 A dead-only (`reduce_from_book_dead_only`) | -45 ± 109 | -26 ± 109 | -93 ± 92 | -284 ± 77 | +0.162 ± 0.033 | -0.092 ± 0.014 | -0.82 ± 0.57 | +198 ± 581 | -0.019 ± 0.046 | +62 ± 15 | FAIL: ~200 below T2.1 alone; dead markets still get picked off |
 | ladder_enabled | +155 ± 77 | +135 ± 66 | +87 ± 70 | -135 ± 51 | +0.102 ± 0.039 | -0.075 ± 0.015 | -1.01 ± 0.52 | +187 ± 583 | +0.048 ± 0.032 | +39 ± 14 | no gain over T2.1 alone (cash still binds); OFF |
 | `ref_tilt_rampin_min` 20 | +176 ± 110 | **+199 ± 83** | +133 ± 87 | -166 ± 62 | +0.153 ± 0.031 | -0.097 ± 0.012 | -1.22 ± 0.63 | +642 ± 650 | +0.061 ± 0.057 | **+9 ± 9** | same P&L as the step-on, less pick-off, smoother switch-on: DEFAULT 20 |
+
+## Confirmation, pinned world (live backstop), 16 seeds x 6 h quiet, T2.1 with `ref_tilt_rampin_min` 0 (d vs BASE; base: pnl_lag +366,
+## pnl_liq +2,084, cap_end 0.831, writes 16.6/min, reduce-only 25% of cycles)
+| Variant | d pnl_lag (exchange-style) | d pnl_liq | d pnl_mid | d pnl (Poly) | d exit_ratio | d cap_end | d wc_end | d writes_pm | d deferred_h | d mk15_mid | d pick_cost | d ro_frac |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| **T2.1** | **+509 ± 110** | **+601 ± 107** | +554 ± 107 | +341 ± 94 | +0.020 ± 0.020 | -0.064 ± 0.012 | -6.8k ± 0.7k | +2.44 ± 0.35 (16.6 -> 19.0) | +507 ± 453 (+9%) | -0.024 ± 0.025 | +40 ± 18 | -0.20 ± 0.04 |
+| T2.1 + backstop 0.85 | +587 ± 112 | +649 ± 101 | +610 ± 104 | +412 ± 103 | +0.017 ± 0.022 | -0.060 ± 0.014 | -6.7k ± 0.8k | +3.11 ± 0.43 | +596 ± 424 | -0.020 ± 0.026 | +56 ± 18 | -0.25 ± 0.04 |
+| T2.1 + hysteresis 0.01 | +456 ± 123 | +523 ± 117 | +487 ± 122 | +292 ± 117 | +0.015 ± 0.021 | -0.057 ± 0.013 | -6.3k ± 0.7k | +2.74 ± 0.44 | +561 ± 488 | -0.034 ± 0.028 | +43 ± 18 | -0.22 ± 0.04 |
+Paired against T2.1 alone (same seeds): backstop 0.85 **+78 ± 86 pnl_lag, +48 ± 81 pnl_liq**, writes +0.67 ± 0.24, reduce-only -0.05 ± 0.02;
+hysteresis 0.01 **-57 ± 60 pnl_lag, -83 ± 66 pnl_liq**, writes +0.32 ± 0.19.
+Verdicts: T2.1 CONFIRMED at 16 x 6 in the live-like world (4.6 SE at the exchange-style mark, 5.6 SE at liquidation; positive even at the
+Polymarket mark over 6 h: the positions it declines to add are the ones that bleed). Backstop 0.85 with T2.1: not clearly positive (the 8 x 3
++180 was noise; the live data says cash binds before the backstop and the reduce-only churn cost -87 net): STAYS 0.80, revisit after a day of
+T2.1. Hysteresis 0.01 with T2.1: negative within noise and more writes: STAYS 0.03.
