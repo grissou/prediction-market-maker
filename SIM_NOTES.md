@@ -644,3 +644,96 @@ Verdicts: T2.1 CONFIRMED at 16 x 6 in the live-like world (4.6 SE at the exchang
 Polymarket mark over 6 h: the positions it declines to add are the ones that bleed). Backstop 0.85 with T2.1: not clearly positive (the 8 x 3
 +180 was noise; the live data says cash binds before the backstop and the reduce-only churn cost -87 net): STAYS 0.80, revisit after a day of
 T2.1. Hysteresis 0.01 with T2.1: negative within noise and more writes: STAYS 0.03.
+
+## Confirmation, tilt world (no backstop), 16 x 6 quiet, T2.1 ramp 0 (d vs BASE; base pnl_lag +623, pnl_liq +2,308, cap_end 0.862, writes 20.3)
+| Variant | d pnl_lag | d pnl_liq | d pnl_mid | d pnl (Poly) | d exit_ratio | d cap_end | d wc_end | d writes_pm | d deferred_h | d mk15_mid | d pick_cost |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| **T2.1** | **+330 ± 64** | **+426 ± 63** | +351 ± 61 | +54 ± 58 | +0.061 ± 0.013 | -0.091 ± 0.009 | -10.0k ± 0.8k | -0.63 ± 0.27 | +464 ± 362 (+8%) | -0.054 ± 0.019 | +52 ± 16 |
+The one rule T2.1 misses: the consensus markout `mk15_mid` is 0.054c per share worse (2.8 SE; the Polymarket-marked `pick_cost` +52): the
+bot's quotes sit nearer the book, so it is picked off a little more per share, ~-150 on 280k shares in 6 h, already inside the +426. Every
+other rule passes (P&L at both marks, capital -9 points, worst case -10k, writes down, deferred +8%, exit ratio up).
+
+## Round 5 summary tables (generated from the per-seed cache tests/live_sim_round5_cache.jsonl by the executor's tables script; d vs BASE, ± 1 SE)
+### Tilt world (anchor 1, tilt 0.05 + 0.002/h), 8 x 3 quiet
+| Variant | d pnl_lag (exchange-style) | d pnl_liq | d pnl_mid | d pnl (Polymarket) | d exit_ratio | d cap_end | d wc_end | d writes_pm | d deferred_h | d mk15_mid c | d pick_cost | d ro_frac |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| BASE (8 seeds) | pnl_lag -753 | pnl_liq 1,152 | pnl_mid 1,254 | pnl 1,591 | exit_ratio 1.003 | cap_end 0.912 | wc_end 48,295 | writes_pm 21.71 | deferred_h 6,084 | mk15_mid 1.089 | pick_cost -61 | ro_frac 0.000 |
+| T2.1 ref_tilt_enabled (n=8) | +166 ± 72 | +163 ± 60 | +101 ± 58 | -131 ± 51 | +0.105 ± 0.039 | -0.076 ± 0.015 | -8,261 ± 967 | -1.17 ± 0.46 | +71 ± 551 | +0.054 ± 0.031 | +38 ± 14 | +0.000 ± 0.000 |
+| T2.1 ramp-in 120 min (n=8) | -36 ± 152 | -70 ± 131 | -98 ± 131 | -195 ± 86 | +0.069 ± 0.032 | -0.047 ± 0.011 | -5,611 ± 1,265 | +0.79 ± 0.53 | +1,070 ± 569 | -0.016 ± 0.048 | +1 ± 7 | +0.000 ± 0.000 |
+| T2.1 ramp-in 20 min (n=8) | +176 ± 110 | +199 ± 83 | +133 ± 87 | -166 ± 62 | +0.153 ± 0.031 | -0.097 ± 0.012 | -9,122 ± 1,370 | -1.22 ± 0.63 | +642 ± 650 | +0.061 ± 0.057 | +9 ± 9 | +0.000 ± 0.000 |
+| T2.2: T2.1 + ref_weight 0.5 (n=8) | +87 ± 82 | +176 ± 50 | +87 ± 62 | -272 ± 66 | +0.141 ± 0.027 | -0.097 ± 0.011 | -10,788 ± 716 | -0.03 ± 0.43 | +1,072 ± 784 | -0.056 ± 0.032 | +60 ± 16 | +0.000 ± 0.000 |
+| T2.2: T2.1 + ref_weight 0.35 (n=8) | +139 ± 130 | +186 ± 103 | +90 ± 103 | -401 ± 85 | +0.201 ± 0.029 | -0.131 ± 0.013 | -13,550 ± 1,376 | -0.42 ± 0.38 | +1,330 ± 467 | -0.076 ± 0.039 | +70 ± 14 | +0.000 ± 0.000 |
+| A reduce_from_book (n=8) | +36 ± 150 | +91 ± 135 | -2 ± 125 | -362 ± 71 | +0.195 ± 0.040 | -0.120 ± 0.017 | -10,700 ± 1,599 | -0.49 ± 0.62 | -210 ± 891 | -0.229 ± 0.031 | +51 ± 8 | +0.000 ± 0.000 |
+| T2.1 + A (n=8) | +42 ± 113 | +124 ± 90 | +27 ± 93 | -434 ± 69 | +0.237 ± 0.042 | -0.141 ± 0.014 | -14,052 ± 1,152 | -1.53 ± 0.57 | -220 ± 820 | -0.168 ± 0.030 | +75 ± 9 | +0.000 ± 0.000 |
+| T2.1 + X11 (A dead-only) (n=8) | -45 ± 109 | -26 ± 109 | -93 ± 92 | -284 ± 77 | +0.162 ± 0.033 | -0.092 ± 0.014 | -8,651 ± 1,472 | -0.82 ± 0.57 | +198 ± 581 | -0.019 ± 0.046 | +62 ± 15 | +0.000 ± 0.000 |
+| B (edge cap 0.01, market 0.01, headline 0.05) (n=4) | -312 ± 61 | -216 ± 19 | -285 ± 46 | -510 ± 75 | +0.188 ± 0.043 | -0.069 ± 0.011 | -6,932 ± 719 | -4.04 ± 0.57 | -2,990 ± 979 | +0.005 ± 0.038 | +6 ± 12 | +0.000 ± 0.000 |
+| T2.1 + B (n=8) | -215 ± 119 | -89 ± 102 | -226 ± 95 | -634 ± 81 | +0.359 ± 0.046 | -0.140 ± 0.014 | -12,375 ± 703 | -6.21 ± 0.43 | -3,778 ± 538 | -0.026 ± 0.027 | +47 ± 12 | +0.000 ± 0.000 |
+| T2.1 + X5 gap_size_shrink 0.03 (n=8) | +110 ± 118 | +64 ± 85 | +45 ± 82 | -212 ± 74 | +0.124 ± 0.047 | -0.078 ± 0.017 | -8,999 ± 1,401 | +3.58 ± 0.41 | +4,337 ± 752 | -0.018 ± 0.020 | +45 ± 10 | +0.000 ± 0.000 |
+| T2.1 + C hold_target 4 h | (not run) |
+| T2.1 + T2.5 pair_unwind_passive | (not run) |
+| T2.1 + T2.4 exposure cap 0.10 (n=4) | -326 ± 96 | -331 ± 86 | -401 ± 135 | -867 ± 98 | +0.293 ± 0.077 | -0.120 ± 0.014 | -12,188 ± 425 | -12.26 ± 0.94 | -5,222 ± 861 | -0.025 ± 0.021 | +56 ± 10 | +0.000 ± 0.000 |
+| T2.1 + T2.4 exposure cap 0.25 (n=8) | +166 ± 72 | +163 ± 60 | +101 ± 58 | -131 ± 51 | +0.105 ± 0.039 | -0.076 ± 0.015 | -8,261 ± 967 | -1.17 ± 0.46 | +71 ± 551 | +0.054 ± 0.031 | +38 ± 14 | +0.000 ± 0.000 |
+| T2.1 + ladder_enabled (n=8) | +155 ± 77 | +135 ± 66 | +87 ± 70 | -135 ± 51 | +0.102 ± 0.039 | -0.075 ± 0.015 | -8,612 ± 858 | -1.01 ± 0.52 | +187 ± 583 | +0.048 ± 0.032 | +39 ± 14 | +0.000 ± 0.000 |
+| fast_unload_enabled (n=8) | +120 ± 95 | -22 ± 102 | +21 ± 76 | +10 ± 48 | -0.005 ± 0.034 | -0.006 ± 0.015 | -1,310 ± 944 | +0.06 ± 0.46 | +206 ± 585 | +0.011 ± 0.051 | +0 ± 4 | +0.000 ± 0.000 |
+| reduce_join_best (n=8) | +40 ± 111 | -23 ± 122 | -9 ± 122 | -43 ± 46 | +0.043 ± 0.033 | -0.020 ± 0.011 | -1,208 ± 878 | -0.82 ± 0.62 | -897 ± 437 | +0.042 ± 0.059 | +3 ± 4 | +0.000 ± 0.000 |
+| turnover_control_enabled (n=8) | +170 ± 106 | +67 ± 121 | +106 ± 110 | +10 ± 43 | +0.025 ± 0.025 | -0.012 ± 0.011 | -994 ± 1,022 | -0.31 ± 0.80 | +200 ± 515 | +0.030 ± 0.055 | -5 ± 5 | +0.000 ± 0.000 |
+| ceiling adding factor 0.25 (n=8) | -100 ± 112 | -162 ± 108 | -117 ± 91 | -159 ± 96 | +0.004 ± 0.036 | -0.004 ± 0.012 | -1,660 ± 600 | -0.79 ± 0.47 | -914 ± 602 | +0.006 ± 0.050 | +5 ± 6 | +0.000 ± 0.000 |
+
+### Pinned world (tilt world + the live reduce-only backstop, _bg_wc 38000), 8 x 3 quiet
+| Variant | d pnl_lag (exchange-style) | d pnl_liq | d pnl_mid | d pnl (Polymarket) | d exit_ratio | d cap_end | d wc_end | d writes_pm | d deferred_h | d mk15_mid c | d pick_cost | d ro_frac |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| BASE (8 seeds) | pnl_lag -872 | pnl_liq 1,004 | pnl_mid 1,098 | pnl 1,186 | exit_ratio 1.126 | cap_end 0.853 | wc_end 42,106 | writes_pm 16.15 | deferred_h 6,416 | mk15_mid 1.103 | pick_cost -48 | ro_frac 0.418 |
+| T2.1 (n=8) | +98 ± 138 | +129 ± 193 | +147 ± 153 | +88 ± 117 | -0.009 ± 0.045 | -0.023 ± 0.017 | -3,407 ± 1,097 | +2.70 ± 1.23 | -740 ± 859 | -0.043 ± 0.070 | +35 ± 9 | -0.327 ± 0.100 |
+| reduce_only_hysteresis 0.01 (n=8) | +98 ± 112 | +22 ± 143 | +90 ± 107 | +102 ± 88 | -0.067 ± 0.029 | +0.020 ± 0.010 | +394 ± 575 | +2.64 ± 0.95 | +2,386 ± 753 | -0.030 ± 0.052 | -5 ± 8 | -0.100 ± 0.055 |
+| worst_case_backstop_frac 0.85 (n=8) | +139 ± 191 | +72 ± 200 | +99 ± 187 | +236 ± 118 | -0.089 ± 0.040 | +0.034 ± 0.014 | +2,836 ± 1,102 | +3.61 ± 1.14 | +78 ± 760 | -0.009 ± 0.064 | -8 ± 5 | -0.265 ± 0.088 |
+| T2.1 + hysteresis 0.01 (n=8) | +172 ± 145 | +236 ± 128 | +190 ± 138 | +245 ± 118 | -0.016 ± 0.040 | -0.012 ± 0.013 | -1,314 ± 840 | +3.50 ± 1.19 | -432 ± 519 | +0.016 ± 0.076 | +35 ± 10 | -0.306 ± 0.091 |
+| T2.1 + backstop 0.85 (n=8) | +285 ± 134 | +311 ± 127 | +257 ± 116 | +275 ± 112 | -0.017 ± 0.045 | -0.017 ± 0.020 | -2,072 ± 1,356 | +4.39 ± 1.22 | -260 ± 798 | +0.040 ± 0.073 | +26 ± 13 | -0.418 ± 0.106 |
+| T2.1 + X5 | (not run) |
+| T2.1 + X11 | (not run) |
+| T2.1 + C 4 h | (not run) |
+
+### Pinned world, 16 x 6 quiet (confirmation)
+| Variant | d pnl_lag (exchange-style) | d pnl_liq | d pnl_mid | d pnl (Polymarket) | d exit_ratio | d cap_end | d wc_end | d writes_pm | d deferred_h | d mk15_mid c | d pick_cost | d ro_frac |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| BASE (16 seeds) | pnl_lag 366 | pnl_liq 2,084 | pnl_mid 2,155 | pnl 2,357 | exit_ratio 1.090 | cap_end 0.831 | wc_end 41,495 | writes_pm 16.58 | deferred_h 5,440 | mk15_mid 1.145 | pick_cost -57 | ro_frac 0.250 |
+| T2.1 (n=16) | +509 ± 110 | +601 ± 107 | +554 ± 107 | +341 ± 94 | +0.020 ± 0.020 | -0.064 ± 0.012 | -6,765 ± 706 | +2.44 ± 0.35 | +507 ± 453 | -0.024 ± 0.025 | +40 ± 18 | -0.201 ± 0.036 |
+| T2.1 + backstop 0.85 (n=16) | +587 ± 112 | +649 ± 101 | +610 ± 104 | +412 ± 103 | +0.017 ± 0.022 | -0.060 ± 0.014 | -6,667 ± 798 | +3.11 ± 0.43 | +596 ± 424 | -0.020 ± 0.026 | +56 ± 18 | -0.250 ± 0.044 |
+| T2.1 + hysteresis 0.01 (n=16) | +456 ± 123 | +523 ± 117 | +487 ± 122 | +292 ± 117 | +0.015 ± 0.021 | -0.057 ± 0.013 | -6,268 ± 741 | +2.74 ± 0.44 | +561 ± 488 | -0.034 ± 0.028 | +43 ± 18 | -0.217 ± 0.041 |
+
+### Tilt world, 16 x 6 quiet (confirmation)
+| Variant | d pnl_lag (exchange-style) | d pnl_liq | d pnl_mid | d pnl (Polymarket) | d exit_ratio | d cap_end | d wc_end | d writes_pm | d deferred_h | d mk15_mid c | d pick_cost | d ro_frac |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| BASE (16 seeds) | pnl_lag 623 | pnl_liq 2,308 | pnl_mid 2,414 | pnl 2,715 | exit_ratio 1.046 | cap_end 0.862 | wc_end 44,846 | writes_pm 20.32 | deferred_h 5,572 | mk15_mid 1.179 | pick_cost -53 | ro_frac 0.000 |
+| T2.1 (n=16) | +330 ± 64 | +426 ± 63 | +351 ± 61 | +54 ± 58 | +0.061 ± 0.013 | -0.091 ± 0.009 | -10,018 ± 750 | -0.63 ± 0.27 | +464 ± 362 | -0.054 ± 0.019 | +52 ± 16 | +0.000 ± 0.000 |
+
+### Tilt world, 6 x 6 news
+| Variant | d pnl_lag (exchange-style) | d pnl_liq | d pnl_mid | d pnl (Polymarket) | d exit_ratio | d cap_end | d wc_end | d writes_pm | d deferred_h | d mk15_mid c | d pick_cost | d ro_frac |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| BASE (6 seeds) | pnl_lag -78 | pnl_liq 1,663 | pnl_mid 1,752 | pnl 2,286 | exit_ratio 1.039 | cap_end 0.889 | wc_end 47,976 | writes_pm 21.09 | deferred_h 6,514 | mk15_mid 1.102 | pick_cost 47 | ro_frac 0.000 |
+| T2.1 (n=6) | +670 ± 183 | +761 ± 163 | +664 ± 140 | +197 ± 119 | +0.063 ± 0.025 | -0.105 ± 0.026 | -10,643 ± 2,343 | -0.94 ± 0.70 | +684 ± 687 | -0.015 ± 0.028 | +171 ± 46 | +0.000 ± 0.000 |
+
+### Tilt flat (growth 0), 6 x 3 quiet
+| Variant | d pnl_lag (exchange-style) | d pnl_liq | d pnl_mid | d pnl (Polymarket) | d exit_ratio | d cap_end | d wc_end | d writes_pm | d deferred_h | d mk15_mid c | d pick_cost | d ro_frac |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| BASE (6 seeds) | pnl_lag -536 | pnl_liq 1,160 | pnl_mid 1,282 | pnl 1,578 | exit_ratio 1.064 | cap_end 0.884 | wc_end 46,814 | writes_pm 20.94 | deferred_h 5,986 | mk15_mid 1.163 | pick_cost -73 | ro_frac 0.000 |
+| T2.1 (n=6) | -64 ± 108 | -2 ± 156 | -36 ± 137 | -151 ± 46 | +0.055 ± 0.038 | -0.054 ± 0.020 | -6,962 ± 2,119 | -0.05 ± 0.74 | +337 ± 718 | -0.077 ± 0.062 | +52 ± 11 | +0.000 ± 0.000 |
+
+### Old world (anchor 0, no tilt knobs), 8 x 3 quiet
+| Variant | d pnl_lag (exchange-style) | d pnl_liq | d pnl_mid | d pnl (Polymarket) | d exit_ratio | d cap_end | d wc_end | d writes_pm | d deferred_h | d mk15_mid c | d pick_cost | d ro_frac |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| BASE (8 seeds) | pnl_lag -251 | pnl_liq 152 | pnl_mid 382 | pnl 1,595 | exit_ratio 1.086 | cap_end 0.860 | wc_end 44,197 | writes_pm 22.21 | deferred_h 7,378 | mk15_mid 1.137 | pick_cost -37 | ro_frac 0.000 |
+| T2.1 (n=8) | +215 ± 74 | +244 ± 94 | +211 ± 77 | +72 ± 80 | +0.024 ± 0.025 | -0.040 ± 0.015 | -6,194 ± 1,523 | -0.22 ± 0.27 | +529 ± 655 | -0.014 ± 0.028 | +3 ± 6 | +0.000 ± 0.000 |
+
+### Calibrated growth (tilt 0.063 + 0.0016/h, pinned), 8 x 3 quiet
+| Variant | d pnl_lag (exchange-style) | d pnl_liq | d pnl_mid | d pnl (Polymarket) | d exit_ratio | d cap_end | d wc_end | d writes_pm | d deferred_h | d mk15_mid c | d pick_cost | d ro_frac |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+
+### First 2 h after switch-on (tilt world), 8 x 2 quiet
+| Variant | d pnl_lag (exchange-style) | d pnl_liq | d pnl_mid | d pnl (Polymarket) | d exit_ratio | d cap_end | d wc_end | d writes_pm | d deferred_h | d mk15_mid c | d pick_cost | d ro_frac |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| BASE (8 seeds) | pnl_lag -1,352 | pnl_liq 423 | pnl_mid 590 | pnl 995 | exit_ratio 0.922 | cap_end 0.935 | wc_end 48,377 | writes_pm 22.87 | deferred_h 7,388 | mk15_mid 1.021 | pick_cost -51 | ro_frac 0.000 |
+| T2.1 step-on (n=8) | +70 ± 39 | +174 ± 55 | +100 ± 32 | -107 ± 25 | +0.163 ± 0.041 | -0.066 ± 0.009 | -5,717 ± 818 | -0.90 ± 0.77 | -361 ± 695 | +0.124 ± 0.065 | +36 ± 9 | +0.000 ± 0.000 |
+| T2.1 ramp 120 (n=8) | -33 ± 39 | +38 ± 71 | -19 ± 50 | -112 ± 28 | +0.110 ± 0.028 | -0.044 ± 0.007 | -3,890 ± 555 | -0.46 ± 0.59 | -336 ± 820 | +0.103 ± 0.067 | +16 ± 9 | +0.000 ± 0.000 |
+
+Simulation spent in Round 5: 402 seed-runs, 1,512 seed-hours, ~440 CPU-minutes at the measured 17.5 s per seed-hour (plus ~40 lost to two
+sandbox reboots before per-seed caching existed). Every configuration ran once; the cache holds every seed result.
