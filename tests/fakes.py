@@ -43,6 +43,53 @@ class FakeApi(Api):
         self.cash = None
         self.refuse_no_sell = None        # a message: refuse every "sell NO" with it (the self-test leg's fallback)
         self.wire = []                    # every order as sent (wire form), for the tests
+        # Package 7 set-collateral rule (False = off, as before; works with the cash model): a race's NO is
+        # collateralised at its worst case (sum - max over legs). A "sell NO" beyond the leg's LONE part (its NO held
+        # less the most NO held on any OTHER leg; a leg without NO counts 0) breaks sets and needs 1 per broken share
+        # of cash, refused at 0 cash. Sells of NO on every NO-holding leg in ONE batch close whole sets (min over those
+        # legs) and need none.
+        self.set_collateral = False
+
+    def race_legs(self, eid):
+        """The exchanges of eid's race, from the market titles ("Will the X Party win the RACE?")."""
+        def race(e):
+            for m in self.markets_list:
+                if any(x["id"] == e for x in m.get("exchanges", [])):
+                    return m["title"].split(" win the ", 1)[-1].rstrip("?")
+            return None
+        r = race(eid)
+        if r is None:
+            return [eid]
+        return [x["id"] for m in self.markets_list for x in m.get("exchanges", []) if race(x["id"]) == r]
+
+    def set_breaks(self, orders):
+        """Package 7: {order index: NO shares it would sell out of NO+NO sets} for a batch (positions as before the
+        batch), worst-case model. Allowed per leg: its lone part, max(0, n_i - max over j != i of n_j) with a leg not
+        holding NO counting 0 (less our resting sell NO there), + the whole sets the batch closes (min over the
+        NO-holding legs of what the batch sells there). Identical to the old rule for 2-leg races."""
+        out = {}
+        if not self.set_collateral:
+            return out
+        sells = {}
+        for k, o in enumerate(orders):
+            if o["side"] == "no" and o["action"] == "sell":
+                sells.setdefault(o["exchangeId"], []).append(k)
+        for eid, ks in sells.items():
+            legs = self.race_legs(eid)
+            held = {e: max(0, -self.inv.get(e, 0)) for e in legs}
+            others = max([held[e] for e in legs if e != eid] or [0])
+            if len(legs) < 2 or held[eid] < 1 or others < 1:
+                continue
+            holding = [e for e in legs if held[e] >= 1]
+            closed = min(sum(orders[j]["quantity"] for j in sells.get(e, [])) for e in holding)
+            resting = sum(r["quantity"] for r in self.orders.values()
+                          if r["exchangeId"] == eid and r["side"] == "no" and r["action"] == "sell")
+            allowed = max(0, held[eid] - others) - resting + closed
+            for k in ks:
+                q = orders[k]["quantity"]
+                out[k] = max(0.0, q - max(0.0, allowed))
+                allowed -= q
+        return out
 
     def log(self, *a): self.calls.append(a)
     def sent(self, kind): return [c for c in self.calls if c[0] == kind]
@@ -143,7 +190,12 @@ class FakeApi(Api):
         if not self.live:
             return [{"index": k, "ok": True, "status": 200, "data": {}} for k in range(len(orders))]
         res = []
+        breaks = self.set_breaks(orders) if getattr(self, "cash", None) is not None else {}
         for k, o in enumerate(orders):
+            if breaks.get(k, 0) > 0 and breaks[k] > self.cash - self.cash_locked() + 1e-9:
+                res.append({"index": k, "ok": False, "status": 400,
+                            "data": {"error": {"code": "BAD_REQUEST", "message": "Insufficient available funds"}}})
+                continue
             if getattr(self, "refuse_no_sell", None) and o["side"] == "no" and o["action"] == "sell":
                 res.append({"index": k, "ok": False, "status": 400, "data": {"error": {"message": self.refuse_no_sell}}})
                 continue

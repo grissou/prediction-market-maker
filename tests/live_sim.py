@@ -398,6 +398,8 @@ class LiveSim(Sim):
                 m.orders = [o for o in m.orders if o.owner != "us"]
             got = [self.take(m, t, action == "buy", qty, levels[m.eid][0]) for m in ms]
             done = min(got)
+            if kind == "unwind" and getattr(self.cfg, "pair_unwind_followup", False) and max(got) - min(got) >= 1:
+                self.pair_followup(t, ms, got, action, levels)
             if not any(got):
                 cd = 4 * cfg_cd
             bot.arb_cooldown[race] = t + cd
@@ -410,6 +412,25 @@ class LiveSim(Sim):
                     self.outsider_arb_sh += done
             self.arb_pnl += per_set * done
             inv.update({m.eid: m.inv for m in ms})
+
+    # ---- Package 7: pair unwind follow-up mirror (isolated; only runs with cfg.pair_unwind_followup) ----
+    def pair_followup(self, t, ms, got, action, levels):
+        """Bot.pair_followup_step without the cycle gap: the lagging leg(s) of a pair unwind take what they owe
+        (most filled - their fill) at once, at up to pair_unwind_followup_max_cost past the planned price, one try,
+        a take's writes charged (take_writes_ok; refused = the imbalance stays). Counts: self.pair_followup_sh."""
+        buy, mc = action == "buy", self.cfg.pair_unwind_followup_max_cost
+        top = max(got)
+        for k, m in enumerate(ms):
+            owe = top - got[k]
+            if owe < 1 or not self.take_writes_ok(t):
+                continue
+            p = levels[m.eid][0]
+            lim = M.floor_tick(p + mc) if buy else M.ceil_tick(p - mc)
+            m.orders = [o for o in m.orders if o.owner != "us"]
+            f = self.take(m, t, buy, owe, lim)
+            got[k] += f
+            self.pair_followup_sh = getattr(self, "pair_followup_sh", 0.0) + f
+    # ---- end Package 7 follow-up mirror ----
 
     # ---- Package 5 T2.5: passive pair unwind mirror (isolated; only runs with cfg.pair_unwind_passive) ----
     def pair_passive(self, t, inv, fvs):
@@ -647,6 +668,7 @@ class LiveSim(Sim):
                    wc_start=round(self.wc_start) if self.wc_start is not None else 0,
                    tilt_s_end=round(getattr(getattr(self, "tilt", None), "s", 0.0), 4),
                    take_refused=getattr(self, "take_refused", 0),
+                   pair_followup_sh=round(getattr(self, "pair_followup_sh", 0.0)),   # Package 7 follow-up
                    cash_refused_sh=round(getattr(self, "cash_refused_sh", 0.0)))   # Package 6 (see cash_clip)
         return out
 

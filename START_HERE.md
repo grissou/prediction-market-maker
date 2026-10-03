@@ -1,9 +1,9 @@
 <!-- STATUS (Finisher 2b, updated on every push) -->
-**STATUS 10:40 UTC 3 Oct (branch claude/finisher-package6):** phase = Package 6 READY (deadlock fix). READY: **Package 6** ("READY: Package 6" commit, draft PR #8) and Package 5 (c14c92b, PR #7).
-Package 6 = Package 5 + `reduce_no_as_sell` (covered "sell NO" for bids that buy back a NO holding: the live 400 "Insufficient funds" deadlock) + the self-test funds-refusal hot-fix with back-off + `ref_tilt_estimator` / `tilt_diag` + the House no-quote diagnosis + 4 more flags OFF.
-Numbers (deadlock fix from the live start, capital 1.0, 0 cash, T2.1 at 0.09, 8 x 3): exchange-style +420 ± 90, liquidation +384 ± 90, Polymarket +333 ± 38, shares +30k; live-pinned world +34 ± 78 / +66 ± 82, capital -2 pts. Tilt estimator: 0.14 vs 0.09 not reproducible on 2 Oct data (bot path 0.067 vs plain 0.062); suspect: tail books at the 8c winsor; `tilt_diag` in status.json decides.
-Deploy: code (handover restart; all new flags off = Package 5 + hot-fix) -> deploy/package6/stage1 (`reduce_no_as_sell`); watch the self-test leg, covered bids on NO holdings, 400 refusals falling, fills on the biggest shorts.
-Next: none from the executor; the owner reads `tilt_diag` on live books to settle the estimator (median vs slope, `ref_tilt_max`).
+**STATUS 15:30 UTC 3 Oct (branch claude/finisher-package7):** phase = Package 7 READY. READY: Package 7 ("READY: Package 7", PR P7PR), Package 6 (f4214f1, PR #8, LIVE with `reduce_no_as_sell`), Package 5 (c14c92b, PR #7).
+Package 7 = NO+NO sets: `no_set_aware_bids` (covered bids capped at the leg's lone part: stops the remaining 400 refusals), `pair_no_unwind_max_cost` (sets unwound as a pair in one covered-sale batch at asks <= 1.003, after a start-up pair check), `pair_unwind_followup` (unequal fills followed up: no one-sided inventory), T2.5 short-set branch skipped; all OFF.
+Numbers: unit-test evidence only (the simulator does not model set collateral); flags off pinned byte-identical to Package 6; red team 0 high / 1 medium / 5 low, all fixed; 30 suites green.
+Deploy: code -> deploy/package7 stage1 (A + F) -> stage2 (+ B); watch list in the Package 7 section.
+Next: owner reads `pairno_state` and the first "PAIR UNWIND (short set)" lines; the executor stays subscribed to PRs #7/#8/P7PR.
 
 # START HERE (Team run, branch `claude/run-c-tournament-improvements-pycdet`)
 
@@ -11,6 +11,56 @@ Status: **complete** (Team complete at 14:45 UTC) (started 2026-10-02 08:50 UTC;
 The Builder's previous START_HERE is kept as `START_HERE_BUILDER.md`; Run A's notes are `ENGINEERING_NOTES.md`.
 Plan: `PLAN.md`. Packages appear below as they become READY (commit messages start "READY: Package N").
 Deploy only commits whose message starts "READY"; the branch is cumulative.
+
+## Package 7 (READY, Finisher 2b, 3 Oct ~15:30 UTC; branch `claude/finisher-package7` from Package 6 706e763; draft PR P7PR): NO+NO sets unwound as a pair, set-aware covered bids, pair-unwind follow-up (all OFF; staged files in `deploy/package7/`)
+Live at the time of writing: Package 6 with `reduce_no_as_sell` on since 14:01:54 UTC (the covered-sale check accepted 14:02:24); `ref_tilt_max`
+moving to 0.11 (`tilt_diag` live: slope 0.107 / median 0.100 / wls 0.091 / pinned_weight 0.083, so the 0.14 was the restored EMA, as suspected).
+**The finding (owner, 14:0x):** 47 of the 49 remaining 400 "Insufficient available funds" refusals are on the 38 races where we hold NO on EVERY
+leg (FL-16 -817 / -975, Alaska Senate, WI-03, MI-10, ...). The exchange collateralises NO+NO as a set ("collateralSavings"), so a covered sale of
+one leg breaks the set and needs cash. Second finding (14:11:55): the existing short-set pair unwind on Hawaii Governor filled [314, 1069] and left
+755 shares unpaired.
+**Built (each OFF; `_max_per_cycle` 2 and `_followup_*` are companions):**
+- A `no_set_aware_bids`: with `reduce_no_as_sell`, a covered bid on a leg of a race where every other leg also holds NO is capped at the leg's LONE
+  part, lone_i = max(0, NO_i - max over the other legs of NO_j) (the exchange's worst-case collateral model; 2-leg: |inv| - min|inv|, so the
+  smaller leg gets no bid and the bigger leg bids its excess). Take paths and the ladder follow the same cap; the sell-NO start-up check only tests
+  legs with a lone part (a once-per-run warning if none exists for 10 min). Pinned: -817 / -975 -> 0 / 158; [10, 8, 5] -> [2, 0, 0]; NO on 2 of 3 legs -> [0, 200].
+- B `pair_no_unwind_max_cost` (-1 = off; 0.003): NO+NO sets are unwound AS A PAIR through the existing short-set buy-back in `arb_plan` /
+  `execute_arbitrage`: one batch of immediate-or-cancel covered "sell NO" orders on every leg (both legs converted or nothing is sent), sized
+  to the smaller leg and to the joint depth within the limits, when the YES asks add up to <= 1 + max_cost (a cost of at most 0.3c per set vs
+  holding the set to the close); `unwind_is_safe`, the 30 s cooldown and the write budget as before; at most `pair_no_unwind_max_per_cycle` (2)
+  such unwinds per cycle (5 writes each). It fires only after the start-up pair check C has passed.
+- C start-up pair check (`pairno_tick/run/finish`): after the sell-NO leg has passed and a NO+NO race is held, ONE batch of two 1-share
+  "sell NO @ 0.995" (a YES bid at 0.005 on each leg; only where neither leg's book has an ask at or below 0.005, so neither can fill), both
+  cancelled at once. Accepted -> B enabled for the run; refused -> alert "the exchange refuses a paired NO sale: NO+NO sets cannot be unwound
+  without cash", B off for the run (`reduce_no_as_sell` stays on), bot keeps running; busy -> retry with back-off (60 s doubling to 30 min).
+  Overlap guards with the main self-test and the sell-NO leg. `pairno_state` in status.json.
+- D T2.5 `pair_unwind_passive`'s SHORT-set branch (rest a bid on one leg, take the other on fill) is a single-leg covered sale that breaks the
+  set: skipped while covered sales are in effect (logged once). Its long-set (YES+YES) branch is untouched; whether the exchange also nets
+  YES+YES sets is unverified.
+- F `pair_unwind_followup` (+ `_max_cost` 0.01, `_tries` 6): every pair unwind sizes its legs to what can fill together (joint depth within the
+  limit, the smaller leg, the planned sets); if the legs still fill unequally, the lagging leg(s) are owed and followed up on later cycles with
+  one immediate-or-cancel order per cycle at <= planned + 1c (a covered sell NO where applicable, capped at the leg's post-fill lone part), for
+  up to 6 tries, then one alert with what is left; `pair_owed` in status.json; `take_arbitrage` skips a race with owed legs; a restart drops the
+  owed record (logged at shutdown). live_sim mirror `pair_followup` (the sim's legs fill equally, so it is pinned with a stub).
+- E status.json `nono_sets` {races, sets, capital} and the 2-hourly summary " | NO+NO sets N (cap X)".
+**Simulator evidence:** none for A/B/C (live_sim does not model the exchange's set collateral; the fake exchange does, opt-in, and the unit tests
+are the evidence). The behaviour with every flag off is pinned byte-identical against Package 6 on a grid of `cover_no_qty`, `no_sell_order`,
+`arb_plan`, `execute_arbitrage` and two full cycles.
+**Red team (opus):** 0 high, 1 medium (the follow-up owed amount ignored the post-fill lone part: fixed), 5 low (3-leg collateral model, write
+budget of B's first cycle -> `_max_per_cycle`, KeyError on a vanished leg, D keyed on the setting not the effective state, start-up check inert
+when no lone part exists: all fixed/noted). 30 suites green: test_nono_sets 103, test_pair_followup 42, test_reduce_no 69, test_mm_bot 600,
+test_stress 20 + STRESS_LADDER=1 20/20, the rest as Package 6; py_compile under Python 3.10.
+**Deploy (owner):** code by handover restart (all new flags off = Package 6 + status fields), then `deploy/package7/settings_override.stage1_set_aware_bids.json`
+(A + F), then stage2 (+ B). **Watch, first 10 minutes after stage 1:** 400 "Insufficient available funds" refusals on NO+NO races falling to ~0; the
+smaller leg of each NO+NO race has no bid resting, the bigger leg bids its lone part; the journal's `pairno` check line (placed and cancelled, or
+the refusal alert); `nono_sets` in status.json (expect ~38 races). **After stage 2, first hour:** "PAIR UNWIND (short set)" lines at asks sums
+1.000-1.003, both legs as side no / action sell in one batch, fills equal (or `pair_owed` clearing within a few cycles); NO+NO races count and
+capital falling; no leg left one-sided (compare the two legs' positions after each unwind); writes <= 28; account on the exchange's number
+not below start - 300. **Rollback triggers:** a pair check refusal (B stays off by itself: nothing to roll back), a covered sale that increased a
+NO holding, an unwind that leaves > 1 leg-imbalance after 6 tries repeatedly, 429s, account below start - 1,000 in 3 h.
+**Untested:** the real exchange's set-collateral rule (the pair check is the guard; the worst-case model for 3-leg races is an inference);
+whether resting covered sales on both legs in one QUOTE batch are accepted (A only sells lone parts, so it does not rely on it); YES+YES netting;
+the live_sim mirrors do not model set collateral or joint sizing.
 
 ## Package 6 (READY, Finisher 2b, 3 Oct ~10:40 UTC; branch `claude/finisher-package6` from Package 5 c14c92b; draft PR #8): the live deadlock fix (`reduce_no_as_sell`), the self-test funds hot-fix, the tilt-estimator diagnosis, and five more flags OFF
 Evidence: `SIM_NOTES.md` "Round 6" and "Round 6b", `analysis/poly_bias/` (P6_RESEARCH.md, NO_REDUCE_QUOTE.md, TILT_ESTIMATOR.md), `PLAN_P6.md`.
