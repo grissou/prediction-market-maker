@@ -11,15 +11,151 @@ The Builder's previous START_HERE is kept as `START_HERE_BUILDER.md`; Run A's no
 Plan: `PLAN.md`. Packages appear below as they become READY (commit messages start "READY: Package N").
 Deploy only commits whose message starts "READY"; the branch is cumulative.
 
-## Package 5 (IN PROGRESS, Finisher 2b executor, 2 Oct evening; branch `claude/finisher-package5` from Package 4 c29f762/fd28b0a)
-Plan: PLAN_POLY_BIAS.md v2 (branch claude/finisher-plan-v2, 6e727dd; merged here, docs and analysis/ only). Run plan: PLAN_FINISHER.md "Package 5".
-Status (20:50 UTC): all planned designs built, merged, red-teamed (0 high / 6 medium, all fixed), 18 suites green, all OFF. Screens
-(SIM_NOTES Round 5): T2.1 `ref_tilt_enabled` PASSES (+163 ± 60 at liquidation, capital -7.6 pts, writes -1.2/min, also +244 ± 94 in the
-old world); A, B, T2.2 (ref_weight 0.5/0.35), T2.4 at 0.10 FAIL or do not beat T2.1 alone. Running: news 6 x 6, flat-tilt check,
-C / T2.5 / T2.4 0.25 screens, 16 x 6 confirmation. Owner lifted the 120 CPU-min cap (20:30 UTC). NOT READY.
-Polymarket mark, now neutral; ceiling 0.25 still worse). Built and merged, all OFF: T2.1 `ref_tilt_enabled`, B `kelly_edge_cap`,
-A `reduce_from_book`, T2.5 `pair_unwind_passive`, T2.4 `tilt_exposure_max_frac`, C `hold_target_hours`, T2.3 `ref_tilt_carry_days`;
-ops fields in status.json/summary/recorder. All 18 suites green. Design screens running. NOT READY.
+## Package 5 (READY, Finisher 2b executor, 3 Oct ~03:00 UTC; branch `claude/finisher-package5`, draft PR #7): the Polymarket-bias fix. Package 4 (c29f762) + a tilt-corrected reference (T2.1) and nine more settings, ALL OFF by default + an honest simulator yardstick + ops fields. Code deploy by handover restart, then flags by settings_override.json (deploy/package5/).
+Plan: `PLAN_POLY_BIAS.md` (v2). Evidence: `SIM_NOTES.md` "Round 5" (every run, with error bars) and `analysis/poly_bias/` (RESULTS.md,
+TIER2_RESULTS.txt, TAKES_RESULTS.md, SNAPSHOT02B_RESULTS.md, P6_RESEARCH.md). Raw simulator output: `tests/live_sim_round5_*.txt`.
+Run plan and actuals: `PLAN_FINISHER.md` "Package 5". Staged override files and their order: `deploy/package5/`.
+
+**Diagnosis (live snapshots to 08:14 and 20:37 UTC, 2 Oct).** The tournament prices every market with ONE favourite-longshot tilt:
+tournament mid ~ c + (1 - s)(Polymarket - c), c = 1/legs. s by 4-hour bin since 1 Oct 16:00: 2.4, 3.4, 4.7, 5.1, 5.4, 5.2, **6.3%**
+(R2 0.60-0.68; 0.1-0.2 points higher with our own best quotes excluded, so we do not cause it); growing ~0.16 points/h on average, flat
+08-16 UTC, rising again after 16:00. That one number explains 60-68% of the Polymarket-tournament gap variance; the tilt part of a gap
+WIDENS over time (-0.14 at 4 h, -0.22 at 8 h), only the residual closes (~0.3). The bot, anchored 70% on raw Polymarket, treats the tilt
+as mispricing: 88% of open position capital was entered toward Polymarket (76% at 08:14); 56% of toward-entered capital has exited vs 96%
+of against-entered; open capital median age 8.3 h; tilt exposure (sum pos x (Polymarket - 0.5)) **+32,742 at 20:37 vs +15,087 at 08:14**,
+each point of tilt marking the book -327; position capital 100% of the account. Marks at 20:36: exchange 101,004 / liquidation 101,986 /
+tournament mid 102,385 / Polymarket 107,316: the "+6.3k Polymarket gain" is a claim on gaps that have only widened; the exchange marks
+~1.4k below the mid (a lagged/smoothed trade price; our fills move it ~0.05c each). Stale-quote takes since 08:14 (38, 24,958 shares):
++1,480 at Polymarket, **+154 at the tournament mid**. Since Package 3 (16:26) the bot is reduce-only in 81% of cycles (sum-of-maxima worst
+case 77-82k cycling against the 0.80 backstop); cash binds too (positions 99.9k of a 101.0k account).
+
+**The yardstick (Phase 1; `tests/live_sim.py`, pins `tests/test_live_sim_marks.py` 110).** Every earlier round marked P&L at Polymarket
+in a world whose rival bots also priced from Polymarket. New world knobs: `_rival_anchor` (1 = rivals and informed takers price from the
+tournament consensus), `_world_tilt` / `_world_tilt_growth` (the tilt's share of the real starting gap and its growth; the start book is
+always the real one), `_world_tilt_add` (extra tilt), `_bg_wc` (the rest of the account's worst case so the live reduce-only backstop
+binds). New fields: `pnl_lag` (VWAP of the last 30 min of prints: the exchange-style mark, THE JUDGE for rank), `pnl_liq` (start and end
+at liquidation: longs at the best other bid, shorts at the best other ask), `pnl_mid`, `mk15_mid` (markout vs the consensus), `exit_ratio`,
+`hold_med`, `ro_frac` (share of cycles reduce-only), `tilt_s_end`. Knobs at 0 = the old numbers to the digit. In the old world the
+Polymarket mark overstated base P&L by ~1,440 per 3 h (pnl 1,590 vs pnl_liq 152). Worlds: "tilt" (anchor 1, tilt 0.05 + 0.002/h),
+"pinned" (+ `_bg_wc` 38000: reduce-only 42% of base cycles), "high-tilt" (+ 8 points), "flat", "old", "news".
+**Earlier conclusions re-scored (tilt world, 8 x 3 quiet, d pnl_liq):** none flipped outright. `fast_unload_enabled` -165 ± 110 -> -22 ± 100
+(its loss was the mark; still no gain), `reduce_join_best` -48 ± 81 -> -23 ± 120, `turnover_control_enabled` +49 ± 62 -> +67 ± 120,
+ceiling factor 0.25 vs 0.5: -262 ± 100 -> -162 ± 110 (keep 0.5). None passes the new rule (none frees 5 points of capital).
+
+**What is in the code (all OFF; each in OVERRIDABLE unless said; `_headline` = staging gate, False = not in `headline_races`):**
+T2.1 `ref_tilt_enabled` (+ `ref_tilt_headline`, `ref_tilt_min_markets` 50, `ref_tilt_halflife_min` 30, `ref_tilt_max` **0.20**, `ref_tilt_winsor` 0.08,
+`ref_tilt_rampin_min` **0**): quote around r' = c + (1 - s)(r - c); s estimated each cycle from the liquid non-headline cross-section
+(`TiltEstimator`, runs read-only with the flag off; `tilt_s`, `tilt_s_applied`, `tilt_s_applied_headline`, `tilt_exposure`, `tilt_state`
+in status.json; s and the ramp clocks restored from status.json on a restart if it is < 10 min old). X12 `take_tilted_ref`: the stale-quote
+takes measure their 5c edge from r' (needs T2.1). A `reduce_from_book` (+ `_pause_s` 120, `_headline`; X11 `reduce_from_book_dead_only`,
+`reduce_from_book_max_turnover`): the reducing side priced from the book, with the self-cross cap. B `kelly_edge_cap`. C `hold_target_hours`
+(+ `hold_unload_budget_frac` 0.02, `hold_take_max_per_min` 2, `hold_target_headline`): aged lots join the best; older than 2T taken inside a
+budget that starts fully used for an hour. T2.4 `tilt_exposure_max_frac` (+ `_headline`). T2.5 `pair_unwind_passive` (+ `pair_unwind_max_cost`
+0.003). X5 `gap_size_shrink` (+ `gap_size_floor` 0.25). T2.3 `ref_tilt_carry_days` (NOT overridable: hard gate until SIG answers the
+end-valuation question). Ops (no flag): status.json `liquidation_value`, `liquidation_unpriced`, `realised_pnl` (+ `_scope` "maker fills
+only"), `unrealised_pnl`, `pnl_unreconciled`, `toward_ref_capital_frac`, `capital_over_6h_frac`, `exit_ratio_24h`; the 2-hourly summary line
+"Liquidation ... realised ... toward Polymarket ... older than 6 h | tilt ..., exposure ..."; recorder `account.liquidation_value` (nullable,
+ALTER on old files).
+
+**Results (d vs BASE = Package 4 defaults + the live overrides, paired seeds, ± 1 SE; judge = `pnl_lag` then `pnl_liq`; full tables with every
+column in SIM_NOTES "Round 5 summary tables"). Pass rule: d pnl_liq >= -1 SE, capital down 5 points, worst case down, writes <= 28 and
+deferred not up > 20%, `mk15_mid` not worse by > 1 SE, exit_ratio up.**
+| Flag (all OFF by default) | d pnl_lag / d pnl_liq, tilt world 8 x 3 quiet | pinned 16 x 6 (live-like) | news 6 x 6 | capital (8 x 3) | writes/min | Verdict |
+|---|---|---|---|---|---|---|
+| **T2.1 `ref_tilt_enabled`** | **+166 ± 72 / +163 ± 60** (ramp 20: +176 ± 110 / +199 ± 83) | **+509 ± 110 / +601 ± 107** (even the Polymarket mark +341 ± 94) | **+670 ± 180 / +761 ± 160** | -7.6 pts | -1.2 (pinned +2.4: it leaves reduce-only) | **PASS: the recommendation.** Old world +215 ± 74 / +244 ± 94, flat tilt -60 ± 59 / +100 ± 84, free 16 x 6 +330 ± 64 / +426 ± 63 |
+| T2.1 + `worst_case_backstop_frac` 0.85 | - | +587 ± 112 / +649 ± 101; vs T2.1 alone **+78 ± 86 / +48 ± 81** | - | -6.0 pts | +3.1 | not clearly positive: stays 0.80 (stage 4 optional, later) |
+| T2.1 + `reduce_only_hysteresis` 0.01 | - | +456 ± 123 / +523 ± 117; vs T2.1 alone **-57 ± 60 / -83 ± 66** | - | -5.7 pts | +2.7 | no: stays 0.03 |
+| T2.1 + `ref_weight` 0.5 / 0.35 (T2.2) | +87 ± 82 / +176 ± 50; +139 ± 130 / +186 ± 103 | - | - | -9.7 / -13 pts | -0.0 / -0.4; deferred +18% / +22% | no-go: not >= 1 SE over T2.1, markout worse (-0.056 / -0.076c) |
+| X12 `take_tilted_ref` | not simulable (no take path in live_sim) | | | | | data: the 38 live takes since 08:14 earned +154 at the tournament mid on 25k shares: recommended with T2.1 |
+| A `reduce_from_book` (+ `_pause_s`, `_headline`) | +36 ± 150 / +91 ± 135; with T2.1 +42 ± 113 / +124 ± 90 | - | - | -12 / -14 pts | -0.5 / -1.5 | FAIL: markout -0.23 / -0.17c (sells to informed flow), no P&L over T2.1 |
+| X11 `reduce_from_book_dead_only` | with T2.1 -45 ± 109 / -26 ± 109 | - | - | -9.2 pts | -0.8 | FAIL: below T2.1 alone |
+| B `kelly_edge_cap` 0.01 + `kelly_max_market_frac` 0.01 + `headline_position_frac` 0.05 | **-312 ± 61 / -216 ± 19** (stopped at 4 seeds); with T2.1 -215 ± 119 / -89 ± 102 | - | - | -6.9 pts | -4.0 | FAIL: gives up spread income everywhere. Do NOT apply the planners' "tonight" overrides |
+| X5 `gap_size_shrink` 0.03 | with T2.1 +110 ± 118 / +64 ± 85 | - | - | -7.8 pts | **+3.6**, deferred +4,300/h | FAIL: below T2.1, smaller orders re-price more |
+| C `hold_target_hours` 4 (+ budget, 2 takes/min, `_headline`) | with T2.1 +136 ± 150 / +175 ± 130 (before takes were charged writes) | - | - | -11.2 pts | -0.9 | neutral vs T2.1 alone; the capital-freeing backstop; Package 6 candidate in reduce-only |
+| T2.4 `tilt_exposure_max_frac` 0.10 / 0.25 | with T2.1 **-326 ± 96 / -331 ± 86** (stopped) / never binds in the sim (= T2.1) | - | - | | -12.3 / 0 | FAIL at 0.10 (the live book starts at 15% of the account); 0.25 untestable here |
+| T2.5 `pair_unwind_passive` (+ `_max_cost` 0.003) | with T2.1 +95 ± 82 / +87 ± 74 (before takes were charged writes) | - | - | -7.9 pts | +0.2 | not positive in 3 h; frees the 7.3k Senate set; OFF, Package 6 candidate in reduce-only |
+| `ladder_enabled` with T2.1 | +155 ± 77 / +135 ± 66 | - | - | -7.5 pts | -1.0 | no gain over T2.1 (cash still binds); OFF |
+| T2.3 `ref_tilt_carry_days` | unit tests only | | | | | HARD GATE: 0, not overridable, until SIG answers the end-valuation question |
+| re-scored old flags: `fast_unload_enabled` / `reduce_join_best` / `turnover_control_enabled` / ceiling factor 0.25 | +120 ± 95 / -22 ± 102; +40 ± 111 / -23 ± 122; +170 ± 106 / +67 ± 121; -100 ± 112 / -162 ± 108 | - | - | -0.6 / -2.0 / -1.2 / -0.4 pts | | none passes (no flip of an earlier verdict; fast_unload's old loss was the mark); all stay as they are |
+Reading: removing the tilt from fair value (T2.1) is the one change that pays at the exchange-style mark AND at liquidation in every world
+(free, pinned, news, flat, old), frees capital and saves writes. Everything that only makes the exit more aggressive (A, X11, lower
+ref_weight) sells into informed flow for no extra P&L; everything that only shrinks size (B, X5, T2.4 at 0.10) gives up spread income; C,
+T2.5 and T2.4 at 0.25 add nothing over T2.1 in 3 h. The "+163 / +166" is 3 h on the 74 biggest markets (~+1,300 per day on the sim's share
+of the book) before anything the sim does not model (the other ~160 markets, the owner's manual trades, SIG's end valuation).
+
+**Verdicts on the owner's three questions (each with T2.1, pinned world):** `worst_case_backstop_frac` 0.85: NOT NOW. Pinned 16 x 6 with T2.1: +587 ± 112 / +649 ± 101 vs T2.1 alone +509 ± 110 / +601 ± 107, paired difference +78 ± 86 (exchange-style) / +48 ± 81 (liquidation), +0.7 writes/min; the 8 x 3 "+180" was noise; the live data says cash binds before the backstop and the reduce-only churn cost -87 net (P6_RESEARCH). Not clearly positive = stays 0.80; revisit after a day of T2.1 (the stage-4 file exists for that).
+`reduce_only_hysteresis` 0.01: NO. With T2.1, paired: -57 ± 60 / -83 ± 66, +0.3 writes/min; alone (8 x 3): +22 ± 140 with deferred changes +37%. Stays 0.03. `ref_tilt_max`: 0.12 binds at a 15% tilt (the estimate sits at the clip while the world is at
+0.15) for the same 3-h P&L as 0.20 (+299 vs +302 at liquidation, +316 vs +351 exchange-style, within noise; 0.20 costs +2.7 writes/min);
+default set to 0.20 so the estimate stays readable and the slow mark bleed of untracked tilt (-327/point/day live) is not accepted by design.
+Live s is 6.3%: alarm, re-measure (analysis/poly_bias/snapshot02b.py) if `tilt_s` passes 0.12.
+**Ramp-in:** measured and not needed (default 0): first 2 h, step-on vs 120-min ramp: exchange-style +70 ± 39 vs -33 ± 39, liquidation
++174 ± 55 vs +38 ± 71, Polymarket-marked cost the same (-107 ± 25 vs -112 ± 28); the step-on sells ~5k shares of inventory at tournament
+prices in 2 h and re-prices ~157 markets once (~10 min of the write budget); the ramp keeps buying the tilt for 2 h and re-prices
+continuously (+0.8 writes/min, deferred +1,070/h). The setting stays (20 min: +176 ± 110 / +199 ± 83 at 8 x 3, pick_cost +9 vs +38: the same P&L as the step-on with the re-price wave spread over ~10 cycles, so 20 is the default; 0 and 120 measured as above).
+**Recommended settings and order (deploy/package5/*.json; each file read within `overrides_seconds` 30 s):** stage 0 code (all off) ->
+stage 1 `ref_tilt_enabled` -> stage 2 + `take_tilted_ref` -> stage 3 + `ref_tilt_headline` -> stage 4 + `worst_case_backstop_frac` 0.85
+(NOT now: see the verdict; the file is there for later). Final file after stage 3: `{"arb_two_sided": false, "worst_case_backstop_frac": 0.8, "capital_ceiling_adding_size_factor": 0.5,
+"writes_per_minute": 28, "writes_per_minute_max": 28, "burst_cycle_seconds": 60, "ref_tilt_enabled": true, "take_tilted_ref": true,
+"ref_tilt_headline": true}`. Leave `reduce_only_hysteresis` 0.03 and `ref_weight` 0.7. Do NOT apply the planners' "tonight" overrides
+(`kelly_max_market_frac` 0.01 / `headline_position_frac` 0.05: design B, -216 ± 19). Everything else stays OFF.
+**Rollout, go/no-go rules (owner deploys; every number below is checked in status.json / the journal; "start" = the value at the moment
+of the toggle).** Do each toggle in a quiet hour (03:00-07:00 UTC or 20:00-23:00 UTC: Polymarket moves and fills are fewest there).
+Stage 0, code (handover restart, all flags off = Package 4 behaviour): check for 10 min: `tilt_s` printed and between 0.03 and 0.10
+(expect ~0.06-0.08; a value stuck at 0.0 or at the `ref_tilt_max` clip for 15 min = the estimator is wrong, do NOT go to stage 1),
+`tilt_exposure` printed (expect ~+30k to +35k), `liquidation_value` within ~1.5k of `account_value`, writes <= 28/min, `rate_limited_total`
+0, no "refused override" alert, orders adopted by the handover kept. Then stage 1 at once if green.
+Stage 1, `ref_tilt_enabled` (deploy/package5/settings_override.stage1_tilt_nonheadline.json). First 20 minutes: the applied tilt ramps
+from 0 to the estimate (`tilt_s_applied` rising to `tilt_s`), so ~150 markets re-price toward the book in 2-3 steps (the write budget may
+run at 28/min for a few minutes; deferred changes rise then fall back within 30 min); no own bid >= own ask anywhere (the recorder's our_bid < our_ask for every quoted market; one violation = rollback); no fills on a reducing side
+within 2 min of a Polymarket jump >= 3c (the jump guard still applies); `tilt_s_applied` = `tilt_s` after 20 min.
+After 1 h (GO to keep it on): (a) buy/sell fill balance: reducing shares / adding shares over the hour >= 1.0 bot-wide (live 16:26-20:37
+was 0.84; sim: +0.1 to +0.16 on the ratio in 2-3 h) and in the 10 biggest toward-Polymarket positions the position is flat or smaller,
+none bigger by more than 5%; (b) position capital share not above start (100% today) and falling by >= 1 point; (c) reduce-only share
+of cycles below its start (81%); (d) account on the exchange's number not below start - 300 (0.3%); (e) writes <= 28/min, 0 x 429.
+After 3 h (GO to stage 2): (a) exit ratio over the 3 h >= 1.0; (b) capital share down >= 3 points from start (sim: -5 to -8 in 3 h);
+(c) reduce-only share down >= 15 points (sim: -33); (d) account on the exchange's number not below start - 500; realised P&L (FIFO,
+`realised_pnl` in status.json) not below start - 300; (e) `tilt_s` still inside 0.03-0.10 and `tilt_exposure` below start.
+Stage 2, `take_tilted_ref` (stage2 file): no quote change; stale-quote takes should fall to near zero in tail markets (journal "TAKE" lines:
+live 38 in 12 h). Check after 1 h: no take in a market whose tilted gap was not confirmed (there should be none); fewer takes than the
+previous hour. If takes continue at the old rate in tails, the tilted reference is not reaching the take path: rollback to stage 1.
+Stage 3, `ref_tilt_headline` (stage3 file; the U.S. House and Senate legs: ~14-20% of position capital): the 4 legs re-price once by
+~1c; the same 1-h checks on those 4 markets (Dem House long and Rep House short should shrink, never grow); account not below start - 300.
+Stage 4, `worst_case_backstop_frac` 0.85 (stage4 file; only after stages 1-3 have held for 3 h): the bot leaves reduce-only at once if
+the backstop was holding it; adding sides return on every market, throttled by the write budget (expect 5-10 min at 28/min). After 1 h:
+worst case (`worst_case_loss`) below 0.85 x account and not rising more than 2k/h; capital share not rising above its stage-1 trend by
+more than 2 points; exit ratio still >= 0.9. Hysteresis stays 0.03.
+ROLLBACK (any stage, copy the previous stage's file; the flag is read within 30 s) on ANY of: a "refused override" alert or an own bid >= own ask;
+`tilt_s` at a clip (0 or `ref_tilt_max`) for 15 min; account on the exchange's number below start - 1,000 within 3 h of a toggle (the sim
+never moved the exchange-style mark by more than ~-100 in a 3 h run); writes above 28/min for 10 min or any 429 after the first 15 min;
+exit ratio below 0.7 for an hour; capital share rising 3+ points in an hour; any take in a market whose gap was not confirmed. Rolling
+stage 1 back to 0 is itself a one-step fair-value move (~150 markets, ~10 min of writes) and raises the sum-of-maxima worst case by
+~0.5 points of equity: in the pinned state that can put the bot back into reduce-only for an episode. Code rollback (a handover restart
+to c29f762 or 439ac54) only if the process misbehaves (exceptions in the journal, status.json not updating).
+**Risks:** (1) SIG settles open positions at the outcome at the close: the tilt was then a yield the bot now declines (~+770 on the 08:14
+book, ~+1.6k on tonight's); T2.3 exists for that case, gated. (2) The sim's informed takers trade toward the anchored consensus; if real
+Polymarket moves carry faster than the data shows (pass-through 0.1-0.25 typical, fat tail, n small), T2.1's news gain shrinks. (3) The
+switch-on re-price wave (~10 min of writes): quiet hour. (4) The estimator is cross-sectional over ~150 liquid non-headline markets (winsor
+8c, min 50 markets, clip 0.20): a market-wide shift of the tails would move it; watch `tilt_s`. (5) The 74-market sim world's effective tilt
+is ~7% (the biggest positions sit where the gaps are biggest). (6) The exchange mark lags the mid by ~2 h: the leaderboard will show
+T2.1's gain late. (7) fills.csv prices: 30% of sells carry the YES price, not the NO price (P6_RESEARCH): `realised_pnl` uses quote prices.
+**Untested:** T2.5's and C's take legs against the real exchange (fake API only); X12 end to end (no take path in live_sim; data-based);
+multi-leg (3+) races (every sim race has 2 legs); the ladder with T2.1 beyond one screen; a tilt that REVERSES (the sim never ran one).
+**Tier 2 ideas not built (PLAN_POLY_BIAS 4, T2.6):** per-market gap half-life weights (per-market persistence weak: slope 0.46, 47 of 229
+stable), an Avellaneda-Stoikov rewrite (T2.1 is the minimal version), rival-floor models (no depth data), locked-set arbitrage as a profit
+centre (+39 from 2 sets while on), quoting the 49 untouched tail markets (capital), a realised-P&L lock-in schedule (rank marks open positions).
+**Owner decisions (recommendation in brackets):** (a) deploy Package 5 code [yes, quiet hour]; (b) stage 1-3 as above [yes]; (c) stage 4
+0.85 [not now: +78 ± 86 over T2.1 alone; revisit after a day]; (d) hysteresis 0.01 [no]; (e) `take_tilted_ref` vs `take_enabled` false [take_tilted_ref; `take_enabled` false is
+the no-code alternative until SIG answers]; (f) T2.5 passive pair unwind [your call: neutral in 3 h, frees the 7.3k Senate set];
+(g) ask SIG about end valuation [yes; T2.3 waits for it]; (h) a snapshot each morning, `python analysis/poly_bias/snapshot02b.py <dir>`
+[yes: the one number to watch is the hourly tilt].
+**Suites (23 files, all green):** test_mm_bot 600, test_live_sim_marks 110, test_strategy 114, test_turnover 94, test_write_savers 75,
+test_hold_target 71, test_fast_unload 61, test_pair_passive 57, test_tilt_rampin 54, test_mark_frag 52, test_reduce_book 49, test_tilt 48,
+test_ops_liq 39, test_recorder_refill 37, test_ref_prices 37, test_behind_best 36, test_tilt_limit 33, test_take_tilted 31, test_carry_ramp
+29, test_reduce_book_scope 26, test_gap_shrink 25, test_stress 20 + STRESS_LADDER=1 20/20 (0 duplicates); py_compile under Python 3.10
+(no except*, Self, tomllib). Two red-team passes (opus): first 0 high / 6 medium / 6 low, second 0 high / 2 medium / 5 low; every code
+item fixed, the two documentation items are in the rollout rules.
+**Simulation spent:** ~440 CPU-minutes (400 seed-runs, 1,500 seed-hours) (the 120 cap was lifted by the owner at 20:30 UTC); every configuration run once (cached per
+seed; the cache is `tests/live_sim_round5_cache.jsonl`).
 
 ## Package 4 (READY, Finisher, 2 Oct evening; branch `claude/finisher-package4`, draft PR #6): Package 3 final + 28/60 defaults + ladder fixes + write savers (all new features OFF). Code deploy (handover restart).
 **What changed against Package 3 final (439ac54):**
@@ -57,6 +193,12 @@ test_mark_frag 52, test_recorder_refill 37, test_ref_prices 37, test_behind_best
 Ladder P&L runs skipped: the gate diagnosis shows 0 ladder shares at start capital 0.90 and 0.80, so a P&L run would measure an idle ladder.
 
 ## HANDOFF (read this if you are picking the work up)
+**Package 5 handoff (3 Oct 03:00 UTC, Finisher 2b).** Live: Package 3 final (439ac54) since 2 Oct 16:26 with the six live overrides; Package 4 (c29f762) not
+deployed. Deploy candidate: **Package 5 (the "READY: Package 5" commit on `claude/finisher-package5`, PR #7)**, which contains Package 4. Read the
+"Package 5" section above (diagnosis, results, rollout rules) and `deploy/package5/README.md` (staged override files). The simulator yardstick is now
+`pnl_lag` / `pnl_liq` in `tests/live_sim.py` with the world knobs `_rival_anchor`, `_world_tilt*`, `_bg_wc`; every Round 5 seed result is in
+`tests/live_sim_round5_cache.jsonl`. The second cycle (Package 6: exits that keep quoting in reduce-only, a backstop soft band) is on
+`claude/finisher-package6` with its own START_HERE section when it exists. Earlier handoffs follow.
 **State at 14:35 UTC, 2 Oct.** Live: Package 2 (83f6d45) since 11:21:57 with settings_override `{"arb_two_sided": false, "worst_case_backstop_frac": 0.8}`
 plus the stop-gap keys below. Deploy candidate: **Package 3 (HEAD, "READY: Package 3")**; it includes 2.1-2.3.
 **Where everything is** (all on this branch, PR #5): `START_HERE.md` (this file: packages, parameter table, owner flags), `PLAN.md`, `deploy/RUNBOOK.md`

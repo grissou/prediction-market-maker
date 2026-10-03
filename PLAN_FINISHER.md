@@ -66,3 +66,6 @@ Deviation from the brief (nproc 1): sub-agents build and unit-test only; all sim
 - After: old-world T2.1 6, pinned world 36, news 6 x 6 x 2 = 18, flat 6 x 3 x 2 = 9, C/T2.5/T2.4@0.25 ~18, 16 x 6 confirm 48,
   ramp-in / first-2-hour / high-tilt / calibrated / X5 / X11 / ladder screens ~60, pinned 16 x 6 x 4 = 96 (see SIM_NOTES Round 5 for each).
 - Every configuration ran once: results are cached per (seed, hours, regime, settings) in the scratchpad and re-read for every table.
+- Final (3 Oct 03:00 UTC): 400 seed-runs, 1,500 seed-hours, ~440 CPU-minutes (17.5 s per seed-hour measured; 6-h runs ~21 s), plus ~40 lost to two sandbox
+  reboots before per-seed caching. Blocks beyond the original plan: pinned world (live backstop) 36 + 16 x 6 x 4 = 108, ramp-in / first-2-hour /
+  high-tilt / calibrated 60, X5 / X11 / ladder / ramp-20 28, 16 x 6 free 48. The owner lifted the 120 cap at 20:30 UTC.

@@ -735,5 +735,5 @@ other rule passes (P&L at both marks, capital -9 points, worst case -10k, writes
 | T2.1 step-on (n=8) | +70 ± 39 | +174 ± 55 | +100 ± 32 | -107 ± 25 | +0.163 ± 0.041 | -0.066 ± 0.009 | -5,717 ± 818 | -0.90 ± 0.77 | -361 ± 695 | +0.124 ± 0.065 | +36 ± 9 | +0.000 ± 0.000 |
 | T2.1 ramp 120 (n=8) | -33 ± 39 | +38 ± 71 | -19 ± 50 | -112 ± 28 | +0.110 ± 0.028 | -0.044 ± 0.007 | -3,890 ± 555 | -0.46 ± 0.59 | -336 ± 820 | +0.103 ± 0.067 | +16 ± 9 | +0.000 ± 0.000 |
 
-Simulation spent in Round 5: 402 seed-runs, 1,512 seed-hours, ~440 CPU-minutes at the measured 17.5 s per seed-hour (plus ~40 lost to two
+Simulation spent in Round 5: 400 seed-runs, 1,500 seed-hours, ~440 CPU-minutes at the measured 17.5 s per seed-hour (plus ~40 lost to two
 sandbox reboots before per-seed caching existed). Every configuration ran once; the cache holds every seed result.
