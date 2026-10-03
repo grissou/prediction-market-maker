@@ -1,9 +1,9 @@
 <!-- STATUS (Finisher 2b, updated on every push) -->
-**STATUS 03:45 UTC 3 Oct (branch claude/finisher-package6):** phase = DONE. READY: **Package 5** (c14c92b on claude/finisher-package5, PR #7, frozen). Package 6: nothing clearly positive, nothing shipped (section below); its three candidate settings stay built and OFF on this branch.
-Key numbers (Package 5, d vs base, exchange-style / liquidation): T2.1 `ref_tilt_enabled` pinned 16 x 6 +509 ± 110 / +601 ± 107; free 16 x 6 +330 ± 64 / +426 ± 63; news +670 ± 180 / +761 ± 160. Backstop 0.85 and hysteresis 0.01 with T2.1: not clearly positive.
-Deploy: Package 5 code (all flags off) -> deploy/package5 stage1 (`ref_tilt_enabled`) -> stage2 (+ `take_tilted_ref`) -> stage3 (+ `ref_tilt_headline`); go/no-go rules in the Package 5 section. Live still Package 3 final.
-Next (a later cycle): a simulator background worst case that grows like live, then re-screen the exits-in-reduce-only flags (the 44k capital lever).
-ETA: none; the executor is finished (final commit "Executor complete" on this branch).
+**STATUS 08:30 UTC 3 Oct (branch claude/finisher-package6):** phase = Package 6 cycle, second pass (owner: prioritise faster entering and exiting). READY: **Package 5** (c14c92b, PR #7, frozen).
+Simulator: live-pinned world added (`_bg_wc_growth` 40000 / `_bg_wc_decay` 4000 with `_bg_wc` 39000: base reduce-only 73-88% of cycles, as live 81%).
+Screening in it on top of T2.1: exits in reduce-only (+ hold target 4 h / 2 h, + reduce_join_best), pair unwind in reduce-only, both together, min_edge 0.75c / 0.5c, tail adding factor 0.25 (built, 48 tests).
+Next: passers to 16 x 6, red-team, "READY: Package 6" + draft PR if clearly positive.
+ETA: screens ~09:50, confirmation ~11:00, READY ~11:45 UTC.
 
 # START HERE (Team run, branch `claude/run-c-tournament-improvements-pycdet`)
 
