@@ -325,8 +325,25 @@ check("...no 'buy NO' on Dem (the 10,000 ask of the guard-off case would have be
       not any(o["exchangeId"] == DEM and o["side"] == "no" and o["action"] == "buy" for o in a.orders.values()),
       list(a.orders.values()))
 a, b = house_bot(dem_ref=0.985, rep_ref=0.015, ref_guard_exits=True)
-check("ref_guard_exits on a genuine jump: exits still rest (the exemption is about this market's own position)",
-      sides_of(b.ex[DEM].quote) == ["ask"], b.ex[DEM].quote)
+check("ref_guard_exits on a genuine 8c jump (raw gap 12.4c > 2 x 5c): no exemption, both exits blocked (red team)",
+      sides_of(b.ex[DEM].quote) == [] and sides_of(b.ex[REP].quote) == [], (b.ex[DEM].quote, b.ex[REP].quote))
+a, b = house_bot(dem_ref=0.955, rep_ref=0.045, ref_guard_exits=True)
+check("...raw gap 9.4c (<= 2 x 5c), no recent move: exits rest (exempt)",
+      sides_of(b.ex[DEM].quote) == ["ask"] and sides_of(b.ex[REP].quote) == ["bid"], (b.ex[DEM].quote, b.ex[REP].quote))
+a, b = house_bot(ref_guard_exits=True)
+b.ex[DEM].ref_moved_at = b.ex[REP].ref_moved_at = time.monotonic() - 5
+quiet_cycle(b)
+check("ref_guard_exits, gap 6.4c but Polymarket moved 5 s ago (< ref_jump_cooldown_seconds): no exemption",
+      sides_of(b.ex[DEM].quote) == [] and sides_of(b.ex[REP].quote) == [], (b.ex[DEM].quote, b.ex[REP].quote))
+b.ex[DEM].ref_moved_at = b.ex[REP].ref_moved_at = time.monotonic() - b.cfg.ref_jump_cooldown_seconds - 1
+quiet_cycle(b)
+check("...the window over: the exits rest again", sides_of(b.ex[DEM].quote) == ["ask"]
+      and sides_of(b.ex[REP].quote) == ["bid"], (b.ex[DEM].quote, b.ex[REP].quote))
+b.ex[DEM].ref_jump_at = time.monotonic() - 5
+b.ex[DEM].cooldown_until = 0.0                    # (the jump's own pull is over: only the exemption window counts)
+quiet_cycle(b)
+check("...a ref jump 5 s ago (jump guard window): no exemption on that market", sides_of(b.ex[DEM].quote) == [],
+      b.ex[DEM].quote)
 a, b = house_bot(reduce_only=False, ref_guard_exits=True, inv={DEM: -500, REP: 500})
 check("adding sides still blocked: short Dem with Polymarket above the book -> no ask (it would add)",
       "ask" not in sides_of(b.ex[DEM].quote) and "bid" in sides_of(b.ex[DEM].quote), b.ex[DEM].quote)
@@ -339,6 +356,50 @@ check("flat: both guarded sides blocked as before (Dem no ask, Rep no bid)",
 a, b = house_bot(ref_guard_tilted=True, ref_guard_exits=True, dem_ref=0.985, rep_ref=0.015)
 check("both flags, jump: exits rest (exits flag), sizes within the positions",
       sides_of(b.ex[DEM].quote) == ["ask"] and b.ex[DEM].quote.ask_size <= 9876 and b.ex[REP].quote.bid_size <= 9396)
+
+print("--- tilt_exit_full_size without adding_factor_per_market: one start-up warning")
+
+
+class Grab(logging.Handler):
+    def __init__(self):
+        super().__init__(logging.WARNING)
+        self.msgs = []
+
+    def emit(self, record):
+        self.msgs.append(record.getMessage())
+
+
+grab = Grab()
+M.log.addHandler(grab)
+old_level, old_prop = M.log.level, M.log.propagate
+M.log.setLevel(logging.WARNING)
+M.log.propagate = False                               # (the root logger stays quiet)
+try:
+    a, b = make_bot()
+    b.warn_settings()
+    check("both off: no warning", not any("tilt_exit_full_size" in m for m in grab.msgs), grab.msgs)
+    b.cfg.tilt_exit_full_size = True
+    b.warn_settings()
+    b.warn_settings()
+    check("full_size on, per-market off: one warning line", sum("tilt_exit_full_size" in m for m in grab.msgs) == 1,
+          grab.msgs)
+    b.cfg.adding_factor_per_market = True
+    b.warn_settings()
+    check("both on: no further warning", sum("tilt_exit_full_size" in m for m in grab.msgs) == 1, grab.msgs)
+    a, b = make_bot()
+    b.cfg.tilt_exit_full_size = True
+    b.running = False
+    a.live = False
+    logging.disable(logging.NOTSET)
+    try:
+        b.run()
+    except Exception:                                 # noqa: BLE001 (only the start-up warning matters here)
+        pass
+    check("run() start-up logs it", sum("tilt_exit_full_size" in m for m in grab.msgs) == 2, grab.msgs)
+finally:
+    M.log.removeHandler(grab)
+    M.log.setLevel(old_level)
+    M.log.propagate = old_prop
 
 print("--- flags off identical to the base code (git show %s:mm_bot.py) on a grid" % BASE_REF)
 base = None

@@ -36,11 +36,17 @@ def check(name, cond, extra=""):
     RESULTS.append(bool(cond))
 
 
-def bot(inv, b=0.02, cash=None, extra=(), followup=False):
+def bot(inv, b=0.02, cash=None, extra=(), followup=False, p8=True):
+    """p8 True: the Package 8 item 2 settings ON (max_sets 1000, race order + set slack, follow-up max age 600 s);
+    False: their defaults (all OFF)."""
     api, bt = make_bot(live=True, extra_markets=extra)
     bt.cfg.reduce_no_as_sell = True
     bt.cfg.pair_no_unwind_max_cost = b
     bt.cfg.pair_unwind_followup = followup
+    if p8:
+        bt.cfg.pair_no_unwind_max_sets = 1000
+        bt.cfg.pair_unwind_race_order = True
+        bt.cfg.pair_unwind_followup_max_age = 600.0
     bt.cfg.selftest_enabled = False
     bt.size_bank = BANK
     api.inv = dict(inv)
@@ -64,8 +70,11 @@ def inv_of(bt):
 
 print("--- 1 sizing: sets per race, not cash per order at the YES ask")
 c = M.Config()
-check("defaults: pair_no_unwind_max_sets 1000, pair_unwind_followup_max_age 600",
-      c.pair_no_unwind_max_sets == 1000 and c.pair_unwind_followup_max_age == 600.0)
+check("defaults OFF: pair_no_unwind_max_sets 0, pair_unwind_race_order False, pair_unwind_followup_max_age 0",
+      c.pair_no_unwind_max_sets == 0 and c.pair_unwind_race_order is False and c.pair_unwind_followup_max_age == 0.0)
+good, bad = M.validate_overrides({"pair_no_unwind_max_sets": 0, "pair_unwind_race_order": True,
+                                  "pair_unwind_followup_max_age": 0}, c)
+check("overrides 0 / True / 0 accepted", not bad and good.get("pair_unwind_race_order") is True, (good, bad))
 good, bad = M.validate_overrides({"pair_no_unwind_max_sets": 2500, "pair_unwind_followup_max_age": 900}, c)
 check("live overrides accepted", not bad and good.get("pair_no_unwind_max_sets") == 2500, (good, bad))
 PA = {"21": 0.80, "22": 0.21}                        # asks 1.01 (a PA-10-like race)
@@ -165,6 +174,16 @@ check("...600 s old: alerted and cleared", "Utah Senate" not in bt.pair_owed and
 done = bt.take_arbitrage(inv_of(bt), FVS, {}, now_m + 600)
 check("...take_arbitrage no longer skips the race for an owed record", "Utah Senate" not in bt.pair_owed)
 
+api, bt = bot({"21": -500, "22": -900}, followup=True, p8=False)
+now_m = time.monotonic()
+bt.pair_owed = {"Utah Senate": {"action": "buy", "legs": {"22": 400}, "t": now_m - 30, "tries": 0,
+                                "price": {"21": 0.5, "22": 0.505}}}
+api.writes_left = lambda: 0
+n0 = len(ALERTS)
+bt.pair_followup_step(FVS, now_m + 100000)
+check("max_age 0 (default, off): a 100,000 s old record is kept, no alert", "Utah Senate" in bt.pair_owed
+      and len(ALERTS) == n0)
+
 print("--- 5 a leg REFUSED in the batch is owed like a zero fill")
 api, bt = bot({"21": -1000, "22": -1000}, followup=True)
 set_books(bt, {"21": 0.50, "22": 0.505})
@@ -193,6 +212,92 @@ check("follow-up: covered sell NO x600 on leg 22, legs even, owed cleared",
       "Utah Senate" not in bt.pair_owed and api.inv == {"21": -400, "22": -400}
       and any(o["exchangeId"] == "22" and o["side"] == "no" and o["action"] == "sell" and o["quantity"] == 600
               for o in api.wire), (bt.pair_owed, api.inv, api.wire[-2:]))
+
+print("--- 6 flags-off identity: live Package 7 config + Package 8 item 2 defaults == 2ef6d12 (Package 7)")
+
+
+def load_old():
+    """mm_bot.py at 2ef6d12 as module mm_bot_p7 (None if git or the commit is unavailable)."""
+    import importlib.util
+    import subprocess
+    import tempfile
+    root = os.path.dirname(HERE)
+    try:
+        src = subprocess.run(["git", "show", "2ef6d12:mm_bot.py"], cwd=root, capture_output=True, check=True,
+                             text=True).stdout
+    except Exception as e:                       # noqa: BLE001
+        print("  (cannot read 2ef6d12:", e, ")")
+        return None
+    path = os.path.join(tempfile.mkdtemp(), "mm_bot_p7.py")
+    with open(path, "w") as f:
+        f.write(src)
+    spec = importlib.util.spec_from_file_location("mm_bot_p7", path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["mm_bot_p7"] = mod
+    spec.loader.exec_module(mod)
+    mod.CFG.alert_url = ""
+    mod.notify = lambda *a, **k: False
+    mod.alert = lambda msg: ALERTS.append(msg)
+    return mod
+
+
+def live_bot(mod, extra=()):
+    """A bot of module `mod` with the LIVE Package 7 flags on and every Package 8 item 2 setting at its default."""
+    import fakes as F
+    saved = F.Config, F.Bot
+    F.Config, F.Bot = mod.Config, mod.Bot
+    try:
+        api, bt = make_bot(live=True, extra_markets=extra)
+    finally:
+        F.Config, F.Bot = saved
+    bt.cfg.reduce_no_as_sell = True
+    bt.cfg.no_set_aware_bids = True
+    bt.cfg.pair_unwind_followup = True
+    bt.cfg.pair_no_unwind_max_cost = 0.02
+    bt.cfg.selftest_enabled = False
+    bt.size_bank = BANK
+    api.cash, api.set_collateral = 0.0, True
+    return api, bt
+
+
+OLD = load_old()
+check("2ef6d12 loaded", OLD is not None)
+if OLD is not None:
+    new_api, new_bt = live_bot(M, EXTRA)
+    old_api, old_bt = live_bot(OLD, EXTRA)
+    check("same races", list(new_bt.groups) == list(old_bt.groups))
+    n_cmp = n_diff = n_plans = 0
+    diffs = []
+    INVS = (-5000, -2000, -500, -82, 0, 300, 2000)
+    ASKS = ((0.80, 0.21), (0.78, 0.21), (0.50, 0.505), (0.53, 0.52), (0.40, 0.55), (0.62, 0.45))
+    for fvs in (FVS4, dict(FVS4, **{"21": 0.53, "22": 0.52})):
+        for a21, a22 in ASKS:
+            for size in (897, 3000, 20000):
+                for i21 in INVS:
+                    for i22 in INVS:
+                        inv = {"11": -100, "12": -100, "21": i21, "22": i22, "31": -500, "32": -500, "41": 50,
+                               "42": 50}
+                        for b_ in (new_bt, old_bt):
+                            for e in b_.ex:
+                                b_.ex[e].inv = float(inv.get(e, 0))
+                            set_books(b_, {"11": 0.50, "12": 0.515, "21": a21, "22": a22, "31": 0.50, "32": 0.505,
+                                           "41": 0.60, "42": 0.45}, size=size)
+                        iv = {e: float(inv.get(e, 0)) for e in new_bt.ex}
+                        pn = new_bt.arb_plan(["21", "22"], iv, fvs, False)
+                        po = old_bt.arb_plan(["21", "22"], iv, fvs, False)
+                        n_cmp += 1
+                        n_plans += pn is not None
+                        same = pn == po and getattr(new_bt, "arb_plan_b") == getattr(old_bt, "arb_plan_b")
+                        ro_new = [r for r, _ in new_bt.arb_race_order(iv)]
+                        same = same and ro_new == list(old_bt.groups)
+                        for d in (-2000, -500, -1, 1, 82, 500, 2000):
+                            same = same and (new_bt.unwind_is_safe(iv, fvs, ["21", "22"], d)
+                                             == old_bt.unwind_is_safe(iv, fvs, ["21", "22"], d))
+                        if not same:
+                            n_diff += 1
+                            diffs.append((i21, i22, a21, a22, size, pn, po))
+    check(f"arb_plan / arb_plan_b / race order / unwind_is_safe identical on {n_cmp} grid points "
+          f"({n_plans} with a plan)", n_diff == 0 and n_plans > 0, diffs[:3])
 
 print()
 print(f"{sum(RESULTS)}/{len(RESULTS)} passed")

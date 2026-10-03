@@ -391,6 +391,147 @@ else:
                 diffs.append((inv, cash, sn[:3], sb[:3]))
     check("two full cycles send the same orders with both flags off (4 books x cash 0 / no cash model)", ok_c, diffs[:1])
 
+print("--- red team: the need of orders not placed is given back")
+from concurrent.futures import Future                      # noqa: E402
+
+
+def bid(eid="12", q=100, p=0.5):
+    return {"exchangeId": eid, "side": "yes", "action": "buy", "quantity": q, "price": p, "tournamentId": "T",
+            "expirationDate": M.iso(M.utcnow() + M.timedelta(minutes=5))}
+
+
+def fresh(cash=1000.0):
+    api, bt = bot({}, gate=True, cash=None)
+    bt.cg_cash, bt.cg_reserved, bt.cg_spent = cash, 0.0, 0.0
+    return api, bt
+
+
+api, bt = fresh()
+real_pb = api.place_batch
+api.place_batch = lambda orders: (_ for _ in ()).throw(M.ApiError(429, "WRITE_BUDGET_WAIT", "would wait"))
+bt.submit_write("batch", ["12"], [(bid(), {"our_side": "bid"})])
+bt.drain_writes(5)
+check("queued batch fails with WRITE_BUDGET_WAIT: its 50 given back (spent 0)", abs(bt.cg_spent) < 1e-9, bt.cg_spent)
+api, bt = fresh()
+api.place_batch = lambda orders: (_ for _ in ()).throw(M.ApiError(0, "NETWORK", "boom"))
+bt.submit_write("batch", ["12", "11"], [(bid(), {"our_side": "bid"}), (bid("11", 10, 0.3), {"our_side": "bid"})])
+bt.drain_writes(5)
+check("queued batch raises (network): both needs given back", abs(bt.cg_spent) < 1e-9, bt.cg_spent)
+api, bt = fresh()
+real_pb = api.place_batch
+
+
+def refuse_first(orders):
+    res = real_pb(orders)
+    res[0] = {"index": 0, "ok": False, "status": 400,
+              "data": {"error": {"code": "BAD_REQUEST", "message": "Insufficient available funds"}}}
+    return res
+
+
+api.place_batch = refuse_first
+bt.submit_write("batch", ["12", "11"], [(bid(), {"our_side": "bid"}), (bid("11", 10, 0.3), {"our_side": "bid"})])
+bt.drain_writes(5)
+check("per-order refusal: only the refused order's 50 back (spent 3 = the placed 10 @ 0.3)",
+      abs(bt.cg_spent - 3.0) < 1e-9, bt.cg_spent)
+check("the gate's note never reaches the wire", all("_cash_need" not in o for o in api.wire), api.wire)
+api, bt = fresh()
+f = Future()
+f.cancel()
+bt.writer = type("W", (), {"submit": lambda self, *a, **k: f})()
+bt.submit_write("batch", ["12"], [(bid(), {"our_side": "bid"})])
+check("(the need was counted when queued)", abs(bt.cg_spent - 50.0) < 1e-9, bt.cg_spent)
+bt.harvest_writes()
+check("future cancelled by stop_queued_writes: its 50 given back", abs(bt.cg_spent) < 1e-9, bt.cg_spent)
+api, bt = fresh()
+api.place_batch = lambda orders: (_ for _ in ()).throw(M.ApiError(429, "WRITE_BUDGET_WAIT", "would wait"))
+try:
+    bt.place_orders([bid()])
+except M.ApiError:
+    pass
+check("main-thread place_orders (takes / follow-ups) raising: its need given back", abs(bt.cg_spent) < 1e-9,
+      bt.cg_spent)
+api, bt = fresh()
+api.place_batch = refuse_first
+bt.place_orders([bid(), bid("11", 10, 0.3)])
+check("main-thread place_orders, first order refused: only its need back", abs(bt.cg_spent - 3.0) < 1e-9, bt.cg_spent)
+
+print("--- red team: a failed / missing cash read")
+ALERTS = []
+M.alert = lambda msg: ALERTS.append(msg)
+
+
+def fut(value=None, exc=None):
+    f_ = Future()
+    f_.set_exception(exc) if exc else f_.set_result(value)
+    return f_
+
+
+api, bt = bot({}, gate=True, cash=None)
+bt.cash_gate_cycle(fut({"cashBalance": 500.0}), {}, [])
+check("good read: cash 500, read age ~0", bt.cg_cash == 500.0 and bt.cash_read_age() < 5, bt.cash_read_age())
+bt.cash_gate_cycle(fut(exc=RuntimeError("timeout")), {}, [])
+bt.cash_gate_cycle(fut({"foo": 1}), {}, [])
+check("first miss alerts once (2 misses -> 1 alert)", len(ALERTS) == 1 and "cash gate" in ALERTS[0], ALERTS)
+bt.cash_gate_cycle(fut({"cashBalance": 400.0}), {}, [])
+bt.cash_gate_cycle(fut({"foo": 1}), {}, [])
+check("a good read re-arms the alert (next miss alerts again)", len(ALERTS) == 2, ALERTS)
+bt.cg_read_at = time.monotonic() - 200
+check("read 200 s old: still gating", bt.cash_gate_on())
+bt.cg_read_at = time.monotonic() - 400
+bt.cg_spent = 400.0 - 25.0                          # 0 left: a gated bid would be dropped
+check("read 400 s old (> 5 min): the gate stops gating", not bt.cash_gate_on())
+n0 = len(api.wire)
+res = bt.place_orders([bid()])
+check("...a bid goes out ungated", len(api.wire) == n0 + 1 and not res[0].get("cash_gated"), res)
+bt.cash_gate_cycle(fut({"cashBalance": 400.0}), {}, [])
+check("...a good read resumes gating", bt.cash_gate_on() and not bt.cg_stale_logged)
+api, bt = bot({}, gate=True, cash=500.0)
+bt.cycle()
+bt.drain_writes(5)
+check("status.json cash_gate_read_age (s since the last good read)", "cash_gate_read_age" in bt.health
+      and 0 <= bt.health["cash_gate_read_age"] < 5, bt.health.get("cash_gate_read_age"))
+api.pnl = lambda: {"foo": 1}
+bt.cg_read_at = time.monotonic() - 400
+bt.cg_cash = 0.0
+bt.cycle()
+bt.drain_writes(5)
+check("cycle with no cash figure for > 5 min: status age > 300 and the bot is not gating", bt.health.get(
+    "cash_gate_read_age", 0) > 300 and not bt.cash_gate_on(), bt.health.get("cash_gate_read_age"))
+M.alert = lambda msg: None
+
+print("--- red team: take / follow-up 'cash gated' logs throttled per market")
+
+
+class Grab(logging.Handler):
+    def __init__(self):
+        super().__init__(logging.INFO)
+        self.msgs = []
+
+    def emit(self, record):
+        self.msgs.append(record.getMessage())
+
+
+grab = Grab()
+M.log.addHandler(grab)
+old_level = M.log.level
+M.log.setLevel(logging.INFO)
+try:
+    api, bt = bot({"11": 0, "12": 0}, gate=True)
+    bt.cg_cash, bt.cg_reserved, bt.cg_spent = 0.0, 0.0, 0.0
+    ex = bt.ex["11"]
+    ex.book = api.full_book("11")
+    ex.take_dir = 1
+    for _ in range(3):
+        bt.execute_take(ex, 0.40, 0.0, 0.14, time.monotonic())
+    n_take = sum("take on" in m and "cash gate" in m for m in grab.msgs)
+    check("3 gated takes on one market: logged once", n_take == 1, grab.msgs)
+    bt.cg_logged_take[ex.eid] -= 601
+    bt.execute_take(ex, 0.40, 0.0, 0.14, time.monotonic())
+    check("...again after 10 minutes", sum("take on" in m and "cash gate" in m for m in grab.msgs) == 2, grab.msgs)
+finally:
+    M.log.removeHandler(grab)
+    M.log.setLevel(old_level)
+
 print()
 print(f"{sum(RESULTS)}/{len(RESULTS)} passed")
 sys.exit(0 if all(RESULTS) else 1)
