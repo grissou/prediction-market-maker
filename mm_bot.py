@@ -835,6 +835,20 @@ class Config:
     # beyond the NO held stays "buy YES @ p" (see order_wire). Asks and adding bids unchanged. The start-up
     # self-test checks the exchange accepts it and falls back to False for the run if not. False = unchanged.
     reduce_no_as_sell: bool = False
+    # --- Package 7: NO+NO sets ---
+    # Live 3 Oct 14:00: 47 of the 49 remaining "Insufficient available funds" refusals were covered NO sales on races
+    # where we hold NO on EVERY leg. The exchange collateralises NO+NO as a SET ("collateralSavings"): selling NO on
+    # ONE leg breaks the set, the remaining lone NO then needs full collateral, i.e. cash. Selling the LONE part (NO
+    # held beyond the race's smallest leg) is fine.
+    # no_set_aware_bids True (with reduce_no_as_sell): a covered bid / take on such a leg is capped at its lone part,
+    # |inv| - min over the race's legs of |inv| (0 on the smallest leg: no bid there, it would need cash). The
+    # set part is only unwound as a pair (below). False = unchanged.
+    no_set_aware_bids: bool = False
+    # pair_no_unwind_max_cost >= 0 (with reduce_no_as_sell; live, after its own start-up check): the short-set
+    # buy-back in arb_plan (buy YES on every leg = covered "sell NO" on every leg, ONE batch) also runs when the asks
+    # add up to <= 1 + this (a cost of at most this per set to free the set's capital), not only <= 1 -
+    # pair_unwind_min_profit. Both legs go out as covered sales in one batch or the batch is not sent. -1 = off.
+    pair_no_unwind_max_cost: float = -1.0
 
 
 CFG = Config()
@@ -1007,6 +1021,9 @@ OVERRIDABLE = {
     "tail_adding_factor": (0.0, 1.0),
     # --- Package 6: reduce NO holdings as covered NO sales ---
     "reduce_no_as_sell": (False, True),
+    # --- Package 7: NO+NO sets ---
+    "no_set_aware_bids": (False, True),
+    "pair_no_unwind_max_cost": (-1.0, 0.05),
 }
 MAX_ORDER_TTL = 7200.0    # no order of ours lives longer than this (dead-man's switch), whatever the TTL settings
 LADDER_MAX_LEVELS = 8
@@ -3419,6 +3436,9 @@ class Bot:
         # behaviour for this run), the background run, when to retry it, and this plan's covered NO per exchange/level
         self.nosell_state, self.nosell_future, self.nosell_next, self.cover_planned = None, None, 0.0, {}
         self.nosell_eid, self.nosell_hold = None, 0.0
+        # Package 7 pair_no_unwind_max_cost: its start-up check leg (a paired covered NO sale), state as nosell's
+        self.pairno_state, self.pairno_future, self.pairno_next, self.pairno_wait = None, None, 0.0, 0.0
+        self.pairno_race, self.pairno_holds, self.pp_short_skip_logged = None, {}, False
         self.selftest_gen = 0             # cancel_gen when the test started
         self.selftest_unlisted = 0        # tests in a row whose orders were accepted but never listed
         self.selftest_errors = 0          # tests in a row that crashed (a bug in the test)
@@ -5346,6 +5366,10 @@ class Bot:
         when every order resting there goes."""
         cfg = self.cfg
         self.__dict__.setdefault("cover_planned", {}).pop(ex.eid, None)   # Package 6: this plan's covered NO afresh
+        if q.bid is not None and q.bid_size > 0 and self.set_blocked(ex.eid, ex.inv, 0):
+            # Package 7 no_set_aware_bids: every NO share here is in a NO+NO set - a bid would be a covered sale that
+            # breaks the set (or a cash purchase): refused at 0 cash. No bid (the ladder's bids are blocked too).
+            q = replace(q, bid=None, bid_size=0, bid_limit=None, bid_max=None)
         lad = [o for o in resting if self.order_level(o) > 0]
         if not lad and not cfg.ladder_enabled:
             ex.lad_tag = ""
@@ -5417,6 +5441,9 @@ class Bot:
         for key in sorted(want, key=lambda k: (k[1], not k[0])):
             if key not in kept and placing and not self.refill_cooling(ex, key[0], now_m):
                 new.append(self.new_order(ex, key[0], want[key][0], want[key][1], fv, now, level=key[1]))
+        if new and getattr(cfg, "no_set_aware_bids", False) and self.reduce_no_on() and self.nono_set_part(ex.eid) >= 1:
+            # Package 7: on a NO+NO set leg a ladder bid that is not a covered (lone-part) sale would need cash: dropped
+            new = [(o, m) for o, m in new if o["action"] != "buy" or o.get("_no_sell")]
         replaced = {(o["action"] == "buy", m["level"]) for o, m in new}
         # A stale order goes when its level is replaced, no longer wanted or a duplicate; one we can't replace now
         # (refill cooldown, back-off) stays while it's safe, like level 0.
@@ -5729,14 +5756,18 @@ class Bot:
             return state == "ok"
         return True
 
-    def cover_no_qty(self, eid, inv, level=None):
+    def cover_no_qty(self, eid, inv, level=None, sets_ok=False):
         """NO shares a bid on eid may sell as a covered "sell NO" now: the NO held in that market (per market, -inv;
         never race-netted) less what our OTHER resting / just-planned bids there may already be selling (other ladder
         levels; the order a re-quote replaces is cancelled first, so the same level never counts). level None = a
-        take, sent after every order of ours there was cancelled: all the NO held. 0 = not in effect / no NO held."""
+        take, sent after every order of ours there was cancelled: all the NO held. 0 = not in effect / no NO held.
+        Package 7 no_set_aware_bids: less the part locked in NO+NO sets (nono_set_part), unless sets_ok (a batch
+        that sells NO on every leg of the race at once: arbitrage / short-set unwind legs)."""
         if not self.reduce_no_on() or inv is None or inv > -1:
             return 0
         held = -float(inv)
+        if getattr(self.cfg, "no_set_aware_bids", False) and not sets_ok:
+            held -= self.nono_set_part(eid, inv)
         if level is not None:
             held -= sum(o.qty for o in self.my_orders.values()
                         if o.eid == eid and o.is_bid and self.order_level(o) != level)
@@ -5746,15 +5777,59 @@ class Bot:
     def no_sell_order(self, order, inv, whole=False):
         """A take / arbitrage order (YES terms) that buys back a short: marked to go out as a covered "sell NO",
         capped at the NO held (whole=True: only if ALL of it fits, else unchanged - arbitrage legs must stay equal).
-        Returns the order (changed in place)."""
+        Returns the order (changed in place), or None (Package 7 no_set_aware_bids, not whole): all the NO held
+        there is in a NO+NO set, so the buy-back can be neither a covered sale nor (at 0 cash) a purchase - not sent."""
         if order["action"] != "buy":
             return order
-        cover = self.cover_no_qty(order["exchangeId"], inv)
+        if not whole and self.set_blocked(order["exchangeId"], inv):
+            return None
+        cover = self.cover_no_qty(order["exchangeId"], inv, sets_ok=whole)
         if cover < 1 or (whole and order["quantity"] > cover):
             return order
         order["quantity"] = min(int(order["quantity"]), cover)
         order["_no_sell"] = True
         return order
+
+    # --- Package 7: NO+NO sets ---
+    def nono_set_part(self, eid, inv=None):
+        """NO shares of eid locked in a NO+NO set: when EVERY leg of its race (2+ legs) holds >= 1 NO, the smallest
+        leg's NO held (min over legs of -inv; inv = this leg's position if given, else ex.inv); else 0."""
+        ex = self.ex.get(eid)
+        members = self.groups.get(ex.group) if ex is not None else None
+        if not members or len(members) < 2 or any(m not in self.ex for m in members):
+            return 0.0
+        held = [-float(inv if (m == eid and inv is not None) else self.ex[m].inv) for m in members]
+        return min(held) if min(held) >= 1 else 0.0
+
+    def set_blocked(self, eid, inv, level=None):
+        """no_set_aware_bids in effect and a bid / take buying back NO on eid has no lone part left to sell as a
+        covered sale (all of its NO is in a NO+NO set): any order there would need cash, so none is sent."""
+        return (getattr(self.cfg, "no_set_aware_bids", False) and self.reduce_no_on() and inv is not None
+                and inv <= -1 and self.nono_set_part(eid, inv) >= 1 and self.cover_no_qty(eid, inv, level) < 1)
+
+    def pair_no_unwind_on(self):
+        """pair_no_unwind_max_cost in effect: set (>= 0), reduce_no_as_sell in effect, and live with the self-test on,
+        its own start-up check (pairno_tick) passed; "off" = the exchange refused a paired NO sale this run."""
+        if getattr(self.cfg, "pair_no_unwind_max_cost", -1.0) < 0 or not self.reduce_no_on():
+            return False
+        state = getattr(self, "pairno_state", None)
+        if state == "off":
+            return False
+        if self.api.live and self.cfg.selftest_enabled:
+            return state == "ok"
+        return True
+
+    def nono_sets(self):
+        """status.json nono_sets: races held NO on every leg (2+ legs), the sets in them (min over legs of NO held)
+        and the capital they lock at the set's guaranteed payout (k - 1 per set of a k-leg race)."""
+        races, sets, cap = 0, 0, 0.0
+        for race, members in self.groups.items():
+            if len(members) < 2 or any(m not in self.ex for m in members):
+                continue
+            n = min(-self.ex[m].inv for m in members)
+            if n >= 1:
+                races, sets, cap = races + 1, sets + int(n), cap + int(n) * (len(members) - 1)
+        return {"races": races, "sets": sets, "capital": round(cap, 2)}
 
     def place_orders(self, orders):
         """POST /orders/batch with each order in its wire form (wire_order): every placement goes through here."""
@@ -6123,7 +6198,12 @@ class Bot:
                     continue
                 total = sum(p for p, _ in levels.values())
                 edge = total - 1 if sign > 0 else 1 - total
-                if edge < cfg.pair_unwind_min_profit - 1e-9:   # (buying back a short set below 0.90 only cuts risk)
+                floor = cfg.pair_unwind_min_profit
+                if sign < 0 and self.pair_no_unwind_on():
+                    # Package 7: a NO+NO set is unwound as a pair even at a small cost (asks <= 1 + max_cost): the
+                    # only way to free it without cash (selling one leg breaks the set's collateral)
+                    floor = min(floor, -cfg.pair_no_unwind_max_cost)
+                if edge < floor - 1e-9:   # (buying back a short set below 0.90 only cuts risk)
                     continue
                 qty = int(min([sets] + [size for _, size in levels.values()] +
                               [cfg.pair_unwind_max_frac * bank / max(p, TICK) for p, _ in levels.values()]))
@@ -6214,6 +6294,14 @@ class Bot:
         ha, hb = inv.get(a, 0.0), inv.get(b, 0.0)
         sign = 1 if min(ha, hb) >= 1 else -1 if max(ha, hb) <= -1 else 0
         if not sign:
+            return None
+        if sign < 0 and self.cfg.reduce_no_as_sell:
+            # Package 7: with reduce_no_as_sell the resting bid is a covered "sell NO" on ONE leg of a NO+NO set,
+            # which breaks the set's collateral and is refused at 0 cash: short sets are unwound as a pair
+            # (arb_plan, pair_no_unwind_max_cost), never passively. Long sets (YES+YES) as before.
+            if not getattr(self, "pp_short_skip_logged", False):
+                self.pp_short_skip_logged = True
+                log.info("T2.5 passive pair unwind: short (NO+NO) sets skipped while reduce_no_as_sell is on")
             return None
         sets, bank = min(sign * ha, sign * hb), self.bankroll()
         cands = [(c, x, y) for x, y in ((a, b), (b, a)) if (c := self.pp_candidate(x, y, sign, sets, bank))]
@@ -6322,6 +6410,9 @@ class Bot:
                                     "quantity": int(qty), "price": price, "tournamentId": self.tid,
                                     "expirationDate": iso(utcnow() + timedelta(seconds=self.cfg.arb_order_ttl))}, ex.inv)
         self.orders_stale = True
+        if order is None:                         # Package 7: all NO there is in a NO+NO set (no_set_aware_bids)
+            log.warning("pair unwind second leg on %s not sent: the NO on %s is all in a NO+NO set", race, ex.label)
+            return 0.0
         try:
             results = self.place_orders([order])
         except ApiError as e:
@@ -6356,6 +6447,8 @@ class Bot:
         st = next((v for v in self.pp.values() if v["leg"] == ex.eid), None)
         if st is None or not self.cfg.pair_unwind_passive:
             return q
+        if st["sign"] < 0 and self.cfg.reduce_no_as_sell:
+            return q                              # Package 7: a short-set slice never rests (see pair_passive_plan)
         side = "ask" if st["sign"] > 0 else "bid"
         if getattr(q, side) is None and not (self.cfg.pair_passive_in_reduce_only
                                              and side in getattr(ex, "ro_clip", "").split()):
@@ -6403,6 +6496,21 @@ class Bot:
             log.info("%s on %s skipped: write budget busy (next cycle)", "pair unwind" if kind == "unwind"
                      else "arbitrage", race)
             return
+        # The legs (the batch), built first: a short-set unwind whose legs cannot ALL go out as covered "sell NO"
+        # is not sent at all (Package 7: a half-converted batch breaks the NO+NO set and needs cash). The expiry is
+        # set after our quotes are pulled (below).
+        orders = [{"exchangeId": e, "side": "yes", "action": action, "quantity": qty, "price": p,
+                   "tournamentId": self.tid} for e, (p, _) in levels.items()]
+        for o in orders:                          # a leg buying back a short: covered "sell NO" if ALL of it fits
+            self.no_sell_order(o, self.ex[o["exchangeId"]].inv, whole=True)
+        if (kind == "unwind" and action == "buy" and self.reduce_no_on()
+                and (getattr(cfg, "no_set_aware_bids", False) or getattr(cfg, "pair_no_unwind_max_cost", -1.0) >= 0)
+                and not all(o.get("_no_sell") for o in orders)):
+            self.pair_no_refused = getattr(self, "pair_no_refused", 0) + 1
+            log.warning("pair unwind on %s (short set) not sent: not every leg fits as a covered 'sell NO' (%s)",
+                        race, ", ".join(f"{self.ex[o['exchangeId']].label} x{o['quantity']} NO held "
+                                        f"{-self.ex[o['exchangeId']].inv:.0f}" for o in orders))
+            return
         total = sum(p for p, _ in levels.values())
         per_set = total - 1 if action == "sell" else 1 - total
         legs = ", ".join(f"{self.ex[e].label} @{p:.3f} x{s:.0f}" for e, (p, s) in levels.items())
@@ -6423,10 +6531,8 @@ class Bot:
             return
         # 2. Trade at exactly those prices. The orders expire within seconds so leftovers can't rest.
         exp = iso(utcnow() + timedelta(seconds=cfg.arb_order_ttl))
-        orders = [{"exchangeId": e, "side": "yes", "action": action, "quantity": qty, "price": p,
-                   "tournamentId": self.tid, "expirationDate": exp} for e, (p, _) in levels.items()]
-        for o in orders:                          # a leg buying back a short: covered "sell NO" if ALL of it fits
-            self.no_sell_order(o, self.ex[o["exchangeId"]].inv, whole=True)
+        for o in orders:
+            o["expirationDate"] = exp
         self.orders_stale = True                  # positions and orders change: re-read next cycle
         try:
             results = self.place_orders(orders)
@@ -6563,6 +6669,9 @@ class Bot:
         ex.take_dir = 0                                                  # a new gap must be confirmed afresh
         if qty < 1:
             return False
+        if buy and self.set_blocked(ex.eid, ex.inv):       # Package 7: all NO here in a NO+NO set: nothing to send
+            log.info("take on %s skipped: all its NO is in a NO+NO set (no_set_aware_bids)", ex.label)
+            return False
         log.warning("%sTAKE %s: Polymarket %.3f vs stale %s %.3f -> %s %d YES at %.3f",
                     "" if self.api.live else "[dry] ", ex.label, p, "ask" if buy else "bid", price,
                     "buying" if buy else "selling", qty, price)
@@ -6576,6 +6685,11 @@ class Bot:
                                     "quantity": qty, "price": price, "tournamentId": self.tid,
                                     "expirationDate": iso(utcnow() + timedelta(seconds=cfg.take_order_ttl))}, ex.inv)
         self.orders_stale = True
+        if order is None:                         # Package 7: all NO here is in a NO+NO set (no_set_aware_bids)
+            self.takes_total -= 1
+            log.warning("take on %s not sent: all its NO is in a NO+NO set (our quote there is re-placed next cycle)",
+                        ex.label)
+            return True
         try:
             results = self.place_orders([order])
         except ApiError as e:
@@ -6757,6 +6871,8 @@ class Bot:
                 if not again:
                     continue
                 p = again[0]
+            if p["buy"] and self.set_blocked(eid, ex.inv):     # Package 7: all NO here in a NO+NO set
+                continue
             self.hold_takes.append((now_m, p["notional"]))     # counted when sent (an IOC may do less: safe side)
             self.hold_takes_total += 1
             taken.add(eid)
@@ -6771,6 +6887,9 @@ class Bot:
                                         "quantity": p["qty"], "price": p["price"], "tournamentId": self.tid,
                                         "expirationDate": iso(utcnow() + timedelta(seconds=cfg.take_order_ttl))}, ex.inv)
             self.orders_stale = True
+            if order is None:                     # Package 7: all NO here is in a NO+NO set (no_set_aware_bids)
+                log.warning("aged take on %s not sent: all its NO is in a NO+NO set", ex.label)
+                continue
             try:
                 results = self.place_orders([order])
             except ApiError as e:
@@ -7133,12 +7252,26 @@ class Bot:
                                        "errors": self.errors_total, "rate_limits": getattr(self.api, "rate_limited", 0)}
 
     def summary_ops_line(self, value):
-        """ops_summary_line for this bot (latest ops fields; tilt_s / tilt_exposure when T2.1 set them). Never raises."""
+        """ops_summary_line for this bot (latest ops fields; tilt_s / tilt_exposure when T2.1 set them), plus
+        " | NO+NO sets N (cap X)" (Package 7: N races held NO on every leg) when any is held. Never raises."""
         try:
-            return ops_summary_line(self.ops_last or self.safe_ops_fields(), value,
+            line = ops_summary_line(self.ops_last or self.safe_ops_fields(), value,
                                     getattr(self, "tilt_s", None), getattr(self, "tilt_exposure", None))
         except Exception as e:                    # a report must never disturb trading
             log.warning("summary ops line failed: %s", e)
+            return None
+        nn = self.safe_nono_sets()
+        if nn and nn.get("races"):
+            part = f"NO+NO sets {nn['races']} (cap {nn['capital'] / 1000:.1f}k)"
+            line = f"{line} | {part}" if line else part
+        return line
+
+    def safe_nono_sets(self):
+        """nono_sets that never raises (None on any error)."""
+        try:
+            return self.nono_sets()
+        except Exception as e:                    # reporting must never disturb trading
+            log.warning("nono_sets unavailable: %s", e)
             return None
 
     def status_report(self):
@@ -7361,6 +7494,8 @@ class Bot:
                 "tilt_state": self.tilt_state_dict(),
                 "tilt_diag": {**getattr(self.tilt, "diag", {}),
                               "estimator": getattr(self.cfg, "ref_tilt_estimator", "slope")},
+                # Package 7: NO+NO sets held (races, sets, capital at k - 1 per set) and the paired-unwind check
+                "nono_sets": self.safe_nono_sets(), "pairno_state": getattr(self, "pairno_state", None),
                 "seconds_since_cycle": round(time.monotonic() - self.last_cycle_done, 1)
                 if self.last_cycle_done is not None else None})
         except OSError as e:
@@ -7878,8 +8013,8 @@ class Bot:
                     outcome = ("error", [f"self-test error: {e}"], self.cfg.order_ttl)
                 self.selftest_finish(self.selftest_eid, outcome)
             return
-        if self.nosell_future is not None:
-            return                                # the sell-NO leg is out: never two tests at once (holds, same market)
+        if self.nosell_future is not None or getattr(self, "pairno_future", None) is not None:
+            return                                # a sell-NO leg is out: never two tests at once (holds, same market)
         if time.monotonic() >= self.selftest_next:
             self.selftest_eid = self.selftest_start()
             self.selftest_future = self.selftest_pool.submit(self.selftest_run, self.selftest_eid, self.selftest_ttl())
@@ -7903,9 +8038,12 @@ class Bot:
                     verdict, msg = "busy", f"self-test error: {e}"
                 self.nosell_finish(verdict, msg)
             return
-        if self.selftest_future is not None or time.monotonic() < self.nosell_next:
+        if (self.selftest_future is not None or getattr(self, "pairno_future", None) is not None
+                or time.monotonic() < self.nosell_next):
             return
         held = [e for e in sorted(self.ex) if self.ex[e].inv <= -1]
+        if getattr(cfg, "no_set_aware_bids", False):   # Package 7: a 1-share sale inside a NO+NO set breaks it and
+            held = [e for e in held if -self.ex[e].inv - self.nono_set_part(e) >= 1]   # is refused: lone parts only
         if not held:
             return                                # nothing to reduce yet: nothing to check
         # The test order is a YES bid at PMIN: only where no other trader's ask (cached book) is at PMIN or below, so
@@ -7979,6 +8117,118 @@ class Bot:
             self.nosell_next = time.monotonic() + self.cfg.selftest_retry_seconds
             log.warning("self-test (sell NO): exchange busy (%s) - trying again in %.0f s", msg,
                         self.cfg.selftest_retry_seconds)
+
+    # --- Package 7: the pair_no_unwind_max_cost self-test leg (a paired covered NO sale) ---
+    PAIRNO_MAX_WAIT = 1800.0                      # busy back-off cap (s)
+
+    def pairno_tick(self):
+        """Main loop, after every cycle: with pair_no_unwind_max_cost >= 0 and reduce_no_as_sell on (live, self-test
+        on), once the sell-NO leg has passed and some race holds NO on every leg, check on a background thread that
+        the exchange takes ONE batch of covered "sell NO" orders, 1 share on each leg of that race (pairno_run: the
+        sale that closes a whole set). Until it has passed, short sets are bought back only at today's rule.
+        Refused -> alert, the paired unwind off for the rest of this run (pairno_state "off"); busy -> tried again
+        with a back-off (selftest_retry_seconds doubling up to PAIRNO_MAX_WAIT). Never stops the bot."""
+        cfg = self.cfg
+        if (getattr(cfg, "pair_no_unwind_max_cost", -1.0) < 0 or not (cfg.reduce_no_as_sell and self.api.live
+                                                                       and cfg.selftest_enabled)
+                or self.pairno_state is not None):
+            return
+        f = self.pairno_future
+        if f is not None:
+            if f.done():
+                self.pairno_future = None
+                try:
+                    verdict, msg = f.result()
+                except Exception as e:            # a bug in the test itself: retried later, never fatal
+                    verdict, msg = "busy", f"self-test error: {e}"
+                self.pairno_finish(verdict, msg)
+            return
+        if (self.nosell_state != "ok" or self.selftest_future is not None or self.nosell_future is not None
+                or time.monotonic() < self.pairno_next):
+            return
+        cands = []
+        for race, members in sorted(self.groups.items()):
+            if len(members) < 2 or any(m not in self.ex for m in members):
+                continue
+            sets = min(-self.ex[m].inv for m in members)
+            # every leg: NO held, and no other trader's ask at or below 0.005 (the YES bid at 0.005 cannot fill)
+            if sets >= 1 and all(self.nosell_safe(self.ex[m]) for m in members):
+                cands.append((len(members) != 2, -sets, race))
+        if not cands:
+            return                                # no NO+NO set held (or none safe to test on): look again next time
+        race = min(cands)[2]                      # a 2-leg race first, the biggest set
+        members = list(self.groups[race])
+        self.pairno_race = race
+        self.pairno_holds = {m: self.ex[m].pending_until for m in members}
+        for m in members:
+            self.ex[m].pending_until = float("inf")   # no quoting there while the test orders may rest
+        self.pairno_future = self.selftest_pool.submit(self.pairno_run, members)
+
+    def pairno_test_orders(self, members):
+        """ONE 1-share "sell NO @ 0.995" (= our bid at YES 0.005) per leg: they close one whole NO+NO set."""
+        exp = iso(utcnow() + timedelta(seconds=self.cfg.order_ttl))
+        return [{"exchangeId": e, "side": "no", "action": "sell", "quantity": 1, "price": round(1 - PMIN, 3),
+                 "tournamentId": self.tid, "expirationDate": exp} for e in members]
+
+    def pairno_run(self, members):
+        """Background thread, API calls only: place the paired test batch, cancel every accepted order at once.
+        -> (verdict, message): "ok" (every leg accepted), "refused" (any leg refused, a funds refusal included:
+        the set collateral rule does not let a paired sale go without cash) or "busy" (try again later)."""
+        try:
+            results = self.api.place_batch(self.pairno_test_orders(members))
+        except ApiError as e:
+            if e.code == "WRITE_BUDGET_WAIT" or e.status in self.SELFTEST_BUSY:
+                return "busy", str(e)
+            return "refused", str(e)
+        results = list(results or [])
+        oids = [((r or {}).get("data") or {}).get("orderId") for r in results]
+        for k, oid in enumerate(oids):
+            if oid is None:
+                continue
+            eid = members[k] if k < len(members) else None
+            try:
+                if not self.api.cancel_order(oid) and eid is not None:
+                    self.api.cancel_all(self.tid, eid)
+            except ApiError:
+                try:
+                    if eid is not None:
+                        self.api.cancel_all(self.tid, eid)
+                except ApiError as e:
+                    log.warning("self-test (paired NO sale): could not cancel test order %s (%s) - it expires on "
+                                "its own", oid, e)
+        if len(results) == len(members) and all(r.get("ok") and o is not None for r, o in zip(results, oids)):
+            return "ok", f"orders {oids} accepted and cancelled"
+        bad = [r for r in results if not r.get("ok")] or [{"error": "no result for every leg"}]
+        if any(self.selftest_funds_refusal(r) for r in bad):
+            return "refused", "insufficient funds: " + str(bad[0])[:250]
+        if all(r.get("status") in self.SELFTEST_BUSY for r in bad):
+            return "busy", str(bad[0])[:300]
+        err = ((bad[0].get("data") or {}).get("error") if isinstance(bad[0].get("data"), dict) else None) or bad[0]
+        return "refused", (err.get("message") if isinstance(err, dict) and err.get("message") else str(bad[0]))[:300]
+
+    def pairno_finish(self, verdict, msg):
+        """Main thread: act on the leg's outcome (see pairno_tick)."""
+        for m, hold in (getattr(self, "pairno_holds", None) or {}).items():
+            if m in self.ex:
+                self.ex[m].pending_until = hold if hold != float("inf") else 0.0
+        self.pairno_holds = {}
+        self.orders_stale = True                  # the clean-up may have touched our orders there: re-read the list
+        if verdict == "ok":
+            self.pairno_state, self.pairno_wait = "ok", 0.0
+            log.info("self-test (paired NO sale) on %s: accepted (%s) - NO+NO sets are unwound as a pair "
+                     "(pair_no_unwind_max_cost)", self.pairno_race, msg)
+        elif verdict == "refused":
+            self.pairno_state = "off"
+            log.error("self-test (paired NO sale) on %s refused: %s - pair_no_unwind_max_cost OFF for this run",
+                      self.pairno_race, msg)
+            alert(f"the exchange refuses a paired NO sale: NO+NO sets cannot be unwound without cash ({msg}). "
+                  f"pair_no_unwind_max_cost is off for the rest of this run; the bot keeps running")
+        else:
+            prev, base = self.pairno_wait, self.cfg.selftest_retry_seconds
+            wait = min(prev * 2, max(self.PAIRNO_MAX_WAIT, base)) if prev else base
+            self.pairno_wait = wait
+            self.pairno_next = time.monotonic() + wait
+            log.warning("self-test (paired NO sale): exchange busy (%s) - trying again in %.0f s", msg, wait)
 
     def start_feed(self):
         """Start the realtime feed if it's enabled and the `realtime` package is installed."""
@@ -8139,6 +8389,7 @@ class Bot:
                     if self.running:
                         self.selftest_tick()      # stops the bot (exit code 3) if the API surprises us
                         self.nosell_tick()        # Package 6: covered "sell NO" leg (never stops the bot)
+                        self.pairno_tick()        # Package 7: paired NO+NO sale leg (never stops the bot)
                     self.on_cycle_ok()
                     self.write_status(ok=True)
                     self.maybe_summary()
