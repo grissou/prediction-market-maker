@@ -1180,6 +1180,11 @@ class Config:
     # (covered NO sales on every leg, one batch, pair_no_unwind_max_per_cycle / _max_sets, follow-ups) does the
     # unwind; the paired buy waits for the sets to fall and a cash read after it. 0 = off (sets never ranked).
     alloc_set_cost_per_usd: float = 0.0
+    # take_respect_reserve True: a stale-quote take (execute_take) is skipped when the cash it needs would leave less
+    # than alloc_mm_reserve of cash free (cash_left - need < reserve), so the market-making reserve the allocator builds is
+    # not spent by the takes first (P10 red team C-1: on the 3 Oct state the takes spent 12.7k of the 11.0k the sets freed in
+    # 4 h; a take earns ~7.7% per $ once at the outcome, the reserve is meant to turn over). False = takes unchanged.
+    take_respect_reserve: bool = False
 
 
 CFG = Config()
@@ -1446,6 +1451,7 @@ OVERRIDABLE = {
     "alloc_max_contract_usd": (0.0, 100000.0),
     "alloc_mm_reserve": (0.0, 100000.0),
     "alloc_set_cost_per_usd": (0.0, 0.2),
+    "take_respect_reserve": (False, True),
 }
 MAX_ORDER_TTL = 7200.0    # no order of ours lives longer than this (dead-man's switch), whatever the TTL settings
 LADDER_MAX_LEVELS = 8
@@ -4427,6 +4433,7 @@ class Bot:
                        "realtime_events": self.feed.events if self.feed else 0,
                        "takes_total": self.takes_total,
                        "takes_skipped_budget": self.takes_skipped_budget,
+                       "take_reserve_blocked": getattr(self, "take_reserve_blocked", 0),
                        "arbs_skipped_budget": self.arbs_skipped_budget,
                        "write_budget_wait_total": getattr(self.api, "write_budget_wait_total", 0),
                        "quote_capital_planned": round(getattr(self, "plan_capital", 0.0)),
@@ -6940,6 +6947,26 @@ class Bot:
             return True
         return False
 
+    def take_blocked_by_reserve(self, order):
+        """P10 take_respect_reserve: True if this take order (YES terms, possibly marked _no_sell) would leave less than
+        alloc_mm_reserve of cash free: cash_left() - its gate need < reserve. False with the flag off, the gate off, or
+        no reserve. A covered sale / a cash-free order (need 0) is never blocked."""
+        cfg = self.cfg
+        reserve = float(getattr(cfg, "alloc_mm_reserve", 0.0) or 0.0)
+        if not getattr(cfg, "take_respect_reserve", False) or reserve <= 0 or not self.cash_gate_on():
+            return False
+        eid = order["exchangeId"]
+        free = self.cash_free(eid, skip=lambda o: o.eid == eid)      # our quotes there are cancelled before the take
+        is_bid = order["action"] == "buy"
+        need = self.tier_need(self.cash_tiers(free, is_bid, order["price"], bool(order.get("_no_sell"))),
+                              float(order["quantity"]))
+        if need <= 1e-9:
+            return False
+        if self.cash_left() - need < reserve - 1e-9:
+            self.take_reserve_blocked = getattr(self, "take_reserve_blocked", 0) + 1
+            return True
+        return False
+
     def cash_gate_quote(self, ex, q, resting):
         """Plan-time cap (plan_exchange): each side's wanted size at most what the cash allows (the resting level-0
         order on that side counts as available: it is kept or replaced), so a capped quote is planned as such
@@ -8482,6 +8509,10 @@ class Bot:
                                        "quantity": qty, "price": price, "tournamentId": self.tid}, ex.inv)
             if prov is not None and self.cash_gate_blocks([prov]):
                 self.cash_gate_log(ex.eid, "take on %s skipped: not enough available cash (cash gate)", ex.label)
+                return False
+            if prov is not None and self.take_blocked_by_reserve(prov):
+                self.cash_gate_log(ex.eid, "take on %s skipped: it would spend the market-making reserve (take_respect_reserve)",
+                                   ex.label)
                 return False
         log.warning("%sTAKE %s: Polymarket %.3f vs stale %s %.3f -> %s %d YES at %.3f",
                     "" if self.api.live else "[dry] ", ex.label, p, "ask" if buy else "bid", price,
