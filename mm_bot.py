@@ -11291,8 +11291,8 @@ class Bot:
     # ------------------------------------------------------------------------------ Package 13 A: buckets, momentum
     P13_KEYS = ("buckets", "aggressive", "momentum")   # status.json keys Package 13 A adds (absent while unused)
     MOM_KILL_SECONDS = 120.0      # the sleeve's mark below mom_kill_frac x cost this long (s) -> killed
-    MOM_STATES = ("off", "active", "exiting", "exited", "killed")
-    P13_PRIVATE = ("_bucket_sell", "_mom", "_mom_exit")   # order notes stripped by wire_order (never sent)
+    MOM_STATES = ("off", "active", "exiting", "exited", "killed")   # (order notes _bucket_sell / _mom / _mom_exit:
+    #                                                                  WIRE_PRIVATE, stripped by wire_order)
 
     def p13_init(self, mom=None, bk=None):
         """Package 13 A state, restored from status.json "momentum" (mom) and "buckets" (bk): the sleeve's legs with
