@@ -1,9 +1,9 @@
 <!-- STATUS (Finisher 2b, updated on every push) -->
-**STATUS 07:15 UTC 4 Oct (branch claude/finisher-package9):** phase = Package 10 "go crazier" Phase 1 (explore to ~09:30; READY by ~17:00). READY: Package 9 (024d5a1, PR #11), 8 (PR #10, LIVE), 7, 6, 5.
-Package 10 = the owner's "market making can make the money if it is quick enough + ideas outside the risk limit": MM velocity ceiling (flow, capture, write budget 28 batches x 10 orders/min), tilt rotation and intraday day-trade backtests, the basket's risk frontier outside the limits, funding at any price; plan in PLAN_P10.md.
-Numbers: none yet (explorers E/F/G writing analysis/p10/).
-Deploy: Package 9 files unchanged (deploy/package9/); nothing new.
-Next: backtests + live_sim screens of quoting-side changes -> build passers behind OFF flags -> "READY: Package 10" with a frontier table.
+**STATUS 07:35 UTC 4 Oct (branch claude/finisher-package9):** phase = Package 10 VALUE MODE, Phase A (explore to ~09:30; READY by ~17:00). READY: Package 9 (024d5a1, PR #11, NOT deployed: superseded), 8 (PR #10, LIVE in value mode), 7, 6, 5.
+STRATEGY CHANGE (owner 07:30): SIG pays at the OUTCOME. The long-tilt basket is wrong (negative EV at the outcome); our toward-Polymarket book is +EV (marks 99.9k, EV ~108.5k). Live = Package 8 with ref_tilt / tilt exits / ref_guard_exits / take_tilted_ref OFF, pair_no_unwind_max_cost 0.003. Package 10 = maximise EV at the outcome under ruin limits: capital allocator by edge per $, value market making (favourite bids / longshot asks, cash reserve), bloc-correlated settlement risk limits, no mark-driven selling of +EV positions. Plan: PLAN_P10.md.
+Numbers: explorer F (analysis/p10/ideas_F.md): exchange flow 3-5M shares/day, our capture 0.45c/share, best day 313k shares (+1.0-1.3k); MM alone 0.9-2.0k/day (central 1.2k) and needs 15-25k of rotating cash; cash is the binding constraint, not speed.
+Deploy: nothing new; Package 9 files are NOT to be used (basket negative-EV at the outcome).
+Next: explorers H (outcome model, frontier, risk limits) and I (allocator + value MM + panic-sell audit) -> live_sim judged on the Polymarket mark -> build -> "READY: Package 10".
 
 # START HERE (Team run, branch `claude/run-c-tournament-improvements-pycdet`)
 
