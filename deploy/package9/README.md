@@ -14,7 +14,7 @@ them instead, leave the basket on and set `basket_exit_utc` to now + 1 h, then s
   each NO+NO set is sold too, FIRST, as a covered "sell NO" sized to the cash gate at 1.0 a set share; the favourite-NO legs stay = long
   tilt for free; a refusal pauses splits in that race 10 x take_cooldown_seconds; "TILT EXIT SPLIT" lines, status
   `tilt_exit_takes.splits`; dry run: +6.1k of cash from splits in hour 1, ~8.8k over 3 h, sets 16.8k -> 9.7k; roll back to F2 alone by
-  setting it false - NOTE the stage3* files do not carry it, so moving to stage 3 switches splits off unless it is added there).
+  setting it false; every later stage file carries it).
   Expect: "TILT EXIT TAKE" lines, `tilt_exposure` falling by ~15-20k in
   the first hours, `cash_gate_left` rising, `worst_case_loss` falling from ~79k. Go to stage 3 when `worst_case_loss` < ~40k and
   `cash_gate_left` > ~20k (the basket refuses to buy while the stressed worst case is above the backstop fraction of the account).

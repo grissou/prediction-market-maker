@@ -35,5 +35,6 @@
   "basket_exit_utc": "2026-10-18T12:00:00Z",
   "arb_cash_rule": true,
   "arb_sellback": true,
-  "tilt_exit_take_max_cost": 0.02
+  "tilt_exit_take_max_cost": 0.02,
+  "tilt_exit_take_split_sets": true
 }

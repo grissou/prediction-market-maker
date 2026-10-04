@@ -33,5 +33,6 @@
   "basket_floor_peak_frac": 0.8,
   "basket_kill_dd": 0.2,
   "basket_exit_utc": "2026-10-18T12:00:00Z",
-  "tilt_exit_take_max_cost": 0.02
+  "tilt_exit_take_max_cost": 0.02,
+  "tilt_exit_take_split_sets": true
 }
