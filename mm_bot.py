@@ -1288,9 +1288,9 @@ class Config:
     # our own orders on that exchange are cancelled).
     # 1. buckets_enabled True: the account in three buckets, rebalanced once per alloc_interval_s (cycle step 6e,
     # beside the allocator; it runs with alloc_enabled off too): MM = alloc_mm_reserve cash (at most the cash the gate
-    # shows) + middle-band inventory ([value_mid_low, value_mid_high]) at p; VALUE = every other position held (not
-    # the sleeve's, not the basket's) at p (a long q x p, a short |q| x (1 - p)); MOMENTUM = the sleeve at cost (what
-    # was paid). VALUE above (bucket_value_frac + bucket_band) x account -> SOLD down to that, lowest edge-held first
+    # shows) + middle-band inventory (mom_max_p < p < 1 - mom_max_p: the classification's "mm") at p; VALUE = every
+    # other position held (not the sleeve's, not the basket's) at p (a long q x p, a short |q| x (1 - p)); MOMENTUM =
+    # the sleeve at cost (what was paid). VALUE above (bucket_value_frac + bucket_band) x account -> SOLD down to that, lowest edge-held first
     # (alloc_plan's measure at the touch), as IOC takers (a long at the best bid, a short bought back at the best ask
     # as a covered sale), EXEMPT from the value floor (answer 1: orders tagged _bucket_sell, notes "bucket"), within
     # bucket_turnover_per_hour of proceeds; never a pinned (alloc_pin), headline (unless alloc_headline), basket or
@@ -11494,9 +11494,10 @@ class Bot:
         return dict(sorted(n.items()))
 
     # --- buckets (section 1) ---
-    def bucket_values(self, inv, now_m):
+    def bucket_values(self, inv, now_m, cls=None):
         """(mm, value, momentum, cash) in $: MM = alloc_mm_reserve cash (at most the cash the gate shows, live) plus
-        the middle-band inventory at p; VALUE = every other position held (not the sleeve's, not the basket's) at p
+        the middle-band inventory at p (p13_is_mm: mom_max_p < p < 1 - mom_max_p, the classification's "mm"); VALUE =
+        every other position held (not the sleeve's, not the basket's) at p
         (longs q x p, shorts |q| x (1 - p)); MOMENTUM = the sleeve at cost. cash = the gate's cash left (None
         without a read)."""
         cfg = self.cfg
@@ -11511,7 +11512,7 @@ class Bot:
                 continue
             px = self.p13_px(ex, now_m)
             usd = self.p13_pos_usd(q, px)
-            if cfg.value_mid_low <= px <= cfg.value_mid_high:
+            if self.p13_is_mm(ex, px, cls):
                 mm += usd
             else:
                 value += usd
@@ -11523,7 +11524,15 @@ class Bot:
             self.bk_flows.popleft()
         return sum(u for _, u in self.bk_flows)
 
-    def bucket_sell_plan(self, inv, now_m, usd, skip=()):
+    def p13_is_mm(self, ex, px, cls=None):
+        """MM inventory (the middle band) rather than VALUE: the classification's "mm" (p strictly between mom_max_p
+        and 1 - mom_max_p) when the market is classified this cycle, else the same band at px."""
+        c = (cls or {}).get(ex.eid)
+        if c is not None:
+            return c["bucket"] == "mm"
+        return self.cfg.mom_max_p < px < 1 - self.cfg.mom_max_p
+
+    def bucket_sell_plan(self, inv, now_m, usd, skip=(), cls=None):
         """THE PURE SELL-DOWN PLANNER: VALUE positions to sell for `usd` of the bucket (at p), lowest edge-held first
         (alloc_plan's measure at the touch: a long (p - bid) / bid, a short (ask - p) / (1 - ask)): [{"eid",
         "label", "kind": "long" | "short", "edge", "usd_left"}]. Never a sleeve leg, a basket leg, a pinned label,
@@ -11537,7 +11546,7 @@ class Bot:
                     or ex.label in pins):
                 continue
             p, book = self.alloc_p(ex, now_m), self.alloc_fresh_book(ex, now_m)
-            if p is None or book is None or cfg.value_mid_low <= p <= cfg.value_mid_high:
+            if p is None or book is None or self.p13_is_mm(ex, p, cls):
                 continue
             lv = (book.get("bids") if q > 0 else book.get("asks")) or []
             if not lv:
@@ -11556,7 +11565,7 @@ class Bot:
             left -= x
         return plan
 
-    def bucket_run(self, now_w, inv, now_m, skip=()):
+    def bucket_run(self, now_w, inv, now_m, skip=(), cls=None):
         """The hourly rebalance (alloc_interval_s, cycle step 6e, beside the allocator): VALUE above target + band ->
         a sell-down plan back to target + band (within bucket_turnover_per_hour); MOMENTUM below target - band (and
         the sleeve not exited / killed) -> a momentum buy round opens (closed once the sleeve reaches its target).
@@ -11566,10 +11575,10 @@ class Bot:
         if not eq:
             self.bk_run = {"skipped": "no account value"}
             return
-        mm, value, mom, cash = self.bucket_values(inv, now_m)
+        mm, value, mom, cash = self.bucket_values(inv, now_m, cls)
         over = value - (cfg.bucket_value_frac + cfg.bucket_band) * eq
         budget = min(over, max(0.0, cfg.bucket_turnover_per_hour - self.bucket_turnover(now_w)))
-        self.bk_sell = self.bucket_sell_plan(inv, now_m, budget, skip) if budget >= self.ALLOC_MIN_USD else []
+        self.bk_sell = self.bucket_sell_plan(inv, now_m, budget, skip, cls) if budget >= self.ALLOC_MIN_USD else []
         short = mom < (cfg.bucket_mom_frac - cfg.bucket_band) * eq
         if short and self.mom_state in ("exiting", "exited", "killed"):
             short = False                         # never re-bought after an exit / the kill
@@ -11585,11 +11594,11 @@ class Bot:
                     100 * cfg.bucket_value_frac, 100 * cfg.bucket_mom_frac, 100 * cfg.bucket_band,
                     self.bk_run["sell_planned"], len(self.bk_sell), ", momentum buy round open" if short else "")
 
-    def bucket_status(self, inv, now_m):
+    def bucket_status(self, inv, now_m, cls=None):
         """status.json "buckets": {mm, value, momentum, cash, targets, deviations, last_rebalance, actions,
         classification, ...} plus what a restart restores (last_run_wall, flows, buy_open)."""
         cfg, eq, now_w = self.cfg, self.last_equity, time.time()
-        mm, value, mom, cash = self.bucket_values(inv, now_m)
+        mm, value, mom, cash = self.bucket_values(inv, now_m, cls)
         tg = {"mm": cfg.bucket_mm_frac, "value": cfg.bucket_value_frac, "momentum": cfg.bucket_mom_frac}
         dev = ({k: round(v / eq - tg[k], 4) for k, v in (("mm", mm), ("value", value), ("momentum", mom))}
                if eq else None)
@@ -11787,6 +11796,14 @@ class Bot:
                 leg["cost"] *= abs(q) / abs(leg["q"])
                 leg["q"] = q
 
+    def p13_market_ok(self, ex, skip=(), headline_ok=False):
+        """A market the sleeve may buy in (alloc_market_ok's rules, its own legs allowed): not a basket leg, not traded
+        by another feature this cycle (skip), not headline unless headline_ok (mom_headline), not inside the pre-close
+        window that stops takes (close_window)."""
+        return not (ex.eid in self.basket_legs or ex.eid in skip or ex.group in skip
+                    or (ex.group in self.cfg.headline_races and not headline_ok)
+                    or self.hours_to_close(ex) <= self.close_window("flatten_hours_before_close"))
+
     def mom_candidates(self, inv, cls, now_m, skip=()):
         """THE PURE MOMENTUM PICKER: [{"eid", "label", "buy" (True = buy YES at the best ask; False = sell YES at the
         best bid, i.e. buy NO: the favourite-NO route), "px", "depth", "unit" ($ per share), "gap"}] smallest gap
@@ -11832,8 +11849,7 @@ class Bot:
                             "depth": bid[0]["quantity"], "unit": 1 - bid[0]["price"], "gap": gap}
             x = self.ex[pick["eid"]]
             q, leg = float(inv.get(x.eid, 0.0)), legs.get(x.eid)
-            if ((x.group in cfg.headline_races and not cfg.mom_headline) or not self.alloc_market_ok(x, skip)
-                    or abs(q - (leg["q"] if leg else 0.0)) >= 1 or pick["depth"] < cfg.mom_min_depth
+            if (not self.p13_market_ok(x, skip, cfg.mom_headline) or abs(q - (leg["q"] if leg else 0.0)) >= 1 or pick["depth"] < cfg.mom_min_depth
                     or self.sl_orders(x.eid) or (leg is None and len(legs) >= cfg.mom_max_markets)):
                 continue
             out.append(pick)
@@ -11868,8 +11884,10 @@ class Bot:
             if n_left < 1 or left < self.ALLOC_MIN_USD:
                 break
             ex = self.ex[c["eid"]]
-            if busy(ex, now_m) or self.p13_own_ioc_resting(ex.eid):
+            if busy(ex, now_m) or self.p13_own_ioc_resting(ex.eid) or ex.eid in traded:
                 continue
+            if ex.eid not in self.mom_legs and len(self.mom_legs) >= cfg.mom_max_markets:
+                continue                              # (mom_max_markets: legs bought earlier this tick count)
             if not self.writes_ready(3):
                 break
             cash = (self.cash_left() - cfg.alloc_mm_reserve) if self.api.live else left
@@ -12073,7 +12091,7 @@ class Bot:
             traded |= t
         if cfg.buckets_enabled:
             if self.bk_last_run_wall is None or now_w - self.bk_last_run_wall >= cfg.alloc_interval_s:
-                self.bucket_run(now_w, inv, now_m, skip)
+                self.bucket_run(now_w, inv, now_m, skip, cls)
             if self.bk_sell:
                 t, n_left = self.bucket_sell_step(inv, mine_real, now_m, now_w, skip | traded, n_left)
                 traded |= t
@@ -12083,7 +12101,7 @@ class Bot:
             t, n_left = self.mom_buy_step(inv, mine_real, now_m, now_w, skip | traded, cls, n_left)
             traded |= t
         self.mom_info = self.mom_status(now_m) if (cfg.momentum_enabled or self.mom_legs or self.mom_state != "off") else {}
-        self.bk_info = self.bucket_status(inv, now_m) if cfg.buckets_enabled or self.bk_last_run_wall is not None else {}
+        self.bk_info = self.bucket_status(inv, now_m, cls) if cfg.buckets_enabled or self.bk_last_run_wall is not None else {}
         return traded
 
     # ------------------------------------------------------------------------------ fills
