@@ -1,9 +1,9 @@
 <!-- STATUS (Finisher 2b, updated on every push) -->
-**STATUS 14:35 UTC 4 Oct (branch claude/finisher-package9):** phase = Package 12 READY ("READY: Package 12", PR #11 updated). READY: Package 12 (literature sweep + five small builds), 10 (VALUE MODE, 2abf782), 9 (superseded), 8 (LIVE in value mode), 7, 6, 5.
-Package 11/12 = ~180 sources read (analysis/p11/LIT_REVIEW.md, 70 ideas): the Rep Senate sleeve is roughly FAIR (Ohio at 0.4 vs the market's 0.6) - a rank bet, if any, is ONE digital = Texas Rep <= $20k (P150 ~30%, P85 6.5%); no tilt reversion before the close (keep 10-15k back); the NO+NO sets are stock (sell the rich favourite-NO leg as a ladder, keep the longshot-NO); hurdle 0.08 -> 0.05; the rules accept trades until 12:00 pm ET on 4 Nov while the bot stops at 23:45 UTC - ASK SIG (election-night taking = +5-15k if allowed). Built OFF: `alloc_set_rich_leg` ladder, `alloc_prefer_short`, `pair_no_unwind_asks_le1`, `close_override_utc` (+ overridable stop), `skew_target_inventory`.
-Numbers: red team 1 high / 4 medium / 2 low fixed; 43 suites + STRESS_LADDER 20/20 green; flags off identical to Package 10 stage 3.
-Deploy: deploy/package12 stage0 -> stage1_sets_skew -> stage2 ONLY if SIG confirms trading after 00:00 UTC; Package 10 stages first. Web budget for this session is spent (200 searches): more reading needs it raised.
-Next: owner asks SIG (trading close, public returns, overnight payouts, control rule); election-night mode on a yes; the executor stays subscribed to PR #11.
+**STATUS 16:40 UTC 4 Oct (branch claude/finisher-package9, head c2f58a3+):** phase = live analysis of the 4 Oct snapshot done (analysis/p12/LIVE_0404.md, TEXAS_AND_1PCT.md, ideas_Z.md); ops fields built (ev_outcome, mm_carry_24h, 39e4012); `risk_unheld_legs` "ref" (c2f58a3). READY: Package 12 (fc3d38d), 10, 9 (superseded), 8; live = Package 12 stage 1 + max_worst_case_frac 0.40 + backstop 0.85 (since 15:46).
+Findings: stage-3 carry not measurable yet (reduce-only 4.2 of 4.5 h; realised 0; 1 of 30 middle markets filled both sides); today's EV at the outcome -2.5k (P8 tilt exits -14k, raw takes +9.9k, value mode +2.9k); the allocator ran 5 times in reduce-only (empty buy list), next run refills the reserve; the backstop 0.85 has 3.7k of room and binds the value book (0.95 frees ~10k for nothing); settlement_risk counted 106 unpriced unheld legs at 0.5 (7.9k phantom: fixed behind `risk_unheld_legs` "ref"); the $20k Texas digital breaks every cap on today's book (P<=85k 33%): <= $10k after a carve-out, or defer; "1%/day" is not realistic (cash binds; take-and-flip and the YES+YES carousel measured dead; value positions cannot exit near fair): +12-18k by 4 Nov is the honest range (E 118-125k).
+Numbers: 45 suites + STRESS_LADDER 20/20 green on c2f58a3.
+Deploy: handover to c2f58a3 for the EV / carry fields and `risk_unheld_legs`; recommended config: worst_case_backstop_frac 0.95, alloc_mm_reserve 5k, alloc_max_edge_sell 0.04, risk_unheld_legs "ref", arb_enabled + arb_cash_rule + arb_sellback for the Dutch books; keep hurdle 0.05.
+Next: SIG's answer on the trading close (election-night mode); the live carry number after 24 h of two-way quoting; the executor stays subscribed to PR #11.
 
 # START HERE (Team run, branch `claude/run-c-tournament-improvements-pycdet`)
 
@@ -11,6 +11,22 @@ Status: **complete** (Team complete at 14:45 UTC) (started 2026-10-02 08:50 UTC;
 The Builder's previous START_HERE is kept as `START_HERE_BUILDER.md`; Run A's notes are `ENGINEERING_NOTES.md`.
 Plan: `PLAN.md`. Packages appear below as they become READY (commit messages start "READY: Package N").
 Deploy only commits whose message starts "READY"; the branch is cumulative.
+
+## Ops add-on (4 Oct 16:00 UTC, commit 39e4012; owner's request 11:35): expected value at the outcome and the market-making carry in status.json
+`ev_outcome` = cash + sum_long q x r + sum_short |q| x (1 - r), r = the race-scaled liquid Polymarket reference (the value-mode `value_p`
+helper); a market without one is valued at the exchange mark, else the book's fair value, else left out, and counted in `ev_outcome_unpriced`;
+cash = the cash gate's figure when read, else account value - positions at marks; `ev_outcome_scope` says so. `ev_outcome_delta_24h` = ev
+now - the newest sample at least 24 h old (one sample per 5 min, 48 h ring `ev_outcome_history`, restored across restarts; None until 24 h).
+Lines: the cycle line ends " | EV outcome 101.2k (+1,234 24h, 2 unpriced)"; the 2-hourly summary adds that and " | MM carry 24h +12 (mid),
+value adds +340, takes -25". `mm_carry_24h` {realised (FIFO-matched middle-band maker buy/sell pairs per market, sum matched qty x (sell -
+buy)), per_day, hours_covered, unmatched_shares, unmatched_ev (at p at fill - price), value_adds_ev (tail maker fills: qty x (p - price) for
+buys / (price - p) for sells), takes_ev, fills {maker_mid, maker_tail, maker_unpriced, take, arb, alloc, basket}, takes_unpriced, meta_missing,
+p_at_fill, p_now, band}. Classification by the order notes (basket > alloc / set_ladder > arb > take; else maker; self-test rows skipped); p at
+fill time is noted in memory from `log_fills` (fills before a restart use the current p: `p_now` counts them). Read-only, no flag;
+tests/test_ops_ev.py 63 (formula, delta ring and restore, lines, classification, FIFO, a status/orders identity check vs 859e751 without the
+new keys). 44 suites + STRESS_LADDER 20/20 green. Pre-estimate from the data (analysis/p10/CARRY.md): the middle two-way book made ~1.5k on
+the one funded day (2 Oct) and ~0 at 0 cash; 0.67 / 1.0k per day of carry -> P(EV >= 150k) 6% / 29% on top of plan (a). The live figure is
+`mm_carry_24h.per_day` after 24 h of stage 3 with the reserve funded.
 
 ## Package 12 (READY, Finisher 2b, 4 Oct ~14:30 UTC; branch `claude/finisher-package9` on top of Package 10; draft PR #11 updated): the literature sweep (Package 11, ~180 sources) and its five small builds — the rich-leg set ladder, prefer-short, the pair-unwind gate, the close override, skew toward the target inventory (all OFF; staged files in `deploy/package12/`)
 **Package 11 (owner 11:15: "spend 5 hours reading papers and online resources for ideas"; `analysis/p11/LIT_REVIEW.md`, six readers,
@@ -45,6 +61,9 @@ Senate/House/control edge is +5.5k at Polymarket but +1.1k at Decision Desk's; N
   hourly (queue position), pulled at once when the race stops being a set, the favourite is no longer rich, its p is unknown or every
   level is not <= p + margin (RT12-1), pinned, pre-close, or off; a refused race waits 900 s (RT12-3); the longshot-NO leg is never sold;
   warning when `tilt_exit_take_split_sets` is also on (RT12-5). status `alloc.set_ladder` {races, shares_resting, filled}.
+  Data check (snap03, 14.1k sets with a reference; Alaska Governor's 3,000 have none): selling the rich leg at the favourite's best bid is
+  +424 of outcome EV (Montana Senate +199 at 7c/share, MN Governor +84, IL Governor +63; two races negative and skipped by the edge test);
+  the -2c / -4c levels add to that only in a late spike.
 - L2 `alloc_prefer_short`: when the race's best bids sum > 1 (own quotes excluded, 2-leg races) the allocator sells the longshot YES
   instead of buying the favourite YES (same exposure, better price, less cash) if the short passes edge / caps; `blocked_by.prefer_short`.
 - L3 `pair_no_unwind_asks_le1`: no NO+NO pair unwind at a cost while the race's bids sum > 1 (the set is worth more leg by leg) or a ladder
@@ -57,6 +76,10 @@ Senate/House/control edge is +5.5k at Polymarket but +1.1k at Decision Desk's; N
   holding (`alloc_target_for`) or, in value mode, the current holding when its edge-held > 0; `age_skew` 0 on +EV holdings; the ADDING side
   keeps its skew-from-flat so the target cannot ratchet (RT12-7); no target skew in reduce-only (RT12-4); race-netted like `eff_inv`; the
   reduce side keeps the value_mode floor; never crosses (Bergault-Guéant / Fodra-Labadie "informed market maker").
+**Simulation evidence (live_sim at the Polymarket mark `pnl`, tests/live_sim_round12_skew.txt, 8 x 3 h, value world with 20% cash and adding
+factor 0.5):** `value_mode` +116 +- 67; + `skew_target_inventory` +125 +- 53 (neutral in the sim: without the allocator only the fallback target
+applies; the mechanism matters live where the allocator sets targets); `value_mode` + `skew_max` 0 + age skew off +205 +- 46 (the config-only
+hygiene stands). Items L1-L3 and M1 need cash / sets / a close: unit tests only.
 **Red team (`analysis/p11/REDTEAM_P12.md`): 1 high, 4 medium, 2 low, all fixed or warned** (tests/test_p12_redteam.py 21). Caveats: at
 ~0 cash the ladder sells little (lone parts only) until the reserve builds; a take on the favourite cancels the ladder until the hourly
 re-quote; `alloc_prefer_short` does not check the short leg's depth (a missed buy at worst); `close_override_utc` extends every market;

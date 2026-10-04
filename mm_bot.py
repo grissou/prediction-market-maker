@@ -121,6 +121,11 @@ class Config:
                                           #   +-249). "correlated" = national swing shock + risk_z x sd of the rest:
     risk_swing_shock: float = 0.15        #   every Republican price up 15c and Democratic down 15c (or the reverse)...
     risk_z: float = 3.0                   #   ...plus 3 standard deviations of the independent race outcomes
+    risk_unheld_legs: str = "half"       # P12 ops (LIVE_0404 / TEXAS_AND_1PCT): the probability used for a race leg we do NOT hold
+                                          #   and that has no fair value this cycle. "half" = 0.5 (as before: on 4 Oct 106 such legs
+                                          #   inflated settlement_risk by ~7.9k of 34.7k); "ref" = its raw Polymarket reference
+                                          #   when there is one, else the race's residual probability (1 - the other legs' values,
+                                          #   shared among the unpriced legs), else 0.5. Only unheld legs change: held legs keep risk_fv.
     worst_case_backstop_frac: float = 0.69  # with "correlated": the old sum-of-maxima still forces reduce-only above
                                             #   69% of account value (~70k on 2026-10-02, the owner's choice; a
                                             #   backstop that no longer binds at 30%)
@@ -1254,6 +1259,69 @@ class Config:
     # that is only the holding (no allocator plan for the market) leaves the ADDING side its skew from flat (RT12-7:
     # else every +EV holding - edge-held > 0 whenever p is above the bid - would bid on unskewed to the hard limit).
     skew_target_inventory: bool = False
+    # --- P12 ops: market-making risk reserve (owner, 4 Oct; everything OFF by default) ---
+    # alloc_mm_reserve keeps CASH for market making, but twice on 4 Oct value buying (takes, value quotes, the
+    # allocator) filled the worst-case backstop and the bot went reduce-only with the cash reserve idle. These keep
+    # RISK room instead. Each cycle (step 6, beside the reduce-only decision, which they never change):
+    #   room_wc   = worst_case_backstop_frac x account - total_worst_case (the sum of per-race maxima)
+    #   room_corr = max_worst_case_frac x account - the settlement risk the cap compares (correlated: min(worst,
+    #               settlement_risk); "sum": the worst case)
+    # mm_risk_reserve_wc > 0 and room_wc below it, OR mm_risk_reserve_corr > 0 and room_corr below it -> "value adds
+    # paused": no stale-quote take that grows a position (execute_take: only the part that shrinks one), no allocator
+    # BUY (alloc_plan / alloc_buy / a paired sale whose buy could not follow; reserve refills and other sales go on),
+    # no basket buy (refused "mm risk reserve"), and in the TAILS (the liquid race-scaled p, else the fair value,
+    # outside [value_mid_low, value_mid_high]) the side ADDING to this exchange's position quotes only what shrinks it
+    # (also the R3 ladder's caps); a resting tail add is dropped by the next re-quote (bid_max / ask_max follow).
+    # The MIDDLE band keeps its two-way quotes (adding within value_mid_inventory_quotes as before) and every
+    # reducing side, aged take (take_aged: always reducing) and arbitrage is untouched. It lifts once every room set
+    # is back to >= 1.1 x its reserve (MM_RISK_HYST). status.json mm_risk_room {room_wc, room_corr, paused, since,
+    # reserve_wc, reserve_corr, blocked {takes, alloc, basket, tail_quotes}}; journal "VALUE ADDS PAUSED ..." /
+    # "value adds resumed ..."; summary " | risk room wc Xk corr Yk (paused)". 0 = off (that room is not checked).
+    mm_risk_reserve_wc: float = 0.0
+    mm_risk_reserve_corr: float = 0.0
+    # --- P14: market-making funding (owner, 4 Oct 21:10 UTC: "keep market making FULLY FUNDED at all times"; OFF) ---
+    # MM INVENTORY = what the middle-band two-way book left us holding. Tracked always (read-only, Bot.mm_inv_step,
+    # cycle step 4): every new fill of one of our RESTING quotes (order note: not take / arb / alloc / set ladder /
+    # basket) whose market's p at fill (the race-scaled liquid Polymarket price, mm_carry_24h's; else the fair value
+    # when quoted) lies in [value_mid_low, value_mid_high] is an MM fill: it first closes opposite MM lots of that
+    # market (FIFO: a round trip), the rest opens a lot [signed shares, YES price, wall time] only in the direction
+    # the position now has. Lots never exceed the position (shrunk oldest first, dropped on a flip / flat). Kept in
+    # status.json mm_funding.lots (restored at start); with no such key the first cycle seeds them from fills.csv's
+    # last 24 h (the order notes' horizon), p = the row's fv_at_quote. A market's MM inventory is STALE when a lot is
+    # older than mm_inv_max_age_h, or its $ at p (long q x p, short |q| x (1 - p)) exceeds mm_inv_max_usd (0 = no $
+    # limit): stale shares = max(the aged lots, the shares over the $ limit).
+    # 1. mm_recycle_enabled True: the stale shares are worked out FIRST, through the quoter itself (decide, after
+    #    hold_quote, before the value floor): the REDUCING side of that market is moved in to fair -
+    #    mm_recycle_concession (long; fair + it for a short), never crossing the best other bid / ask, never past the value floor in value
+    #    mode (value_floor_quote runs after it), sized max(the quoter's, the stale shares) <= the position; our adding
+    #    side is pulled a tick behind it and otherwise keeps quoting. One order per side as ever (the quoter's reduce
+    #    side IS the recycler's order: no duplicate); a side the quoter left out (a guard, the cooldown) stays out.
+    #    If the market's edge-held (alloc_edge_held) >= value_quote_hurdle (0: alloc_min_edge_buy) the stale MM
+    #    inventory is VALUE: its lots are handed to the value bucket (no longer MM, not recycled), and the refill (2)
+    #    sells the lowest-edge value positions instead. Journal "MM RECYCLE ..." lines; fills of a recycled side are
+    #    class "recycle" in mm_carry_24h (key present only once such a fill exists).
+    # 2. mm_refill_fast True: with a fresh cash read showing the cash gate's free cash below alloc_mm_reserve, the
+    #    allocator's reserve refill (B2, alloc_plan / alloc_sell) runs on the NEXT cycle (at most every MM_REFILL_GAP
+    #    s), not only at the hourly run, inside alloc_max_turnover_per_hour and the allocator's write share, in this
+    #    order: stale MM inventory (an IOC at the best bid when fair - bid <= mm_recycle_concession and the bid is not
+    #    below the floor; else it rests through (1)), then value positions lowest edge-held first; every refill sale
+    #    (hourly ones too) at or above the value floor p - value_sell_margin (shorts p + margin). A market sold this
+    #    way is not planned again until the positions read shows the sale (or MM_SENT_LAG s: red team RT13-3).
+    # 3. mm_room_guard True: mm_risk_reserve_* counts the MM inventory's own worst-case / correlated contribution
+    #    (the risk with vs without the MM lots) against the MM room first: the pause is decided on the value book's
+    #    share, room + min(MM contribution, reserve), with the same MM_RISK_HYST hysteresis; value buying (allocator
+    #    buys, takes, basket buys, tail adds) stays paused until that is back; the recycler and refills never pause.
+    # 4. Monitoring (always written, read-only): status.json mm_funding {cash_free, cash_target, room_free, room_target,
+    #    inventory_usd, oldest_inventory_h, stale_markets, recycling, handed_to_value, below_half_since, ...}; with any
+    #    of 1-3 on, ONE alert when cash or a room has stayed below 50% of its target for > mm_funding_alert_h (re-armed
+    #    once all are back above half) and a "MM funding ..." piece on the 2-hourly summary line.
+    mm_recycle_enabled: bool = False
+    mm_inv_max_age_h: float = 6.0
+    mm_inv_max_usd: float = 3000.0
+    mm_recycle_concession: float = 0.01
+    mm_refill_fast: bool = False
+    mm_room_guard: bool = False
+    mm_funding_alert_h: float = 2.0
 
 
 CFG = Config()
@@ -1296,6 +1364,7 @@ OVERRIDABLE = {
     "ref_only_enabled": (False, True), "ref_only_max_gap": (0.005, 0.2), "ref_only_min_edge": (0.0, 0.1),
     "ref_only_size_frac": (0.0, 0.02), "ref_only_reduce_full": (False, True),
     "risk_swing_shock": (0.05, 0.5), "risk_z": (1.0, 6.0), "worst_case_backstop_frac": (0.3, 1.5),   # (P10 A3: 1.5 ~ off)
+    "risk_unheld_legs": ("half", "ref"),
     "order_ttl": (300.0, 7200.0), "refresh_before_expiry": (30.0, 900.0), "batch_size": (1, 50),
     "kelly_no_edge_frac": (0.0, 0.01), "take_ref_max_age_seconds": (0.0, 300.0),
     "arb_two_sided": (False, True),
@@ -1530,10 +1599,22 @@ OVERRIDABLE = {
     "close_override_utc": ("2026-11-01T00:00:00Z", "2026-11-07T00:00:00Z"),   # ISO UTC time (DATE_SETTINGS), "" = off
     "stop_minutes_before_close": (0.0, 120.0),
     "skew_target_inventory": (False, True),
+    # --- P12 ops: market-making risk reserve ---
+    "mm_risk_reserve_wc": (0.0, 50000.0),
+    "mm_risk_reserve_corr": (0.0, 50000.0),
+    # --- P14: market-making funding ---
+    "mm_recycle_enabled": (False, True),
+    "mm_inv_max_age_h": (0.5, 168.0),
+    "mm_inv_max_usd": (0.0, 50000.0),
+    "mm_recycle_concession": (0.0, 0.05),
+    "mm_refill_fast": (False, True),
+    "mm_room_guard": (False, True),
+    "mm_funding_alert_h": (0.25, 24.0),
 }
+MM_RISK_HYST = 1.1        # mm_risk_reserve_*: value adds resume once each room set is >= this x its reserve
 MAX_ORDER_TTL = 7200.0    # no order of ours lives longer than this (dead-man's switch), whatever the TTL settings
 LADDER_MAX_LEVELS = 8
-ONE_OF_SETTINGS = {"ref_tilt_estimator"}   # string settings that take exactly one of their OVERRIDABLE names
+ONE_OF_SETTINGS = {"ref_tilt_estimator", "risk_unheld_legs"}   # string settings that take exactly one of their OVERRIDABLE names
 DATE_SETTINGS = {"basket_exit_utc", "close_override_utc"}   # string settings: one ISO UTC time within their range
 DATE_EMPTY_OK = {"close_override_utc"}     # ...that also take "" (= off)
 FREE_TEXT_SETTINGS = {"alloc_pin"}         # string settings that take any text of (min, max) characters
@@ -3676,6 +3757,27 @@ def ops_summary_line(ops, account=None, tilt_s=None, tilt_exposure=None):
     return line
 
 
+def ev_outcome_part(ops):
+    """"EV outcome 101.2k (+1,234 24h, 2 unpriced)" from the ev fields ("?" for an unknown 24-h delta); None
+    while ev_outcome is unknown."""
+    ops = ops or {}
+    ev = ops.get("ev_outcome")
+    if ev is None:
+        return None
+    d = ops.get("ev_outcome_delta_24h")
+    return (f"EV outcome {ev / 1000:.1f}k ({f'{d:+,.0f}' if d is not None else '?'} 24h, "
+            f"{ops.get('ev_outcome_unpriced') or 0} unpriced)")
+
+
+def mm_carry_part(ops):
+    """"MM carry 24h +12 (mid), value adds +340, takes -25" from mm_carry_24h; None without it."""
+    mc = (ops or {}).get("mm_carry_24h")
+    if not isinstance(mc, dict):
+        return None
+    return (f"MM carry 24h {mc.get('realised', 0):+,.0f} (mid), value adds {mc.get('value_adds_ev', 0):+,.0f}, "
+            f"takes {mc.get('takes_ev', 0):+,.0f}")
+
+
 def build_summary(api, fills_path, initial_balance, value=None, value_prev=None, arbs=None, health=None, takes=None,
                   hours=24, status=None, ops_line=None):
     """The phone summary as (title, message). Reads account value (unless given), rank and Smart Score
@@ -3938,6 +4040,7 @@ class Ex:
     lad_pull_until: float = 0.0           # ...ladder pulled until then after a Polymarket jump
     lad_tag: str = ""                     # " L3" on the quote log line while 3 ladder orders rest
     lad_ctx: tuple = (1.0, 1.0, None)     # ...decide's (adding_factor, adding_limit_factor, frag_limit) this cycle
+    mmr_tail: bool = False                # P12 ops: value adds paused and a tail market (decide; the ladder too)
 
 
 def busy(ex, now_m):
@@ -4012,6 +4115,7 @@ class Bot:
         self.restore_rampin(_tilt_saved)
         self.basket_init(self.load_basket())   # Package 9 F1: the long-tilt basket (restored from status.json)
         self.alloc_init(self.load_status_key("alloc"))   # Package 10 B: the allocator (last run, turnover)
+        self.mmf_init(self.load_status_key("mm_funding"))   # P14: MM inventory lots, alert state (status.json)
         self.pos_marks = {}             # {eid: the exchange's own valuation price of the position (currentPrice)}
         self.fv_fallback_logged = {}      # {eid: source} - which fallback risk_fv used for a held position (logged once)
         self.mark_sd = {}                 # eid -> sd of the 10-min mid change (mark_frag_*; from the recorder)
@@ -4073,6 +4177,11 @@ class Bot:
         self.burst, self.burst_calm_since, self.burst_set = False, 0.0, set()
         self.trading_since = None         # monotonic time the trading loop started (burst_startup_grace_seconds)
         self.global_reduce = False
+        # P12 ops mm_risk_reserve_*: "value adds paused" (cycle step 6, mm_risk_room_update), when it started (wall
+        # time), the latest rooms, and what it held back (cumulative; tail_quotes: sides in the latest cycle)
+        self.mmr_paused, self.mmr_since, self.mmr_room = False, None, (None, None)
+        self.mmr_blocked = {"takes": 0, "alloc": 0, "basket": 0, "tail_quotes": 0}
+        self.mmr_tail_now = 0
         self.backstop_adding_factor = 1.0     # Package 6 candidate: backstop soft band (cycle step 6 sets it)
         self.ref_moved = set()            # eids whose Polymarket price moved >= urgent_ref_move at the latest reading
         self.unloads = {}                 # eid -> {"until", "side", "left"}: fast unload windows (note_unloads)
@@ -4106,6 +4215,9 @@ class Bot:
         self.ops_last = {}                # ops fields of the latest status write (ops_fields): recorder, summary
         self.ops_cache = {}               # ops_fields: fills.csv-derived numbers, recomputed when the file changes
         self.ops_warned = False           # ops_fields failed once (logged once)
+        self.ev_hist = self.load_ev_hist()   # [[wall, ev_outcome], ...] last 48 h (status.json, survives a restart)
+        self.ev_fill_p = {}               # {fill_id: Polymarket p when the fill was logged} (mm_carry_24h; this run)
+        self.ev_warned = False            # ev_fields failed once (logged once)
         self.takes_total = 0
         self.takes_skipped_budget = self.arbs_skipped_budget = 0   # not sent: write budget busy (status.json)
         self.take_version_seen = 0        # last Polymarket reading the take logic has counted
@@ -4497,6 +4609,7 @@ class Bot:
             self.note_unloads(new_fills, inv, now_m)
         self.note_turnover(new_fills if read_fills else ())
         self.refresh_turnover(now_m)
+        self.mm_inv_step(new_fills if read_fills else (), inv)   # P14: MM inventory lots (read-only, never raises)
 
         # 5. Guaranteed arbitrage inside races (takes liquidity; our quotes there are pulled first) --
         # Package 7 pair_unwind_followup: legs an earlier pair unwind left unequal are evened up first
@@ -4527,6 +4640,10 @@ class Bot:
             log.warning("%s reduce-only: risk %.0f, worst case %.0f, account %s", "ENTERING" if global_reduce
                         else "leaving", risk, worst, f"{equity:.0f}" if equity is not None else "?")
         self.global_reduce = global_reduce
+        if cfg.mm_risk_reserve_wc > 0 or cfg.mm_risk_reserve_corr > 0 or self.mmr_paused:   # P12 ops (after it:
+            self.mm_risk_room_update(worst, risk, equity,                                   #  never changes it)
+                                     self.mm_room_part(inv, fvs, worst, risk)               # P14 3 mm_room_guard
+                                     if getattr(cfg, "mm_room_guard", False) else None)
         self.backstop_adding_factor = backstop_soft_factor(worst, equity, cfg)   # Package 6 candidate: soft band
         capital = self.capital_in_positions(pos, inv, fvs)
         cap_frac = capital / equity if equity else None
@@ -4537,13 +4654,13 @@ class Bot:
         ages = self.portfolio_age(time.time())
         if full:                                  # summary line on full checks only (event cycles can be every 2 s)
             log.info("%s | account %s (locked in orders %.0f, %s) | worst-case loss %.0f (risk %.0f)%s | party delta %+.0f | "
-                     "priced %d/%d | resting %d | last cycle %s",
+                     "priced %d/%d | resting %d | last cycle %s%s",
                      "realtime" if realtime else ("polling (realtime connecting)" if self.feed else "polling"),
                      f"{equity:.0f}" if equity is not None else "?", reserved,
                      {"add": "added back", "ignore": "already included"}.get(self.reserved_mode, "detecting"), worst, risk,
                      " -> REDUCE-ONLY" if global_reduce else "", party_delta,
                      sum(v is not None for v in fvs.values()), len(fvs), sum(len(v) for v in resting.values()),
-                     self.phases_text())
+                     self.phases_text(), self.ev_line_part())
         self.health = {"account_value": equity, "locked_in_orders": round(reserved, 2),
                        "reserved_cash_mode": self.reserved_mode or "detecting", "worst_case_loss": round(worst, 2),
                        "reduce_only": global_reduce, "party_delta": party_delta,
@@ -4621,6 +4738,9 @@ class Bot:
         # 7. Decide + reconcile each exchange. One write at a time (parallel_writes = 1): cancels happen now,
         #    new orders are batched after. Otherwise every change is planned first, then sent in parallel.
         new_orders, changes = [], []
+        self.mmr_tail_now = 0                     # P12 ops: tail adding sides held back this cycle (decide counts)
+        if self.mmf_recycling:                    # P14 1: this cycle's recycler overrides (decide fills it again)
+            self.mmf_recycling = {}
         if self.cash_gate_on():                   # Package 8: the quotes' plan budget, after this cycle's takes
             self.cg_plan_left, self.cg_capped_now = self.cash_left(), 0
         self.ladder_setup(equity, capital, raw_orders, liquid, party_delta, resting)
@@ -4653,6 +4773,9 @@ class Bot:
         # Orders resting NOW, after this cycle's changes (the health snapshot above was taken before them).
         self.health["orders_resting"] = len(self.my_orders) if self.api.live else len(self.sim)
         self.health["selftest_state"] = self.selftest_state()
+        mmr = self.mm_risk_status()               # P12 ops mm_risk_reserve_* (absent while off and never paused)
+        if mmr is not None:
+            self.health["mm_risk_room"] = mmr
         if getattr(cfg, "cash_gate_enabled", False):   # Package 8 (absent while the gate is off)
             self.health["cash_gated"] = getattr(self, "cash_gated", 0)
             self.health["cash_trimmed"] = getattr(self, "cash_trimmed", 0)
@@ -4679,6 +4802,8 @@ class Bot:
         if cfg.ladder_enabled or lad:                 # (absent while the ladder is off and nothing of it rests)
             self.health["ladder_orders"] = len(lad)
             self.health["ladder_cash"] = round(sum(ladder_lock(o) for o in lad))
+
+        self.mm_funding_tick()                    # P14 4: the below-half clock and its alert (never raises)
 
         # 8. Snapshot for later analysis (every record_seconds) -------------------------------------
         self.record(fvs, now_m)
@@ -5545,6 +5670,33 @@ class Bot:
                         self.ex[e].inv)
         return p
 
+    def risk_legs(self, inv, fvs, members):
+        """[(net YES shares, probability)] for one race's risk measures: held legs at risk_fv (as before); unheld legs at
+        their fair value / last fair value, else (risk_unheld_legs "half") 0.5 or ("ref") the raw Polymarket reference,
+        else the race's residual probability shared among the unpriced legs, else 0.5."""
+        mode = getattr(self.cfg, "risk_unheld_legs", "half")
+        out, missing = [], []
+        for e in members:
+            q = inv.get(e, 0.0)
+            if q:
+                out.append((q, self.risk_fv(e, fvs, members)))
+                continue
+            p = fvs.get(e) or self.ex[e].last_fv
+            if p is None and mode == "ref":
+                r = (self.cur_refs or {}).get(e) if getattr(self, "cur_refs", None) else None
+                p = float(r) if r is not None else None
+            if p is None:
+                missing.append(len(out))
+                out.append((0.0, 0.5))
+            else:
+                out.append((0.0, p))
+        if missing and mode == "ref" and len(out) > 1:
+            known = sum(p for i, (_, p) in enumerate(out) if i not in missing)
+            share = max(0.0, 1.0 - known) / len(missing)
+            for i in missing:
+                out[i] = (0.0, share)
+        return out
+
     def settlement_risk(self, inv, fvs, party_delta):
         """R7: national swing shock (risk_swing_shock x |net Rep-minus-Dem YES shares|) plus risk_z standard
         deviations of the settlement value of every race, races independent once the swing is taken out.
@@ -5554,11 +5706,86 @@ class Bot:
             inv, party_delta, stress = self.basket_risk_split(inv, fvs, party_delta)
         var = 0.0
         for members in self.groups.values():
-            legs = [(inv.get(e, 0.0), self.risk_fv(e, fvs, members) if inv.get(e) else (fvs.get(e) or self.ex[e].last_fv or 0.5))
-                    for e in members]
+            legs = self.risk_legs(inv, fvs, members)
             if any(x for x, _ in legs):
                 var += race_variance(legs)
         return self.cfg.risk_swing_shock * abs(party_delta) + self.cfg.risk_z * math.sqrt(var) + stress
+
+    def mm_risk_room_update(self, worst, risk, equity, mm_part=None):
+        """P12 ops mm_risk_reserve_* (cycle step 6, after the reduce-only decision, which it never touches): this
+        cycle's rooms (room_wc = worst_case_backstop_frac x account - worst, room_corr = max_worst_case_frac x account -
+        risk) and the "value adds paused" state with its hysteresis (pause below a reserve, resume once each reserve
+        set is covered MM_RISK_HYST times). No account value: the rooms are unknown and the state is kept. Returns
+        self.mmr_paused. P14 mm_room_guard: mm_part = the MM lots' (worst-case, correlated) contribution, counted
+        against the MM room first: the pause is decided on the value book's share, room + min(contribution, reserve)."""
+        cfg = self.cfg
+        res_wc, res_corr = max(0.0, cfg.mm_risk_reserve_wc), max(0.0, cfg.mm_risk_reserve_corr)
+        if not equity:
+            self.mmr_room = (None, None)
+            return self.mmr_paused
+        room_wc = cfg.worst_case_backstop_frac * equity - worst
+        room_corr = cfg.max_worst_case_frac * equity - risk
+        self.mmr_room = (room_wc, room_corr)
+        v_wc, v_corr, guard = room_wc, room_corr, ""
+        if mm_part is not None:                   # P14 3: the value book's share of each room
+            v_wc, v_corr = room_wc + min(mm_part[0], res_wc), room_corr + min(mm_part[1], res_corr)
+            self.mmf_room_mm, self.mmf_room_value = tuple(mm_part), (v_wc, v_corr)
+            guard = (f" [mm_room_guard: MM inventory {mm_part[0]:.0f} wc / {mm_part[1]:.0f} corr counted against "
+                     f"the MM room first; value share {v_wc:.0f} / {v_corr:.0f}]")
+        short = ((res_wc > 0 and v_wc < res_wc - 1e-9) or (res_corr > 0 and v_corr < res_corr - 1e-9))
+        clear = ((res_wc <= 0 or v_wc >= MM_RISK_HYST * res_wc - 1e-9)
+                 and (res_corr <= 0 or v_corr >= MM_RISK_HYST * res_corr - 1e-9))
+        paused = short or (self.mmr_paused and not clear)
+        if paused != self.mmr_paused:
+            log.warning("%s: risk room worst case %.0f (reserve %.0f), correlated %.0f (reserve %.0f), account "
+                        "%.0f%s%s",
+                        "VALUE ADDS PAUSED (mm_risk_reserve: takes, allocator buys, basket buys and tail adds stop; "
+                        "middle-band two-way quoting goes on)" if paused else "value adds resumed (mm_risk_reserve)",
+                        room_wc, res_wc, room_corr, res_corr, equity,
+                        "" if paused or res_wc > 0 or res_corr > 0 else " - setting off", guard)
+            self.mmr_since = time.time() if paused else None
+        self.mmr_paused = paused
+        return paused
+
+    def mm_risk_status(self):
+        """P12 ops: status.json mm_risk_room (None while both settings are 0 and it never paused: the key absent)."""
+        cfg = self.cfg
+        if not (cfg.mm_risk_reserve_wc > 0 or cfg.mm_risk_reserve_corr > 0 or self.mmr_paused or self.mmr_since):
+            return None
+        rw, rc = self.mmr_room
+        return {"room_wc": None if rw is None else round(rw, 2), "room_corr": None if rc is None else round(rc, 2),
+                "paused": self.mmr_paused,
+                "since": (datetime.fromtimestamp(self.mmr_since, timezone.utc).isoformat(timespec="seconds")
+                          if self.mmr_since else None),
+                "reserve_wc": cfg.mm_risk_reserve_wc, "reserve_corr": cfg.mm_risk_reserve_corr,
+                "blocked": {**self.mmr_blocked, "tail_quotes": self.mmr_tail_now},
+                **({"value_share_wc": None if self.mmf_room_value[0] is None else round(self.mmf_room_value[0], 2),
+                    "value_share_corr": None if self.mmf_room_value[1] is None else round(self.mmf_room_value[1], 2)}
+                   if getattr(cfg, "mm_room_guard", False) else {})}   # P14 3 (absent while off)
+
+    def mm_risk_count(self, path, n=1):
+        """P12 ops: count n value adds held back on path (takes / alloc / basket) for status.json mm_risk_room."""
+        if n:
+            blocked = self.__dict__.setdefault("mmr_blocked", {"takes": 0, "alloc": 0, "basket": 0, "tail_quotes": 0})
+            blocked[path] = blocked.get(path, 0) + n
+
+    def mm_risk_summary(self):
+        """P12 ops: "risk room wc Xk corr Yk (paused)" for the 2-hourly summary while a setting is on; "" otherwise."""
+        cfg = self.cfg
+        if not (cfg.mm_risk_reserve_wc > 0 or cfg.mm_risk_reserve_corr > 0):
+            return ""
+        rw, rc = self.mmr_room
+        k = lambda x: "?" if x is None else f"{x / 1000:.1f}k"   # noqa: E731
+        return f"risk room wc {k(rw)} corr {k(rc)}" + (" (paused)" if self.mmr_paused else "")
+
+    def mm_tail_adds_off(self, ex, fv, ref, ref_liquid):
+        """P12 ops: True while value adds are paused and this market is in a TAIL: its liquid race-scaled p (value_p),
+        else its fair value, outside [value_mid_low, value_mid_high]. The middle band keeps two-way quoting."""
+        if not self.mmr_paused:
+            return False
+        p = self.value_p(ex, ref, ref_liquid)
+        p = fv if p is None else p
+        return p is not None and not (self.cfg.value_mid_low <= p <= self.cfg.value_mid_high)
 
     def total_worst_case(self, inv, fvs):
         """Sum over races of the worst-case settlement loss (see worst_case_loss)."""
@@ -5566,8 +5793,7 @@ class Bot:
         if self.basket_risk_on():                 # Package 9 F1 (C-10): basket shares out, at a stress loss instead
             inv, _, total = self.basket_risk_split(inv, fvs, 0.0)
         for members in self.groups.values():
-            legs = [(inv.get(e, 0.0), self.risk_fv(e, fvs, members) if inv.get(e) else (fvs.get(e) or self.ex[e].last_fv or 0.5))
-                    for e in members]
+            legs = self.risk_legs(inv, fvs, members)
             if any(x for x, _ in legs):
                 total += worst_case_loss(legs)
         return total
@@ -5737,6 +5963,15 @@ class Bot:
             ask_cap = int(ex.inv) if ask_cap is None else min(ask_cap, int(ex.inv))
         if exempt_bid:
             bid_cap = int(-ex.inv) if bid_cap is None else min(bid_cap, int(-ex.inv))
+        # P12 ops mm_risk_reserve_*: value adds paused -> in the tails only what shrinks this exchange's position
+        ex.mmr_tail = (self.mm_tail_adds_off(ex, fv, ref, ref_liquid) if getattr(self, "mmr_paused", False)
+                       else False)
+        if ex.mmr_tail:
+            red_bid, red_ask = max(0, int(-ex.inv)), max(0, int(ex.inv))
+            held = (bid_cap is None or bid_cap > red_bid) + (ask_cap is None or ask_cap > red_ask)
+            self.mmr_tail_now = getattr(self, "mmr_tail_now", 0) + held
+            bid_cap = red_bid if bid_cap is None else min(bid_cap, red_bid)
+            ask_cap = red_ask if ask_cap is None else min(ask_cap, red_ask)
 
         reduce_only = global_reduce or hrs <= self.close_window("flatten_hours_before_close", cfg)
         # From flatten_per_market_hours: flatten each market on its own, i.e. judge (and skew) by this
@@ -5829,6 +6064,8 @@ class Bot:
         if cfg.hold_target_hours > 0 and (not reduce_only or cfg.exit_quotes_in_reduce_only):   # C hold target:
             # aged lots' reducing side joins the best (Package 6: also in reduce-only, behind its flag)
             q = self.hold_quote(ex, q, best_bid, best_ask, book_fv if book_fv is not None else fv, cfg, ref, now_m)
+        if getattr(cfg, "mm_recycle_enabled", False):   # P14 1: stale MM inventory out through the reducing side
+            q = self.mm_recycle_quote(ex, q, fv, best_bid, best_ask, vp, cfg, now_m)
         if getattr(cfg, "value_mode", False) and vp is not None:   # Package 10 A1: the final quote, value floor
             q = value_floor_quote(q, vp, ex.inv, cfg)
         return q
@@ -6259,6 +6496,9 @@ class Bot:
             extra[False].append(max(0.0, inv))
         if fv > cfg.tail_high:
             extra[True].append(max(0.0, -inv))
+        if ex.mmr_tail and getattr(self, "mmr_paused", False):   # P12 ops mm_risk_reserve_*: tails only shrink a position
+            extra[True].append(max(0.0, -inv))
+            extra[False].append(max(0.0, inv))
         sign = PARTY_SIGN.get(ex.party, 0)
         if sign and getattr(cfg, "bloc_delta_enabled", False):   # Package 10 A2: room in bloc delta / sensitivity
             d, cap = self.party_measure(self.lad_party_delta)
@@ -6759,6 +6999,9 @@ class Bot:
             meta["inv"], meta["qty"] = ex.inv, int(size)
         if level:
             meta["level"] = level
+        rec = self.mmf_recycling.get(ex.eid) if not level and getattr(self, "mmf_recycling", None) else None
+        if rec is not None and rec.get("price") is not None and rec["side"] == ("bid" if is_bid else "ask"):
+            meta["recycle"] = True                # P14 1: this side carries the recycler (fills class "recycle")
         return order, meta
 
     # --- Package 6: reduce NO holdings as covered NO sales (reduce_no_as_sell) ---
@@ -8665,6 +8908,12 @@ class Bot:
             room = min(room, max(0.0, -inv) if buy else max(0.0, inv))
         cost = price if buy else 1 - price
         qty = int(min(level["quantity"], room, cfg.max_order_cash_frac * bank / max(cost, TICK)))
+        if getattr(self, "mmr_paused", False) and qty >= 1:   # P12 ops mm_risk_reserve_*: value adds paused -
+            cut = int(min(qty, max(0.0, -inv) if buy else max(0.0, inv)))   # only what shrinks the position here
+            if cut < 1:
+                self.mm_risk_count("takes")
+                log.info("take on %s skipped: value adds paused (mm_risk_reserve)", ex.label)
+            qty = cut
         if qty >= 1 and not self.writes_ready(3):
             # Checked BEFORE pulling our own quote (cancel + take + leftover cancel): a take that can't be sent
             # must not leave the market unquoted. The direction stays confirmed: taken once the budget frees.
@@ -9754,6 +10003,8 @@ class Bot:
             # P9 red team: exempt from reduce-only, but the sum-of-maxima backstop (the basket in it at its stress loss)
             # stays the LAST RESORT for adds too - else nothing bounds the worst case while the basket buys
             refuse = "worst-case backstop"
+        elif getattr(self, "mmr_paused", False):      # P12 ops mm_risk_reserve_*: value adds paused (sales go on)
+            refuse = "mm risk reserve"
         elif not (self.cash_gate_on() and getattr(self, "cg_cash", None) is not None):
             refuse = "no fresh cash read (cash_gate_enabled needed)"
         cash = self.cash_left() if refuse is None else 0.0
@@ -9763,6 +10014,8 @@ class Bot:
             # stalled with refused None and no log line - say why (it buys as soon as the gate has cash again)
             refuse = "no free cash (cash gate)"
         if refuse != (self.basket_info or {}).get("refused"):
+            if refuse == "mm risk reserve":
+                self.mm_risk_count("basket")
             log.info("BASKET adds %s", f"refused: {refuse}" if refuse else "allowed again")
         writes = getattr(self.api, "writes_left", lambda: 10 ** 6)() if self.api.live else 10 ** 6
         orders = self.basket_orders(now_w, fvs, book_fvs, inv, target, full, cash, refuse is None, writes, sched, now_m,
@@ -10114,20 +10367,27 @@ class Bot:
             age_off = edge is not None and edge > 0
         return inv_for_quote - t, age_off
 
-    def alloc_plan(self, inv, now_m, cash, skip=(), turnover_left=None):
+    def alloc_plan(self, inv, now_m, cash, skip=(), turnover_left=None, refill_only=False):
         """THE PURE PLANNER (no request, no state change but the once-only bloc log): ([pair], {"blocked_by",
         "ev_gain_est"}). pair = {"sell": {"kind": "long" | "short" | "set" | "cash", "eid" / "race", "label", "qty",
         "px", "edge", "usd"}, "buy": None | {"eid", "label", "short", "px", "qty", "edge", "usd"}, "usd", "status"}.
         Reserve refills first (cash below alloc_mm_reserve: sales with no buy, lowest edge first), then pairs: lowest
         edge-held with highest-edge level while the gain >= alloc_min_improvement, inside alloc_max_contract_usd per
-        market, the turnover left and (bloc_delta_enabled) the bloc cap."""
+        market, the turnover left and (bloc_delta_enabled) the bloc cap.
+        P14 mm_refill_fast: the refills sell the stale MM inventory first (mm_refill_held; its legs carry "mm"),
+        then the lowest edge-held, every refill sale at or beyond the value floor (mm_floor_ok); a market a refill
+        IOC sold whose sale the positions read does not show yet is skipped (RT13-3). refill_only: no pairs."""
         cfg = self.cfg
         blocked = defaultdict(int)
         pins = self.alloc_pins()
+        fast = bool(getattr(cfg, "mm_refill_fast", False))
         held, levels = [], []
         for e, q in sorted(inv.items()):
             ex = self.ex.get(e)
             if ex is None or abs(q) < 1 or not self.alloc_market_ok(ex, skip) or ex.label in pins:
+                continue
+            if fast and self.mm_sale_lagging(e, q, now_m):   # P14 (RT13-3): its sale not in the positions read yet
+                blocked["in_flight"] += 1
                 continue
             p, book = self.alloc_p(ex, now_m), self.alloc_fresh_book(ex, now_m)
             if p is None or book is None:
@@ -10143,7 +10403,8 @@ class Bot:
             qty = int(qty + 1e-9)
             if qty >= 1 and edge <= cfg.alloc_max_edge_sell + 1e-9 and qty * unit >= self.ALLOC_MIN_USD:
                 held.append({"kind": "long" if q > 0 else "short", "eid": e, "label": ex.label, "px": px, "edge": edge,
-                             "unit": unit, "avail": qty * unit})
+                             "unit": unit, "avail": qty * unit,
+                             **({"floor_ok": self.mm_floor_ok(q > 0, px, p)} if fast else {})})   # P14
         if cfg.alloc_set_cost_per_usd > 0 and cfg.pair_unwind_enabled and self.pair_no_unwind_on():
             for race, members in sorted(self.groups.items()):
                 if len(members) < 2 or any(m not in self.ex for m in members):
@@ -10171,7 +10432,13 @@ class Bot:
         spare = cash - cfg.alloc_mm_reserve
         if spare >= self.ALLOC_MIN_USD:
             held.append({"kind": "cash", "label": "spare cash", "px": 1.0, "edge": 0.0, "unit": 1.0, "avail": spare})
-        held.sort(key=lambda h: (h["edge"], h.get("eid") or h.get("race") or ""))
+        if fast:                                  # P14 2: the stale MM inventory is sold first (its value entry out)
+            mm = self.mm_refill_held(inv, now_m, skip, pins, blocked)
+            mm_e = {h["eid"] for h in mm}
+            held = mm + [h for h in held if h.get("eid") not in mm_e]
+            held.sort(key=lambda h: (0 if h.get("mm") else 1, h["edge"], h.get("eid") or h.get("race") or ""))
+        else:
+            held.sort(key=lambda h: (h["edge"], h.get("eid") or h.get("race") or ""))
         room = {}
         no_buy = self.alloc_prefer_short_legs(inv, now_m, skip) if getattr(cfg, "alloc_prefer_short", False) else {}
         for e, ex in sorted(self.ex.items()):
@@ -10202,6 +10469,9 @@ class Bot:
         if getattr(self, "global_reduce", False) and levels:   # (red team RT-2: no buy while in reduce-only;
             blocked["risk"] += 1                                #  reserve refills, which only reduce, still run)
             levels = []
+        if getattr(self, "mmr_paused", False) and levels:      # P12 ops mm_risk_reserve_*: value adds paused (the
+            blocked["mm_risk_reserve"] += 1                     #  same: no buy; reserve refills still run)
+            levels = []
         left = float("inf") if turnover_left is None else max(0.0, turnover_left)
         pairs, gain = [], 0.0
         hyp = {e: float(q) for e, q in inv.items()}
@@ -10220,6 +10490,8 @@ class Bot:
                 leg.update(race=h["race"], members=h["members"])
             else:
                 leg["eid"] = h["eid"]
+            if h.get("mm"):
+                leg["mm"] = True                  # P14 2: stale MM inventory (alloc_sell checks fair / floor instead)
             return leg
 
         def apply(inv_, s, b, sign=1):
@@ -10236,6 +10508,10 @@ class Bot:
         bloc = bloc_fn(hyp) if bloc_fn is not None else 0.0
         while deficit >= self.ALLOC_MIN_USD and hi < len(held) and left >= self.ALLOC_MIN_USD:
             h = held[hi]
+            if not h.get("floor_ok", True):       # P14 mm_refill_fast: no refill sale below the value floor
+                blocked["floor"] += 1
+                hi += 1
+                continue
             s = sell_leg(h, min(h["avail"], deficit, left)) if h["kind"] != "cash" else None
             if s is None:
                 hi += 1
@@ -10258,7 +10534,9 @@ class Bot:
                 hi += 1
         bloc = bloc_fn(hyp) if bloc_fn is not None else 0.0
         # B1: pairs (sell lowest edge-held, buy highest edge)
-        sq = [h for h in held if h["avail"] >= self.ALLOC_MIN_USD]
+        sq = [h for h in held if h["avail"] >= self.ALLOC_MIN_USD and not h.get("mm")]   # (P14: MM legs refill only)
+        if refill_only:                           # P14 mm_refill_fast: the fast refill plans no pairs
+            sq = []
         si = bi = 0
         while si < len(sq) and bi < len(levels) and left >= self.ALLOC_MIN_USD and len(pairs) < 200:
             h, o = sq[si], levels[bi]
@@ -10315,6 +10593,9 @@ class Bot:
             left = f"spare cash ${pr['usd']:.0f}"
         elif s["kind"] == "set":
             left = f"unwind {s['label']} {s['qty']} sets @ asks sum {s['px']:.3f} (cost {100 * s['edge']:.1f}% per $)"
+        elif s.get("mm"):                         # P14 2: stale market-making inventory
+            left = (f"sell {s['label']} {'NO ' if s['kind'] == 'short' else ''}{s['qty']} @ {s['px']:.3f} "
+                    f"(stale MM inventory, edge-held {100 * s['edge']:.1f}%)")
         else:
             left = (f"sell {s['label']} {'NO ' if s['kind'] == 'short' else ''}{s['qty']} @ {s['px']:.3f} "
                     f"(edge-held {100 * s['edge']:.1f}%)")
@@ -10362,6 +10643,7 @@ class Bot:
                                               cfg.alloc_max_turnover_per_hour - turnover)
                 self.alloc_last_run_wall = now_w
                 self.alloc_targets = self.alloc_plan_targets(inv, pairs)   # Package 12 M2
+                self.mm_risk_count("alloc", info["blocked_by"].get("mm_risk_reserve", 0))   # P12 ops
                 for pr in pairs:
                     log.info("[dry] %s", self.alloc_journal(pr))
                 self.alloc_state = "dry run"
@@ -10383,6 +10665,7 @@ class Bot:
             self.alloc_totals["runs_total"] += 1
             self.alloc_pairs, self.alloc_sells_stopped = pairs, False
             self.alloc_targets = self.alloc_plan_targets(inv, pairs)       # Package 12 M2
+            self.mm_risk_count("alloc", info["blocked_by"].get("mm_risk_reserve", 0))   # P12 ops
             for pr in pairs:
                 pr["planned_at"] = now_m
             self.alloc_run = {"blocked_by": dict(info["blocked_by"]), "pairs_planned": len(pairs), "sold": 0.0,
@@ -10392,6 +10675,10 @@ class Bot:
                         info["ev_gain_est"])
             for pr in pairs:
                 log.warning("%s", self.alloc_journal(pr))
+        elif (getattr(cfg, "mm_refill_fast", False) and not self.alloc_pairs   # P14 2: the reserve refilled NOW
+              and now_m - self.mmf_refill_last_m >= self.MM_REFILL_GAP
+              and self.cash_left() < cfg.alloc_mm_reserve - self.ALLOC_MIN_USD):
+            self.mm_refill_tick(inv, now_m, now, skip, turnover)
         writes = getattr(self.api, "writes_left", lambda: 10 ** 6)()
         n_left = int(min(cfg.alloc_max_orders_per_cycle, math.floor(cfg.alloc_writes_frac * max(0, writes) / 3 + 1e-9)))
         # 1. registered NO+NO set unwinds (B3): done by take_arbitrage, or expired
@@ -10421,7 +10708,7 @@ class Bot:
             if self.alloc_sells_stopped:
                 pr["status"] = "skipped"
                 continue
-            if now_m - pr.get("planned_at", now_m) > cfg.alloc_interval_s:
+            if now_m - pr.get("planned_at", now_m) > (self.MM_FAST_EXPIRE if pr.get("fast") else cfg.alloc_interval_s):
                 pr["status"] = "expired"          # a sale still not sent after a whole interval: re-planned afresh
                 continue
             if pr["sell"]["kind"] != "set" and n_left < 1:
@@ -10471,6 +10758,10 @@ class Bot:
         ex = self.ex.get(b["eid"])
         if getattr(self, "global_reduce", False):     # (red team RT-2: no buy in reduce-only; the pair waits, then
             self.alloc_block("risk")                  #  expires after ALLOC_BUY_WAIT with its cash kept)
+            return False
+        if getattr(self, "mmr_paused", False):        # P12 ops mm_risk_reserve_*: value adds paused (as RT-2)
+            self.alloc_block("mm_risk_reserve")
+            self.mm_risk_count("alloc")
             return False
         if ex is None or not self.alloc_market_ok(ex, skip) or busy(ex, now_m):
             return False                          # (traded by another feature / a write in flight: next cycle)
@@ -10560,6 +10851,10 @@ class Bot:
         if b is not None and getattr(self, "global_reduce", False):   # (red team RT-2: its buy could not follow)
             self.alloc_block("risk")
             return False
+        if b is not None and getattr(self, "mmr_paused", False):     # P12 ops mm_risk_reserve_*: nor while paused
+            self.alloc_block("mm_risk_reserve")
+            self.mm_risk_count("alloc")
+            return False
         if b is not None:                         # the paired level first: no sale without it on a fresh book
             bx = self.ex.get(b["eid"])
             if bx is None or not self.alloc_market_ok(bx, skip):
@@ -10601,11 +10896,29 @@ class Bot:
             return False
         best = lv[0]["price"]
         edge = (p - best) / best if s["kind"] == "long" else (best - p) / max(1 - best, TICK)
-        if edge > cfg.alloc_max_edge_sell + 1e-9 or (bedge is not None
-                                                     and bedge - edge < cfg.alloc_min_improvement - 1e-9):
+        fast = bool(getattr(cfg, "mm_refill_fast", False))
+        if s.get("mm"):                           # P14 2: stale MM inventory - near fair and the floor, not the edge
+            fair = ex.last_fv if ex.last_fv is not None else p
+            gap = fair - best if s["kind"] == "long" else best - fair
+            if gap > cfg.mm_recycle_concession + 1e-9 or not self.mm_floor_ok(s["kind"] == "long", best, p):
+                pr["status"] = "gone"
+                log.info("ALLOC %s not sold: %.3f is %.3f from fair %.3f (> concession %.3f) or past the value floor - "
+                         "it rests through the recycler", s["label"], best, gap, fair, cfg.mm_recycle_concession)
+                return False
+        elif edge > cfg.alloc_max_edge_sell + 1e-9 or (bedge is not None
+                                                       and bedge - edge < cfg.alloc_min_improvement - 1e-9):
             pr["status"] = "gone"
             log.info("ALLOC %s not sold: edge-held now %.1f%% at %.3f (the pair no longer pays)", s["label"],
                      100 * edge, best)
+            return False
+        if fast and b is None and not self.mm_floor_ok(s["kind"] == "long", best, p):   # P14 2: refills >= floor
+            pr["status"] = "gone"
+            self.alloc_block("floor")
+            log.info("ALLOC %s not sold: %.3f is past the value floor (p %.3f -+ %.3f)", s["label"], best, p,
+                     cfg.value_sell_margin)
+            return False
+        if fast and self.mm_sale_lagging(s["eid"], q, now_m):   # P14 (RT13-3): an earlier IOC's sale not read yet
+            self.alloc_block("in_flight")
             return False
         unit = best if s["kind"] == "long" else 1 - best
         cap_q = q if s["kind"] == "long" else self.alloc_lone_no(s["eid"], q)
@@ -10642,6 +10955,14 @@ class Bot:
         self.alloc_totals["sold_total"] += usd
         log.warning("ALLOC sold %s %.0f @ %.3f (edge-held %.1f%%, $%.0f freed)%s", s["label"], done, best, 100 * edge,
                     usd, f" -> buy {b['label']} after the next cash read" if b else " (reserve refill)")
+        if fast:                                  # P14: not planned / sold again until the positions read shows it
+            self.mmf_sent[s["eid"]] = (now_m, abs(q), float(done))
+            if pr.get("fast"):
+                self.mmf_refill["sold_usd"] = round(self.mmf_refill["sold_usd"] + usd, 2)
+            if s.get("mm"):
+                self.mmf_refill["mm_sold_usd"] = round(self.mmf_refill["mm_sold_usd"] + usd, 2)
+                log.warning("MM RECYCLE %s: %.0f stale MM shares sold by IOC @ %.3f ($%.0f to the reserve)", s["label"],
+                            done, best, usd)
         return True
 
     def alloc_set_check(self, pr, inv, now_m, now_w):
@@ -10934,6 +11255,519 @@ class Bot:
         return replace(q, ask=lo, ask_limit=max(lo, q.ask_limit) if q.ask_limit is not None else lo)
 
     # ------------------------------------------------------------------------------ fills
+    # ------------------------------------------------------------------------------ P14: market-making funding
+    MM_FUNDING_KEYS = ("mm_funding",)   # read-only status.json key(s): identity checks ignore them (as EV_KEYS)
+    MM_LOTS_MAX = 20              # MM lots kept per market (beyond it the two oldest merge: older time, mean price)
+    MM_SEED_HOURS = 24.0          # no status.json mm_funding at start: fills.csv this far back (order notes: 1 day)
+    MM_REFILL_GAP = 60.0          # mm_refill_fast: a refill is planned at most this often (s)
+    MM_FAST_EXPIRE = 300.0        # ...a fast refill sale still not sent after this long is dropped (re-planned) (s)
+    MM_SENT_LAG = 120.0           # ...a market a refill IOC sold is not planned again until the positions read
+                                  #    shows the sale, or this long after it (red team RT13-3: a lagging read) (s)
+    MM_MAKER_SKIP = ("basket", "alloc", "set_ladder", "arb", "take")   # order notes that are not resting quotes
+
+    def mmf_init(self, d=None):
+        """P14 state, restored from status.json "mm_funding" (d): the MM lots {eid: [[signed shares, YES price, wall
+        time], ...]} oldest first, the hand-over tally, the alert clock. With no "lots" there, the first cycle seeds
+        the lots from fills.csv (mm_lots_seed)."""
+        d = d if isinstance(d, dict) else {}
+
+        def num(x, default=None):
+            return float(x) if isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) else default
+        self.mm_lots = {}
+        raw = d.get("lots")
+        for e, v in (raw.items() if isinstance(raw, dict) else ()):
+            lots = [[num(x[0]), num(x[1]), num(x[2])] for x in (v if isinstance(v, list) else ())
+                    if isinstance(x, (list, tuple)) and len(x) == 3 and None not in (num(x[0]), num(x[1]), num(x[2]))
+                    and abs(num(x[0])) > 1e-9]
+            if lots and (all(x[0] > 0 for x in lots) or all(x[0] < 0 for x in lots)):   # (mixed signs: unusable)
+                self.mm_lots[str(e)] = lots
+        self.mm_lots_seeded = isinstance(raw, dict)
+        self.mmf_seed = "restored from status.json" if self.mm_lots_seeded else None
+        h = d.get("handed_to_value") if isinstance(d.get("handed_to_value"), dict) else {}
+        self.mmf_handed = {"count": int(num(h.get("count"), 0)), "shares": num(h.get("shares"), 0.0),
+                           "usd": num(h.get("usd"), 0.0)}
+        r = d.get("refill") if isinstance(d.get("refill"), dict) else {}
+        self.mmf_refill = {"runs": int(num(r.get("runs"), 0)), "sold_usd": num(r.get("sold_usd"), 0.0),
+                           "mm_sold_usd": num(r.get("mm_sold_usd"), 0.0),
+                           "last": r.get("last") if isinstance(r.get("last"), str) else None}
+        self.mmf_below_since = num(d.get("below_half_since_wall"))   # wall time cash / a room fell below half
+        self.mmf_alerted = bool(d.get("alerted")) and self.mmf_below_since is not None
+        self.mmf_refill_last_m = -1e18            # monotonic time of the latest fast refill plan
+        self.mmf_recycling = {}                   # eid -> {"side", "qty", "price", "why"}: this cycle's recycler
+        self.mmf_logged = {}                      # eid -> the latest "MM RECYCLE" line's (side, price, qty)
+        self.mmf_sent = {}                        # eid -> (now_m, |q| before, shares sold): refill IOC sales (RT13-3)
+        self.mmf_room_mm = (None, None)           # mm_room_guard: the MM lots' worst-case / correlated contribution
+        self.mmf_room_value = (None, None)        # ...and the value book's share of the rooms the pause is decided on
+        self.mmf_warned = False
+
+    def mmf_on(self, cfg=None):
+        """Any P14 flag on (the alert and the summary piece follow them; the status key is always written)."""
+        cfg = cfg or self.cfg
+        return bool(getattr(cfg, "mm_recycle_enabled", False) or getattr(cfg, "mm_refill_fast", False)
+                    or getattr(cfg, "mm_room_guard", False))
+
+    def mmf_warn(self, what, err):
+        if not self.mmf_warned:
+            self.mmf_warned = True
+            log.warning("MM funding %s failed (%s: %s) - skipped (logged once)", what, type(err).__name__, err)
+
+    def mm_meta(self, oid):
+        """The order note of order oid (keys are ints in a run, strings after a restart)."""
+        meta = self.order_meta or {}
+        m = meta.get(oid)
+        if m is None:
+            m = meta.get(str(oid))
+        if m is None and str(oid).isdigit():
+            m = meta.get(int(str(oid)))
+        return m
+
+    def mm_is_maker(self, meta):
+        """A fill of one of our RESTING quotes (mm_carry_24h's maker class): a note with our side, none of the
+        take / arbitrage / allocator / set ladder / basket tags."""
+        return (isinstance(meta, dict) and meta.get("our_side") in ("bid", "ask")
+                and not any(meta.get(k) for k in self.MM_MAKER_SKIP))
+
+    def mm_in_band(self, p):
+        return p is not None and self.cfg.value_mid_low <= p <= self.cfg.value_mid_high
+
+    def mm_lot_add(self, e, buy, qty, price, t, q_now, opens=True):
+        """One MM fill into market e's lots: it first closes opposite lots (FIFO, a round trip), the rest opens a lot
+        only in the direction the position q_now has (a fill that only shrank a non-MM holding opens nothing)."""
+        lots = self.mm_lots.setdefault(e, [])
+        rem = qty if buy else -qty
+        while abs(rem) > 1e-9 and lots and (lots[0][0] > 0) != (rem > 0):
+            lot = lots[0]
+            n = min(abs(rem), abs(lot[0]))
+            lot[0] += n if lot[0] < 0 else -n
+            rem += n if rem < 0 else -n
+            if abs(lot[0]) <= 1e-9:
+                lots.pop(0)
+        if opens and abs(rem) > 1e-9 and q_now * rem > 0:
+            lots.append([rem, price, t])
+            while len(lots) > self.MM_LOTS_MAX:    # the two oldest merged: their total, mean price, the older time
+                a, b = lots[0], lots[1]
+                n = a[0] + b[0]
+                lots[0:2] = [[n, (a[0] * a[1] + b[0] * b[1]) / n, min(a[2], b[2])]]
+        if not lots:
+            self.mm_lots.pop(e, None)
+
+    def mm_lots_reconcile(self, inv):
+        """MM lots never exceed the position: flat / flipped / a market gone -> dropped; shrunk (a sale by anything
+        else: an allocator IOC, a take) -> the oldest lots go first."""
+        for e in list(self.mm_lots):
+            q, lots = float(inv.get(e, 0.0)), self.mm_lots[e]
+            s = sum(x[0] for x in lots)
+            if abs(q) < 1 or not lots or q * s <= 0 or e not in self.ex:
+                self.mm_lots.pop(e, None)
+                continue
+            drop = abs(s) - abs(q)
+            while drop > 1e-9 and lots:
+                n = min(drop, abs(lots[0][0]))
+                lots[0][0] += n if lots[0][0] < 0 else -n
+                drop -= n
+                if abs(lots[0][0]) <= 1e-9:
+                    lots.pop(0)
+            if not lots:
+                self.mm_lots.pop(e, None)
+
+    def mm_lots_seed(self, inv, now):
+        """First start without status.json mm_funding.lots: rebuild the MM lots from fills.csv's last MM_SEED_HOURS
+        (the order notes, which tell a resting quote from a take / arbitrage / allocator order, are kept a day): each
+        row of a resting quote with p = its fv_at_quote (else the market's p now) in the middle band, through
+        mm_lot_add against today's positions, then reconciled. Older inventory is not MM (left to the allocator)."""
+        self.mm_lots_seeded = True
+        try:
+            rows = read_fills(bot_path(self.cfg.fills_csv))
+        except (OSError, ValueError, csv.Error):
+            rows = []
+        n = 0
+        for r in rows:
+            ts = parse_ts(r.get("filled_at"))
+            side = r.get("our_side")
+            if ts is None or ts.timestamp() < now - self.MM_SEED_HOURS * 3600 or side not in ("bid", "ask"):
+                continue
+            if not self.mm_is_maker(self.mm_meta(r.get("order_id"))):
+                continue
+            e = str(r.get("exchange_id"))
+            try:
+                p = float(r.get("fv_at_quote"))
+            except (TypeError, ValueError):
+                p = self.ev_p(e)
+            try:
+                qty, price = abs(float(r.get("qty") or 0)), float(r.get("quote_price") or r.get("fill_price") or 0)
+            except ValueError:
+                continue
+            if qty <= 0 or not self.mm_in_band(p) or e not in self.ex:
+                continue
+            self.mm_lot_add(e, side == "bid", qty, price, ts.timestamp(), float(inv.get(e, 0.0)))
+            n += 1
+        self.mm_lots_reconcile(inv)
+        self.mmf_seed = (f"seeded from fills.csv ({n} middle-band maker fills of the last {self.MM_SEED_HOURS:.0f} h "
+                         f"-> {len(self.mm_lots)} markets)")
+        log.info("MM inventory %s", self.mmf_seed)
+
+    def mm_inv_step(self, new, inv):
+        """P14, cycle step 4 (always; read-only): the MM lots kept in step with this cycle's new fills and the
+        positions read (see Config, P14). Never raises."""
+        try:
+            now = time.time()
+            if not self.mm_lots_seeded:
+                self.mm_lots_seed(inv, now)
+            for f in reversed(list(new or ())):            # (the API lists newest first)
+                meta = self.mm_meta(f.get("orderId"))
+                if not self.mm_is_maker(meta):
+                    continue
+                e = str(f.get("exchangeId"))
+                p = self.ev_fill_p.get(str(f.get("id")))   # (mm_carry_24h's p at fill; else the fair value when quoted)
+                p = meta.get("fv") if p is None else p
+                rec = bool(meta.get("recycle"))
+                if (not rec and not self.mm_in_band(p)) or e not in self.ex:
+                    continue                                # (a recycled side's fill always closes MM lots)
+                ts = parse_ts(f.get("filledAt"))
+                price = meta.get("price") if meta.get("price") is not None else f.get("price")
+                self.mm_lot_add(e, meta["our_side"] == "bid", abs(float(f.get("quantity") or 0)), float(price or 0),
+                                ts.timestamp() if ts is not None else now, float(inv.get(e, 0.0)), opens=not rec)
+            self.mm_lots_reconcile(inv)
+        except Exception as err:                          # reporting must never disturb trading
+            self.mmf_warn("lot tracking", err)
+
+    def mm_p(self, e):
+        """$ value per YES share for MM inventory: the race-scaled liquid Polymarket p, else the last fair value."""
+        p = self.ev_p(e)
+        if p is None and e in self.ex:
+            p = self.ex[e].last_fv
+        return p
+
+    def mm_view(self, now=None, eids=None):
+        """{eid: {"q", "usd", "oldest_h", "stale", "why"}} for every market holding MM inventory: q its MM shares
+        (signed), usd at p (long q x p, short |q| x (1 - p); no p: at the lots' prices), stale = shares to work out:
+        max(the lots older than mm_inv_max_age_h, the shares above mm_inv_max_usd (0 = no $ limit)) <= |q|."""
+        cfg = self.cfg
+        now = time.time() if now is None else now
+        out = {}
+        for e in (self.mm_lots if eids is None else [x for x in eids if x in self.mm_lots]):
+            lots = self.mm_lots[e]
+            q = sum(x[0] for x in lots)
+            if abs(q) < 1:
+                continue
+            p = self.mm_p(e)
+            unit = None if p is None else (p if q > 0 else 1 - p)
+            usd = (abs(q) * unit if unit is not None
+                   else sum(abs(x[0]) * (x[1] if x[0] > 0 else 1 - x[1]) for x in lots))
+            aged = sum(abs(x[0]) for x in lots if now - x[2] > cfg.mm_inv_max_age_h * 3600)
+            over = 0.0
+            if cfg.mm_inv_max_usd > 0 and usd > cfg.mm_inv_max_usd + 1e-9 and unit:
+                over = math.ceil((usd - cfg.mm_inv_max_usd) / unit - 1e-9)
+            stale = int(min(abs(q), max(aged, over)) + 1e-9)
+            why = "+".join(w for w, hit in (("age", aged >= 1), ("$", over >= 1)) if hit)
+            out[e] = {"q": q, "usd": usd, "oldest_h": (now - min(x[2] for x in lots)) / 3600, "stale": stale,
+                      "why": why}
+        return out
+
+    def mm_hurdle(self, cfg=None):
+        """The edge-held from which MM inventory is VALUE: value_quote_hurdle, or alloc_min_edge_buy while it is 0."""
+        cfg = cfg or self.cfg
+        return cfg.value_quote_hurdle if cfg.value_quote_hurdle > 0 else cfg.alloc_min_edge_buy
+
+    def mm_hand_over(self, ex, edge, v):
+        """P14 1: market ex's MM inventory is value (edge-held >= the hurdle): its lots leave the MM book (no longer
+        recycled; the reserve refill sells the lowest-edge value positions instead)."""
+        lots = self.mm_lots.pop(ex.eid, [])
+        sh = sum(abs(x[0]) for x in lots)
+        self.mmf_handed["count"] += 1
+        self.mmf_handed["shares"] = round(self.mmf_handed["shares"] + sh, 2)
+        self.mmf_handed["usd"] = round(self.mmf_handed["usd"] + v["usd"], 2)
+        self.mmf_logged.pop(ex.eid, None)
+        log.warning("MM RECYCLE %s: %+.0f MM shares ($%.0f, stale by %s) handed to the value bucket - edge-held "
+                    "%.1f%% >= hurdle %.1f%%: held, not recycled (the reserve refills from the lowest-edge value "
+                    "positions)", ex.label, sum(x[0] for x in lots), v["usd"], v["why"] or "-", 100 * edge,
+                    100 * self.mm_hurdle())
+
+    def mm_recycle_quote(self, ex, q, fv, best_bid, best_ask, vp, cfg, now_m):
+        """P14 1 (mm_recycle_enabled; decide, after hold_quote, before the value floor): a market with stale MM
+        inventory gets its REDUCING side moved in to fair -+ mm_recycle_concession (never crossing the best other
+        bid / ask; at or beyond the value floor in value mode), sized max(the quoter's size, the stale shares) within
+        the position; our adding side a tick behind it. A side the quoter left out stays out (recorded as blocked).
+        +EV inventory (edge-held >= mm_hurdle) is handed over instead (mm_hand_over)."""
+        self.mmf_recycling.pop(ex.eid, None)
+        if fv is None or abs(ex.inv) < 1 or ex.eid not in self.mm_lots or ex.label in self.alloc_pins():
+            return q                              # (a pinned label is never pushed out: alloc_pin, as the allocator)
+        v = self.mm_view(time.time(), [ex.eid]).get(ex.eid)
+        if v is None or v["stale"] < 1 or v["q"] * ex.inv <= 0:
+            return q
+        edge = self.alloc_edge_held(ex, ex.inv, now_m)
+        if edge is not None and edge >= self.mm_hurdle(cfg) - 1e-9:
+            self.mm_hand_over(ex, edge, v)
+            return q
+        n, conc, value = v["stale"], cfg.mm_recycle_concession, getattr(cfg, "value_mode", False) and vp is not None
+        rec = {"side": "ask" if ex.inv > 0 else "bid", "qty": n, "price": None, "why": v["why"]}
+        if ex.inv >= 1:
+            if q.ask is None or q.ask_size < 1:
+                self.mmf_recycling[ex.eid] = {**rec, "blocked": "no reducing side"}
+                return q
+            px = ceil_tick(fv - conc)
+            if best_bid is not None:
+                px = max(px, ceil_tick(best_bid + TICK))            # never crossing the best other bid
+            if value:
+                px = max(px, value_side_prices(vp, ex.inv, cfg)[1])  # never below the value floor
+            ask = min(q.ask, px)
+            size = max(q.ask_size, min(n, int(ex.inv)))
+            bid, bid_size, bid_limit = q.bid, q.bid_size, q.bid_limit
+            top = floor_tick(ask - TICK)                            # our adding bid a tick behind it
+            if bid is not None and bid > top + 1e-9:
+                bid = top
+            if bid_limit is not None and bid_limit > top + 1e-9:
+                bid_limit = top
+            if bid is not None and bid < PMIN - 1e-9:
+                bid, bid_size, bid_limit = None, 0, None
+            q = replace(q, ask=ask, ask_size=size, ask_limit=min(q.ask_limit, ask) if q.ask_limit is not None else None,
+                        ask_max=max(q.ask_max, size) if q.ask_max is not None else None,
+                        bid=bid, bid_size=bid_size if bid is not None else 0, bid_limit=bid_limit,
+                        bid_max=q.bid_max if bid is not None else None)
+            price = ask
+        else:
+            if q.bid is None or q.bid_size < 1:
+                self.mmf_recycling[ex.eid] = {**rec, "blocked": "no reducing side"}
+                return q
+            px = floor_tick(fv + conc)
+            if best_ask is not None:
+                px = min(px, floor_tick(best_ask - TICK))           # never crossing the best other ask
+            if value:
+                fb = value_side_prices(vp, ex.inv, cfg)[0]
+                px = min(px, fb if fb is not None else px)          # never above the value floor (a short's)
+            if px < PMIN - 1e-9:
+                self.mmf_recycling[ex.eid] = {**rec, "blocked": "no grid price"}
+                return q
+            bid = max(q.bid, px)
+            size = max(q.bid_size, min(n, int(-ex.inv)))
+            ask, ask_size, ask_limit = q.ask, q.ask_size, q.ask_limit
+            low = ceil_tick(bid + TICK)                             # our adding ask a tick behind it
+            if ask is not None and ask < low - 1e-9:
+                ask = low
+            if ask_limit is not None and ask_limit < low - 1e-9:
+                ask_limit = low
+            if ask is not None and ask > PMAX + 1e-9:
+                ask, ask_size, ask_limit = None, 0, None
+            q = replace(q, bid=bid, bid_size=size, bid_limit=max(q.bid_limit, bid) if q.bid_limit is not None else None,
+                        bid_max=max(q.bid_max, size) if q.bid_max is not None else None,
+                        ask=ask, ask_size=ask_size if ask is not None else 0, ask_limit=ask_limit,
+                        ask_max=q.ask_max if ask is not None else None)
+            price = bid
+        rec["price"] = round(price, 3)
+        self.mmf_recycling[ex.eid] = rec
+        key = (rec["side"], rec["price"], n)
+        if self.mmf_logged.get(ex.eid) != key:
+            self.mmf_logged[ex.eid] = key
+            log.warning("MM RECYCLE %s %s %d @ %.3f (fair %.3f %s %.3f concession%s; MM inventory %+.0f, oldest "
+                        "%.1f h, $%.0f; stale by %s)", ex.label, "sell" if ex.inv > 0 else "buy back", n, price, fv,
+                        "-" if ex.inv > 0 else "+", conc, ", value floor" if value else "", v["q"], v["oldest_h"],
+                        v["usd"], v["why"])
+        return q
+
+    def mm_sale_lagging(self, e, q, now_m):
+        """RT13-3: a refill IOC sold in e and the positions read q does not show it yet (within MM_SENT_LAG)."""
+        x = self.mmf_sent.get(e)
+        if x is None:
+            return False
+        t, before, sold = x
+        if now_m - t > self.MM_SENT_LAG or abs(q) <= before - sold + 0.5:
+            self.mmf_sent.pop(e, None)
+            return False
+        return True
+
+    def mm_floor_ok(self, long, px, p):
+        """A refill sale at px at or beyond the value floor: a long's >= p - value_sell_margin, a short's buy-back
+        <= p + margin."""
+        m = self.cfg.value_sell_margin
+        return px >= p - m - 1e-9 if long else px <= p + m + 1e-9
+
+    def mm_refill_held(self, inv, now_m, skip, pins, blocked):
+        """P14 2 (mm_refill_fast, alloc_plan): the stale MM inventory as refill holdings sold FIRST ("mm": True):
+        an IOC at the best bid (a short: the best ask, as a covered NO sale) when the gap to fair (ex.last_fv, else
+        p) is <= mm_recycle_concession and the price is at or beyond the value floor; else it rests through the
+        recycler (blocked_by "mm_resting"). Value inventory (edge-held >= mm_hurdle) is not MM here."""
+        cfg, out = self.cfg, []
+        for e, v in sorted(self.mm_view(time.time()).items()):
+            ex, q = self.ex.get(e), float(inv.get(e, 0.0))
+            if (ex is None or abs(q) < 1 or v["stale"] < 1 or v["q"] * q <= 0 or not self.alloc_market_ok(ex, skip)
+                    or ex.label in pins):
+                continue
+            if self.mm_sale_lagging(e, q, now_m):
+                blocked["in_flight"] += 1
+                continue
+            p, book = self.alloc_p(ex, now_m), self.alloc_fresh_book(ex, now_m)
+            fair = ex.last_fv if ex.last_fv is not None else p
+            if p is None or book is None or fair is None:
+                continue
+            edge = self.alloc_edge_held(ex, q, now_m)
+            if edge is not None and edge >= self.mm_hurdle() - 1e-9:
+                continue                                  # value: the lowest-edge value positions refill instead
+            key = "bids" if q > 0 else "asks"
+            if not book.get(key):
+                continue
+            px, depth = book[key][0]["price"], book[key][0]["quantity"]
+            gap = fair - px if q > 0 else px - fair
+            if gap > cfg.mm_recycle_concession + 1e-9 or not self.mm_floor_ok(q > 0, px, p):
+                blocked["mm_resting"] += 1
+                continue
+            n = min(v["stale"], depth, abs(q) if q > 0 else self.alloc_lone_no(e, q))
+            unit = px if q > 0 else 1 - px
+            n = int(n + 1e-9)
+            if n < 1 or n * unit < self.ALLOC_MIN_USD:
+                continue
+            out.append({"kind": "long" if q > 0 else "short", "eid": e, "label": ex.label, "px": px,
+                        "edge": edge if edge is not None else 0.0, "unit": unit, "avail": n * unit, "mm": True,
+                        "floor_ok": True})
+        return out
+
+    def mm_refill_tick(self, inv, now_m, now, skip, turnover):
+        """P14 2 (alloc_tick, live, no run in flight, cash read fresh): free cash below alloc_mm_reserve -> a
+        refill-only plan now (alloc_plan refill_only: MM inventory first, then the lowest edge-held, the floor),
+        executed by alloc_tick's own sale step this cycle (writes / turnover as any run). The hourly clock is not
+        moved; the plan's pairs expire after MM_FAST_EXPIRE if never sent."""
+        cfg = self.cfg
+        cash = self.cash_left()
+        self.mmf_refill_last_m = now_m
+        pairs, info = self.alloc_plan(inv, now_m, cash, skip, cfg.alloc_max_turnover_per_hour - turnover,
+                                      refill_only=True)
+        if not pairs:
+            self.mmf_refill["blocked_by"] = dict(info["blocked_by"])
+            return
+        for pr in pairs:
+            pr["planned_at"], pr["fast"] = now_m, True
+        self.alloc_pairs, self.alloc_sells_stopped = pairs, False
+        self.alloc_run = {"blocked_by": dict(info["blocked_by"]), "pairs_planned": len(pairs), "sold": 0.0,
+                          "bought": 0.0, "cash_before": round(cash, 2), "ev_gain_est": 0.0, "fast_refill": True}
+        self.mmf_refill["runs"] += 1
+        self.mmf_refill["last"] = iso(now)
+        self.mmf_refill["blocked_by"] = dict(info["blocked_by"])
+        log.warning("ALLOC fast refill (mm_refill_fast): %d sale(s) planned (cash %.0f < reserve %.0f, turnover left "
+                    "%.0f)", len(pairs), cash, cfg.alloc_mm_reserve, cfg.alloc_max_turnover_per_hour - turnover)
+        for pr in pairs:
+            log.warning("%s", self.alloc_journal(pr))
+
+    def mm_room_part(self, inv, fvs, worst, risk):
+        """P14 3 (mm_room_guard): (worst-case, correlated) contribution of the MM lots = the cycle's risk measures
+        minus the same measures on the positions without the MM shares (>= 0), or None on an error."""
+        try:
+            mmq = {e: sum(x[0] for x in lots) for e, lots in self.mm_lots.items()}
+            if not any(abs(v) >= 1 for v in mmq.values()):
+                return 0.0, 0.0
+            inv_v = {e: float(q) - mmq.get(e, 0.0) for e, q in inv.items()}
+            worst_v = self.total_worst_case(inv_v, fvs)
+            if self.cfg.risk_model == "correlated":
+                pd_v = sum(PARTY_SIGN.get(ex.party, 0) * inv_v.get(eid, 0.0) for eid, ex in self.ex.items())
+                risk_v = min(worst_v, self.settlement_risk(inv_v, fvs, pd_v))
+            else:
+                risk_v = worst_v
+            return max(0.0, worst - worst_v), max(0.0, risk - risk_v)
+        except Exception as err:
+            self.mmf_warn("room guard", err)
+            return None
+
+    def mm_funding_below(self):
+        """What is below half its target now: ["cash 4,100 of 20,000", "risk room wc ..."] ([] = funded)."""
+        cfg, out = self.cfg, []
+        cash = self.cash_left() if getattr(self, "cg_cash", None) is not None else None
+        if cfg.alloc_mm_reserve > 0 and cash is not None and cash < 0.5 * cfg.alloc_mm_reserve - 1e-9:
+            out.append(f"cash {cash:,.0f} of {cfg.alloc_mm_reserve:,.0f}")
+        rw, rc = self.mmr_room
+        for name, room, res in (("wc", rw, cfg.mm_risk_reserve_wc), ("corr", rc, cfg.mm_risk_reserve_corr)):
+            if res > 0 and room is not None and room < 0.5 * res - 1e-9:
+                out.append(f"risk room {name} {room:,.0f} of {res:,.0f}")
+        return out
+
+    def mm_funding_tick(self):
+        """P14 4 (end of every cycle): the below-half clock (since when cash or a room has been below half its
+        target; cleared, and the alert re-armed, once all are back) and, with a P14 flag on, ONE alert after
+        mm_funding_alert_h hours below. Never raises."""
+        try:
+            now, below = time.time(), self.mm_funding_below()
+            if below:
+                if self.mmf_below_since is None:
+                    self.mmf_below_since = now
+            elif self.mmf_below_since is not None:
+                if self.mmf_alerted:
+                    log.warning("MM funding back above half of its targets (alert re-armed)")
+                self.mmf_below_since, self.mmf_alerted = None, False
+            hours = (now - self.mmf_below_since) / 3600 if self.mmf_below_since is not None else 0.0
+            if below and self.mmf_on() and not self.mmf_alerted and hours > self.cfg.mm_funding_alert_h:
+                self.mmf_alerted = True
+                alert(f"MM funding below half for {hours:.1f} h: {'; '.join(below)} (market making is short of "
+                      f"cash / risk room)")
+        except Exception as err:
+            self.mmf_warn("alert check", err)
+
+    def mm_funding_fields(self):
+        """status.json mm_funding (read-only; also what a restart restores: lots, handed_to_value, refill, the alert
+        clock)."""
+        cfg, now = self.cfg, time.time()
+        view = self.mm_view(now)
+        rnd2 = lambda x: None if x is None else round(x, 2)   # noqa: E731
+        cash = self.cash_left() if getattr(self, "cg_cash", None) is not None else None
+        rw, rc = self.mmr_room
+        out = {"cash_free": rnd2(cash), "cash_target": cfg.alloc_mm_reserve,
+               "room_free": {"wc": rnd2(rw), "corr": rnd2(rc)},
+               "room_target": {"wc": cfg.mm_risk_reserve_wc, "corr": cfg.mm_risk_reserve_corr},
+               "inventory_usd": round(sum(v["usd"] for v in view.values()), 2),
+               "inventory_markets": len(view),
+               "oldest_inventory_h": round(max(v["oldest_h"] for v in view.values()), 2) if view else None,
+               "stale_markets": sum(1 for v in view.values() if v["stale"] >= 1),
+               "stale_usd": round(sum(v["usd"] * v["stale"] / max(1.0, abs(v["q"])) for v in view.values()), 2),
+               "recycling": {self.ex[e].label: dict(r) for e, r in sorted(self.mmf_recycling.items()) if e in self.ex},
+               "handed_to_value": dict(self.mmf_handed),
+               "below_half": self.mm_funding_below(),
+               "below_half_since": (iso(datetime.fromtimestamp(self.mmf_below_since, timezone.utc))
+                                    if self.mmf_below_since is not None else None),
+               "below_half_since_wall": self.mmf_below_since, "alerted": self.mmf_alerted,
+               "refill": dict(self.mmf_refill),
+               "flags": {"recycle": bool(getattr(cfg, "mm_recycle_enabled", False)),
+                         "refill_fast": bool(getattr(cfg, "mm_refill_fast", False)),
+                         "room_guard": bool(getattr(cfg, "mm_room_guard", False))},
+               "lots_source": self.mmf_seed,
+               "lots": {e: [[round(x[0], 2), round(x[1], 4), round(x[2], 1)] for x in v]
+                        for e, v in sorted(self.mm_lots.items())}}
+        if getattr(cfg, "mm_room_guard", False):
+            mw, mc = self.mmf_room_mm
+            vw, vc = self.mmf_room_value
+            out["room_guard"] = {"mm_inventory": {"wc": rnd2(mw), "corr": rnd2(mc)},
+                                 "value_share": {"wc": rnd2(vw), "corr": rnd2(vc)}}
+        return out
+
+    def safe_mm_funding(self):
+        """mm_funding_fields that never raises: on an error the lots alone (so a restart still restores them)."""
+        try:
+            return self.mm_funding_fields()
+        except Exception as err:                          # reporting must never disturb trading
+            self.mmf_warn("status fields", err)
+            return {"lots": {e: [list(x) for x in v] for e, v in getattr(self, "mm_lots", {}).items()},
+                    "lots_source": getattr(self, "mmf_seed", None)}
+
+    def mm_funding_summary(self):
+        """P14: "MM funding cash Xk/Yk, room wc ..., inventory Zk (N stale, oldest H h)" for the 2-hourly summary
+        while a P14 flag is on; "" otherwise. Never raises."""
+        if not self.mmf_on():
+            return ""
+        try:
+            f, cfg = self.mm_funding_fields(), self.cfg
+            k = lambda x: "?" if x is None else f"{x / 1000:.1f}k"   # noqa: E731
+            parts = [f"cash {k(f['cash_free'])}/{k(f['cash_target'])}"]
+            for name in ("wc", "corr"):
+                if f["room_target"][name] > 0:
+                    parts.append(f"room {name} {k(f['room_free'][name])}/{k(f['room_target'][name])}")
+            oldest = f["oldest_inventory_h"]
+            parts.append(f"inventory {k(f['inventory_usd'])} ({f['stale_markets']} stale"
+                         + (f", oldest {oldest:.1f} h" if oldest is not None else "") + ")")
+            if f["handed_to_value"]["count"]:
+                parts.append(f"{f['handed_to_value']['count']} handed to value")
+            line = "MM funding " + ", ".join(parts)
+            if f["below_half_since"]:
+                line += f" BELOW HALF since {f['below_half_since'][11:16]}"
+            return line
+        except Exception as err:
+            self.mmf_warn("summary", err)
+            return ""
+
     def log_fills(self, fvs):
         """Fetch fills newer than the last one we logged (paging back up to max_fill_pages pages), and
         update our record of resting orders: an order's shares left = what we placed - what has filled
@@ -10968,6 +11802,7 @@ class Bot:
                         break
         if new:
             self.fills.record(new, self.order_meta, fvs)
+            self.note_fill_p(new)                             # (mm_carry_24h: Polymarket p at fill time)
         for f in reversed(new):                               # oldest first
             oid = f.get("orderId")
             o = self.my_orders.get(oid)
@@ -11290,6 +12125,20 @@ class Bot:
         if getattr(self.cfg, "bloc_delta_enabled", False):   # Package 10 A2: " | bloc delta X/sd"
             part = f"bloc delta {self.bloc_delta:+,.0f}/sd"
             line = f"{line} | {part}" if line else part
+        part = self.mm_risk_summary()                 # P12 ops: " | risk room wc Xk corr Yk (paused)"
+        if part:
+            line = f"{line} | {part}" if line else part
+        part = self.mm_funding_summary()              # P14: " | MM funding cash Xk/Yk, ..." (a P14 flag on)
+        if part:
+            line = f"{line} | {part}" if line else part
+        for fn in (ev_outcome_part, mm_carry_part):   # " | EV outcome X (+Y 24h, N unpriced) | MM carry 24h ..."
+            try:
+                part = fn(self.ops_last)
+            except (TypeError, ValueError) as e:
+                log.warning("summary %s failed: %s", fn.__name__, e)
+                part = None
+            if part:
+                line = f"{line} | {part}" if line else part
         return line
 
     def safe_nono_sets(self):
@@ -11384,6 +12233,9 @@ class Bot:
         ev = c["events"]
         while ev and ev[0][0] < since:
             ev.popleft()
+        rows = c.setdefault("rows", deque())
+        while rows and rows[0][0] < since:
+            rows.popleft()
         c.update(sig=sig, t=now, lots={e: [list(x) for x in v] for e, v in c["book"].items() if v},
                  reduced_24h=sum(r for t, r, _ in ev if t >= since), added_24h=sum(a for t, _, a in ev if t >= since))
         self.ops_cache = c
@@ -11419,6 +12271,10 @@ class Bot:
             add += abs(rem)
         if ts is not None:
             c["events"].append((ts, red, add))
+            # (mm_carry_24h) the row itself, kept 24 h: (time, fill id, order id, market, bid?, shares, YES price)
+            c.setdefault("rows", deque()).append((ts, str(r.get("fill_id")), str(r.get("order_id")),
+                                                  str(r.get("exchange_id")), side == "bid", qty, price))
+            c["first_ts"] = min(c.get("first_ts") or ts, ts)
 
     def ops_fields(self, now=None):
         """Read-only reporting for status.json, the recorder and the phone summary (no requests; None = unknown):
@@ -11493,6 +12349,198 @@ class Bot:
             out["pair_passive_sets_total"] = self.pp_sets_total
         return out
 
+    # ------------------------------------------------------------------------------ EV at the outcome, MM carry
+    EV_KEYS = ("ev_outcome", "ev_outcome_unpriced", "ev_outcome_delta_24h", "ev_outcome_scope", "mm_carry_24h")
+    EV_HIST_SECONDS = 300.0       # one (wall, ev) sample at most this often (48 h = 576 samples in status.json)
+    EV_HIST_KEEP = 48 * 3600.0
+    EV_SCOPE = ("cash (cash gate read, else account - positions at marks) + positions held to the outcome at the "
+                "race-scaled liquid Polymarket price (long q x r, short |q| x (1 - r)); no liquid price: at the "
+                "exchange mark, else the book's fair value, else left out (all counted in ev_outcome_unpriced)")
+
+    def load_ev_hist(self):
+        """status.json ev_outcome_history ([[wall, ev], ...]) the previous run left; [] if none or unreadable."""
+        try:
+            with open(bot_path(self.cfg.status_file)) as f:
+                h = json.load(f).get("ev_outcome_history")
+            return [[float(t), float(v)] for t, v in h] if isinstance(h, list) else []
+        except (OSError, ValueError, TypeError, AttributeError):
+            return []
+
+    def ev_p(self, e):
+        """The outcome value of one YES share in market e: value_p (race-scaled liquid Polymarket), else None."""
+        ex = self.ex.get(e)
+        if ex is None:
+            return None
+        return self.value_p(ex, (self.cur_refs or {}).get(e), e in (self.cur_liquid or ()))
+
+    def note_fill_p(self, new):
+        """mm_carry_24h: the Polymarket p of each newly logged fill's market now (= at fill time, to a cycle)."""
+        try:
+            for f in new:
+                self.ev_fill_p[str(f.get("id"))] = self.ev_p(str(f.get("exchangeId")))
+            if len(self.ev_fill_p) > 20000:               # (a day of fills is far fewer: drop the oldest half)
+                self.ev_fill_p = dict(list(self.ev_fill_p.items())[10000:])
+        except Exception as e:                            # reporting must never disturb trading
+            log.warning("fill p note failed: %s", e)
+
+    def ev_fields(self, now=None, record=False):
+        """Read-only reporting (status.json, the realtime line, the phone summary; None = unknown):
+          ev_outcome            what the account pays at the OUTCOME: cash + positions valued at Polymarket (see
+                                EV_SCOPE); cash = the cash gate's cg_cash when read, else account value - positions
+                                at marks (exchange mark, else book fair value)
+          ev_outcome_unpriced   held markets without a liquid Polymarket price (valued at the mark / book, or out)
+          ev_outcome_delta_24h  ev now - ev 24 h ago from a 48 h ring of (wall, ev) samples (status.json
+                                ev_outcome_history, EV_HIST_SECONDS apart; record=True adds one); None before 24 h
+          mm_carry_24h          mm_carry (the market maker's realised middle-band spread, value adds, takes)"""
+        cfg = self.cfg
+        now = time.time() if now is None else now
+        out = dict.fromkeys(self.EV_KEYS)
+        out["ev_outcome_scope"] = self.EV_SCOPE
+        inv = {e: float(q) for e, q in (self.held or {}).items() if e in self.ex and round(q)}
+        book_fv = {}
+        for members in self.groups.values():
+            if any(e in inv for e in members):
+                fv = {e: fair_value(self.ex[e].book, cfg) for e in members if e in self.ex}
+                book_fv.update(normalise(fv) if len(fv) > 1 else fv)
+        at_ref, at_mark, unpriced, unmarked = 0.0, 0.0, 0, 0
+        for e, q in inv.items():
+            m = self.pos_marks.get(e)
+            m = m if m is not None else book_fv.get(e)
+            if m is not None:
+                at_mark += self.alloc_held_usd(q, m)
+            else:
+                unmarked += 1
+            p = self.ev_p(e)
+            if p is None:
+                unpriced += 1
+                p = m
+            if p is not None:
+                at_ref += self.alloc_held_usd(q, p)
+        out["ev_outcome_unpriced"] = unpriced
+        cash = getattr(self, "cg_cash", None)
+        if cash is None and self.health.get("account_value") is not None and not unmarked:
+            cash = float(self.health["account_value"]) - at_mark
+        if cash is not None:
+            ev = round(float(cash) + at_ref, 2)
+            out["ev_outcome"] = ev
+            h = self.ev_hist
+            if record and (not h or now - h[-1][0] >= self.EV_HIST_SECONDS):
+                h.append([round(now, 1), ev])
+            while h and h[0][0] < now - self.EV_HIST_KEEP:
+                h.pop(0)
+            old = [v for t, v in h if t <= now - 24 * 3600 + 1]     # (+1 s: samples are stored to 0.1 s)
+            out["ev_outcome_delta_24h"] = round(ev - old[-1], 2) if old else None
+        out["mm_carry_24h"] = self.mm_carry(now)
+        return out
+
+    def mm_carry(self, now):
+        """mm_carry_24h: over the last 24 h of fills.csv (ops_fills rows, our_side bid / ask) classified with the
+        order notes (order_meta, kept a day): take / arb (pair unwinds included) / alloc (set ladder included) /
+        basket orders are not maker fills; the rest are our resting quotes ("maker"; a fill whose note is gone
+        counts as maker, see meta_missing). p = the market's race-scaled liquid Polymarket price when the fill was
+        logged (ev_fill_p; fills logged before this run use the price now: p_now count). Maker fills with p in
+        [value_mid_low, value_mid_high] are the middle band: their buys and sells are FIFO-matched per market in time
+        order, realised = sum matched qty x (sell - buy); what stays unmatched is unmatched_shares, valued at p -
+        price (unmatched_ev, not realised). value_adds_ev = tail maker fills' edge to p at fill (buy q x (p - price),
+        sell q x (price - p)); takes_ev the same for take fills. per_day = realised x 24 / hours covered.
+        P14: a fill of a side the recycler priced (note "recycle") counts as fills.recycle (not maker_mid) and its edge
+        to p in recycle_ev - both keys only once such a fill exists; in the band it still closes the FIFO lots."""
+        cfg = self.cfg
+        c = self.ops_fills(now)
+        notes = {str(k): v for k, v in (self.order_meta or {}).items()}
+        lo, hi = cfg.value_mid_low, cfg.value_mid_high
+        counts = dict.fromkeys(("maker_mid", "maker_tail", "maker_unpriced", "take", "arb", "alloc", "basket"), 0)
+        book, realised, adds, takes = defaultdict(deque), 0.0, 0.0, 0.0
+        p_fill = p_now = missing = take_unpriced = 0
+        recycle_ev = None                         # P14: recycled fills' edge to p (None: none seen)
+        for ts, fid, oid, e, buy, qty, price in sorted(c.get("rows") or (), key=lambda r: r[0]):
+            if ts < now - 24 * 3600:
+                continue
+            meta = notes.get(oid)
+            if meta is None:
+                missing += 1
+                meta = {}
+            if meta.get("basket"):
+                cls = "basket"
+            elif meta.get("alloc") or meta.get("set_ladder"):
+                cls = "alloc"
+            elif meta.get("arb"):
+                cls = "arb"
+            elif meta.get("take"):
+                cls = "take"
+            else:
+                cls = "maker"
+            if cls not in ("maker", "take"):
+                counts[cls] += 1
+                continue
+            if fid in self.ev_fill_p:
+                p = self.ev_fill_p[fid]
+                p_fill += 1
+            else:
+                p = self.ev_p(e)
+                p_now += 1
+            edge = None if p is None else qty * ((p - price) if buy else (price - p))
+            if cls == "maker" and meta.get("recycle"):   # P14 1: a recycled MM side (keys only once one exists);
+                counts["recycle"] = counts.get("recycle", 0) + 1   # it still closes middle-band lots below
+                recycle_ev = (recycle_ev or 0.0) + (edge or 0.0)
+                if p is None or not lo <= p <= hi:
+                    continue
+            if cls == "take":
+                counts["take"] += 1
+                if edge is None:
+                    take_unpriced += 1
+                else:
+                    takes += edge
+                continue
+            if p is None:
+                counts["maker_unpriced"] += 1
+            elif not lo <= p <= hi:
+                counts["maker_tail"] += 1
+                adds += edge
+            else:
+                if not meta.get("recycle"):
+                    counts["maker_mid"] += 1
+                lots, rem = book[e], qty if buy else -qty
+                while abs(rem) > 1e-9 and lots and (lots[0][0] > 0) != (rem > 0):
+                    lot = lots[0]
+                    n = min(abs(rem), abs(lot[0]))
+                    realised += n * (price - lot[1]) * (1 if lot[0] > 0 else -1)
+                    lot[0] += n if lot[0] < 0 else -n
+                    rem += n if rem < 0 else -n
+                    if abs(lot[0]) <= 1e-9:
+                        lots.popleft()
+                if abs(rem) > 1e-9:
+                    lots.append([rem, price, p])
+        left = [x for v in book.values() for x in v]
+        first = c.get("first_ts")
+        hours = round(min(24.0, max(0.0, (now - first) / 3600)), 2) if first is not None else None
+        return {"realised": round(realised, 2),
+                "per_day": round(realised * 24 / hours, 2) if hours else None, "hours_covered": hours,
+                "unmatched_shares": round(sum(abs(q) for q, _, _ in left), 2),
+                "unmatched_ev": round(sum(q * (p - px) for q, px, p in left), 2),
+                "value_adds_ev": round(adds, 2), "takes_ev": round(takes, 2), "fills": counts,
+                "takes_unpriced": take_unpriced, "meta_missing": missing, "p_at_fill": p_fill, "p_now": p_now,
+                "band": [lo, hi], **({"recycle_ev": round(recycle_ev, 2)} if recycle_ev is not None else {})}
+
+    def ev_line_part(self):
+        """" | EV outcome X (+Y 24h, N unpriced)" for the realtime / polling cycle line (the latest status write's
+        figures), "" while unknown. Never raises."""
+        try:
+            part = ev_outcome_part(self.ops_last)
+        except (TypeError, ValueError, AttributeError):
+            part = None
+        return f" | {part}" if part else ""
+
+    def safe_ev_fields(self, record=False):
+        """ev_fields that never raises: on any error every field is None (logged once)."""
+        try:
+            return self.ev_fields(record=record)
+        except Exception as e:                    # reporting must never disturb trading
+            if not self.ev_warned:
+                self.ev_warned = True
+                log.warning("ev fields unavailable (%s: %s) - reported as null", type(e).__name__, e)
+            return dict.fromkeys(self.EV_KEYS)
+
     def safe_ops_fields(self):
         """ops_fields that never raises: on any error every field is None (logged once)."""
         try:
@@ -11505,7 +12553,7 @@ class Bot:
 
     def write_status(self, ok):
         """status.json: a one-glance health check, e.g. `cat status.json` over ssh."""
-        self.ops_last = self.safe_ops_fields()
+        self.ops_last = {**self.safe_ops_fields(), **self.safe_ev_fields(record=True)}
         try:
             owed = ({"pair_owed": self.pair_owed_status()}
                     if getattr(self.cfg, "pair_unwind_followup", False) or getattr(self, "pair_owed", None) else {})
@@ -11529,6 +12577,10 @@ class Bot:
                 **({"basket": self.basket_status()} if self.basket_persist_needed() else {}),
                 # Package 10 B: the allocator (also what a restart restores; absent while never used)
                 **({"alloc": self.alloc_status()} if self.alloc_persist_needed() else {}),
+                # P14: market-making funding (read-only; MM_FUNDING_KEYS; also what a restart restores: the MM lots)
+                "mm_funding": self.safe_mm_funding(),
+                # ev_outcome_delta_24h's ring of (wall, ev) samples (also what a restart restores)
+                "ev_outcome_history": [list(x) for x in self.ev_hist],
                 "seconds_since_cycle": round(time.monotonic() - self.last_cycle_done, 1)
                 if self.last_cycle_done is not None else None})
         except OSError as e:
@@ -11622,6 +12674,16 @@ class Bot:
             log.warning("alloc_pin names no market: %s - those labels pin nothing (labels are matched exactly, e.g. "
                         "'Rep Ohio Senate')", ", ".join(unknown))
         self.warned_alloc_pin = unknown
+        c = self.cfg                          # P14: a funding flag that cannot act with these settings
+        bad = tuple(n for n, hit in (
+            ("mm_refill_fast without alloc_enabled (the fast refill is the allocator's B2 refill)",
+             getattr(c, "mm_refill_fast", False) and not getattr(c, "alloc_enabled", False)),
+            ("mm_room_guard with mm_risk_reserve_wc and _corr both 0 (no room is kept, nothing to guard)",
+             getattr(c, "mm_room_guard", False) and not (getattr(c, "mm_risk_reserve_wc", 0.0) > 0
+                                                         or getattr(c, "mm_risk_reserve_corr", 0.0) > 0))) if hit)
+        if bad and bad != getattr(self, "warned_mmf", ()):
+            log.warning("MM funding: %s", "; ".join(bad))
+        self.warned_mmf = bad
         on = ()                               # Package 10 A1 (iv): mark-driven selling paths left on in value mode
         if getattr(self.cfg, "value_mode", False):
             c = self.cfg

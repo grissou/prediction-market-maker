@@ -22,3 +22,15 @@ Rollback = the previous file.
 Red team (analysis/p11/REDTEAM_P12.md): 1 high (ladder resting with the favourite's p unknown/moved: pulled), 4 medium, 2 low, all fixed
 or warned. Caveats: at ~0 cash the ladder sells little; a take on the favourite cancels the ladder until the hourly re-quote;
 `alloc_prefer_short` does not check the short leg's depth; keep `tilt_exit_take_split_sets` OFF with the ladder (it sells the opposite leg).
+- stage1b_risk_reserve (P12 ops, owner 4 Oct 16:45 UTC) = the live file of 4 Oct (snap04: backstop 0.85, max_worst_case_frac 0.40)
+  + `mm_risk_reserve_wc` 5000 and `mm_risk_reserve_corr` 4000: keep RISK room for market making, not just the 15k of cash. Each cycle
+  room_wc = worst_case_backstop_frac x account - worst-case loss and room_corr = max_worst_case_frac x account - settlement risk; once
+  either is below its reserve, "value adds paused": no stale-quote take that grows a position (shrinking ones still go), no allocator
+  buy (refills and other sales go on), no basket buy, and in the tails (p outside value_mid_low..high) only the side shrinking a
+  position quotes - a resting tail add is dropped at the next re-quote. Middle-band two-way quoting keeps both sides (within
+  value_mid_inventory_quotes), every reducing side, aged take and arbitrage are unchanged, and reduce-only itself is not touched: the
+  point is to stop value buying ~5k BEFORE the backstop binds. It lifts at 1.1 x each reserve (5.5k / 4.4k). Expect: journal
+  "VALUE ADDS PAUSED ..." / "value adds resumed ..."; status.json `mm_risk_room` {room_wc, room_corr, paused, since, reserve_wc,
+  reserve_corr, blocked {takes, alloc, basket, tail_quotes}}; summary " | risk room wc Xk corr Yk (paused)". If you raise the backstop
+  (e.g. 0.90 as today), re-apply it in this file: the reserves are measured from whatever the backstop / cap are. Rollback: set both to
+  0 (or the previous file); 0 = off, pinned byte-identical on a grid (tests/test_mm_risk_reserve.py).
