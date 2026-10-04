@@ -55,6 +55,20 @@ that on the 15-20k reserve; the one funded day says ~1.5k, from a single day. Ga
 Polymarket mark in the middle band >= 0.6k/day before counting on it. Without it, the honest expectation is plan (a)/(b): E ~113-115k,
 P(>= 150k) ~0% - and the Senate sleeve is the only lever for 150k (17-24% at P(<= 85k) 4%).
 
+## CORRECTION (11:55, Package 11 literature sweep, `analysis/p11/lit_portfolio.md` PORT-2/3 and `lit_anomalies.md`)
+The Rep U.S. Senate sleeve's "edge" came mostly from the seat-count model assuming Ohio at pDem 0.40; the market has Ohio at ~0.57-0.61.
+With that fixed the races imply P(Dem control) 0.58-0.63, so Rep Senate at 0.35 is roughly FAIR, not underpriced (and the political-market
+literature says race prices are themselves pulled toward 50%, which would bias a seat-count sum the same way). Do NOT buy the Senate
+sleeve on the earlier numbers. If a rank bet is wanted, the literature's answer (Browne 1999: a floor plus ONE digital that pays the gap)
+and the re-run point to a $20k **Texas Rep** sleeve (short Dem TX at 0.67 / long Rep TX at 0.34, on top of plan (a)'s existing Dem TX
+short): P(>= 150k) ~30% vs 16%, E 112.1k vs 110.6k, P(<= 85k) 6.5% vs 5.2%, P(top 50) 28% vs 23%; one volatile race (Paxton 51% -> 35%
+on Kalshi in a month); $20k stays the ceiling for any single digital (P(<= 85k) ~24% at $22k); hedges against a Dem wave make it worse.
+Also from the sweep: assume NO reversion of the tilt before the close (Page & Clemen; Restocchi: mispricing JUMPS in the last 24 h), so
+drop the +1.6k recycling assumption and keep 10-15k back for the last days; the stage-3 `value_quote_hurdle` 0.08 puts favourite bids
+~2.5c behind the book (they would not fill): use ~0.04-0.05 (the allocator's marginal edge); the NO+NO sets are stock to SELL into the
+tilt (rest asks on the favourite-NO leg at the rich price) rather than unwind at cost; the rules page says trades are accepted until
+12:00 pm ET on 4 Nov and rank = balance after all markets resolve (the brief's 00:00 UTC close needs confirming against the API).
+
 ## What Package 10 built (all OFF; `deploy/package10/`; dry run on the live state in `analysis/p10/DRYRUN.md`)
 1. `value_mode`: no reducing quote below p - 0.5c (above p + 0.5c for a short) in normal AND reduce-only quoting (the reduce-only skew
    clamp was skipped: today 4 of 6 resting reducing quotes sit below value); the pre-close windows (`exit_hours_before_close` 2,
