@@ -190,7 +190,8 @@ def stage0():
         same = new == old
         check("stage0: identical orders to the Package 9 head on the live seed (12 cycles: every order, price, size, "
               "feature)", same, (len(new), len(old), [x for x in new if x not in old][:3]))
-        ev_ign = set(getattr(M.Bot, "EV_KEYS", ())) | {"ev_outcome_history"}   # later read-only ev / carry report keys
+        ev_ign = (set(getattr(M.Bot, "EV_KEYS", ())) | {"ev_outcome_history"}   # later read-only ev / carry report keys
+                  | set(getattr(M.Bot, "MM_FUNDING_KEYS", ())))   # (and P14 mm_funding)
         keys = (set(st_new) ^ set(st_old)) - ev_ign
         check("stage0: identical status.json keys (no bloc / alloc section)", not keys, keys)
         out(f"- 12 cycles on the live seed, Package 10 code vs the Package 9 head {BASE_REV}: {len(new)} orders each, "
