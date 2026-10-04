@@ -1,0 +1,33 @@
+# /etc/systemd/system/mmbot.service
+# systemd service for the market-making bot. setup.sh installs it; you then control it with:
+#   systemctl enable --now mmbot     start now + on every boot
+#   systemctl stop mmbot             stop (sends Ctrl+C, so the bot cancels all its orders)
+#   systemctl status mmbot           running? last exit code?
+#   journalctl -u mmbot -f           live log
+
+[Unit]
+Description=SIG Predictions Cup market-making bot
+After=network-online.target
+Wants=network-online.target
+# Never give up restarting after crashes: crashes only happen outside the trading loop (e.g. no
+# network at boot), and the bot cancels leftovers on start-up. Permanent stops use exit codes below.
+StartLimitIntervalSec=0
+
+[Service]
+User=mmbot
+WorkingDirectory=/opt/mmbot
+ExecStart=/opt/mmbot/.venv/bin/python /opt/mmbot/mm_bot.py run --live
+Environment=PYTHONUNBUFFERED=1
+
+# Crash (exit 1) -> restart after a minute.
+# Exit 3 (fatal: bad API key, terms not accepted...) and 4 (kill switch) -> stay stopped for a human.
+Restart=on-failure
+RestartSec=60
+RestartPreventExitStatus=3 4
+
+# Stop = Ctrl+C, then give the bot up to a minute to cancel everything before it's force-killed.
+KillSignal=SIGINT
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target
