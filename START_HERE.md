@@ -1,9 +1,9 @@
 <!-- STATUS (Finisher 2b, updated on every push) -->
-**STATUS 01:20 UTC 4 Oct (branch claude/finisher-package9):** phase = Package 9 READY ("READY: Package 9", PR PR_NUM). READY: Package 8 (7b298a4, PR #10, LIVE since 22:42), 7 (PR #9), 6 (PR #8), 5 (PR #7).
+**STATUS 01:20 UTC 4 Oct (branch claude/finisher-package9):** phase = Package 9 READY ("READY: Package 9", PR #11). READY: Package 8 (7b298a4, PR #10, LIVE since 22:42), 7 (PR #9), 6 (PR #8), 5 (PR #7).
 Package 9 = the catch-up package: F1 `basket_*` long-tilt basket (CPPI on the cushion above max(86k, 0.85 x peak), m 5 / cap 80k, kill at -15% or the floor, exit 18 Oct, T-72h backstop, 36-h test, stress risk model), F2 `tilt_exit_take` (taker exits for the short-tilt book within 1c of tilted fv), F5 `arb_cash_rule` / `arb_sellback`; config hygiene (`take_tilted_ref`, `ref_tilt_max` 0.20, sets kept).
 Numbers (Monte Carlo, analysis/p9/PLAN_MC.txt; switch-on ~09:00 UTC): hold the book P150 0%; m 5 29% (D prior 22%) / P200 1% / P<=85k 1.2% / DD>20% 4.2%; m 6 + carry 40% (29%) / 11% / 0.7% / 4.5%; every 10 h of delay ~-10 points; half size 3%. Red team 2 high / 5 medium / 3 low, all fixed; 35 suites + STRESS_LADDER 20/20 green.
 Deploy: deploy/package9 stage0 -> stage1_hygiene -> stage2_flatten -> stage3_basket (when worst_case_loss < 40k, cash_gate_left > 20k) -> stage4_carry; plan: analysis/p9/CATCHUP_PLAN.md.
-Next: owner decides the basket (m 5 vs m 6) this morning; the executor stays subscribed to PRs #7-#10 and PR_NUM.
+Next: owner decides the basket (m 5 vs m 6) this morning; the executor stays subscribed to PRs #7-#10 and #11.
 
 # START HERE (Team run, branch `claude/run-c-tournament-improvements-pycdet`)
 
@@ -12,7 +12,7 @@ The Builder's previous START_HERE is kept as `START_HERE_BUILDER.md`; Run A's no
 Plan: `PLAN.md`. Packages appear below as they become READY (commit messages start "READY: Package N").
 Deploy only commits whose message starts "READY"; the branch is cumulative.
 
-## Package 9 (READY, Finisher 2b, 4 Oct ~01:30 UTC; branch `claude/finisher-package9` from Package 8 7b298a4; draft PR PR_NUM): the catch-up package — the long-tilt basket with kill-switches, taker exits for the short-tilt book, arbitrage with a cash rule (all OFF; staged files in `deploy/package9/`; the plan in `analysis/p9/CATCHUP_PLAN.md`)
+## Package 9 (READY, Finisher 2b, 4 Oct ~01:30 UTC; branch `claude/finisher-package9` from Package 8 7b298a4; draft PR #11): the catch-up package — the long-tilt basket with kill-switches, taker exits for the short-tilt book, arbitrage with a cash rule (all OFF; staged files in `deploy/package9/`; the plan in `analysis/p9/CATCHUP_PLAN.md`)
 **Objective (owner, 3 Oct 22:50-23:00):** P(account >= 150k by 4 Nov) first, P(>= 200k) second, P(<= 85k) < ~10%, max drawdown < ~20%;
 rank strategies by those numbers, not by mean P&L; the smallest risk that gets P(>= 150k) above ~40%, or say plainly that none can.
 **Research (78 ideas, `analysis/p9/ideas_A-D.md`; synthesis `analysis/p9/SYNTHESIS.md`; data = `ops-snapshot-2026-10-03`, to 22:47 UTC):**
