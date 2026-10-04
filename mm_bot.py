@@ -4308,6 +4308,7 @@ class Bot:
         self.refs = self.load_reference_prices()
         self.ref_version_seen = 0         # last Polymarket reading the jump guard has looked at
         self.last_tops = {}               # latest bulk best bid/ask per exchange (for recording)
+        self.last_tops_at = {}            # (when each was read, monotonic: Package 13 B hv_top_moved)
         self.other_tops = {}              # eid -> (other traders' best bid, best ask, time read) from bulk prices
         self.ref_tops = {}                # eid -> (best bid, best ask): R5 priced it from other_tops this cycle
         self.trading_since = None         # time.monotonic() when the trading loop started (startup priming)
@@ -4894,7 +4895,8 @@ class Bot:
         new_orders, changes = [], []
         self.mmr_tail_now = 0                     # P12 ops: tail adding sides held back this cycle (decide counts)
         if self.cash_gate_on():                   # Package 8: the quotes' plan budget, after this cycle's takes
-            self.cg_plan_left, self.cg_capped_now = self.cash_left(), 0
+            # (Package 13 B: less the election holdback while it is reserved - kept in CASH for the takes)
+            self.cg_plan_left, self.cg_capped_now = max(0.0, self.cash_left() - self.el_holdback_left()), 0
         self.ladder_setup(equity, capital, raw_orders, liquid, party_delta, resting)
         if getattr(cfg, "aggressive_value", False):   # Package 13 A2: the collateral the per-market / race caps see
             self.aggr_coll = self.p13_coll_snapshot(inv, now_m)
@@ -5265,6 +5267,7 @@ class Bot:
             else:
                 tops.update(res)
         self.last_tops = tops
+        self.last_tops_at = dict.fromkeys(tops, now_m)
         self.note_other_tops(tops, mine_real, now_m)
 
         extra = []
@@ -5305,6 +5308,7 @@ class Bot:
                 log.warning("bulk re-check failed for %d books (%s)", len(chunk), res)
                 continue
             self.last_tops.update(res)
+            self.last_tops_at.update(dict.fromkeys(res, now_m))
             self.note_other_tops(res, mine_real, now_m)
             for eid in chunk:
                 ex = self.ex.get(eid)
@@ -11434,6 +11438,8 @@ class Bot:
             if isinstance(x, (list, tuple)) and len(x) == 2 and num(x[0]) is not None and num(x[1]) is not None:
                 self.bk_flows.append((num(x[0]), num(x[1])))
         self.bk_sell = []                         # this run's sell-down: [{"eid", "label", "usd_left", "edge"}]
+        self.bk_sold_race = {}                    # race -> wall time the sell-down last sold there (this run; no
+        #                                           momentum buy there within alloc_interval_s: never a round trip)
         self.bk_buy_open = bool(bk.get("buy_open", False))   # a momentum buy round is open (rebalance below target)
         tot = bk.get("totals") if isinstance(bk.get("totals"), dict) else {}
         self.bk_totals = {k: num(tot.get(k), 0.0) for k in ("sold_usd", "sell_orders", "bought_usd", "buy_orders")}
@@ -11851,6 +11857,7 @@ class Bot:
             traded.add(ex.eid)
             if done >= 1:
                 inv[it["eid"]] = q + (-done if it["kind"] == "long" else done)
+                self.bk_sold_race[ex.group] = now_w
                 usd = done * cash_unit
                 it["usd_left"] -= done * unit
                 self.bk_flows.append((now_w, usd))
@@ -12001,6 +12008,8 @@ class Bot:
                 continue
             if ex.eid not in self.mom_legs and len(self.mom_legs) >= cfg.mom_max_markets:
                 continue                              # (mom_max_markets: legs bought earlier this tick count)
+            if now_w - self.bk_sold_race.get(ex.group, -1e18) < cfg.alloc_interval_s:
+                continue                              # (the sell-down sold in this race this hour: no round trip)
             if not self.writes_ready(3):
                 break
             cash = (self.cash_left() - self.cash_reserve()) if self.api.live else left   # (13 B: the holdback)
@@ -12053,14 +12062,18 @@ class Bot:
         cfg, traded = self.cfg, set()
         hours = max(cfg.mom_exit_hours, 1e-6)
         frac_left = max(0.0, 1.0 - (now_w - (self.mom_exit_wall or now_w)) / (hours * 3600))
-        for e in sorted(self.mom_legs):
+        due = []                                  # (the furthest behind schedule first: with more legs than orders a
+        for e in sorted(self.mom_legs):           #  cycle, a fixed order would starve the last legs)
+            leg = self.mom_legs[e]
+            start = abs(self.mom_exit_start.get(e, leg["q"]))
+            want = int(abs(leg["q"]) - start * frac_left + 1e-9)
+            due.append((-want / max(start, 1.0), e, want))
+        for _, e, want in sorted(due):
             if n_left < 1:
                 break
             leg, ex = self.mom_legs[e], self.ex.get(e)
             if ex is None:
                 continue
-            start = abs(self.mom_exit_start.get(e, leg["q"]))
-            want = int(abs(leg["q"]) - start * frac_left + 1e-9)
             if want < 1 or busy(ex, now_m) or self.p13_own_ioc_resting(e):
                 continue
             if self.hours_to_close(ex) * 60 <= cfg.stop_minutes_before_close:
@@ -12343,7 +12356,7 @@ class Bot:
                     why[e] = "no p"
                 elif self.HV_LONGSHOT + 1e-12 < p < self.HV_FAVOURITE - 1e-12:
                     why[e] = "middle"
-                elif e in skip or ex.group in skip or busy(ex, now_m):
+                elif e in skip or ex.group in skip or busy(ex, now_m) or self.hv_top_moved(ex, now_m):
                     why[e] = "soft"
                 else:
                     book = self.alloc_fresh_book(ex, now_m)
@@ -12422,6 +12435,23 @@ class Bot:
                         "other": other, "edge": edge0, "levels": levels, "coll": used}
             n += 1
         return plans, why
+
+    def hv_top_moved(self, ex, now_m):
+        """The latest bulk best bid / ask (last_tops) shows this market's top moved since its cached book (not
+        re-downloaded yet: max_books_per_cycle), so the cached touch may be stale: no new levels from it this cycle
+        (a level planned from it could cross the book). A book confirmed / downloaded since that reading is current."""
+        top = (getattr(self, "last_tops", None) or {}).get(ex.eid)
+        at = (getattr(self, "last_tops_at", None) or {}).get(ex.eid)
+        if top is None or at is None or ex.book is None or ex.verified >= at - 1e-9:
+            return False
+        mine = ([o for o in self.my_orders.values() if o.eid == ex.eid] if self.api.live
+                else self.sim_by_eid().get(ex.eid, []))
+        theirs = others_top(tuple(top), mine)     # (a side where our own order is at / better than the top: unknown)
+        for k, key in ((0, "bids"), (1, "asks")):
+            lv = ex.book.get(key) or []
+            if theirs[k] is not None and (not lv or abs(rnd(lv[0]["price"]) - theirs[k]) > 1e-9):
+                return True
+        return False
 
     def hv_tick(self, now, inv, mine_real, now_m=None, skip=()):
         """Package 13 B section 4, cycle step 6g: plan (hv_plan); pull a market's levels when it has no plan (unless
@@ -12665,8 +12695,9 @@ class Bot:
         return t is not None and (now or utcnow()) >= t
 
     def el_update_calls(self, now):
-        """Once a cycle (election active): per market, its RAW liquid Polymarket price (cur_refs; the price the
-        market itself reads, not race-scaled) >= election_called_p -> "win", <= 1 - it -> "lose", held for
+        """Once a cycle (election active): per market, its RAW liquid Polymarket price (cur_refs, plus the prices
+        reference_prices dropped as implausible: el_rejected_refs; the price the market itself reads, not
+        race-scaled) >= election_called_p -> "win", <= 1 - it -> "lose", held for
         election_called_min minutes -> CALLED; a reference of exactly 1.0 / 0.0 (or refs.resolved(), if a future feed
         offers it) -> called at once ("resolved"). A liquid price back inside the band un-calls it; no liquid reading
         (a closed Polymarket market drops out of the feed) leaves the state as it is."""
@@ -12678,6 +12709,8 @@ class Bot:
             return
         now_w = now.timestamp()
         refs, liquid, cp = self.cur_refs or {}, self.cur_liquid or set(), cfg.election_called_p
+        if self.ref_rejected:                     # a call moves Polymarket far from the (stale) tournament book: the
+            refs, liquid = self.el_rejected_refs(refs, liquid)   # quoter drops it (ref_max_plausible_gap); not so here
         resolved = {}
         fn = getattr(self.refs, "resolved", None) if self.refs is not None else None
         if callable(fn):
@@ -12717,6 +12750,26 @@ class Bot:
                 log.warning("ELECTION %s CALLED: %s (Polymarket %.3f for %.0f min)", ex.label,
                             "won" if side == "win" else "lost", r, (now_w - c["since"]) / 60)
             self.el_calls[e] = c
+
+    def el_rejected_refs(self, refs, liquid):
+        """(refs, liquid) plus the RAW Polymarket prices reference_prices dropped this cycle as implausible (more than
+        ref_max_plausible_gap from the tournament book): on election night that gap is the stale quote a call is
+        about, so the calls read them (the quoter, the allocator and the fair values still do not)."""
+        try:
+            by_key = self.refs.get()
+            spreads = self.refs.spreads() if hasattr(self.refs, "spreads") else {}
+        except Exception as e:                    # (as reference_prices: never stops the cycle)
+            log.warning("reference prices unavailable for the election calls: %s", e)
+            return refs, liquid
+        refs, liquid = dict(refs), set(liquid)
+        for e, ex in self.ex.items():
+            key = f"{ex.group}|{ex.party}"
+            if key in self.ref_rejected and key in by_key and e not in refs:
+                refs[e] = by_key[key]
+                s = spreads.get(key)
+                if s is not None and s <= self.cfg.ref_liquid_spread:
+                    liquid.add(e)
+        return refs, liquid
 
     def el_races(self):
         """{race: {"winner": eid | None, "losers": [eid]}} of the races with a called leg: a called winner makes every
@@ -12781,8 +12834,8 @@ class Bot:
             if c["buy"] and q <= -1:
                 n = int(min(c["depth"], self.cover_no_qty(e, q), free["lone"] + free["set"]) + 1e-9)
                 covered, cash_u = n >= 1, 0.0
-            elif not c["buy"] and free["yes"] >= 1:
-                n, covered, cash_u = int(min(c["depth"], free["yes"]) + 1e-9), True, 0.0
+            elif not c["buy"] and min(free["yes"], q) >= 1:   # (cash_free reads ex.inv: last cycle's, stale on a
+                n, covered, cash_u = int(min(c["depth"], free["yes"], q) + 1e-9), True, 0.0   # market taken since)
             else:
                 n = 0
             if not covered:
