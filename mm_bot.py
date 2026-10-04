@@ -64,6 +64,7 @@ import random
 import re
 import signal
 import sqlite3
+import statistics
 import sys
 import threading
 import time
@@ -1072,6 +1073,66 @@ class Config:
     # counts against pair_no_unwind_max_per_cycle like a short-set unwind at a cost. False = unchanged.
     arb_sellback: bool = False
     arb_sellback_min_sum: float = 1.00
+    # --- Package 10 A (analysis/p10/SPEC_P10.md Part A; everything OFF by default) ---
+    # SIG pays positions out at the OUTCOME: a contract is worth its Polymarket probability p, not its mark. Below,
+    # "p" = the raw Polymarket price scaled to sum to 1 over the race (when every leg has one; else the raw price),
+    # used only where it is LIQUID (Bot.value_p); no liquid p -> nothing below changes that market.
+    # A1 value_mode True, the no-panic-sell guard (analysis/p10/ideas_I.md I-5, the audit table):
+    #  (i) compute_quote never prices the side REDUCING this exchange's position below value: a long's ask >=
+    #      p - value_sell_margin, a short's bid <= p + value_sell_margin, in normal AND reduce-only quoting, after
+    #      every skew (inventory, age), reduce_join_best, fast unload, reduce_from_book; it only moves that price AWAY
+    #      from the other side, so it never crosses another trader (step 4 still runs after it) and never changes a
+    #      size (never flips a position). The same floor is applied once more to decide's final quote (after
+    #      hold_quote). The max_skew_through clamp (skew never pays through fair value) also runs in reduce-only.
+    #  (ii) the pre-close windows do nothing: no exit_hours_before_close taker exit (decide, ladder, status), no
+    #      flatten_hours_before_close reduce-only, no flatten_per_market_hours per-market flatten, and every other
+    #      check keyed on those windows (cancel urgency, no-chase, takes, arbitrage, hold takes) sees no window
+    #      (Bot.close_window). stop_minutes_before_close still stops quoting before the close. The three settings are
+    #      live-overridable too (0 = off) for a deploy that keeps value_mode off.
+    #  (iii) exit_quote takes the same floor (value_floor) when given one, should the exit ever run again.
+    #  (iv) warn_settings logs a WARNING (start-up and override time) for each mark-driven selling path left on with
+    #      it: reduce_from_book, fast_unload_enabled, hold_target_hours > 0, tilt_exit_priority / tilt_exit_full_size
+    #      / tilt_exit_take, ref_tilt_enabled, take_tilted_ref, ref_guard_exits. Not forced off: the owner decides
+    #      (the floor (i) still holds for every resting quote they price).
+    #  (v) Part B's allocator sells go through their own immediate-or-cancel path, never compute_quote: exempt.
+    # False = unchanged.
+    value_mode: bool = False
+    value_sell_margin: float = 0.005     # how far below p a reducing ask may rest (above p a reducing bid)
+    # A2 bloc_delta_enabled True (analysis/p10/ideas_H.md H-2): the national-swing cap measures the book's outcome
+    # sensitivity to the party factor F (Gaussian copula) instead of counting YES shares. Per partisan contract (label
+    # "Dem ..." / "Rep ...", independents 0) with a liquid p: $ per sd of F per YES share = sqrt(rho) x
+    # phi(Phi^-1(p_dem)) x (1 - p_ind), p_dem = the Dem leg's p / (1 - p_ind) (p_ind = the race's other legs; a lone
+    # market: its own p), rho = bloc_rho (bloc_rho_control in the headline control markets); sign + on Rep YES, - on
+    # Dem YES, so bloc_delta = sum position x sensitivity is + when Republican-leaning, like party_delta. A race with
+    # one partisan leg and an independent (no Dem-vs-Rep pair) counts 0, as H's model. One 50c share weighs 0.40, a
+    # 0.5c longshot 0.014 (the share count weighs them the same). With the flag party_blocks / party_shift (and the
+    # ladder's party room) use |bloc_delta| <= max_bloc_delta_frac x account instead of max_party_delta_frac x
+    # account in shares; status.json bloc_delta, bloc_delta_frac (signed, / account); summary " | bloc delta X/sd".
+    # Values from H-10: 0.05 (+-5k per sd at 100k) keeps P(final <= 85k) < 2% for the value core. False = unchanged.
+    bloc_delta_enabled: bool = False
+    bloc_rho: float = 0.45               # race-to-national-factor correlation (H: 0.25-0.65 moves Senate odds +-0.02)
+    bloc_rho_control: float = 0.85       # the party-control markets (headline_races) follow the factor more closely
+    max_bloc_delta_frac: float = 0.05    # |bloc_delta| cap, $ per sd of the national factor, x account value
+    # A4 value_quote_hurdle > 0 (analysis/p10/ideas_I.md I-4), with a liquid p, for the side ADDING to this
+    # exchange's position (a bid unless short, an ask unless long): outside the middle band (p below value_mid_low or
+    # above value_mid_high) a YES bid never above p / (1 + h) and a YES ask never below 1 - (1 - p) / (1 + h), h =
+    # this hurdle per $ of collateral held to the outcome (a fill there must beat what the capital earns elsewhere);
+    # a hurdle price off the grid (bid < 0.5c, ask > 99.5c) -> that side is not quoted. CONSEQUENCE: in the tails only
+    # favourite bids and longshot asks can rest near the book (the tournament prices favourites low and longshots
+    # high: the other side's hurdle price sits far beyond the book, so it rests out of reach). In the middle band the
+    # normal min_edge quoting applies instead, and the position here is capped at value_mid_inventory_quotes x the
+    # quote size on the side that grows it (beyond it only the reducing side rests), so the cash rotates. The reducing
+    # side is A1's (value_mode). 0 = off.
+    value_quote_hurdle: float = 0.0
+    value_mid_low: float = 0.15
+    value_mid_high: float = 0.85
+    value_mid_inventory_quotes: float = 2.0
+    # A3 (ranges only, no new setting): worst_case_backstop_frac may be overridden up to 1.5. For a fully
+    # collateralised outcome book the sum of per-race maxima is a gross-capital cap that protects only against every
+    # race failing at once (P ~ 0 at the outcome; H-10: Monte Carlo q0.1% loss 22k vs the 79-112k it measures); 1.3-1.5
+    # = effectively off, leaving max_worst_case_frac (R7, 0.35 for the value core) and the bloc-delta cap as the real
+    # limits. max_drawdown_pct (the kill switch) stays out of OVERRIDABLE (house rule); 0.40 (H-10, kill at 60k marks)
+    # is a code / deploy default change.
 
 
 CFG = Config()
@@ -1113,7 +1174,7 @@ OVERRIDABLE = {
     "improve_ticks": (0, 3), "undercut_step_back": (0.0, 0.05),
     "ref_only_enabled": (False, True), "ref_only_max_gap": (0.005, 0.2), "ref_only_min_edge": (0.0, 0.1),
     "ref_only_size_frac": (0.0, 0.02), "ref_only_reduce_full": (False, True),
-    "risk_swing_shock": (0.05, 0.5), "risk_z": (1.0, 6.0), "worst_case_backstop_frac": (0.3, 0.9),
+    "risk_swing_shock": (0.05, 0.5), "risk_z": (1.0, 6.0), "worst_case_backstop_frac": (0.3, 1.5),   # (P10 A3: 1.5 ~ off)
     "order_ttl": (300.0, 7200.0), "refresh_before_expiry": (30.0, 900.0), "batch_size": (1, 50),
     "kelly_no_edge_frac": (0.0, 0.01), "take_ref_max_age_seconds": (0.0, 300.0),
     "arb_two_sided": (False, True),
@@ -1310,6 +1371,20 @@ OVERRIDABLE = {
     "arb_leg_depth_frac": (0.1, 1.0),
     "arb_sellback": (False, True),
     "arb_sellback_min_sum": (0.95, 1.1),
+    # --- Package 10 A ---
+    "value_mode": (False, True),
+    "value_sell_margin": (0.0, 0.05),
+    "exit_hours_before_close": (0.0, 48.0),      # (0 = no election-night taker exit)
+    "flatten_hours_before_close": (0.0, 48.0),   # (0 = no flatten reduce-only window)
+    "flatten_per_market_hours": (0.0, 12.0),
+    "bloc_delta_enabled": (False, True),
+    "bloc_rho": (0.1, 0.9),
+    "bloc_rho_control": (0.1, 0.95),
+    "max_bloc_delta_frac": (0.01, 0.5),
+    "value_quote_hurdle": (0.0, 0.5),
+    "value_mid_low": (0.0, 0.5),
+    "value_mid_high": (0.5, 1.0),
+    "value_mid_inventory_quotes": (0.0, 20.0),
 }
 MAX_ORDER_TTL = 7200.0    # no order of ours lives longer than this (dead-man's switch), whatever the TTL settings
 LADDER_MAX_LEVELS = 8
@@ -2368,6 +2443,49 @@ def normalise(fvs):
     return {k: v / total for k, v in fvs.items()} if total > 0 else fvs
 
 
+_STD_NORMAL = statistics.NormalDist()
+
+
+def bloc_slope(p_dem, rho, p_ind=0.0):
+    """Package 10 A2 (ideas_H.md H-2): d E[payout of one Dem-win share] / d F is -sqrt(rho) x phi(Phi^-1(p_dem)) x
+    (1 - p_ind) under the Gaussian copula (F = the national factor, + = Republican; p_dem conditional on no
+    independent winning). Returns the magnitude sqrt(rho) x phi(Phi^-1(p_dem)) x (1 - p_ind)."""
+    x = min(max(p_dem, 1e-5), 1 - 1e-5)
+    return math.sqrt(rho) * _STD_NORMAL.pdf(_STD_NORMAL.inv_cdf(x)) * (1 - p_ind)
+
+
+def bloc_sensitivities(races, cfg=CFG):
+    """Package 10 A2: {eid: $ per sd of the national factor per YES share} (+ Rep YES, - Dem YES, so a Republican-
+    leaning book is +, like party_delta). races = {race: [(eid, label, p or None, liquid), ...]}, p race-scaled.
+    A race needs a "Dem " and a "Rep " leg (labels), or is one partisan market alone; p_ind = the other legs' p;
+    p_dem = the Dem leg's p (else 1 - Rep p - p_ind) / (1 - p_ind). Only contracts with a liquid p get one; the
+    headline (control) races use bloc_rho_control."""
+    out = {}
+    for race, legs in races.items():
+        kind = {e: ("D" if (lab or "").startswith("Dem ") else "R" if (lab or "").startswith("Rep ") else "I")
+                for e, lab, _, _ in legs}
+        ps = {e: p for e, _, p, _ in legs}
+        dem = [e for e in kind if kind[e] == "D"]
+        rep = [e for e in kind if kind[e] == "R"]
+        if not ((dem and rep) or (len(legs) == 1 and (dem or rep))):
+            continue
+        p_ind = sum(ps[e] or 0.0 for e in kind if kind[e] == "I")
+        if dem and ps[dem[0]] is not None:
+            pd = ps[dem[0]]
+        elif rep and ps[rep[0]] is not None:
+            pd = 1 - ps[rep[0]] - p_ind
+        else:
+            continue
+        if p_ind >= 1 - 1e-9:
+            continue
+        rho = cfg.bloc_rho_control if race in cfg.headline_races else cfg.bloc_rho
+        slope = bloc_slope(pd / (1 - p_ind), rho, p_ind)
+        for e, _, p, liquid in legs:
+            if liquid and p is not None and kind[e] != "I":
+                out[e] = slope if kind[e] == "R" else -slope
+    return out
+
+
 def race_variance(legs):
     """Variance of one race's settlement payout. legs = [(net YES shares, probability), ...]; exactly one leg
     wins in a race (probabilities scaled to sum to 1); a lone market wins with its own probability."""
@@ -2606,7 +2724,7 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
                   position_limit=None, min_edge=None, reduce_size=None, net_inv=None, age_hours=0.0,
                   adding_factor=1.0, bias_side=None, bias_edge=0.0, bias_size=1.0, unload_side=None,
                   unload_edge=0.0, unload_size=None, adding_limit_factor=1.0, frag_limit=None, behind_best=True,
-                  reduce_fv=None, why=None, adding_per_market=False):
+                  reduce_fv=None, why=None, adding_per_market=False, value_p=None):
     """
     fv         fair YES probability
     inv        our net YES shares on THIS exchange (negative = net NO); drives the hard position limit
@@ -2654,6 +2772,11 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
     adding_per_market  Package 8 (adding_factor_per_market): adding_factor and adding_limit_factor pick the adding side
                        by THIS exchange's position inv (the side growing |inv|; of a side that shrinks it, the part
                        beyond the position is adding too), not by net_inv. False = race-netted, as before
+    value_p            Package 10 A: this market's liquid, race-scaled Polymarket probability (Bot.value_p), or None.
+                       With cfg.value_mode the side reducing THIS exchange's position never rests beyond
+                       p -+ value_sell_margin (value_side_prices); with cfg.value_quote_hurdle > 0 the adding side
+                       follows the hurdle / middle-band rule (A4). None = neither (and value_mode alone still runs
+                       the max_skew_through clamp in reduce-only)
     """
     bankroll = bankroll or DEFAULT_BANKROLL
     max_order_cash = cfg.max_order_cash_frac * bankroll
@@ -2661,6 +2784,12 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
         order_size = cfg.order_size_frac * bankroll
     else:
         max_order_cash = max(max_order_cash, order_size)   # a planned size has already been capital-checked
+    vmode = bool(getattr(cfg, "value_mode", False))         # Package 10 A1
+    hurdle = getattr(cfg, "value_quote_hurdle", 0.0) if value_p is not None else 0.0   # Package 10 A4
+    v_mid = hurdle > 0 and cfg.value_mid_low <= value_p <= cfg.value_mid_high
+    if v_mid:                                 # A4 middle band: the side growing |inv| stops at N quote sizes
+        mid_limit = max(0.0, cfg.value_mid_inventory_quotes) * order_size
+        frag_limit = mid_limit if frag_limit is None else min(frag_limit, mid_limit)
     # 1. Reservation price = fair value shifted against our inventory. Long -> lower r -> we bid
     #    less eagerly and offer more eagerly, which pushes the position back toward flat.
     if cfg.skew_mode == "quote" and order_size > 0:
@@ -2706,7 +2835,7 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
             ask = ceil_tick(r_ask + max(ask_edge, cfg.undercut_step_back))
     bid = min(max(bid, bid_lo), bid_hi)
     ask = max(min(ask, ask_hi), ask_lo)
-    if not reduce_only and cfg.max_skew_through < 1.0:
+    if (not reduce_only or vmode) and cfg.max_skew_through < 1.0:   # (P10 A1: in reduce-only too)
         # Skew sheds inventory by quoting less greedily, never by paying through our own fair value
         # (day one: fills at <= -1c edge lost -804 at the 60-min mid; rival bots pick those quotes off).
         bid_hi = min(bid_hi, floor_tick(fv_bid + cfg.max_skew_through))   # (fv_bid / fv_ask = fv unless A)
@@ -2761,6 +2890,35 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
             no_ask = True
         else:
             ask, ask_lo = max(ask, ceil_tick(cap)), max(ask_lo, ceil_tick(cap))
+    # 4d. Package 10: A4 the adding side's hurdle price (tails), A1 the reducing side's value floor. Each only moves a
+    #     price AWAY from the other side (and the keep limits with it); step 4 runs again after them.
+    if hurdle > 0 and not v_mid:
+        if inv > -1:                              # the bid adds (not buying back a short)
+            cap = value_p / (1 + hurdle)
+            if cap < PMIN - 1e-9:
+                no_bid = True
+            else:
+                bid, bid_hi = min(bid, floor_tick(cap)), min(bid_hi, floor_tick(cap))
+        if inv < 1:                               # the ask adds (not selling down a long)
+            flo = 1 - (1 - value_p) / (1 + hurdle)
+            if flo > PMAX + 1e-9:
+                no_ask = True
+            else:
+                ask, ask_lo = max(ask, ceil_tick(flo)), max(ask_lo, ceil_tick(flo))
+    if vmode and value_p is not None:
+        fb, fa = value_side_prices(value_p, inv, cfg)
+        if fa is not None:
+            ask, ask_lo = max(ask, fa), max(ask_lo, fa)
+        if fb is not None:
+            if fb < PMIN - 1e-9:
+                no_bid = True
+            else:
+                bid, bid_hi = min(bid, fb), min(bid_hi, fb)
+    if (hurdle > 0 and not v_mid) or (vmode and value_p is not None):   # (step 4 again: never cross another trader)
+        if best_ask is not None:
+            bid = min(bid, floor_tick(best_ask - TICK))
+        if best_bid is not None:
+            ask = max(ask, ceil_tick(best_bid + TICK))
 
     # 5. Size: shrink toward the position limit on each side, and cap the cash tied up per order.
     #    Limits: Kelly sizing when we have a liquid Polymarket price, else max_position_frac of the account.
@@ -2887,22 +3045,61 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
                  bid_max if bid_max != bid_size else None, ask_max if ask_max != ask_size else None, behind)
 
 
-def exit_quote(fv, inv, best_bid, best_ask, cfg=CFG, bankroll=None, max_size=None):
+def value_side_prices(p, inv, cfg=CFG):
+    """Package 10 A1: (highest bid, lowest ask) the side REDUCING this exchange's position inv may rest at, given the
+    market's liquid race-scaled Polymarket p: long (inv >= 1) -> (None, ceil_tick(p - value_sell_margin)); short
+    (inv <= -1) -> (p + margin without the grid clamp, floored to the tick (< PMIN = no bid), None); flat -> (None,
+    None). Selling below p (buying back above p) gives value away at the outcome."""
+    m = cfg.value_sell_margin
+    if inv >= 1:
+        return None, ceil_tick(p - m)
+    if inv <= -1:
+        x = math.floor(round((p + m) / TICK, 6)) * TICK
+        return (round(min(x, PMAX), 3) if x >= PMIN - 1e-9 else 0.0), None
+    return None, None
+
+
+def value_floor_quote(q, p, inv, cfg=CFG):
+    """Package 10 A1 on a finished Quote (decide, after hold_quote): the reducing side moved back to the value floor
+    (value_side_prices) if anything priced it beyond; its keep limit too. Only moves away from the other side; sizes
+    unchanged. A bid that would have to go below the grid is dropped."""
+    if p is None or q is NO_QUOTE:
+        return q
+    fb, fa = value_side_prices(p, inv, cfg)
+    if fa is not None and q.ask is not None and q.ask < fa - 1e-9:
+        q = replace(q, ask=fa, ask_limit=max(q.ask_limit, fa) if q.ask_limit is not None else None)
+    if fb is not None and q.bid is not None and q.bid > fb + 1e-9:
+        if fb < PMIN - 1e-9:
+            q = replace(q, bid=None, bid_size=0, bid_limit=None, bid_max=None)
+        else:
+            q = replace(q, bid=fb, bid_limit=min(q.bid_limit, fb) if q.bid_limit is not None else None)
+    return q
+
+
+def exit_quote(fv, inv, best_bid, best_ask, cfg=CFG, bankroll=None, max_size=None, value_floor=None):
     """Election-night exit: get this market flat, trading against other orders if needed.
 
     Long -> sell at the best other bid (an immediate trade), but never below fv - exit_max_slippage;
     if the best bid is worse than that, the order rests at that floor instead. Short -> the mirror
     image. Only the side that reduces the position is quoted. Sized to the whole position, capped at
     max_order_cash_frac of the account per order (the rest goes on later cycles).
+    value_floor (Package 10 A1 iii): a liquid Polymarket p -> never sell below p - value_sell_margin (buy back above
+    p + margin) either; None = unchanged.
     """
     bankroll = bankroll or DEFAULT_BANKROLL
     if inv >= 1:
         price = max(best_bid if best_bid is not None else 0.0, fv - cfg.exit_max_slippage)
+        if value_floor is not None:
+            price = max(price, value_floor - cfg.value_sell_margin)
         price = ceil_tick(price)
         size = int(min(inv, max(cfg.max_order_cash_frac * bankroll / max(1 - price, TICK), max_size or 0)))
         return Quote(ask=price, ask_size=size) if size >= 1 else NO_QUOTE
     if inv <= -1:
         price = min(best_ask if best_ask is not None else 1.0, fv + cfg.exit_max_slippage)
+        if value_floor is not None:
+            price = min(price, value_floor + cfg.value_sell_margin)
+            if price < PMIN - 1e-9:
+                return NO_QUOTE                   # (no grid price at or below the value floor)
         price = floor_tick(price)
         size = int(min(-inv, max(cfg.max_order_cash_frac * bankroll / max(price, TICK), max_size or 0)))
         return Quote(bid=price, bid_size=size) if size >= 1 else NO_QUOTE
@@ -3675,6 +3872,8 @@ class Bot:
         self.lad_cash_left = 0.0          # R3 ladder: cash the ladder may still lock this cycle (see ladder_setup)
         self.lad_keep = {}                # ...this exchange's levels a resting ladder order may keep (ladder_targets)
         self.lad_placed = {}              # ...ladder orderId -> monotonic time placed (churn control)
+        self.bloc_sens, self.bloc_delta, self.bloc_inv = {}, 0.0, {}   # Package 10 A2 (bloc_refresh)
+        self.warned_value = ()                    # Package 10 A1 (iv): the value_mode warnings last logged
         self.lad_liquid, self.lad_party_delta = set(), 0.0   # ...this cycle's liquid Polymarket eids, party delta
         # Threads for sending several HTTP requests at once (downloads mostly wait on the network).
         self.pool = ThreadPoolExecutor(max_workers=max(1, cfg.parallel_requests), thread_name_prefix="http")
@@ -4096,6 +4295,8 @@ class Bot:
         eff = self.effective_inventory(inv)
         worst = self.total_worst_case(inv, fvs)
         party_delta = sum(PARTY_SIGN.get(ex.party, 0) * inv.get(eid, 0.0) for eid, ex in self.ex.items())
+        if cfg.bloc_delta_enabled:                # Package 10 A2: the bloc delta the party cap uses this cycle
+            self.bloc_refresh(inv)
         # Hysteresis: once in reduce-only, both caps are reduce_only_hysteresis lower until it has been left.
         hyst = min(cfg.reduce_only_hysteresis, cfg.max_worst_case_frac / 2) if self.global_reduce else 0.0
         if cfg.risk_model == "correlated":
@@ -4162,6 +4363,9 @@ class Bot:
                        "positions": {self.ex[e].label: q for e, q in inv.items() if q and e in self.ex}}
 
         self.health.update(books_loaded=self.books_loaded(), markets_priced_from_tops=len(self.ref_tops))
+        if cfg.bloc_delta_enabled:                # Package 10 A2 (absent while off)
+            self.health["bloc_delta"] = round(self.bloc_delta, 2)
+            self.health["bloc_delta_frac"] = round(self.bloc_delta / equity, 4) if equity else None
 
         # 6b. Take tournament quotes that Polymarket says are clearly stale (confirmed over 2 readings) ---
         taken = (self.take_stale_quotes(refs, liquid, fvs, inv, mine_real, global_reduce, party_delta, now_m)
@@ -5247,12 +5451,16 @@ class Bot:
         # This comes before every other guard on purpose: getting out must never be blocked. If the book
         # has gone too thin for a fair value (likely on election night), exit around our last known fair
         # value, or failing that Polymarket's price, instead of holding the position into settlement.
-        if hrs <= cfg.exit_hours_before_close:
+        # Package 10 A1: the value-mode p (liquid, race-scaled Polymarket) and no pre-close windows (close_window)
+        vp = (self.value_p(ex, ref, ref_liquid)
+              if getattr(cfg, "value_mode", False) or getattr(cfg, "value_quote_hurdle", 0.0) > 0 else None)
+        if hrs <= self.close_window("exit_hours_before_close", cfg):
             anchor = next((x for x in (fv, ex.last_fv, ref) if x is not None), None)
             if fv is not None:
                 ex.last_fv = fv
             planned = self.size_plan.get(ex.eid) if cfg.size_by_activity else None   # big positions leave in big pieces
-            return (exit_quote(anchor, ex.inv, best_bid, best_ask, cfg, self.bankroll(), max_size=planned)
+            return (exit_quote(anchor, ex.inv, best_bid, best_ask, cfg, self.bankroll(), max_size=planned,
+                               value_floor=vp if getattr(cfg, "value_mode", False) else None)
                     if anchor is not None else NO_QUOTE)
         if fv is None:
             return NO_QUOTE                                   # no trustworthy price
@@ -5302,10 +5510,10 @@ class Bot:
         if exempt_bid:
             bid_cap = int(-ex.inv) if bid_cap is None else min(bid_cap, int(-ex.inv))
 
-        reduce_only = global_reduce or hrs <= cfg.flatten_hours_before_close
+        reduce_only = global_reduce or hrs <= self.close_window("flatten_hours_before_close", cfg)
         # From flatten_per_market_hours: flatten each market on its own, i.e. judge (and skew) by this
         # market's own position rather than the race-netted one.
-        inv_for_quote = ex.inv if hrs <= cfg.flatten_per_market_hours else ex.eff
+        inv_for_quote = ex.inv if hrs <= self.close_window("flatten_per_market_hours", cfg) else ex.eff
         # Kelly position limits, only with a liquid Polymarket price and a known account value.
         kelly_p = ref if (ref is not None and ref_liquid) else None
         # Size: this market's share of the capital plan; the party-control markets get a flat position limit.
@@ -5376,13 +5584,16 @@ class Bot:
                              unload_side=u_side, unload_edge=cfg.fast_unload_edge, unload_size=u_size,
                              adding_limit_factor=adding_limit, frag_limit=frag_limit,
                              behind_best=ex.eid not in self.ref_only, reduce_fv=reduce_fv, why=why,
-                             adding_per_market=bool(getattr(cfg, "adding_factor_per_market", False)))
+                             adding_per_market=bool(getattr(cfg, "adding_factor_per_market", False)),
+                             value_p=vp)
         ex.ro_clip = why.get("ro_clip", "")
         ex.bb_tag = " bb" if q.behind else ""
         ex.lad_ctx = (adding, adding_limit, frag_limit)   # (R3 ladder: the same factors and limits)
         if cfg.hold_target_hours > 0 and (not reduce_only or cfg.exit_quotes_in_reduce_only):   # C hold target:
             # aged lots' reducing side joins the best (Package 6: also in reduce-only, behind its flag)
             q = self.hold_quote(ex, q, best_bid, best_ask, book_fv if book_fv is not None else fv, cfg, ref, now_m)
+        if getattr(cfg, "value_mode", False) and vp is not None:   # Package 10 A1: the final quote, value floor
+            q = value_floor_quote(q, vp, ex.inv, cfg)
         return q
 
     def update_size_plan(self, now_m, fvs):
@@ -5424,17 +5635,75 @@ class Bot:
         Democratic ones up, so fills bring the net exposure back. Grows linearly to party_skew_at_cap at
         the hard cap (where party_blocks takes over). Zero for markets that aren't Rep/Dem."""
         sign = PARTY_SIGN.get(ex.party, 0)
-        cap = self.cfg.max_party_delta_frac * self.bankroll()
+        party_delta, cap = self.party_measure(party_delta)
         if not sign or cap <= 0:
             return 0.0
         return self.cfg.party_skew_at_cap * sign * max(-1.0, min(1.0, party_delta / cap))
+
+    def party_measure(self, party_delta):
+        """(net exposure, cap) for the national-swing cap: the share-count party_delta and max_party_delta_frac x
+        account; Package 10 A2 bloc_delta_enabled: the bloc delta ($ per sd, + = Republican) and max_bloc_delta_frac
+        x account instead."""
+        if getattr(self.cfg, "bloc_delta_enabled", False):
+            return self.bloc_delta, self.cfg.max_bloc_delta_frac * self.bankroll()
+        return party_delta, self.cfg.max_party_delta_frac * self.bankroll()
+
+    def bloc_refresh(self, inv):
+        """Package 10 A2 (cycle step 6, flag on): this cycle's per-share sensitivities (liquid race-scaled
+        Polymarket) and the bloc delta of inv. Returns the bloc delta."""
+        races = defaultdict(list)
+        for eid, ex in self.ex.items():
+            races[ex.group].append((eid, ex.label, self.scaled_ref(ex), eid in (self.cur_liquid or ())))
+        self.bloc_sens, self.bloc_inv = bloc_sensitivities(races, self.cfg), dict(inv)
+        self.bloc_delta = self.bloc_delta_now(inv)
+        return self.bloc_delta
+
+    def bloc_delta_now(self, inv=None):
+        """Package 10 A2: sum position x sensitivity ($ per sd of the national factor; + = Republican-leaning) for a
+        position map {eid: YES shares} (None = the last positions read), with this cycle's sensitivities. Part B's
+        allocator calls it on a hypothetical book to check a pair against the cap (bloc_cap)."""
+        inv = self.bloc_inv if inv is None else inv
+        return sum(q * self.bloc_sens.get(e, 0.0) for e, q in (inv or {}).items())
+
+    def bloc_cap(self):
+        """Package 10 A2: the |bloc_delta| cap in $ per sd (max_bloc_delta_frac x account)."""
+        return self.cfg.max_bloc_delta_frac * self.bankroll()
+
+    def scaled_ref(self, ex):
+        """Package 10: this cycle's raw Polymarket price for ex scaled to sum to 1 over its race when every leg has
+        one (else the raw price; None without one). Liquidity is the caller's check."""
+        refs = self.cur_refs or {}
+        r = refs.get(ex.eid)
+        if r is None:
+            return None
+        members = self.groups.get(ex.group) or [ex.eid]
+        if len(members) > 1 and all(refs.get(e) is not None for e in members):
+            tot = sum(refs[e] for e in members)
+            if tot > 0:
+                return r / tot
+        return r
+
+    def value_p(self, ex, ref, ref_liquid):
+        """Package 10 A1 / A4: the outcome value of one YES share here = the race-scaled Polymarket price, only when
+        liquid (ref_liquid); None otherwise (the value rules then leave this market alone)."""
+        if ref is None or not ref_liquid:
+            return None
+        if (self.cur_refs or {}).get(ex.eid) is None:     # (decide called outside a cycle: the raw price given)
+            return ref
+        return self.scaled_ref(ex)
+
+    def close_window(self, name, cfg=None):
+        """Package 10 A1 (ii): the pre-close window setting `name` (exit_hours_before_close, flatten_hours_before_close,
+        flatten_per_market_hours) as the code should apply it: the setting, or -inf (no window, ever) in value_mode."""
+        cfg = cfg or self.cfg
+        return float("-inf") if getattr(cfg, "value_mode", False) else getattr(cfg, name)
 
     def party_blocks(self, ex, party_delta):
         """National-swing cap -> (no_bid, no_ask). Buying YES on a Republican market pushes the net
         Republican-minus-Democrat delta up, on a Democratic market down; selling does the opposite.
         Beyond the cap, block whichever side would make it worse."""
         sign = PARTY_SIGN.get(ex.party, 0)
-        party_cap = self.cfg.max_party_delta_frac * self.bankroll()
+        party_delta, party_cap = self.party_measure(party_delta)   # (Package 10 A2: the bloc delta with the flag)
         too_red, too_blue = party_delta > party_cap, party_delta < -party_cap
         return (sign > 0 and too_red) or (sign < 0 and too_blue), (sign > 0 and too_blue) or (sign < 0 and too_red)
 
@@ -5510,7 +5779,7 @@ class Bot:
                 fix_ask = False
         # Reduce-only, flatten and exit windows: always do exactly what the risk logic asks (no holding, no
         # burst-mode skipping), or a position could be left to grow or never be exited.
-        critical = self.global_reduce or self.hours_to_close(ex) <= self.cfg.flatten_hours_before_close
+        critical = self.global_reduce or self.hours_to_close(ex) <= self.close_window("flatten_hours_before_close")
         # Refill cooldown: no new order on a side that was just hit repeatedly; what rests there stays while safe.
         cool_bid = not critical and self.refill_cooling(ex, True, now_m)
         cool_ask = not critical and self.refill_cooling(ex, False, now_m)
@@ -5704,7 +5973,7 @@ class Bot:
         factor never makes a resting order unsafe, like Quote.bid_max for level 0)."""
         cfg, bank = self.cfg, self.bankroll()
         hrs = self.hours_to_close(ex)
-        if hrs <= cfg.exit_hours_before_close:
+        if hrs <= self.close_window("exit_hours_before_close"):
             return {True: lambda px: 0, False: lambda px: 0}
         inv, net = ex.inv, ex.eff
         headline = cfg.size_by_activity and ex.group in cfg.headline_races
@@ -5717,8 +5986,8 @@ class Bot:
                 return kelly_position(kelly_p, px, bank, cfg, yes=yes)
             return cfg.max_position_frac * bank
         extra = {True: [], False: []}
-        if self.global_reduce or hrs <= cfg.flatten_hours_before_close:
-            pos = inv if hrs <= cfg.flatten_per_market_hours else net
+        if self.global_reduce or hrs <= self.close_window("flatten_hours_before_close"):
+            pos = inv if hrs <= self.close_window("flatten_per_market_hours") else net
             extra[True].append(-pos)                       # only buy back a short...
             extra[False].append(pos)                       # ...or sell down a long
         if quote > 0 and abs(net) > cfg.ladder_max_inv_quotes * quote:
@@ -5744,7 +6013,12 @@ class Bot:
         if fv > cfg.tail_high:
             extra[True].append(max(0.0, -inv))
         sign = PARTY_SIGN.get(ex.party, 0)
-        if sign:                                           # buying YES moves the party delta by sign a share
+        if sign and getattr(cfg, "bloc_delta_enabled", False):   # Package 10 A2: room in bloc delta / sensitivity
+            d, cap = self.party_measure(self.lad_party_delta)
+            w = abs(self.bloc_sens.get(ex.eid, 0.0))
+            for is_bid, room in ((True, cap - sign * d), (False, cap + sign * d)):
+                extra[is_bid].append(room / w if w > 0 else (0.0 if room < 0 else float("inf")))
+        elif sign:                                         # buying YES moves the party delta by sign a share
             cap, d = cfg.max_party_delta_frac * bank, self.lad_party_delta
             extra[True].append(cap - sign * d)
             extra[False].append(cap + sign * d)
@@ -6662,7 +6936,7 @@ class Bot:
         meta = (self.order_meta.get(resting[0].order_id) or {}) if len(resting) == 1 else {}
         if cfg.no_chase_enabled and meta:
             now_m = time.monotonic() if now_m is None else now_m
-            if (self.global_reduce or self.hours_to_close(ex) <= cfg.flatten_hours_before_close
+            if (self.global_reduce or self.hours_to_close(ex) <= self.close_window("flatten_hours_before_close")
                     or ex.eid in self.ref_moved or now_m - ex.ref_moved_at < 15
                     or self.unload_urgent(ex, now_m) == ("bid" if is_bid else "ask")):
                 meta = {}                         # (unknown placement notes -> the normal rules)
@@ -6960,7 +7234,8 @@ class Bot:
                 continue
             # pre-close window: arbitrage would open positions the per-market flatten then pays to unwind;
             # unwinding a held set only reduces them, so it still runs
-            closing = any(self.hours_to_close(self.ex[e]) <= cfg.flatten_hours_before_close for e in members)
+            closing = any(self.hours_to_close(self.ex[e]) <= self.close_window("flatten_hours_before_close")
+                          for e in members)
             plan = self.arb_plan(members, inv, fvs, closing)      # quick check on the cached books
             if plan is None:
                 continue
@@ -7346,7 +7621,7 @@ class Bot:
                 del self.pp[race]
             else:
                 prefer = None
-            closing = any(self.hours_to_close(self.ex[e]) <= cfg.flatten_hours_before_close
+            closing = any(self.hours_to_close(self.ex[e]) <= self.close_window("flatten_hours_before_close")
                           for e in members if e in self.ex)
             plan = None if closing else self.pair_passive_plan(members, inv, fvs, prefer)
             if plan is not None:
@@ -8036,7 +8311,7 @@ class Bot:
             if (not self.running or not ex.take_dir or now_m - ex.take_since < cfg.take_confirm_seconds
                     or now_m < ex.take_until
                     or busy(ex, now_m) or global_reduce
-                    or self.hours_to_close(ex) <= cfg.flatten_hours_before_close):
+                    or self.hours_to_close(ex) <= self.close_window("flatten_hours_before_close")):
                 continue
             if not self.writes_ready(3):          # cancel + take + leftover cancel, on the main thread
                 continue                          # (the direction stays confirmed: taken once the budget frees)
@@ -8457,7 +8732,7 @@ class Bot:
             pos = inv.get(eid, 0.0)
             if ex is None or abs(pos) < 1 or not self.hold_gate(ex, cfg) or busy(ex, now_m) or eid in self.basket_legs:
                 continue
-            if self.hours_to_close(ex) <= cfg.flatten_hours_before_close:
+            if self.hours_to_close(ex) <= self.close_window("flatten_hours_before_close"):
                 continue                          # the flatten / exit windows have their own rules
             if now_m < ex.cooldown_until or now_m - ex.ref_jump_at < cfg.reduce_from_book_pause_s:
                 continue                          # jump guard / just after a Polymarket jump: not now
@@ -9678,6 +9953,9 @@ class Bot:
         part = self.basket_summary()                  # Package 9 F1: " | basket $X (N legs, state)"
         if part:
             line = f"{line} | {part}" if line else part
+        if getattr(self.cfg, "bloc_delta_enabled", False):   # Package 10 A2: " | bloc delta X/sd"
+            part = f"bloc delta {self.bloc_delta:+,.0f}/sd"
+            line = f"{line} | {part}" if line else part
         return line
 
     def safe_nono_sets(self):
@@ -9715,9 +9993,9 @@ class Bot:
             hrs = min((self.hours_to_close(ex) for ex in self.ex.values()), default=float("inf"))
             if hrs * 60 <= cfg.stop_minutes_before_close:
                 phase = "stopped for settlement"
-            elif hrs <= cfg.exit_hours_before_close:
+            elif hrs <= self.close_window("exit_hours_before_close"):
                 phase = f"election night: exiting positions ({hrs:.1f} h to close)"
-            elif hrs <= cfg.flatten_hours_before_close:
+            elif hrs <= self.close_window("flatten_hours_before_close"):
                 phase = f"election night: reducing positions ({hrs:.1f} h to close)"
             elif h and not h.get("orders_resting"):
                 problems.append("no orders resting")
@@ -9991,6 +10269,25 @@ class Bot:
             log.warning("basket_enabled is on without cash_gate_enabled: the basket buys nothing without the gate's "
                         "fresh cash read (exits and the kill still run) - turn cash_gate_enabled on")
         self.warned_basket_cash = bad
+        on = ()                                   # Package 10 A1 (iv): mark-driven selling paths left on in value mode
+        if getattr(self.cfg, "value_mode", False):
+            c = self.cfg
+            on = tuple(n for n, hit in (
+                ("reduce_from_book", c.reduce_from_book), ("fast_unload_enabled", c.fast_unload_enabled),
+                ("hold_target_hours > 0", c.hold_target_hours > 0), ("tilt_exit_priority", c.tilt_exit_priority),
+                ("tilt_exit_full_size", c.tilt_exit_full_size), ("tilt_exit_take", c.tilt_exit_take),
+                ("ref_tilt_enabled", c.ref_tilt_enabled), ("take_tilted_ref", c.take_tilted_ref),
+                ("ref_guard_exits", c.ref_guard_exits)) if hit)
+            if on and on != self.warned_value:
+                log.warning("value_mode is on with %s: these sell at marks below Polymarket (their resting quotes "
+                            "still keep the value floor; turn them off for an outcome-settled book)", ", ".join(on))
+            closing = [n for n in ("exit_hours_before_close", "flatten_hours_before_close", "flatten_per_market_hours")
+                       if getattr(c, n) > 0]
+            if closing and not self.warned_value:
+                log.warning("value_mode: the pre-close windows are OFF (%s ignored; stop_minutes_before_close still "
+                            "stops quoting before the close)", ", ".join(f"{n} {getattr(c, n):g}" for n in closing))
+            on = on or ("(on)",)
+        self.warned_value = on
 
     def check_market_edge(self, force=False):
         """Every market_edge_reload_seconds: re-read market_edge.json (rival-floor map) if it changed. Bad entries

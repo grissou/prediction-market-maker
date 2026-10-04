@@ -1839,7 +1839,7 @@ check("the new live settings are accepted (quoting, thin-book, risk, lifecycle, 
       not _bad and _ok == {k: (float(v) if isinstance(getattr(_d, k), float) else v) for k, v in _new.items()}, _bad)
 _out = {"skew_per_quote": 0.06, "skew_max": 0.2, "max_skew_through": -0.01, "improve_ticks": 4, "undercut_step_back": 0.1,
         "ref_only_enabled": 1, "ref_only_max_gap": 0.001, "ref_only_min_edge": 0.2, "ref_only_size_frac": 0.05,
-        "ref_only_reduce_full": "yes", "risk_swing_shock": 0.01, "risk_z": 7, "worst_case_backstop_frac": 0.95,
+        "ref_only_reduce_full": "yes", "risk_swing_shock": 0.01, "risk_z": 7, "worst_case_backstop_frac": 1.6,
         "order_ttl": 100, "refresh_before_expiry": 1000, "batch_size": 0, "kelly_no_edge_frac": 0.02,
         "writes_per_minute_max": 200, "write_budget_cut": 0.1, "never_defer_unsafe": 0,
         "startup_writes_per_minute": -1, "burst_startup_grace_seconds": 601, "take_ref_max_age_seconds": 301}
