@@ -43,6 +43,18 @@ asks rest; the middle (15-85c) is two-way at min_edge, capped at 2 quote sizes s
 outcome valuation ~1.4k/day on today's ~210 adding sides; UNMEASURED live in value mode: gate the reserve on 24 h of live data at
 >= 0.6k/day. The stale-quote takes keep running (they buy value at +7.5c/share) but respect the reserve (`take_respect_reserve`).
 
+
+## Carry check (`analysis/p10/CARRY.md`, 09:55): what "market-making carry" really is at the outcome
+Maker fills by day, valued at the outcome: value sides (favourite bids, longshot asks) 1 Oct +1.4k on 39k of cash, 2 Oct +4.3k on 79k,
+3 Oct +0.2k on 3.4k: **~4.9c per $, ONCE** (the positions are locked to the outcome) - so "1.0k/day of carry" from the value sides needs
+20-35k of FRESH cash a day, which a 100k account does not have: that income is plan (a) itself (deploy the capital once at ~5-10%). The
+repeatable part is the MIDDLE two-way book (15-85c): +1,976 over ~1.3 days (mostly 2 Oct, ~1.5k that day), largely netting out, so it
+rotates the cash. The anti-value sides lost 1.9k (the value-mode rule removes them). k 0.9 calibration cuts the value sides ~35%.
+**Corrected reading of the MM rows above:** the 6% / 29% P(>= 150k) at 0.67 / 1.0k per day stands only if the middle two-way book earns
+that on the 15-20k reserve; the one funded day says ~1.5k, from a single day. Gate stage 3 on 24 h of live data: maker P&L at the
+Polymarket mark in the middle band >= 0.6k/day before counting on it. Without it, the honest expectation is plan (a)/(b): E ~113-115k,
+P(>= 150k) ~0% - and the Senate sleeve is the only lever for 150k (17-24% at P(<= 85k) 4%).
+
 ## What Package 10 built (all OFF; `deploy/package10/`; dry run on the live state in `analysis/p10/DRYRUN.md`)
 1. `value_mode`: no reducing quote below p - 0.5c (above p + 0.5c for a short) in normal AND reduce-only quoting (the reduce-only skew
    clamp was skipped: today 4 of 6 resting reducing quotes sit below value); the pre-close windows (`exit_hours_before_close` 2,

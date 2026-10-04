@@ -65,6 +65,10 @@ takes off the reserve is reached in ~5-6 h); stage 3 (with `take_respect_reserve
 ~1.4k/day on F's model; with +20k of cash 201 adding sides REST (67 at the top, 48 middle markets two-way) and the takes spend 5.0k of it
 (19.3k without the flag); tilt rise (+3c): no value sold; convergence (books to p +- 1c): the allocator frees ~20k into
 the reserve and buys nothing (no level with >= 5% edge).
+**Carry check (`analysis/p10/CARRY.md`):** maker value-side fills earned ~4.9c per $ ONCE (1 Oct +1.4k on 39k cash, 2 Oct +4.3k on 79k,
+3 Oct +0.2k on 3.4k): that is plan (a)'s edge, not carry; the repeatable income is the middle two-way book (+1,976 over ~1.3 days, ~1.5k on
+the one funded day, netting out); the anti-value sides lost 1.9k. So the MM odds (6-29%) rest on the middle band earning 0.67-1.0k/day on
+the reserve: measure 24 h live before counting on it.
 **Simulation evidence:** live_sim judged on the Polymarket mark `pnl` (= settlement EV; tests/live_sim_round10_value.txt, 8 x 3 h, live
 world with tilt 0.14): `ref_weight` 1.0 +212 +- 66; + `skew_max` 0 + age skew off +381 +- 73; + adding factor 0.5 with 20% cash +497 +- 82
 (worst case rises as value is held: hence the backstop at 1.3). The outcome model is the judge for everything else (no 30-day sim).
