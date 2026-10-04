@@ -20,3 +20,7 @@ them instead, leave the basket on and set `basket_exit_utc` to now + 1 h, then s
   need + 2k, own quotes excluded, thinnest-leg sizing, unequal legs completed or reversed the same cycle) + `arb_sellback` (YES+YES sets
   sold back at bids >= 1.00).
 Watch list, rollback triggers and the odds: START_HERE.md "Package 9" and analysis/p9/CATCHUP_PLAN.md.
+Dry run on the live state (analysis/p9/DRYRUN.md, tests/test_p9_dryrun.py) - expect: stage 2 frees ~8-9k of cash and ~4k of
+tilt exposure in the first hours (only the levels within 1c of the tilted fv; worst case 79k -> ~70k, NOT < 40k unless the tilt
+estimate rises); stage 3 on that cash builds ~11k (26 legs) then waits ("no free cash (cash gate)"); with ample cash the m 5
+build settles near ~40k (m 6 / 90k: ~45k), not 72-90k, because each $ bought cuts the cushion by ~15c (impact + spread).
