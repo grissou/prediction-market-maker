@@ -1043,9 +1043,9 @@ class Config:
     # gate's own per-order rule, all legs together) fits: cash_left() >= arb_cash_mult x need + arb_cash_reserve
     # (fewer sets when that is what fits, none below 1; no cash figure = none: it needs cash_gate_enabled). If the
     # batch fills its legs unequally, the lagging legs are OWED (pair_owe) and the next cycle's follow-up completes
-    # them within pair_unwind_followup_max_cost of the planned price; from the second try on the extra legs are
-    # bought / sold BACK instead (within arb_min_profit + pair_unwind_followup_max_cost), so no one-legged set is
-    # kept. status.json arb_cash_blocked; journal "ARB skipped: cash rule (need X, left Y)". False = unchanged.
+    # them within pair_unwind_followup_max_cost of the planned price; when nothing can complete them then (same
+    # cycle), and from the second try on, the extra legs are bought / sold BACK instead (within arb_min_profit (_buy)
+    # + pair_unwind_followup_max_cost), so no one-legged set is kept (tries / max age: pair_unwind_followup_*). status.json arb_cash_blocked; journal "ARB skipped: cash rule (need X, left Y)". False = unchanged.
     arb_cash_rule: bool = False
     arb_cash_mult: float = 1.25
     arb_cash_reserve: float = 2000.0
@@ -4055,7 +4055,8 @@ class Bot:
 
         # 5. Guaranteed arbitrage inside races (takes liquidity; our quotes there are pulled first) --
         # Package 7 pair_unwind_followup: legs an earlier pair unwind left unequal are evened up first
-        owed_races = self.pair_followup_step(fvs, now_m, mine_real) if getattr(self, "pair_owed", None) else set()
+        owed_races = (self.pair_followup_step(fvs, now_m, mine_real, inv=inv) if getattr(self, "pair_owed", None)
+                      else set())
         arb_races = self.take_arbitrage(inv, fvs, mine_real, now_m) if self.running else set()
         arb_races |= owed_races
         if cfg.pair_unwind_passive or self.pp:    # T2.5: a passive slice filled -> the other leg is taken now
@@ -6909,6 +6910,7 @@ class Bot:
             return done
         b_left = int(getattr(cfg, "pair_no_unwind_max_per_cycle", 2))   # Package 7: B-only short-set unwinds
         b_waiting = 0
+        cash_rule = bool(getattr(cfg, "arb_cash_rule", False))          # Package 9 F5
         for race, members in self.arb_race_order(inv):
             if (len(members) < 2 or not self.running or now_m < self.arb_cooldown.get(race, 0)
                     or race in getattr(self, "pair_owed", ())  # Package 7: its owed legs are evened up first
@@ -6918,8 +6920,14 @@ class Bot:
             # pre-close window: arbitrage would open positions the per-market flatten then pays to unwind;
             # unwinding a held set only reduces them, so it still runs
             closing = any(self.hours_to_close(self.ex[e]) <= cfg.flatten_hours_before_close for e in members)
-            if self.arb_plan(members, inv, fvs, closing) is None:     # quick check on the cached books
+            plan = self.arb_plan(members, inv, fvs, closing)      # quick check on the cached books
+            if plan is None:
                 continue
+            if cash_rule and plan[0] == "arb":   # Package 9 F5: no set it cannot fully fund (no book download)
+                fit, need, left = self.arb_cash_fit(plan[2], plan[3], plan[1])
+                if fit < 1 and plan[3] >= 1:
+                    self.arb_cash_refused(race, need, left)
+                    continue
             if getattr(self, "arb_plan_b", False) and b_left < 1:     # Package 7: B's per-cycle cap: waits
                 b_waiting += 1
                 continue
@@ -6937,6 +6945,15 @@ class Bot:
             plan = self.arb_plan(members, inv, fvs, closing)
             if plan is None:
                 continue
+            if cash_rule and plan[0] == "arb" and plan[3] >= 1:   # Package 9 F5: the cash rule on the fresh books
+                fit, need, left = self.arb_cash_fit(plan[2], plan[3], plan[1])
+                if fit < 1:
+                    self.arb_cash_refused(race, need, left)
+                    continue
+                if fit < plan[3]:
+                    log.info("arbitrage on %s: %d -> %d sets (cash rule: left %.2f, %s x need + %.0f)", race,
+                             plan[3], fit, left, cfg.arb_cash_mult, cfg.arb_cash_reserve)
+                plan = plan[:3] + (fit,)
             if getattr(self, "arb_plan_b", False):
                 if b_left < 1:
                     b_waiting += 1
@@ -7031,11 +7048,15 @@ class Bot:
                     return "unwind", action, levels, qty
         if not cfg.arb_enabled or closing:
             return None
+        rule = bool(getattr(cfg, "arb_cash_rule", False))
+        if rule:                          # Package 9 F5: other traders' levels only, never one at a price of ours
+            bids, asks = self.arb_levels(members, "bids"), self.arb_levels(members, "asks")
         if bids and sum(p for p, _ in bids.values()) >= 1 + cfg.arb_min_profit - 1e-9:
             qty = int(min([cfg.arb_max_frac * bank] +
                           [size for _, size in bids.values()] +                            # only what's bid at that price
                           [cfg.max_position_frac * bank + inv.get(e, 0.0) for e in members] +   # selling lowers position
-                          [cfg.max_order_cash_frac * bank / max(1 - p, TICK) for p, _ in bids.values()]))  # cash per order
+                          [cfg.max_order_cash_frac * bank / max(1 - p, TICK) for p, _ in bids.values()] +  # cash per order
+                          ([cfg.arb_leg_depth_frac * min(size for _, size in bids.values())] if rule else [])))
             return "arb", "sell", bids, qty
         # The set pays 1 only if a LISTED party wins. Book fair values are normalised to sum to 1, so they cannot
         # see an unlisted outsider: every leg needs a LIQUID Polymarket price and those RAW prices must add up to
@@ -7047,9 +7068,91 @@ class Bot:
             qty = int(min([cfg.arb_max_frac * bank] +
                           [size for _, size in asks.values()] +                            # only what's offered there
                           [cfg.max_position_frac * bank - inv.get(e, 0.0) for e in members] +   # buying raises position
-                          [cfg.max_order_cash_frac * bank / max(p, TICK) for p, _ in asks.values()]))  # cash per order
+                          [cfg.max_order_cash_frac * bank / max(p, TICK) for p, _ in asks.values()] +  # cash per order
+                          ([cfg.arb_leg_depth_frac * min(size for _, size in asks.values())] if rule else [])))
             return "arb", "buy", asks, qty
         return None
+
+    # --- Package 9 F5: the arbitrage cash rule (arb_cash_rule) ---
+    def own_prices(self, eid):
+        """{(is_bid, YES price)} of every order of ours on eid we know of: resting (our record), just placed (not yet
+        listed) and sent with no answer yet (unconfirmed)."""
+        out = {(o.is_bid, rnd(o.price)) for o in list(self.my_orders.values()) if o.eid == eid}
+        out |= {(o.is_bid, rnd(o.price)) for o, _t in list(self.recent_orders.values()) if o.eid == eid}
+        out |= {(c[0].get("action") == "buy", rnd(float(c[0].get("price", 0.0))))
+                for c in (self.unconfirmed.get(eid) or []) if isinstance(c[0], dict)}
+        return out
+
+    def arb_levels(self, members, key):
+        """F5: top_levels on other traders only, a level at a price where we have (or just sent) an order on that side
+        skipped WHOLE (live 3 Oct: own quotes in 29% of the race-cycles at bids >= 1.04 - strip_own only takes off
+        the size our record knows of). {eid: (price, size)} or None if a leg has no such level."""
+        out = {}
+        for e in members:
+            b = self.ex[e].book
+            mine = self.own_prices(e)
+            bid = key == "bids"
+            lv = [x for x in ((b or {}).get(key) or []) if (bid, rnd(x["price"])) not in mine]
+            if not lv:
+                return None
+            out[e] = (lv[0]["price"], lv[0]["quantity"])
+        return out
+
+    def arb_orders(self, levels, qty, action):
+        """The legs execute_arbitrage sends for qty sets (a leg buying back a short: a covered "sell NO" if all fits)."""
+        orders = [{"exchangeId": e, "side": "yes", "action": action, "quantity": int(qty), "price": p,
+                   "tournamentId": self.tid} for e, (p, _) in levels.items()]
+        for o in orders:
+            self.no_sell_order(o, self.ex[o["exchangeId"]].inv, whole=True)
+        return orders
+
+    def arb_cash_need(self, levels, qty, action):
+        """F5: the cash the legs of qty sets need together, by the cash gate's own per-order rule (cash_tiers: a sale
+        beyond the YES held buys NO at 1 - price, a purchase price a share, a covered "sell NO" its lone part free,
+        closing sets free when every leg is one); our resting orders there are cancelled first (ignored)."""
+        orders = self.arb_orders(levels, qty, action)
+        free = {o["exchangeId"]: self.cash_free(o["exchangeId"], skip=lambda r: True) for o in orders}
+        closed = all(o.get("_no_sell") for o in orders)
+        need = 0.0
+        for o in orders:
+            b, ns = o["action"] == "buy", bool(o.get("_no_sell"))
+            need += self.tier_need(self.cash_tiers(free[o["exchangeId"]], b, o["price"], ns, closed), qty)
+            self.tier_consume(free[o["exchangeId"]], b, ns, qty)
+        return need
+
+    def arb_cash_fit(self, levels, qty, action):
+        """F5: (sets, need of the planned sets, cash left): the most sets <= qty with cash_left() >= arb_cash_mult x
+        their need + arb_cash_reserve (0 without a good cash figure: the rule needs cash_gate_enabled)."""
+        cfg = self.cfg
+        qty = int(qty)
+        if not self.cash_gate_on() or getattr(self, "cg_cash", None) is None:
+            return 0, (self.arb_cash_need(levels, qty, action) if qty >= 1 else 0.0), None
+        left = self.cash_left()
+        need_q = self.arb_cash_need(levels, qty, action) if qty >= 1 else 0.0
+
+        def fits(n):
+            return left + 1e-9 >= cfg.arb_cash_mult * self.arb_cash_need(levels, n, action) + cfg.arb_cash_reserve
+        if qty < 1 or not fits(1):
+            return 0, need_q, left
+        lo, hi = 1, qty
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if fits(mid):
+                lo = mid
+            else:
+                hi = mid - 1
+        return lo, need_q, left
+
+    def arb_cash_refused(self, race, need, left):
+        """F5: one refusal by the cash rule: counted (status.json arb_cash_blocked) and journaled (once a minute a
+        race)."""
+        self.arb_cash_blocked += 1
+        now_m, seen = time.monotonic(), self.__dict__.setdefault("arb_cash_logged", {})
+        if now_m - seen.get(race, -1e18) >= 60.0:
+            seen[race] = now_m
+            log.warning("ARB skipped: cash rule (need %.2f, left %s) on %s - %s x need + %.0f required", need,
+                        "no cash figure" if left is None else f"{left:.2f}", race, self.cfg.arb_cash_mult,
+                        self.cfg.arb_cash_reserve)
 
     def unwind_is_safe(self, inv, fvs, members, delta, set_slack=False):
         """Would adding `delta` YES shares on every leg of a race leave the party delta within its cap (or no
@@ -7427,6 +7530,8 @@ class Bot:
                 self.notes_dirty = True
         if len(set(traded)) > 1 and followup:     # Package 7: the lagging leg(s) owe the difference
             self.pair_owe(race, orders, traded, action, now_m)
+        elif len(set(traded)) > 1 and kind == "arb" and getattr(cfg, "arb_cash_rule", False):
+            self.arb_owe(race, orders, traded, action, now_m)   # Package 9 F5: never a one-legged set left
         elif len(set(traded)) > 1:
             alert(f"arbitrage on {race} only partly filled {traded}: the difference is now ordinary "
                   f"inventory, which the quoting will work off")
@@ -7493,18 +7598,202 @@ class Bot:
                     ", ".join(f"{self.ex[e].label} {q}" for e, q in legs.items()),
                     self.cfg.pair_unwind_followup_tries, self.cfg.pair_unwind_followup_max_cost)
 
+    # --- Package 9 F5: an arbitrage whose legs filled unequally (arb_cash_rule) ---
+    @staticmethod
+    def arb_owed_legs(st):
+        """F5: st["legs"] = {eid: shares behind the most-filled leg} (status.json pair_owed, take_arbitrage's skip)."""
+        top = max(st["filled"].values())
+        st["legs"] = {e: int(round(top - f)) for e, f in st["filled"].items() if top - f >= 1 - 1e-9}
+
+    def arb_owe(self, race, orders, traded, action, now_m):
+        """F5: an arbitrage batch filled its legs unequally (a leg refused for cash, or its level gone): the race is
+        owed (self.pair_owed, kind "arb"; in memory only) and arb_followup evens it from the next cycle on."""
+        st = {"kind": "arb", "action": action, "filled": {o["exchangeId"]: float(f) for o, f in zip(orders, traded)},
+              "t": now_m, "tries": 0, "price": {o["exchangeId"]: o["price"] for o in orders}}
+        self.arb_owed_legs(st)
+        self.pair_owed[race] = st
+        log.warning("ARBITRAGE on %s filled %s unequally: %s owed - completed next cycle (within %.3f of the planned "
+                    "price), then the extra legs %s back", race, traded,
+                    ", ".join(f"{self.ex[e].label} {q}" for e, q in st["legs"].items()),
+                    self.cfg.pair_unwind_followup_max_cost, "bought" if action == "sell" else "sold")
+
+    def arb_followup(self, race, st, fvs, now_m, mine_real=None, inv=None):
+        """F5, once a cycle per owed arbitrage: try 1 COMPLETES the set (the arbitrage's own action on each lagging
+        leg, at most pair_unwind_followup_max_cost past its planned price); when nothing can complete it then, and
+        from try 2 on, it REVERSES the extra (the
+        opposite action on each leg filled beyond the least-filled one, at most arb_min_profit (_buy) +
+        pair_unwind_followup_max_cost past the planned price: the arbitrage's edge given back, never more). Each:
+        immediate-or-cancel orders on fresh books, at most the shares needed (never past the position the arbitrage
+        made: no flip), cash-gated, our orders there cancelled first and the leftovers after. Dropped once even
+        (logged), or alerted and dropped after pair_unwind_followup_tries tries / pair_unwind_followup_max_age.
+        Returns {race} when writes went out (the race is not quoted this cycle)."""
+        cfg = self.cfg
+        gone = [e for e in st["filled"] if e not in self.ex]
+        if gone:
+            alert(f"arbitrage on {race}: a leg is no longer listed - owed state dropped ({st['legs']})")
+            del self.pair_owed[race]
+            return set()
+        filled = st["filled"]
+        if max(filled.values()) - min(filled.values()) < 1 - 1e-9:
+            log.warning("arbitrage on %s: legs even (%s) - owed state cleared", race, filled)
+            del self.pair_owed[race]
+            return set()
+        max_age = float(getattr(cfg, "pair_unwind_followup_max_age", 0.0) or 0.0)
+        if max_age > 0 and now_m - st.get("t", now_m) >= max_age:
+            alert(f"arbitrage on {race}: legs not evened within {max_age:.0f} s ({st['tries']} tries; filled "
+                  f"{filled}): owed state cleared, now ordinary inventory")
+            del self.pair_owed[race]
+            return set()
+        if not self.running or not self.api.live:
+            return set()
+        complete = st["tries"] < 1
+        if not self.writes_ready(2 * len(filled) + 1):   # our quotes + the orders + leftover cancels, every leg at most
+            self.arbs_skipped_budget += 1
+            log.info("arbitrage follow-up on %s deferred: write budget busy (next cycle)", race)
+            return set()
+        st["tries"] += 1
+        if inv is not None:                       # this cycle's positions (ex.inv is last cycle's before decide)
+            for e in filled:
+                self.ex[e].inv = float(inv.get(e, 0.0))
+        orders = self.arb_followup_orders(race, st, complete, mine_real)
+        if complete and not orders:               # nothing completes the set now: reverse the extra at once
+            complete = False
+            orders = self.arb_followup_orders(race, st, complete, mine_real)
+        acted = set()
+        if orders:
+            got = self.arb_followup_send(race, orders, complete, fvs, now_m)
+            if got is None:                       # never sent (write budget): not a try
+                st["tries"] -= 1
+                return set()
+            acted.add(race)
+            for e, g in got.items():
+                filled[e] += g if complete else -g
+            self.arb_owed_legs(st)
+        if max(filled.values()) - min(filled.values()) < 1 - 1e-9:
+            log.warning("arbitrage on %s: follow-up evened the legs after %d %s (%s)", race, st["tries"],
+                        "try" if st["tries"] == 1 else "tries", "completed" if complete else "reversed")
+            del self.pair_owed[race]
+        elif st["tries"] >= cfg.pair_unwind_followup_tries:
+            alert(f"arbitrage on {race} still unequal after {st['tries']} tries (filled {filled}): now ordinary "
+                  f"inventory, which the quoting will work off")
+            del self.pair_owed[race]
+        return acted
+
+    def arb_followup_orders(self, race, st, complete, mine_real=None):
+        """F5: the follow-up's orders on fresh books: complete = the arbitrage's action on each lagging leg for what it
+        is behind (limit pair_unwind_followup_max_cost past the planned price); else the opposite action on each leg
+        for what it is ahead of the least-filled one (limit arb_min_profit (_buy) + that past it). Sized to the
+        book's depth within the limit (walked to the worst level needed); a buy that buys back a short goes as a
+        covered "sell NO" when all of it fits; cash-gated per order (a leg that does not fit waits)."""
+        cfg, filled = self.cfg, st["filled"]
+        top, low = max(filled.values()), min(filled.values())
+        want = ({e: int(round(top - f)) for e, f in filled.items() if top - f >= 1 - 1e-9} if complete
+                else {e: int(round(f - low)) for e, f in filled.items() if f - low >= 1 - 1e-9})
+        buy = (st["action"] == "buy") == complete     # completing repeats the arbitrage's action, reversing undoes it
+        key = "asks" if buy else "bids"
+        edge = cfg.arb_min_profit if st["action"] == "sell" else cfg.arb_min_profit_buy
+        slack = cfg.pair_unwind_followup_max_cost + (0.0 if complete else edge)
+        orders = []
+        for e, n in want.items():
+            ex = self.ex[e]
+            try:
+                ex.book = strip_own(self.api.book(e, self.tid), (mine_real or {}).get(e, []))
+                ex.book_time = ex.verified = time.monotonic()
+            except ApiError as err:
+                log.warning("arbitrage follow-up on %s: book download failed (%s) - cached book", race, err)
+            planned = st["price"][e]
+            limit = floor_tick(planned + slack) if buy else ceil_tick(planned - slack)
+            price, depth = None, 0.0
+            for lv in (ex.book or {}).get(key) or []:
+                if (lv["price"] > limit + 1e-9) if buy else (lv["price"] < limit - 1e-9):
+                    break
+                if depth >= n:
+                    break
+                price, depth = lv["price"], depth + lv["quantity"]
+            qty = int(min(n, depth) + 1e-9)
+            if qty < 1 or price is None:
+                log.warning("arbitrage follow-up on %s (%s): nothing on %s within %.3f (planned %.3f), try %d of %d",
+                            race, "complete" if complete else "reverse", ex.label, limit, planned, st["tries"],
+                            cfg.pair_unwind_followup_tries)
+                continue
+            order = {"exchangeId": e, "side": "yes", "action": "buy" if buy else "sell", "quantity": qty,
+                     "price": price, "tournamentId": self.tid}
+            if buy:
+                self.no_sell_order(order, ex.inv, whole=True)   # a covered "sell NO" when all of it fits
+            orders.append(order)
+        if orders and self.cash_gate_on():
+            fits = [o for o in orders if not self.cash_gate_blocks([o])]
+            for o in orders:
+                if o not in fits:
+                    self.cash_gate_log(o["exchangeId"], "arbitrage follow-up on %s: %s not sent - not enough "
+                                       "available cash (cash gate)", race, self.ex[o["exchangeId"]].label)
+            orders = fits
+        return orders
+
+    def arb_followup_send(self, race, orders, complete, fvs, now_m):
+        """F5: the follow-up batch: our orders on those legs cancelled, the orders (alive arb_order_ttl), the leftovers
+        cancelled. {eid: shares filled}, or None if never sent (write budget)."""
+        cfg = self.cfg
+        if not all([self.cancel(o["exchangeId"], [], whole_exchange=True) for o in orders]):
+            log.warning("arbitrage follow-up on %s: could not clear our own quotes - next cycle", race)
+            return {}
+        exp = iso(utcnow() + timedelta(seconds=cfg.arb_order_ttl))
+        for o in orders:
+            o["expirationDate"] = exp
+        log.warning("ARBITRAGE follow-up %s (%s): %s", race, "complete" if complete else "reverse", ", ".join(
+            f"{'buying' if o['action'] == 'buy' else 'selling'} {o['quantity']} YES on {self.ex[o['exchangeId']].label}"
+            f" at {o['price']:.3f}{' (sell NO)' if o.get('_no_sell') else ''}" for o in orders))
+        self.orders_stale = True
+        try:
+            results = self.place_orders(orders)
+        except ApiError as err:
+            if err.code == "WRITE_BUDGET_WAIT":
+                self.arbs_skipped_budget += 1
+                return None
+            for o in orders:
+                self.ex[o["exchangeId"]].pending_until = now_m + cfg.pending_seconds
+            alert(f"arbitrage follow-up on {race}: placement failed ({err}) - check positions")
+            if err.code in FATAL_API_CODES:
+                fatal(f"orders rejected with {err.code}")
+            return {}
+        by_index = {r.get("index", k): r for k, r in enumerate(results)}
+        for k, o in enumerate(orders):
+            if (by_index.get(k) or {}).get("ok"):
+                self.remember_order(o, (by_index.get(k) or {}).get("data") or {}, now_m)
+        for o in orders:
+            self.cancel(o["exchangeId"], [], whole_exchange=True, quiet=True)
+        got = {}
+        for k, o in enumerate(orders):
+            res = by_index.get(k) or {}
+            data = res.get("data") or {}
+            if not res.get("ok"):
+                log.warning("arbitrage follow-up on %s: %s refused (%s)", race, self.ex[o["exchangeId"]].label,
+                            (data.get("error") or {}).get("message") or data.get("error"))
+            got[o["exchangeId"]] = float(data.get("quantityTraded") or 0) if res.get("ok") else 0.0
+            if data.get("orderId") is not None:
+                self.order_meta[data["orderId"]] = {"our_side": "bid" if o["action"] == "buy" else "ask",
+                                                    "price": o["price"], "arb": True, "fv": fvs.get(o["exchangeId"]),
+                                                    "t": time.time(), "eid": o["exchangeId"],
+                                                    **({"no_sell": True} if o.get("_no_sell") else {})}
+                self.notes_dirty = True
+        return got
+
     def pair_owed_status(self):
         """status.json pair_owed: {race: shares still owed (summed over its lagging legs)}."""
         return {r: int(sum(st["legs"].values())) for r, st in getattr(self, "pair_owed", {}).items()}
 
-    def pair_followup_step(self, fvs, now_m, mine_real=None):
+    def pair_followup_step(self, fvs, now_m, mine_real=None, inv=None):
         """Once a cycle, before take_arbitrage: per race with owed legs, one immediate-or-cancel order on each lagging
         leg (pair_followup_take). The owed shares shrink by what fills; the state is dropped once even, or after
         pair_unwind_followup_tries cycles that sent (or tried to send) the follow-up, with one alert of what is left.
-        A cycle the write budget defers is not a try. Returns the races acted on (not quoted this cycle)."""
+        A cycle the write budget defers is not a try. Returns the races acted on (not quoted this cycle).
+        Package 9 F5: an arbitrage's owed record (kind "arb") goes to arb_followup (inv: this cycle's positions)."""
         cfg, acted = self.cfg, set()
         for race in list(self.pair_owed):
             st = self.pair_owed[race]
+            if st.get("kind") == "arb":
+                acted |= self.arb_followup(race, st, fvs, now_m, mine_real, inv)
+                continue
             for e in [e for e in st["legs"] if e not in self.ex]:   # a leg gone from the market list: dropped
                 log.warning("pair unwind follow-up on %s: %s owed on a market no longer listed - dropped", race,
                             st["legs"].pop(e))
