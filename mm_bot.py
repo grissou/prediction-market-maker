@@ -9097,6 +9097,12 @@ class Bot:
             "no_add_utc": iso(datetime.fromtimestamp(sched["no_add"], timezone.utc)) if sched["no_add"] else None}
         return traded
 
+    def basket_exit_blocked(self, ex, why):
+        """P9 red team: a basket SALE (exit, kill, backstop, tracking down) that cannot go out is alerted once a leg -
+        not only an info log: a kill or a backstop that silently never completes is the failure that matters."""
+        self.basket_alert_once(f"exit-blocked {ex.eid}", f"BASKET sale on {ex.label} ({self.basket_state}) cannot go "
+                               f"out: {why} - the leg stays held; free cash / check reduce_no_as_sell")
+
     def basket_send(self, orders, inv, fvs, mine_real, now_w, now_m):
         """Send planned basket orders, each an immediate-or-cancel take: write budget for 3 writes first, a fresh book
         (the plan re-checked on it: the price still there and inside the caps), the cash gate's pre-check, our own
@@ -9148,11 +9154,15 @@ class Bot:
                 order = self.no_sell_order(order, inv.get(e, 0.0))
                 if order is None:
                     log.info("BASKET %s skipped: its NO is all in a NO+NO set", ex.label)
+                    self.basket_exit_blocked(ex, "its NO is all in a NO+NO set")
                     continue
             if p["add"] and not self.cash_gate_on():
                 continue                                  # (planned with a fresh read: the gate went stale since)
             if self.cash_gate_on() and self.cash_gate_blocks([order]):
                 self.cash_gate_log(e, "BASKET %s skipped: not enough available cash (cash gate)", ex.label)
+                if not p["add"]:
+                    self.basket_exit_blocked(ex, "not enough available cash (a short bought back as a YES purchase: "
+                                                 "covered NO sales not in effect)")
                 continue
             if not self.cancel(e, [], whole_exchange=True):
                 log.warning("BASKET %s skipped: could not confirm our own orders there are cancelled", ex.label)

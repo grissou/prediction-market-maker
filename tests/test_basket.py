@@ -920,6 +920,20 @@ check("RT-6: a basket leg whose fresh book lost its bids counts as sold at 0 in 
       "at its mark); an ordinary position keeps its mark (as ops_fields)", abs(liq - (100000.0 - 800.0)) < 1e-6, liq)
 b.ex["32"].verified = time.monotonic() - 10 * b.cfg.book_stale
 check("RT-6: ...a stale book proves nothing: the mark kept", b.basket_liquidation({"32": 10000}, 1e5, fv) == 1e5)
+api7, b7 = basket_bot(races={6: (0.120, 0.92)}, cash=0.0)
+api7.inv["61"] = -3000
+warm(b7)
+b7.cfg.reduce_no_as_sell = False                 # (the exchange refused covered NO sales this run, or before the test)
+b7.basket_state, b7.basket_on_wall, b7.basket_peak = "killed", time.time() - 50 * H, 100000.0
+b7.basket_killed, b7.basket_killed_wall = True, time.time() - 3 * H
+b7.basket_legs, b7.basket_kill_start = {"61": -3000.0}, {"61": -3000.0}
+b7.cg_cash, b7.cg_spent, b7.cg_reserved, b7.cg_read_at = 0.0, 0.0, 0.0, time.monotonic()
+ALERTS.clear()
+n0 = len(api7.wire)
+tick(b7)
+tick(b7)
+check("RT-7: a kill sale the cash gate blocks (a short bought back as a YES purchase at 0 cash) is ALERTED once",
+      len(api7.wire) == n0 and sum("cannot go out" in a for a in ALERTS) == 1 and b7.basket_legs, ALERTS)
 b.cfg.basket_mult, b.cfg.basket_mult_after_fail = 2.0, 8.0
 b.basket_test = "failed"
 check("RT-5: a failed test never RAISES the multiplier (mult_after_fail 8 > mult 2 -> 2)",
