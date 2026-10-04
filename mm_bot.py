@@ -1259,6 +1259,26 @@ class Config:
     # that is only the holding (no allocator plan for the market) leaves the ADDING side its skew from flat (RT12-7:
     # else every +EV holding - edge-held > 0 whenever p is above the bid - would bid on unskewed to the hard limit).
     skew_target_inventory: bool = False
+    # --- P12 ops: market-making risk reserve (owner, 4 Oct; everything OFF by default) ---
+    # alloc_mm_reserve keeps CASH for market making, but twice on 4 Oct value buying (takes, value quotes, the
+    # allocator) filled the worst-case backstop and the bot went reduce-only with the cash reserve idle. These keep
+    # RISK room instead. Each cycle (step 6, beside the reduce-only decision, which they never change):
+    #   room_wc   = worst_case_backstop_frac x account - total_worst_case (the sum of per-race maxima)
+    #   room_corr = max_worst_case_frac x account - the settlement risk the cap compares (correlated: min(worst,
+    #               settlement_risk); "sum": the worst case)
+    # mm_risk_reserve_wc > 0 and room_wc below it, OR mm_risk_reserve_corr > 0 and room_corr below it -> "value adds
+    # paused": no stale-quote take that grows a position (execute_take: only the part that shrinks one), no allocator
+    # BUY (alloc_plan / alloc_buy / a paired sale whose buy could not follow; reserve refills and other sales go on),
+    # no basket buy (refused "mm risk reserve"), and in the TAILS (the liquid race-scaled p, else the fair value,
+    # outside [value_mid_low, value_mid_high]) the side ADDING to this exchange's position quotes only what shrinks it
+    # (also the R3 ladder's caps); a resting tail add is dropped by the next re-quote (bid_max / ask_max follow).
+    # The MIDDLE band keeps its two-way quotes (adding within value_mid_inventory_quotes as before) and every
+    # reducing side, aged take (take_aged: always reducing) and arbitrage is untouched. It lifts once every room set
+    # is back to >= 1.1 x its reserve (MM_RISK_HYST). status.json mm_risk_room {room_wc, room_corr, paused, since,
+    # reserve_wc, reserve_corr, blocked {takes, alloc, basket, tail_quotes}}; journal "VALUE ADDS PAUSED ..." /
+    # "value adds resumed ..."; summary " | risk room wc Xk corr Yk (paused)". 0 = off (that room is not checked).
+    mm_risk_reserve_wc: float = 0.0
+    mm_risk_reserve_corr: float = 0.0
 
 
 CFG = Config()
@@ -1536,7 +1556,11 @@ OVERRIDABLE = {
     "close_override_utc": ("2026-11-01T00:00:00Z", "2026-11-07T00:00:00Z"),   # ISO UTC time (DATE_SETTINGS), "" = off
     "stop_minutes_before_close": (0.0, 120.0),
     "skew_target_inventory": (False, True),
+    # --- P12 ops: market-making risk reserve ---
+    "mm_risk_reserve_wc": (0.0, 50000.0),
+    "mm_risk_reserve_corr": (0.0, 50000.0),
 }
+MM_RISK_HYST = 1.1        # mm_risk_reserve_*: value adds resume once each room set is >= this x its reserve
 MAX_ORDER_TTL = 7200.0    # no order of ours lives longer than this (dead-man's switch), whatever the TTL settings
 LADDER_MAX_LEVELS = 8
 ONE_OF_SETTINGS = {"ref_tilt_estimator", "risk_unheld_legs"}   # string settings that take exactly one of their OVERRIDABLE names
@@ -3965,6 +3989,7 @@ class Ex:
     lad_pull_until: float = 0.0           # ...ladder pulled until then after a Polymarket jump
     lad_tag: str = ""                     # " L3" on the quote log line while 3 ladder orders rest
     lad_ctx: tuple = (1.0, 1.0, None)     # ...decide's (adding_factor, adding_limit_factor, frag_limit) this cycle
+    mmr_tail: bool = False                # P12 ops: value adds paused and a tail market (decide; the ladder too)
 
 
 def busy(ex, now_m):
@@ -4100,6 +4125,11 @@ class Bot:
         self.burst, self.burst_calm_since, self.burst_set = False, 0.0, set()
         self.trading_since = None         # monotonic time the trading loop started (burst_startup_grace_seconds)
         self.global_reduce = False
+        # P12 ops mm_risk_reserve_*: "value adds paused" (cycle step 6, mm_risk_room_update), when it started (wall
+        # time), the latest rooms, and what it held back (cumulative; tail_quotes: sides in the latest cycle)
+        self.mmr_paused, self.mmr_since, self.mmr_room = False, None, (None, None)
+        self.mmr_blocked = {"takes": 0, "alloc": 0, "basket": 0, "tail_quotes": 0}
+        self.mmr_tail_now = 0
         self.backstop_adding_factor = 1.0     # Package 6 candidate: backstop soft band (cycle step 6 sets it)
         self.ref_moved = set()            # eids whose Polymarket price moved >= urgent_ref_move at the latest reading
         self.unloads = {}                 # eid -> {"until", "side", "left"}: fast unload windows (note_unloads)
@@ -4557,6 +4587,8 @@ class Bot:
             log.warning("%s reduce-only: risk %.0f, worst case %.0f, account %s", "ENTERING" if global_reduce
                         else "leaving", risk, worst, f"{equity:.0f}" if equity is not None else "?")
         self.global_reduce = global_reduce
+        if cfg.mm_risk_reserve_wc > 0 or cfg.mm_risk_reserve_corr > 0 or self.mmr_paused:   # P12 ops (after it:
+            self.mm_risk_room_update(worst, risk, equity)                                   #  never changes it)
         self.backstop_adding_factor = backstop_soft_factor(worst, equity, cfg)   # Package 6 candidate: soft band
         capital = self.capital_in_positions(pos, inv, fvs)
         cap_frac = capital / equity if equity else None
@@ -4651,6 +4683,7 @@ class Bot:
         # 7. Decide + reconcile each exchange. One write at a time (parallel_writes = 1): cancels happen now,
         #    new orders are batched after. Otherwise every change is planned first, then sent in parallel.
         new_orders, changes = [], []
+        self.mmr_tail_now = 0                     # P12 ops: tail adding sides held back this cycle (decide counts)
         if self.cash_gate_on():                   # Package 8: the quotes' plan budget, after this cycle's takes
             self.cg_plan_left, self.cg_capped_now = self.cash_left(), 0
         self.ladder_setup(equity, capital, raw_orders, liquid, party_delta, resting)
@@ -4683,6 +4716,9 @@ class Bot:
         # Orders resting NOW, after this cycle's changes (the health snapshot above was taken before them).
         self.health["orders_resting"] = len(self.my_orders) if self.api.live else len(self.sim)
         self.health["selftest_state"] = self.selftest_state()
+        mmr = self.mm_risk_status()               # P12 ops mm_risk_reserve_* (absent while off and never paused)
+        if mmr is not None:
+            self.health["mm_risk_room"] = mmr
         if getattr(cfg, "cash_gate_enabled", False):   # Package 8 (absent while the gate is off)
             self.health["cash_gated"] = getattr(self, "cash_gated", 0)
             self.health["cash_trimmed"] = getattr(self, "cash_trimmed", 0)
@@ -5616,6 +5652,71 @@ class Bot:
                 var += race_variance(legs)
         return self.cfg.risk_swing_shock * abs(party_delta) + self.cfg.risk_z * math.sqrt(var) + stress
 
+    def mm_risk_room_update(self, worst, risk, equity):
+        """P12 ops mm_risk_reserve_* (cycle step 6, after the reduce-only decision, which it never touches): this
+        cycle's rooms (room_wc = worst_case_backstop_frac x account - worst, room_corr = max_worst_case_frac x account -
+        risk) and the "value adds paused" state with its hysteresis (pause below a reserve, resume once each reserve
+        set is covered MM_RISK_HYST times). No account value: the rooms are unknown and the state is kept. Returns
+        self.mmr_paused."""
+        cfg = self.cfg
+        res_wc, res_corr = max(0.0, cfg.mm_risk_reserve_wc), max(0.0, cfg.mm_risk_reserve_corr)
+        if not equity:
+            self.mmr_room = (None, None)
+            return self.mmr_paused
+        room_wc = cfg.worst_case_backstop_frac * equity - worst
+        room_corr = cfg.max_worst_case_frac * equity - risk
+        self.mmr_room = (room_wc, room_corr)
+        short = ((res_wc > 0 and room_wc < res_wc - 1e-9) or (res_corr > 0 and room_corr < res_corr - 1e-9))
+        clear = ((res_wc <= 0 or room_wc >= MM_RISK_HYST * res_wc - 1e-9)
+                 and (res_corr <= 0 or room_corr >= MM_RISK_HYST * res_corr - 1e-9))
+        paused = short or (self.mmr_paused and not clear)
+        if paused != self.mmr_paused:
+            log.warning("%s: risk room worst case %.0f (reserve %.0f), correlated %.0f (reserve %.0f), account %.0f%s",
+                        "VALUE ADDS PAUSED (mm_risk_reserve: takes, allocator buys, basket buys and tail adds stop; "
+                        "middle-band two-way quoting goes on)" if paused else "value adds resumed (mm_risk_reserve)",
+                        room_wc, res_wc, room_corr, res_corr, equity,
+                        "" if paused or res_wc > 0 or res_corr > 0 else " - setting off")
+            self.mmr_since = time.time() if paused else None
+        self.mmr_paused = paused
+        return paused
+
+    def mm_risk_status(self):
+        """P12 ops: status.json mm_risk_room (None while both settings are 0 and it never paused: the key absent)."""
+        cfg = self.cfg
+        if not (cfg.mm_risk_reserve_wc > 0 or cfg.mm_risk_reserve_corr > 0 or self.mmr_paused or self.mmr_since):
+            return None
+        rw, rc = self.mmr_room
+        return {"room_wc": None if rw is None else round(rw, 2), "room_corr": None if rc is None else round(rc, 2),
+                "paused": self.mmr_paused,
+                "since": (datetime.fromtimestamp(self.mmr_since, timezone.utc).isoformat(timespec="seconds")
+                          if self.mmr_since else None),
+                "reserve_wc": cfg.mm_risk_reserve_wc, "reserve_corr": cfg.mm_risk_reserve_corr,
+                "blocked": {**self.mmr_blocked, "tail_quotes": self.mmr_tail_now}}
+
+    def mm_risk_count(self, path, n=1):
+        """P12 ops: count n value adds held back on path (takes / alloc / basket) for status.json mm_risk_room."""
+        if n:
+            blocked = self.__dict__.setdefault("mmr_blocked", {"takes": 0, "alloc": 0, "basket": 0, "tail_quotes": 0})
+            blocked[path] = blocked.get(path, 0) + n
+
+    def mm_risk_summary(self):
+        """P12 ops: "risk room wc Xk corr Yk (paused)" for the 2-hourly summary while a setting is on; "" otherwise."""
+        cfg = self.cfg
+        if not (cfg.mm_risk_reserve_wc > 0 or cfg.mm_risk_reserve_corr > 0):
+            return ""
+        rw, rc = self.mmr_room
+        k = lambda x: "?" if x is None else f"{x / 1000:.1f}k"   # noqa: E731
+        return f"risk room wc {k(rw)} corr {k(rc)}" + (" (paused)" if self.mmr_paused else "")
+
+    def mm_tail_adds_off(self, ex, fv, ref, ref_liquid):
+        """P12 ops: True while value adds are paused and this market is in a TAIL: its liquid race-scaled p (value_p),
+        else its fair value, outside [value_mid_low, value_mid_high]. The middle band keeps two-way quoting."""
+        if not self.mmr_paused:
+            return False
+        p = self.value_p(ex, ref, ref_liquid)
+        p = fv if p is None else p
+        return p is not None and not (self.cfg.value_mid_low <= p <= self.cfg.value_mid_high)
+
     def total_worst_case(self, inv, fvs):
         """Sum over races of the worst-case settlement loss (see worst_case_loss)."""
         total = 0.0
@@ -5792,6 +5893,15 @@ class Bot:
             ask_cap = int(ex.inv) if ask_cap is None else min(ask_cap, int(ex.inv))
         if exempt_bid:
             bid_cap = int(-ex.inv) if bid_cap is None else min(bid_cap, int(-ex.inv))
+        # P12 ops mm_risk_reserve_*: value adds paused -> in the tails only what shrinks this exchange's position
+        ex.mmr_tail = (self.mm_tail_adds_off(ex, fv, ref, ref_liquid) if getattr(self, "mmr_paused", False)
+                       else False)
+        if ex.mmr_tail:
+            red_bid, red_ask = max(0, int(-ex.inv)), max(0, int(ex.inv))
+            held = (bid_cap is None or bid_cap > red_bid) + (ask_cap is None or ask_cap > red_ask)
+            self.mmr_tail_now = getattr(self, "mmr_tail_now", 0) + held
+            bid_cap = red_bid if bid_cap is None else min(bid_cap, red_bid)
+            ask_cap = red_ask if ask_cap is None else min(ask_cap, red_ask)
 
         reduce_only = global_reduce or hrs <= self.close_window("flatten_hours_before_close", cfg)
         # From flatten_per_market_hours: flatten each market on its own, i.e. judge (and skew) by this
@@ -6314,6 +6424,9 @@ class Bot:
             extra[False].append(max(0.0, inv))
         if fv > cfg.tail_high:
             extra[True].append(max(0.0, -inv))
+        if ex.mmr_tail and getattr(self, "mmr_paused", False):   # P12 ops mm_risk_reserve_*: tails only shrink a position
+            extra[True].append(max(0.0, -inv))
+            extra[False].append(max(0.0, inv))
         sign = PARTY_SIGN.get(ex.party, 0)
         if sign and getattr(cfg, "bloc_delta_enabled", False):   # Package 10 A2: room in bloc delta / sensitivity
             d, cap = self.party_measure(self.lad_party_delta)
@@ -8720,6 +8833,12 @@ class Bot:
             room = min(room, max(0.0, -inv) if buy else max(0.0, inv))
         cost = price if buy else 1 - price
         qty = int(min(level["quantity"], room, cfg.max_order_cash_frac * bank / max(cost, TICK)))
+        if getattr(self, "mmr_paused", False) and qty >= 1:   # P12 ops mm_risk_reserve_*: value adds paused -
+            cut = int(min(qty, max(0.0, -inv) if buy else max(0.0, inv)))   # only what shrinks the position here
+            if cut < 1:
+                self.mm_risk_count("takes")
+                log.info("take on %s skipped: value adds paused (mm_risk_reserve)", ex.label)
+            qty = cut
         if qty >= 1 and not self.writes_ready(3):
             # Checked BEFORE pulling our own quote (cancel + take + leftover cancel): a take that can't be sent
             # must not leave the market unquoted. The direction stays confirmed: taken once the budget frees.
@@ -9809,6 +9928,8 @@ class Bot:
             # P9 red team: exempt from reduce-only, but the sum-of-maxima backstop (the basket in it at its stress loss)
             # stays the LAST RESORT for adds too - else nothing bounds the worst case while the basket buys
             refuse = "worst-case backstop"
+        elif getattr(self, "mmr_paused", False):      # P12 ops mm_risk_reserve_*: value adds paused (sales go on)
+            refuse = "mm risk reserve"
         elif not (self.cash_gate_on() and getattr(self, "cg_cash", None) is not None):
             refuse = "no fresh cash read (cash_gate_enabled needed)"
         cash = self.cash_left() if refuse is None else 0.0
@@ -9818,6 +9939,8 @@ class Bot:
             # stalled with refused None and no log line - say why (it buys as soon as the gate has cash again)
             refuse = "no free cash (cash gate)"
         if refuse != (self.basket_info or {}).get("refused"):
+            if refuse == "mm risk reserve":
+                self.mm_risk_count("basket")
             log.info("BASKET adds %s", f"refused: {refuse}" if refuse else "allowed again")
         writes = getattr(self.api, "writes_left", lambda: 10 ** 6)() if self.api.live else 10 ** 6
         orders = self.basket_orders(now_w, fvs, book_fvs, inv, target, full, cash, refuse is None, writes, sched, now_m,
@@ -10257,6 +10380,9 @@ class Bot:
         if getattr(self, "global_reduce", False) and levels:   # (red team RT-2: no buy while in reduce-only;
             blocked["risk"] += 1                                #  reserve refills, which only reduce, still run)
             levels = []
+        if getattr(self, "mmr_paused", False) and levels:      # P12 ops mm_risk_reserve_*: value adds paused (the
+            blocked["mm_risk_reserve"] += 1                     #  same: no buy; reserve refills still run)
+            levels = []
         left = float("inf") if turnover_left is None else max(0.0, turnover_left)
         pairs, gain = [], 0.0
         hyp = {e: float(q) for e, q in inv.items()}
@@ -10417,6 +10543,7 @@ class Bot:
                                               cfg.alloc_max_turnover_per_hour - turnover)
                 self.alloc_last_run_wall = now_w
                 self.alloc_targets = self.alloc_plan_targets(inv, pairs)   # Package 12 M2
+                self.mm_risk_count("alloc", info["blocked_by"].get("mm_risk_reserve", 0))   # P12 ops
                 for pr in pairs:
                     log.info("[dry] %s", self.alloc_journal(pr))
                 self.alloc_state = "dry run"
@@ -10438,6 +10565,7 @@ class Bot:
             self.alloc_totals["runs_total"] += 1
             self.alloc_pairs, self.alloc_sells_stopped = pairs, False
             self.alloc_targets = self.alloc_plan_targets(inv, pairs)       # Package 12 M2
+            self.mm_risk_count("alloc", info["blocked_by"].get("mm_risk_reserve", 0))   # P12 ops
             for pr in pairs:
                 pr["planned_at"] = now_m
             self.alloc_run = {"blocked_by": dict(info["blocked_by"]), "pairs_planned": len(pairs), "sold": 0.0,
@@ -10527,6 +10655,10 @@ class Bot:
         if getattr(self, "global_reduce", False):     # (red team RT-2: no buy in reduce-only; the pair waits, then
             self.alloc_block("risk")                  #  expires after ALLOC_BUY_WAIT with its cash kept)
             return False
+        if getattr(self, "mmr_paused", False):        # P12 ops mm_risk_reserve_*: value adds paused (as RT-2)
+            self.alloc_block("mm_risk_reserve")
+            self.mm_risk_count("alloc")
+            return False
         if ex is None or not self.alloc_market_ok(ex, skip) or busy(ex, now_m):
             return False                          # (traded by another feature / a write in flight: next cycle)
         q = float(inv.get(b["eid"], 0.0))
@@ -10614,6 +10746,10 @@ class Bot:
         bedge = None
         if b is not None and getattr(self, "global_reduce", False):   # (red team RT-2: its buy could not follow)
             self.alloc_block("risk")
+            return False
+        if b is not None and getattr(self, "mmr_paused", False):     # P12 ops mm_risk_reserve_*: nor while paused
+            self.alloc_block("mm_risk_reserve")
+            self.mm_risk_count("alloc")
             return False
         if b is not None:                         # the paired level first: no sale without it on a fresh book
             bx = self.ex.get(b["eid"])
@@ -11345,6 +11481,9 @@ class Bot:
             line = f"{line} | {part}" if line else part
         if getattr(self.cfg, "bloc_delta_enabled", False):   # Package 10 A2: " | bloc delta X/sd"
             part = f"bloc delta {self.bloc_delta:+,.0f}/sd"
+            line = f"{line} | {part}" if line else part
+        part = self.mm_risk_summary()                 # P12 ops: " | risk room wc Xk corr Yk (paused)"
+        if part:
             line = f"{line} | {part}" if line else part
         for fn in (ev_outcome_part, mm_carry_part):   # " | EV outcome X (+Y 24h, N unpriced) | MM carry 24h ..."
             try:
