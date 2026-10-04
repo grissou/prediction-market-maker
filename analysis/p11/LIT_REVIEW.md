@@ -46,7 +46,32 @@ count"; 50-50 goes to the VP's party. Late settlement: Georgia runoff 1 Dec (Gov
 delays the standings, not our balance. **Open questions for SIG:** the per-market trading close vs the 12:00 pm ET rule; how control is
 decided; what happens to an unresolved market.
 
-## E. Recommendation (ranked by value per unit of risk and cost)
+## F. Second wave (readers 5-6; `lit_electionnight.md` 31 sources, `lit_competitions.md` 19 sources cited from memory: the session's web
+## access ran out — 200 WebSearch calls used, and WebFetch then needed per-URL approval that nobody was there to give)
+| # | Idea | Source | What changes | Value / cost |
+|---|---|---|---|---|
+| F1 | **The bot stops itself at 23:45 UTC on 3 Nov** whatever SIG allows: `mm_bot.py:4121` sets each market's close to min(settlementDate, endDate) = 00:00 UTC and `stop_minutes_before_close` 15 cancels everything. Three more defaults block election-night trading: the tail guard forbids buying YES above fv 0.95 except to shrink; order / position caps 1k / 2k per market; a take costs 3 writes (~9 takes/min) | EN code finding | if SIG confirms trading to 12:00 pm ET: a `close_override_utc` setting, a "certain" class (AP-called + Polymarket >= 0.98 for 10 min, or Polymarket resolved -> p = 1/0) that lifts the tail guard and caps (15% of the account per race, 40% total; exclude AK, ME, GA near 50%, races with an independent), takes batched 10 per write (50-100/min), funded by selling called-winner positions and set legs bid >= 0.96-0.98 | **+5-15k, more if SIG pays called races out overnight**; cash is the limit; ~150-200 lines; untestable offline |
+| F2 | **Don't trade the first hour's swing**: PA/MI/WI report R-leaning votes first, OH/NC/FL/GA report D-leaning first, AZ/NV/CA take days; 2004/2018/2020 each had a 25-40 point overshoot; Polymarket reached 99.1% in 2024 ~4 h before the AP call | EN-7/12; Snowberg-Wolfers-Zitzewitz 2004; Auld-Linton (Brexit: a results model led Betfair by ~113 min) | the control contracts stay in a stricter "moving" class until ~03:00 UTC; take only what the live price AND a 21:00 UTC Polymarket snapshot agree on | the biggest election-night risk (a reversal is a real loss at the outcome) |
+| F3 | **Case A (close at 00:00 UTC) defence**: from 21:00 raise the take edge / confirmation on the control contracts; from 23:00 quote only the value side and nothing in IN/KY; keep the 23:45 stop; the reference at full speed 22:00-00:00 | EN-2/3; Lee-Mucklow-Ready (pre-announcement spreads) | config-ish; protects 1-5k |
+| F4 | **Poll-closing timeline (UTC, 3-4 Nov):** 23:00 IN/KY; 00:00 GA/VA/VT/SC/most FL; 00:30 NC/OH/WV; 01:00 PA/MI/ME/NH/NJ/MA/IL/most TX/KS; 02:00 NY/WI/MN/IA/AZ/CO/NE/NM; 03:00 NV/MT/UT; 04:00 CA/WA/OR; 05-06:00 AK. Lopsided races called at close, safe statewide 1-3.5 h after, competitive 4-7 h or days; AZ/NV/CA/AK/ME and sub-1-point races still uncalled by 17:00 UTC 4 Nov; GA runoff 1 Dec | AP methodology; Polymarket resolves only when AP + Fox + NBC all call | the schedule for F1/F2 |
+| F5 | **Sell the longshot instead of buying the favourite whenever a race's best bids sum above 1** (48% of 2-leg race snapshots in the last 600 cycles, 99.8% of 3-leg): same exposure, better price, less cash | CMP-1; snap03 | a side choice in the allocator's edge-per-$ ranking (~15 lines) |
+| F6 | **Dutch books are frequent and slow to close**: bids sum > 1 in 30% of race snapshots (52% on 3 Oct, mostly 0.5-2c, sometimes 4c+), asks sum < 1 in 9.6%; median life ~2 min, p90 ~25 min; most frequent 20-22 UTC, largest 04-07 UTC (1.8c). Nobody runs a fast set-arbitrage bot here | CMP-2, Saguillo et al. 2025 | sell-side set arbitrage back on with all legs in one write (Package 9's `arb_cash_rule` exists); only gaps >= 2.5-3c clear a 5% per-$ hurdle; a riskless set yields 1-2% of collateral vs our 5-10% value edge, so it is cash parking |
+| F7 | **Time pair unwinds for when a race's asks sum <= 1**; never unwind while the bids sum > 1 | CMP-11 | a gate on `pair_no_unwind_max_cost` (~10 lines) |
+| F8 | **A rival bot** posts 20-share levels in ~230 of 237 markets around the tournament mid; 14% of its 1,293 levels sit > 1c through our fair value, always on our value side (bids longshots above fair, offers favourites below). If it reposts after being hit, folding 20-share levels through fair value into the take rule is a repeatable fair-play take, worth ~$0.3-0.6 per write | CMP rival pattern; snap03 | test on the live recorder (the books table is too sparse); never post to make it move |
+| F9 | **Contest theory explains the tilt and predicts late Hail-Mary buying**: a laggard on a top-k leaderboard is rewarded for extreme bets (Witkowski et al.; Brown-Harlow-Starks; Chevalier-Ellison), so s rises into the close; keep a reserve for the last 72 h and rest longshot asks in the ~20 most salient markets late | CMP-3/9, ANOM-7 | config (reserve) + the ladder of A4 |
+
+## G. Recommendation, updated
+1. **Ask SIG today** (EN-1): are orders accepted 00:00-17:00 UTC on 4 Nov; is trading on public returns allowed; are called races paid out
+   overnight; how are retracted calls, recounts, runoffs and independents resolved. The answer decides whether election-night mode (F1,
+   +5-15k, the only lever that moves P(>= 150k) by tens of points) is built; either way the bot's 23:45 self-stop (F1) must become a setting.
+2. **Package 12 (small code, ~250 lines in all):** rich-leg set sale ladder (A4, +0.5-0.9k), skew toward target inventory (B1), longshot-sell
+   side choice when bids sum > 1 (F5), pair-unwind gate on asks sum <= 1 (F7), `close_override_utc` + the stop setting (F1 part 1), consensus
+   band + TX/KS shade (C1-C3). Config now: hurdle 0.05 (done), `bloc_rho` 0.55, a 10-15k end-game reserve.
+3. **Owner decision:** the Texas Rep digital <= $20k (A2) after re-running the model with rho 0.55 and the unresolved-control mass.
+4. **More reading** needs the web budget raised (CLAUDE_CODE_MAX_WEB_SEARCHES_PER_SESSION) or URLs pasted by the owner; ~180 sources were
+   read in this session (readers 1-5), reader 6 wrote from memory.
+
+## E. Recommendation (ranked by value per unit of risk and cost) — superseded by G above
 1. **Ask SIG about the trading close today (A6)**; build election-night mode only on a "yes" (the one lever that moves P(>= 150k) by tens of
    points; fair play: taking existing quotes on public results).
 2. **Config now:** stage-3 hurdle 0.05 (A5); `bloc_rho` 0.55; keep a 10-15k end-game reserve (A3); `tilt_exit_take_split_sets` stays off.
