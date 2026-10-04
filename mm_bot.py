@@ -3676,6 +3676,27 @@ def ops_summary_line(ops, account=None, tilt_s=None, tilt_exposure=None):
     return line
 
 
+def ev_outcome_part(ops):
+    """"EV outcome 101.2k (+1,234 24h, 2 unpriced)" from the ev fields ("?" for an unknown 24-h delta); None
+    while ev_outcome is unknown."""
+    ops = ops or {}
+    ev = ops.get("ev_outcome")
+    if ev is None:
+        return None
+    d = ops.get("ev_outcome_delta_24h")
+    return (f"EV outcome {ev / 1000:.1f}k ({f'{d:+,.0f}' if d is not None else '?'} 24h, "
+            f"{ops.get('ev_outcome_unpriced') or 0} unpriced)")
+
+
+def mm_carry_part(ops):
+    """"MM carry 24h +12 (mid), value adds +340, takes -25" from mm_carry_24h; None without it."""
+    mc = (ops or {}).get("mm_carry_24h")
+    if not isinstance(mc, dict):
+        return None
+    return (f"MM carry 24h {mc.get('realised', 0):+,.0f} (mid), value adds {mc.get('value_adds_ev', 0):+,.0f}, "
+            f"takes {mc.get('takes_ev', 0):+,.0f}")
+
+
 def build_summary(api, fills_path, initial_balance, value=None, value_prev=None, arbs=None, health=None, takes=None,
                   hours=24, status=None, ops_line=None):
     """The phone summary as (title, message). Reads account value (unless given), rank and Smart Score
@@ -4106,6 +4127,9 @@ class Bot:
         self.ops_last = {}                # ops fields of the latest status write (ops_fields): recorder, summary
         self.ops_cache = {}               # ops_fields: fills.csv-derived numbers, recomputed when the file changes
         self.ops_warned = False           # ops_fields failed once (logged once)
+        self.ev_hist = self.load_ev_hist()   # [[wall, ev_outcome], ...] last 48 h (status.json, survives a restart)
+        self.ev_fill_p = {}               # {fill_id: Polymarket p when the fill was logged} (mm_carry_24h; this run)
+        self.ev_warned = False            # ev_fields failed once (logged once)
         self.takes_total = 0
         self.takes_skipped_budget = self.arbs_skipped_budget = 0   # not sent: write budget busy (status.json)
         self.take_version_seen = 0        # last Polymarket reading the take logic has counted
@@ -4537,13 +4561,13 @@ class Bot:
         ages = self.portfolio_age(time.time())
         if full:                                  # summary line on full checks only (event cycles can be every 2 s)
             log.info("%s | account %s (locked in orders %.0f, %s) | worst-case loss %.0f (risk %.0f)%s | party delta %+.0f | "
-                     "priced %d/%d | resting %d | last cycle %s",
+                     "priced %d/%d | resting %d | last cycle %s%s",
                      "realtime" if realtime else ("polling (realtime connecting)" if self.feed else "polling"),
                      f"{equity:.0f}" if equity is not None else "?", reserved,
                      {"add": "added back", "ignore": "already included"}.get(self.reserved_mode, "detecting"), worst, risk,
                      " -> REDUCE-ONLY" if global_reduce else "", party_delta,
                      sum(v is not None for v in fvs.values()), len(fvs), sum(len(v) for v in resting.values()),
-                     self.phases_text())
+                     self.phases_text(), self.ev_line_part())
         self.health = {"account_value": equity, "locked_in_orders": round(reserved, 2),
                        "reserved_cash_mode": self.reserved_mode or "detecting", "worst_case_loss": round(worst, 2),
                        "reduce_only": global_reduce, "party_delta": party_delta,
@@ -10968,6 +10992,7 @@ class Bot:
                         break
         if new:
             self.fills.record(new, self.order_meta, fvs)
+            self.note_fill_p(new)                             # (mm_carry_24h: Polymarket p at fill time)
         for f in reversed(new):                               # oldest first
             oid = f.get("orderId")
             o = self.my_orders.get(oid)
@@ -11290,6 +11315,14 @@ class Bot:
         if getattr(self.cfg, "bloc_delta_enabled", False):   # Package 10 A2: " | bloc delta X/sd"
             part = f"bloc delta {self.bloc_delta:+,.0f}/sd"
             line = f"{line} | {part}" if line else part
+        for fn in (ev_outcome_part, mm_carry_part):   # " | EV outcome X (+Y 24h, N unpriced) | MM carry 24h ..."
+            try:
+                part = fn(self.ops_last)
+            except (TypeError, ValueError) as e:
+                log.warning("summary %s failed: %s", fn.__name__, e)
+                part = None
+            if part:
+                line = f"{line} | {part}" if line else part
         return line
 
     def safe_nono_sets(self):
@@ -11384,6 +11417,9 @@ class Bot:
         ev = c["events"]
         while ev and ev[0][0] < since:
             ev.popleft()
+        rows = c.setdefault("rows", deque())
+        while rows and rows[0][0] < since:
+            rows.popleft()
         c.update(sig=sig, t=now, lots={e: [list(x) for x in v] for e, v in c["book"].items() if v},
                  reduced_24h=sum(r for t, r, _ in ev if t >= since), added_24h=sum(a for t, _, a in ev if t >= since))
         self.ops_cache = c
@@ -11419,6 +11455,10 @@ class Bot:
             add += abs(rem)
         if ts is not None:
             c["events"].append((ts, red, add))
+            # (mm_carry_24h) the row itself, kept 24 h: (time, fill id, order id, market, bid?, shares, YES price)
+            c.setdefault("rows", deque()).append((ts, str(r.get("fill_id")), str(r.get("order_id")),
+                                                  str(r.get("exchange_id")), side == "bid", qty, price))
+            c["first_ts"] = min(c.get("first_ts") or ts, ts)
 
     def ops_fields(self, now=None):
         """Read-only reporting for status.json, the recorder and the phone summary (no requests; None = unknown):
@@ -11493,6 +11533,189 @@ class Bot:
             out["pair_passive_sets_total"] = self.pp_sets_total
         return out
 
+    # ------------------------------------------------------------------------------ EV at the outcome, MM carry
+    EV_KEYS = ("ev_outcome", "ev_outcome_unpriced", "ev_outcome_delta_24h", "ev_outcome_scope", "mm_carry_24h")
+    EV_HIST_SECONDS = 300.0       # one (wall, ev) sample at most this often (48 h = 576 samples in status.json)
+    EV_HIST_KEEP = 48 * 3600.0
+    EV_SCOPE = ("cash (cash gate read, else account - positions at marks) + positions held to the outcome at the "
+                "race-scaled liquid Polymarket price (long q x r, short |q| x (1 - r)); no liquid price: at the "
+                "exchange mark, else the book's fair value, else left out (all counted in ev_outcome_unpriced)")
+
+    def load_ev_hist(self):
+        """status.json ev_outcome_history ([[wall, ev], ...]) the previous run left; [] if none or unreadable."""
+        try:
+            with open(bot_path(self.cfg.status_file)) as f:
+                h = json.load(f).get("ev_outcome_history")
+            return [[float(t), float(v)] for t, v in h] if isinstance(h, list) else []
+        except (OSError, ValueError, TypeError, AttributeError):
+            return []
+
+    def ev_p(self, e):
+        """The outcome value of one YES share in market e: value_p (race-scaled liquid Polymarket), else None."""
+        ex = self.ex.get(e)
+        if ex is None:
+            return None
+        return self.value_p(ex, (self.cur_refs or {}).get(e), e in (self.cur_liquid or ()))
+
+    def note_fill_p(self, new):
+        """mm_carry_24h: the Polymarket p of each newly logged fill's market now (= at fill time, to a cycle)."""
+        try:
+            for f in new:
+                self.ev_fill_p[str(f.get("id"))] = self.ev_p(str(f.get("exchangeId")))
+            if len(self.ev_fill_p) > 20000:               # (a day of fills is far fewer: drop the oldest half)
+                self.ev_fill_p = dict(list(self.ev_fill_p.items())[10000:])
+        except Exception as e:                            # reporting must never disturb trading
+            log.warning("fill p note failed: %s", e)
+
+    def ev_fields(self, now=None, record=False):
+        """Read-only reporting (status.json, the realtime line, the phone summary; None = unknown):
+          ev_outcome            what the account pays at the OUTCOME: cash + positions valued at Polymarket (see
+                                EV_SCOPE); cash = the cash gate's cg_cash when read, else account value - positions
+                                at marks (exchange mark, else book fair value)
+          ev_outcome_unpriced   held markets without a liquid Polymarket price (valued at the mark / book, or out)
+          ev_outcome_delta_24h  ev now - ev 24 h ago from a 48 h ring of (wall, ev) samples (status.json
+                                ev_outcome_history, EV_HIST_SECONDS apart; record=True adds one); None before 24 h
+          mm_carry_24h          mm_carry (the market maker's realised middle-band spread, value adds, takes)"""
+        cfg = self.cfg
+        now = time.time() if now is None else now
+        out = dict.fromkeys(self.EV_KEYS)
+        out["ev_outcome_scope"] = self.EV_SCOPE
+        inv = {e: float(q) for e, q in (self.held or {}).items() if e in self.ex and round(q)}
+        book_fv = {}
+        for members in self.groups.values():
+            if any(e in inv for e in members):
+                fv = {e: fair_value(self.ex[e].book, cfg) for e in members if e in self.ex}
+                book_fv.update(normalise(fv) if len(fv) > 1 else fv)
+        at_ref, at_mark, unpriced, unmarked = 0.0, 0.0, 0, 0
+        for e, q in inv.items():
+            m = self.pos_marks.get(e)
+            m = m if m is not None else book_fv.get(e)
+            if m is not None:
+                at_mark += self.alloc_held_usd(q, m)
+            else:
+                unmarked += 1
+            p = self.ev_p(e)
+            if p is None:
+                unpriced += 1
+                p = m
+            if p is not None:
+                at_ref += self.alloc_held_usd(q, p)
+        out["ev_outcome_unpriced"] = unpriced
+        cash = getattr(self, "cg_cash", None)
+        if cash is None and self.health.get("account_value") is not None and not unmarked:
+            cash = float(self.health["account_value"]) - at_mark
+        if cash is not None:
+            ev = round(float(cash) + at_ref, 2)
+            out["ev_outcome"] = ev
+            h = self.ev_hist
+            if record and (not h or now - h[-1][0] >= self.EV_HIST_SECONDS):
+                h.append([round(now, 1), ev])
+            while h and h[0][0] < now - self.EV_HIST_KEEP:
+                h.pop(0)
+            old = [v for t, v in h if t <= now - 24 * 3600 + 1]     # (+1 s: samples are stored to 0.1 s)
+            out["ev_outcome_delta_24h"] = round(ev - old[-1], 2) if old else None
+        out["mm_carry_24h"] = self.mm_carry(now)
+        return out
+
+    def mm_carry(self, now):
+        """mm_carry_24h: over the last 24 h of fills.csv (ops_fills rows, our_side bid / ask) classified with the
+        order notes (order_meta, kept a day): take / arb (pair unwinds included) / alloc (set ladder included) /
+        basket orders are not maker fills; the rest are our resting quotes ("maker"; a fill whose note is gone
+        counts as maker, see meta_missing). p = the market's race-scaled liquid Polymarket price when the fill was
+        logged (ev_fill_p; fills logged before this run use the price now: p_now count). Maker fills with p in
+        [value_mid_low, value_mid_high] are the middle band: their buys and sells are FIFO-matched per market in time
+        order, realised = sum matched qty x (sell - buy); what stays unmatched is unmatched_shares, valued at p -
+        price (unmatched_ev, not realised). value_adds_ev = tail maker fills' edge to p at fill (buy q x (p - price),
+        sell q x (price - p)); takes_ev the same for take fills. per_day = realised x 24 / hours covered."""
+        cfg = self.cfg
+        c = self.ops_fills(now)
+        notes = {str(k): v for k, v in (self.order_meta or {}).items()}
+        lo, hi = cfg.value_mid_low, cfg.value_mid_high
+        counts = dict.fromkeys(("maker_mid", "maker_tail", "maker_unpriced", "take", "arb", "alloc", "basket"), 0)
+        book, realised, adds, takes = defaultdict(deque), 0.0, 0.0, 0.0
+        p_fill = p_now = missing = take_unpriced = 0
+        for ts, fid, oid, e, buy, qty, price in sorted(c.get("rows") or (), key=lambda r: r[0]):
+            if ts < now - 24 * 3600:
+                continue
+            meta = notes.get(oid)
+            if meta is None:
+                missing += 1
+                meta = {}
+            if meta.get("basket"):
+                cls = "basket"
+            elif meta.get("alloc") or meta.get("set_ladder"):
+                cls = "alloc"
+            elif meta.get("arb"):
+                cls = "arb"
+            elif meta.get("take"):
+                cls = "take"
+            else:
+                cls = "maker"
+            if cls not in ("maker", "take"):
+                counts[cls] += 1
+                continue
+            if fid in self.ev_fill_p:
+                p = self.ev_fill_p[fid]
+                p_fill += 1
+            else:
+                p = self.ev_p(e)
+                p_now += 1
+            edge = None if p is None else qty * ((p - price) if buy else (price - p))
+            if cls == "take":
+                counts["take"] += 1
+                if edge is None:
+                    take_unpriced += 1
+                else:
+                    takes += edge
+                continue
+            if p is None:
+                counts["maker_unpriced"] += 1
+            elif not lo <= p <= hi:
+                counts["maker_tail"] += 1
+                adds += edge
+            else:
+                counts["maker_mid"] += 1
+                lots, rem = book[e], qty if buy else -qty
+                while abs(rem) > 1e-9 and lots and (lots[0][0] > 0) != (rem > 0):
+                    lot = lots[0]
+                    n = min(abs(rem), abs(lot[0]))
+                    realised += n * (price - lot[1]) * (1 if lot[0] > 0 else -1)
+                    lot[0] += n if lot[0] < 0 else -n
+                    rem += n if rem < 0 else -n
+                    if abs(lot[0]) <= 1e-9:
+                        lots.popleft()
+                if abs(rem) > 1e-9:
+                    lots.append([rem, price, p])
+        left = [x for v in book.values() for x in v]
+        first = c.get("first_ts")
+        hours = round(min(24.0, max(0.0, (now - first) / 3600)), 2) if first is not None else None
+        return {"realised": round(realised, 2),
+                "per_day": round(realised * 24 / hours, 2) if hours else None, "hours_covered": hours,
+                "unmatched_shares": round(sum(abs(q) for q, _, _ in left), 2),
+                "unmatched_ev": round(sum(q * (p - px) for q, px, p in left), 2),
+                "value_adds_ev": round(adds, 2), "takes_ev": round(takes, 2), "fills": counts,
+                "takes_unpriced": take_unpriced, "meta_missing": missing, "p_at_fill": p_fill, "p_now": p_now,
+                "band": [lo, hi]}
+
+    def ev_line_part(self):
+        """" | EV outcome X (+Y 24h, N unpriced)" for the realtime / polling cycle line (the latest status write's
+        figures), "" while unknown. Never raises."""
+        try:
+            part = ev_outcome_part(self.ops_last)
+        except (TypeError, ValueError, AttributeError):
+            part = None
+        return f" | {part}" if part else ""
+
+    def safe_ev_fields(self, record=False):
+        """ev_fields that never raises: on any error every field is None (logged once)."""
+        try:
+            return self.ev_fields(record=record)
+        except Exception as e:                    # reporting must never disturb trading
+            if not self.ev_warned:
+                self.ev_warned = True
+                log.warning("ev fields unavailable (%s: %s) - reported as null", type(e).__name__, e)
+            return dict.fromkeys(self.EV_KEYS)
+
     def safe_ops_fields(self):
         """ops_fields that never raises: on any error every field is None (logged once)."""
         try:
@@ -11505,7 +11728,7 @@ class Bot:
 
     def write_status(self, ok):
         """status.json: a one-glance health check, e.g. `cat status.json` over ssh."""
-        self.ops_last = self.safe_ops_fields()
+        self.ops_last = {**self.safe_ops_fields(), **self.safe_ev_fields(record=True)}
         try:
             owed = ({"pair_owed": self.pair_owed_status()}
                     if getattr(self.cfg, "pair_unwind_followup", False) or getattr(self, "pair_owed", None) else {})
@@ -11529,6 +11752,8 @@ class Bot:
                 **({"basket": self.basket_status()} if self.basket_persist_needed() else {}),
                 # Package 10 B: the allocator (also what a restart restores; absent while never used)
                 **({"alloc": self.alloc_status()} if self.alloc_persist_needed() else {}),
+                # ev_outcome_delta_24h's ring of (wall, ev) samples (also what a restart restores)
+                "ev_outcome_history": [list(x) for x in self.ev_hist],
                 "seconds_since_cycle": round(time.monotonic() - self.last_cycle_done, 1)
                 if self.last_cycle_done is not None else None})
         except OSError as e:
