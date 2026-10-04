@@ -827,6 +827,24 @@ b.cfg.basket_enabled, b.overrides = True, {"basket_enabled": True}
 cycle(b)
 check("...later the file says false (state already off: still observed by the cycle), then true: latch cleared",
       not b.basket_killed and b.basket_state == "building", (b.basket_killed, b.basket_state))
+api, b = basket_bot(races={3: (0.080, 0.90)})
+fv = warm(b)
+b.basket_state, b.basket_on_wall, b.basket_peak = "tracking", time.time() - 5 * H, 100000.0
+b.basket_legs = {"32": 3000.0}
+api.inv["32"] = 3000
+n0 = len(api.wire)
+tick(b, equity=None)
+check("no account value: no target, no tracking sale (never a sale to 0 on missing data), no buy",
+      len(api.wire) == n0 and b.basket_legs == {"32": 3000.0} and b.basket_info["target"] is None, b.basket_info)
+ALERTS.clear()
+real_tick = b.basket_tick
+b.basket_tick = lambda *a, **k: 1 / 0
+n0 = len(api.wire)
+cycle(b)
+check("a crashing basket tick: the cycle completes, the market maker still quotes, one alert",
+      any(o_["exchangeId"] == "11" for o_ in api.orders.values()) and "selftest_state" in b.health
+      and sum("crashed" in a for a in ALERTS) == 1, ALERTS)
+b.basket_tick = real_tick
 api, b = basket_bot(races={6: (0.120, 0.92)}, cash=0.0)
 api.inv["61"] = -3000
 fv = warm(b)

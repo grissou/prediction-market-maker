@@ -4090,7 +4090,15 @@ class Bot:
             taken |= self.take_aged(inv, book_fvs, mine_real, now_m)
         # 6c. Package 9 F1: the long-tilt basket (immediate-or-cancel takes; exempt from reduce-only, see Config)
         if self.running and (cfg.basket_enabled or self.basket_legs or self.basket_state != "off" or self.basket_killed):
-            taken |= self.basket_tick(now, inv, fvs, book_fvs, equity, mine_real, now_m)
+            try:
+                taken |= self.basket_tick(now, inv, fvs, book_fvs, equity, mine_real, now_m)
+            except ApiError:
+                raise                                 # (as the takes: the cycle's own error handling)
+            except Exception:                         # a basket bug must never stop the market maker
+                self.orders_stale = True
+                log.exception("basket tick failed - skipped this cycle")
+                self.basket_alert_once("crash", "BASKET tick crashed (see the log) - the basket is skipped while it "
+                                       "fails; the market maker goes on")
 
         self.phase_mark("fills_risk_takes")
         # 7. Decide + reconcile each exchange. One write at a time (parallel_writes = 1): cancels happen now,
@@ -8474,8 +8482,8 @@ class Bot:
         if self.basket_state == "exiting" and not self.basket_legs:
             self.basket_state, self.basket_last_action = "done", "exit done"
         # the target: ramped while building, re-computed hourly after it
-        target = None
-        if self.basket_state in self.BASKET_LIVE:
+        target = None                                     # (no account value: no target at all - never a sale to 0
+        if self.basket_state in self.BASKET_LIVE and liq is not None:   # on missing data; forced sales still run)
             if self.basket_state == "building" or self.basket_target_frozen is None or (
                     now_w - (self.basket_target_at or -1e18) >= 3600):
                 self.basket_target_frozen, self.basket_target_at = ramped, now_w
