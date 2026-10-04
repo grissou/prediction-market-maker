@@ -945,6 +945,18 @@ check("RT-9: live ranges: basket_slip <= 0.02, basket_stress_frac >= 0.2 (0.05 /
       bad)
 good, bad = M.validate_overrides({"basket_slip": 0.02, "basket_stress_frac": 0.2}, M.Config())
 check("RT-9: ...the new bounds themselves accepted", len(good) == 2 and not bad, bad)
+api10, b10 = basket_bot(races={3: (0.080, 0.90)}, worst_case_backstop_frac=0.02)
+api10.inv.update({"21": 3000, "22": -3000})
+warm(b10)
+b10.basket_state, b10.basket_on_wall, b10.basket_peak = "tracking", time.time() - 5 * H, 100000.0
+n0 = len(api10.wire)
+tick(b10)
+check("RT-10: worst case over worst_case_backstop_frac x account: no basket add (the backstop stays the last resort)",
+      len(api10.wire) == n0 and not b10.basket_legs and b10.basket_info.get("refused") == "worst-case backstop",
+      b10.basket_info.get("refused"))
+b10.cfg.worst_case_backstop_frac = 0.69
+tick(b10)
+check("RT-10: ...under it: the basket buys (reduce-only alone does not stop it)", b10.basket_legs.get("32", 0) > 0)
 b.cfg.basket_mult, b.cfg.basket_mult_after_fail = 2.0, 8.0
 b.basket_test = "failed"
 check("RT-5: a failed test never RAISES the multiplier (mult_after_fail 8 > mult 2 -> 2)",

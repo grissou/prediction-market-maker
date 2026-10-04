@@ -9081,6 +9081,10 @@ class Bot:
             refuse = "no adds this close to the exit"
         elif liq is None:
             refuse = "no account value"
+        elif (equity and self.total_worst_case(inv, fvs) > cfg.worst_case_backstop_frac * equity):
+            # P9 red team: exempt from reduce-only, but the sum-of-maxima backstop (the basket in it at its stress loss)
+            # stays the LAST RESORT for adds too - else nothing bounds the worst case while the basket buys
+            refuse = "worst-case backstop"
         elif not (self.cash_gate_on() and getattr(self, "cg_cash", None) is not None):
             refuse = "no fresh cash read (cash_gate_enabled needed)"
         cash = self.cash_left() if refuse is None else 0.0
