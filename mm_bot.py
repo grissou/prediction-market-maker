@@ -1348,6 +1348,55 @@ class Config:
     mom_exit_hours: float = 6.0           # an exit is spread over this many hours
     mom_exit_utc: str = ""                # optional ISO UTC time from which the exit runs ("" = none)
     mom_kill_frac: float = 0.75           # kill when the sleeve at the mark < this x its cost (120 s)
+    # --- Package 13 B (analysis/p12/SPEC_P13_AGGRESSIVE.md sections 4-5; everything OFF by default). The same limits
+    # stay: the cash gate, the value floor, the backstop tripwire (global_reduce), the kill switch, aggr_max_market_usd /
+    # aggr_max_race_usd of collateral (every bucket and resting order combined); never an order to move a mark, no wash
+    # trade, never across our own orders.
+    # 4. tilt_harvest_ladder True: sell the tilt as a MAKER (Bot.hv_tick, cycle step 6g). Every market with a fresh
+    # liquid race-scaled p (alloc_p) that is not a momentum-sleeve leg, a basket leg or a P12 set-ladder market: a
+    # LONGSHOT (p <= 0.10) gets resting YES ASKS at its best other ask + each harvest_offsets, a FAVOURITE (p >= 0.90)
+    # resting YES BIDS at its best other bid - each offset; a level only where its edge per $ of collateral clears
+    # harvest_min_edge ((ask - p) / (1 - ask), (p - bid) / bid), never at / through the other side of the book or our
+    # own orders there (skipped, never clipped), each harvest_level_usd of collateral (an ask locks 1 - price a share
+    # beyond the YES held, a bid its price, a bid buying back NO held goes out as a covered "sell NO"), within the
+    # per-market / per-race collateral room (the position valued at p), the cash gate (and the election holdback),
+    # at most harvest_max_markets markets (best edge first) and harvest_writes_frac of the cycle's writes left. Resting
+    # (MAX_ORDER_TTL), tagged "harvest" in the notes; hidden from the quote planner (plan_exchange) whose quote keeps
+    # off them, and the market maker quotes the ladder's side only to reduce a position. Re-quoted when a level is
+    # > HV_TOL (1c) off its target or p moved > HV_TOL, else at most every harvest_requote_s (an order still exactly at
+    # its target keeps its queue spot); a level gone (filled / cancelled) is re-placed at once. Pulled at once when p
+    # is unknown, the market joins the sleeve, reduce-only (the tripwire), the pre-close stop, or the flag goes off.
+    # Fills are VALUE positions (held to the outcome; the value floor protects them); journal "HARVEST fill ...",
+    # their own fill class "harvest" in mm_carry_24h; status.json "harvest". Dry run: planned and logged, nothing sent.
+    tilt_harvest_ladder: bool = False
+    harvest_offsets: tuple = (0.0, 0.02, 0.04, 0.06)   # YES-price offsets away from the touch (asks up, bids down)
+    harvest_level_usd: float = 3000.0     # collateral per level, $
+    harvest_min_edge: float = 0.08        # edge per $ of collateral a level must clear
+    harvest_max_markets: int = 237        # laddered markets, at most (best level-0 edge first)
+    harvest_writes_frac: float = 0.4      # placements / re-quotes a cycle <= this x the writes left (pulls: always)
+    harvest_requote_s: float = 900.0      # a ladder is re-quoted at most this often unless a level / p moved > 1c
+    # 5. election_night True (SIG: orders accepted until 17:00 UTC on 4 Nov, trading while results come in allowed;
+    # with close_override_utc / stop_minutes_before_close of Package 12 M1). From election_holdback_from_utc,
+    # election_holdback_usd (less what the election takes already spent) is kept in CASH: the allocator (its buys and
+    # spare cash), the momentum buys and the harvest ladder only spend cash above alloc_mm_reserve + it (nothing is
+    # sold to build it). From election_start_utc a race is CALLED (Bot.el_update_calls) when a leg's liquid
+    # Polymarket price has stayed >= election_called_p (that leg won; the race's other legs lost) or <= 1 -
+    # election_called_p (that leg lost) for election_called_min minutes, or at once when the reference reads exactly
+    # 1.0 / 0.0 (resolved; today's feed never shows that: ref_prices drops closed markets and keeps prices strictly
+    # inside (0, 1)); a liquid price back inside the band un-calls it. On called races only (Bot.el_takes): the stale
+    # tournament quotes are TAKEN - YES bought at asks below election_take_max_price on a winner (a covered "sell NO"
+    # where we hold NO), YES sold into bids above 1 - it on a loser (YES held first, else a short) - immediate-or-cancel,
+    # batched (batch_size orders a write), through the cash gate, within the collateral caps and the holdback (the
+    # takes' budget), not blocked by the pre-close windows while close_override_utc keeps the market open (only the
+    # stop window stops them); the market maker is reduce-only there. Journal "ELECTION take ...", fill class
+    # "election", status.json "election". False = unchanged.
+    election_night: bool = False
+    election_holdback_usd: float = 20000.0   # cash kept for the election takes, $ (their budget)
+    election_holdback_from_utc: str = "2026-11-03T12:00:00Z"   # the holdback is reserved from this time
+    election_start_utc: str = "2026-11-03T23:00:00Z"   # calls (and takes) from this time
+    election_called_p: float = 0.98       # a leg's liquid Polymarket price >= this (or <= 1 - this): called
+    election_called_min: float = 10.0     # ...for this many minutes
+    election_take_max_price: float = 0.95   # winner YES bought below this; loser YES sold above 1 - this
 
 
 CFG = Config()
@@ -1651,13 +1700,30 @@ OVERRIDABLE = {
     "mom_exit_hours": (0.25, 72.0),
     "mom_exit_utc": ("2026-10-01T00:00:00Z", "2026-11-07T00:00:00Z"),   # ISO UTC time (DATE_SETTINGS), "" = none
     "mom_kill_frac": (0.3, 0.99),
+    # --- Package 13 B ---
+    "tilt_harvest_ladder": (False, True),
+    "harvest_offsets": (0.0, 0.2),       # a list of 1..LADDER_MAX_LEVELS offsets, each in 0..0.2
+    "harvest_level_usd": (0.0, 50000.0),
+    "harvest_min_edge": (0.0, 2.0),
+    "harvest_max_markets": (0, 1000),
+    "harvest_writes_frac": (0.0, 1.0),
+    "harvest_requote_s": (60.0, 7200.0),
+    "election_night": (False, True),
+    "election_holdback_usd": (0.0, 100000.0),
+    "election_holdback_from_utc": ("2026-10-01T00:00:00Z", "2026-11-07T00:00:00Z"),   # ISO UTC time, "" = none
+    "election_start_utc": ("2026-10-01T00:00:00Z", "2026-11-07T00:00:00Z"),   # ISO UTC time, "" = never
+    "election_called_p": (0.90, 0.999),
+    "election_called_min": (0.0, 120.0),
+    "election_take_max_price": (0.5, 0.999),
 }
 MM_RISK_HYST = 1.1        # mm_risk_reserve_*: value adds resume once each room set is >= this x its reserve
 MAX_ORDER_TTL = 7200.0    # no order of ours lives longer than this (dead-man's switch), whatever the TTL settings
 LADDER_MAX_LEVELS = 8
 ONE_OF_SETTINGS = {"ref_tilt_estimator", "risk_unheld_legs"}   # string settings that take exactly one of their OVERRIDABLE names
-DATE_SETTINGS = {"basket_exit_utc", "close_override_utc", "mom_exit_utc"}   # strings: one ISO UTC time in their range
-DATE_EMPTY_OK = {"close_override_utc", "mom_exit_utc"}     # ...that also take "" (= off)
+DATE_SETTINGS = {"basket_exit_utc", "close_override_utc", "mom_exit_utc",   # strings: one ISO UTC time in their range
+                 "election_holdback_from_utc", "election_start_utc"}
+DATE_EMPTY_OK = {"close_override_utc", "mom_exit_utc",     # ...that also take "" (= off)
+                 "election_holdback_from_utc", "election_start_utc"}
 FREE_TEXT_SETTINGS = {"alloc_pin"}         # string settings that take any text of (min, max) characters
 
 
@@ -4167,6 +4233,7 @@ class Bot:
         self.basket_init(self.load_basket())   # Package 9 F1: the long-tilt basket (restored from status.json)
         self.alloc_init(self.load_status_key("alloc"))   # Package 10 B: the allocator (last run, turnover)
         self.p13_init(self.load_status_key("momentum"), self.load_status_key("buckets"))   # Package 13 A
+        self.p13b_init(self.load_status_key("election"))   # Package 13 B: harvest ladder, election night
         self.pos_marks = {}             # {eid: the exchange's own valuation price of the position (currentPrice)}
         self.fv_fallback_logged = {}      # {eid: source} - which fallback risk_fv used for a held position (logged once)
         self.mark_sd = {}                 # eid -> sd of the 10-min mid change (mark_frag_*; from the recorder)
@@ -4801,6 +4868,24 @@ class Bot:
             except Exception:                         # a Package 13 bug must never stop the market maker
                 self.orders_stale = True
                 log.exception("Package 13 tick failed - skipped this cycle")
+        # 6f. Package 13 B: election night (calls; immediate-or-cancel takes on called races, batched)
+        if self.running and self.el_on():
+            try:
+                taken |= self.el_tick(now, inv, mine_real, now_m, skip=taken | arb_races)
+            except ApiError:
+                raise                                 # (as the takes: the cycle's own error handling)
+            except Exception:                         # a Package 13 bug must never stop the market maker
+                self.orders_stale = True
+                log.exception("election tick failed - skipped this cycle")
+        # 6g. Package 13 B: the harvest ladder (resting maker levels; pulls)
+        if self.running and self.hv_on():
+            try:
+                taken |= self.hv_tick(now, inv, mine_real, now_m, skip=taken | arb_races)
+            except ApiError:
+                raise                                 # (as the takes: the cycle's own error handling)
+            except Exception:                         # a Package 13 bug must never stop the market maker
+                self.orders_stale = True
+                log.exception("harvest ladder tick failed - skipped this cycle")
 
         self.phase_mark("fills_risk_takes")
         # 7. Decide + reconcile each exchange. One write at a time (parallel_writes = 1): cancels happen now,
@@ -6032,6 +6117,14 @@ class Bot:
             self.mmr_tail_now = getattr(self, "mmr_tail_now", 0) + held
             bid_cap = red_bid if bid_cap is None else min(bid_cap, red_bid)
             ask_cap = red_ask if ask_cap is None else min(ask_cap, red_ask)
+        # Package 13 B: the harvest ladder's side quotes only what reduces this position (the ladder is that side);
+        # a called race (election_night): reduce-only on both sides (the wrong side would be picked off at once)
+        hv_s = (getattr(self, "hv_sides", None) or {}).get(ex.eid)
+        el_s = (getattr(self, "el_sides", None) or {}).get(ex.eid)
+        if hv_s == "bid" or el_s:
+            bid_cap = max(0, int(-ex.inv)) if bid_cap is None else min(bid_cap, max(0, int(-ex.inv)))
+        if hv_s == "ask" or el_s:
+            ask_cap = max(0, int(ex.inv)) if ask_cap is None else min(ask_cap, max(0, int(ex.inv)))
 
         reduce_only = global_reduce or hrs <= self.close_window("flatten_hours_before_close", cfg)
         # From flatten_per_market_hours: flatten each market on its own, i.e. judge (and skew) by this
@@ -6571,6 +6664,12 @@ class Bot:
         if ex.mmr_tail and getattr(self, "mmr_paused", False):   # P12 ops mm_risk_reserve_*: tails only shrink a position
             extra[True].append(max(0.0, -inv))
             extra[False].append(max(0.0, inv))
+        hv_s = (getattr(self, "hv_sides", None) or {}).get(ex.eid)   # Package 13 B: the harvest ladder's side / a
+        el_s = (getattr(self, "el_sides", None) or {}).get(ex.eid)   # called race: only what shrinks the position
+        if hv_s == "bid" or el_s:
+            extra[True].append(max(0.0, -inv))
+        if hv_s == "ask" or el_s:
+            extra[False].append(max(0.0, inv))
         sign = 0 if aggr else PARTY_SIGN.get(ex.party, 0)
         if sign and getattr(cfg, "bloc_delta_enabled", False):   # Package 10 A2: room in bloc delta / sensitivity
             d, cap = self.party_measure(self.lad_party_delta)
@@ -6660,13 +6759,17 @@ class Bot:
 
     def plan_exchange(self, ex, q, resting, fv, now, now_m):
         """plan_exchange_core, except (Package 12 L1) that our rich-leg set ladder's orders resting here are left
-        alone: not seen by the quote's plan, never in a cancel-all, and the quote's ask kept above them."""
+        alone: not seen by the quote's plan, never in a cancel-all, and the quote's ask kept above them. Package 13 B:
+        the harvest ladder's orders too (its bids as the set ladder's; the quote's bid kept below its asks)."""
         meta = self.order_meta
-        lad = [o for o in resting if (meta.get(o.order_id) or {}).get("set_ladder")] if resting else []
+        lad = [o for o in resting if (meta.get(o.order_id) or {}).get("set_ladder")
+               or (meta.get(o.order_id) or {}).get("harvest")] if resting else []
         if not lad:
             return self.plan_exchange_core(ex, q, resting, fv, now, now_m)
-        ch = self.plan_exchange_core(ex, self.sl_guard_quote(ex, q, lad), [o for o in resting if o not in lad], fv,
-                                     now, now_m)
+        bids, asks = [o for o in lad if o.is_bid], [o for o in lad if not o.is_bid]
+        q = self.sl_guard_quote(ex, q, bids) if bids else q
+        q = self.hv_guard_quote(ex, q, asks) if asks else q
+        ch = self.plan_exchange_core(ex, q, [o for o in resting if o not in lad], fv, now, now_m)
         if ch is not None:
             ch.whole = False                      # (a cancel-all would take the ladder too)
         return ch
@@ -7101,6 +7204,8 @@ class Bot:
                         if o.eid == eid and o.is_bid and self.order_level(o) != level)
             if level == 0 and not (getattr(self.cfg, "no_set_aware_bids", False) and not sets_ok):
                 held -= sum(o.qty for o in self.sl_orders(eid))   # Package 12 L1: what our set ladder sells there
+            if level == 0 and getattr(self, "hv_sides", None):    # Package 13 B: what our harvest bids buy there
+                held -= sum(o.qty for o in self.hv_orders(eid) if o.is_bid)
             held -= sum(q for lv, q in (getattr(self, "cover_planned", {}).get(eid) or {}).items() if lv != level)
         return max(0, int(held + 1e-9))
 
@@ -7420,7 +7525,8 @@ class Bot:
         alloc_mm_reserve of cash free: cash_left() - its gate need < reserve. False with the flag off, the gate off, or
         no reserve. A covered sale / a cash-free order (need 0) is never blocked."""
         cfg = self.cfg
-        reserve = float(getattr(cfg, "alloc_mm_reserve", 0.0) or 0.0)
+        reserve = float(getattr(cfg, "alloc_mm_reserve", 0.0) or 0.0) + (self.el_holdback_left()   # (13 B)
+                                                                           if hasattr(self, "el_totals") else 0.0)
         if not getattr(cfg, "take_respect_reserve", False) or reserve <= 0 or not self.cash_gate_on():
             return False
         eid = order["exchangeId"]
@@ -10508,7 +10614,7 @@ class Bot:
                 if cpu <= cfg.alloc_set_cost_per_usd + 1e-9 and n * free >= self.ALLOC_MIN_USD:
                     held.append({"kind": "set", "race": race, "label": f"{race} NO+NO set", "px": sum(asks),
                                  "edge": max(0.0, cpu), "unit": free, "avail": n * free, "members": list(members)})
-        spare = cash - cfg.alloc_mm_reserve
+        spare = cash - self.cash_reserve()        # (Package 13 B: less the election holdback while reserved)
         if spare >= self.ALLOC_MIN_USD:
             held.append({"kind": "cash", "label": "spare cash", "px": 1.0, "edge": 0.0, "unit": 1.0, "avail": spare})
         held.sort(key=lambda h: (h["edge"], h.get("eid") or h.get("race") or ""))
@@ -10829,7 +10935,7 @@ class Bot:
         if (q < 0 and not b["short"]) or (q > 0 and b["short"]):
             pr["status"] = "dropped"              # never flip a position: the cash stays
             return False
-        avail = self.cash_left() - cfg.alloc_mm_reserve
+        avail = self.cash_left() - self.cash_reserve()   # (Package 13 B: and the election holdback)
         if avail < (b["px"] if not b["short"] else 1 - b["px"]):
             self.alloc_block("cash")              # the cash read does not show the money (yet)
             return False
@@ -11896,7 +12002,7 @@ class Bot:
                 continue                              # (mom_max_markets: legs bought earlier this tick count)
             if not self.writes_ready(3):
                 break
-            cash = (self.cash_left() - cfg.alloc_mm_reserve) if self.api.live else left
+            cash = (self.cash_left() - self.cash_reserve()) if self.api.live else left   # (13 B: the holdback)
             if cash < c["unit"]:
                 break
             book = self.alloc_download(ex, mine_real) if self.api.live else self.alloc_fresh_book(ex, now_m)
@@ -12118,6 +12224,695 @@ class Bot:
         self.bk_info = self.bucket_status(inv, now_m, cls) if on else {}
         return traded
 
+    # ------------------------------------------------------------------------------ Package 13 B: harvest, election
+    P13B_KEYS = ("harvest", "election")   # status.json keys Package 13 B adds (absent while unused)
+    HV_LONGSHOT, HV_FAVOURITE = 0.10, 0.90   # the harvest ladder's bands: asks where p <= / bids where p >= these
+    HV_TOL = 0.01                 # a level more than this off its target, or p moved more since the re-quote: at once
+    HV_KEEP_MARGIN = 60.0         # at a re-quote an order exactly at its target stays if it outlives the next one by this
+    HV_REFUSED_WAIT = 900.0       # the exchange refused a market's levels: not re-sent there before this (s)
+    EL_TAKE_COOLDOWN = 5.0        # after an election take on a market, no new one there for this long (s)
+
+    def p13b_init(self, el=None):
+        """Package 13 B state: the harvest ladder's per-market re-quote state and its fills (this run); the election
+        calls (restored from status.json "election" with their wall-clock start: a restart does not restart the
+        election_called_min clock) and the takes' totals (cash_spent spends the holdback down: restored)."""
+        el = el if isinstance(el, dict) else {}
+
+        def num(x, default=None):
+            return float(x) if isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) else default
+        self.hv_state = {}                        # eid -> {"at": monotonic re-quote time, "p": p then, "side"}
+        self.hv_plans = {}                        # this cycle's plans {eid: plan}
+        self.hv_sides = {}                        # eid -> "ask" / "bid": the ladder's side (decide, ladder_caps)
+        self.hv_refused = {}                      # eid -> monotonic time the exchange refused a level there
+        self.hv_fills = deque()                   # (wall, shares, edge $ at p) of harvest fills, last 24 h (this run)
+        self.hv_totals = {"placed": 0, "pulled": 0}
+        self.hv_info = {}                         # status.json "harvest"
+        self.el_calls = {}                        # eid -> {"side": "win" | "lose", "since": wall, "called", "resolved"}
+        for e, c in (el.get("calls") if isinstance(el.get("calls"), dict) else {}).items():
+            if isinstance(c, dict) and c.get("side") in ("win", "lose") and num(c.get("since")) is not None:
+                self.el_calls[str(e)] = {"side": c["side"], "since": num(c["since"]), "called": bool(c.get("called")),
+                                         "resolved": bool(c.get("resolved"))}
+        tot = el.get("totals") if isinstance(el.get("totals"), dict) else {}
+        self.el_totals = {k: num(tot.get(k), 0.0) for k in ("takes", "orders", "shares", "cash_spent")}
+        self.el_sides = {}                        # eid -> "win" / "lose" on called races (decide: reduce-only)
+        self.el_until = {}                        # eid -> monotonic time before which no new take goes there
+        self.el_info = {}                         # status.json "election"
+        if self.el_calls or self.el_totals["takes"]:
+            log.warning("election state restored: %d call(s), %d take(s), $%.0f spent", len(self.el_calls),
+                        self.el_totals["takes"], self.el_totals["cash_spent"])
+
+    def p13b_time(self, name):
+        """A Package 13 B date setting as an aware datetime, or None ("" = none; invalid / out of its range: ignored,
+        validate_overrides refuses those)."""
+        v = getattr(self.cfg, name, "")
+        if not isinstance(v, str) or not v.strip():
+            return None
+        dt, (lo_s, hi_s) = parse_utc_setting(v), OVERRIDABLE[name]
+        return dt if dt is not None and parse_utc_setting(lo_s) <= dt <= parse_utc_setting(hi_s) else None
+
+    def el_holdback_on(self, now=None):
+        """election_night on and election_holdback_from_utc reached: the holdback is reserved."""
+        if not getattr(self.cfg, "election_night", False):
+            return False
+        t = self.p13b_time("election_holdback_from_utc")
+        return t is not None and (now or utcnow()) >= t
+
+    def el_holdback_left(self, now=None):
+        """$ of cash the election holdback keeps now: election_holdback_usd less what the election takes spent, while
+        it is reserved (el_holdback_on); 0 before / without it."""
+        if not self.el_holdback_on(now):
+            return 0.0
+        return max(0.0, self.cfg.election_holdback_usd - (getattr(self, "el_totals", None) or {}).get("cash_spent", 0.0))
+
+    def cash_reserve(self):
+        """The cash the allocator (its buys and spare cash), the momentum buys and the stale takes'
+        take_respect_reserve leave alone: alloc_mm_reserve, plus the election holdback while it is reserved (Package
+        13 B). Nothing is SOLD to build the holdback: the allocator's B2 refill still aims at alloc_mm_reserve alone."""
+        return self.cfg.alloc_mm_reserve + self.el_holdback_left()
+
+    def place_orders_keep(self, orders, keep):
+        """place_orders with `keep` $ of the gate's cash held back (the election holdback): the gate sees that much
+        less while it trims / drops these orders. keep 0 or no gate: place_orders as it is."""
+        if keep <= 0 or not self.cash_gate_on() or getattr(self, "cg_cash", None) is None:
+            return self.place_orders(orders)
+        self.cg_spent = getattr(self, "cg_spent", 0.0) + keep
+        try:
+            return self.place_orders(orders)
+        finally:
+            self.cg_spent -= keep
+
+    # --- section 4: the harvest ladder ---
+    def hv_orders(self, eid=None):
+        """Our resting harvest-ladder orders (order_meta "harvest" = level + 1), on eid or everywhere."""
+        meta = self.order_meta
+        return [o for o in list(self.my_orders.values()) if (eid is None or o.eid == eid)
+                and (meta.get(o.order_id) or {}).get("harvest")]
+
+    def hv_on(self):
+        """Cycle step 6g runs: the flag, a plan / state left, or levels of ours resting (pulled once the flag is off)."""
+        return bool(getattr(self.cfg, "tilt_harvest_ladder", False) or getattr(self, "hv_state", None)
+                    or getattr(self, "hv_plans", None) or getattr(self, "hv_sides", None)
+                    or (self.api.live and self.hv_orders()))
+
+    def hv_plan(self, inv, now_m, skip=()):
+        """THE PURE PLANNER: ({eid: plan}, {eid: why}). plan = {"eid", "label", "side": "ask" | "bid", "p", "touch",
+        "edge" (at the touch: the ranking), "levels": [(level, YES price, shares, edge per $, covered shares)], "coll"
+        ($ of collateral planned)}; why = "soft" (cannot be judged now: no fresh book / no touch, traded by another
+        feature this cycle, a write in flight - resting levels stay) or why the market has no ladder (pulled)."""
+        cfg, plans, why = self.cfg, {}, {}
+        offs = sorted({round(float(x), 3) for x in (cfg.harvest_offsets or ())})[:LADDER_MAX_LEVELS]
+        on = bool(cfg.tilt_harvest_ladder) and bool(offs) and not self.global_reduce
+        legs, basket = getattr(self, "mom_legs", None) or {}, getattr(self, "basket_legs", None) or {}
+        sl = {o.eid for o in self.sl_orders()}
+        cands = []
+        for e, ex in sorted(self.ex.items()):
+            if not on:
+                why[e] = "reduce-only" if self.global_reduce and cfg.tilt_harvest_ladder else "off"
+            elif e in legs or e in basket:
+                why[e] = "momentum" if e in legs else "basket"
+            elif e in sl:
+                why[e] = "set ladder"
+            elif self.hours_to_close(ex) * 60 <= cfg.stop_minutes_before_close:
+                why[e] = "stop"
+            else:
+                p = self.alloc_p(ex, now_m)
+                if p is None:
+                    why[e] = "no p"
+                elif self.HV_LONGSHOT + 1e-12 < p < self.HV_FAVOURITE - 1e-12:
+                    why[e] = "middle"
+                elif e in skip or ex.group in skip or busy(ex, now_m):
+                    why[e] = "soft"
+                else:
+                    book = self.alloc_fresh_book(ex, now_m)
+                    ask_side = p <= self.HV_LONGSHOT + 1e-12
+                    touch = ((book or {}).get("asks" if ask_side else "bids") or [None])[0]
+                    if touch is None:
+                        why[e] = "soft"
+                    else:
+                        t = touch["price"]
+                        cands.append((e, ex, p, ask_side, book, t,
+                                      (t - p) / max(1 - t, TICK) if ask_side else (p - t) / max(t, TICK)))
+        if not cands:
+            return plans, why
+        # collateral: every bucket's positions at p and our resting orders, less the ladder's own (re-planned here)
+        snap = self.p13_coll_snapshot(inv, now_m)
+        hv_ids = set()
+        for o in self.hv_orders():
+            hv_ids.add(o.order_id)
+            if o.eid in snap:
+                snap[o.eid][1] = max(0.0, snap[o.eid][1] - self.resting_lock(o))
+        rest = list(self.my_orders.values()) if self.api.live else [o for v in self.sim_by_eid().values() for o in v]
+        own = defaultdict(list)                   # our other orders, per market (never crossed)
+        for o in rest:
+            if o.order_id not in hv_ids:
+                own[o.eid].append(o)
+        n = 0
+        for e, ex, p, ask_side, book, t, edge0 in sorted(cands, key=lambda c: (-c[6], c[0])):
+            if n >= cfg.harvest_max_markets:
+                why[e] = "max markets"
+                continue
+            o_lv = ((book.get("bids") if ask_side else book.get("asks")) or [None])[0]
+            other = o_lv["price"] if o_lv is not None else None   # the other side's best (other traders)
+            mine, q = own.get(e, []), float(inv.get(e, 0.0))
+            room = self.p13_room(ex, snap, own_orders=True)
+            if ask_side:                          # YES held and not yet on sale: sold covered first
+                free = max(0.0, q) - sum(o.qty for o in mine if not o.is_bid)
+                lim = max([o.price for o in mine if o.is_bid], default=None)
+            else:                                 # NO held and not yet on sale: a covered "sell NO" (whole levels)
+                free = (self.cover_no_qty(e, q) - sum(o.qty for o in mine if o.is_bid and (
+                    self.order_meta.get(o.order_id) or {}).get("no_sell"))) if q <= -1 else 0.0
+                lim = min([o.price for o in mine if not o.is_bid], default=None)
+            free = max(0.0, free)
+            levels, used = [], 0.0
+            for k, off in enumerate(offs):
+                if ask_side:
+                    px = round(t + off, 3)
+                    if (px > PMAX + 1e-9 or (other is not None and px <= other + 1e-9)
+                            or (lim is not None and px <= lim + 1e-9)):
+                        continue                  # (off the grid / at or through the book or our own bid: skipped)
+                    edge, lock, val = (px - p) / max(1 - px, TICK), 1 - px, max(1 - px, 1 - p)
+                else:
+                    px = round(t - off, 3)
+                    if (px < PMIN - 1e-9 or (other is not None and px >= other - 1e-9)
+                            or (lim is not None and px >= lim - 1e-9)):
+                        continue
+                    edge, lock, val = (p - px) / max(px, TICK), px, max(px, p)
+                if edge < cfg.harvest_min_edge - 1e-9:
+                    continue
+                want = int(cfg.harvest_level_usd / max(lock, TICK) + 1e-9)
+                if not ask_side and free >= 1:    # (buying back NO held: cash-free, reduces the collateral)
+                    cov = int(min(want, free) + 1e-9)
+                    qty = cov
+                else:
+                    cov = int(min(want, free) + 1e-9) if ask_side else 0
+                    qty = cov + int(min(want - cov, max(0.0, room - used) / max(val, TICK)) + 1e-9)
+                if qty < 1:
+                    continue
+                free -= cov
+                used += (qty - cov) * val
+                levels.append((k, px, qty, edge, cov))
+            if not levels:
+                why[e] = "no edge" if room >= 1 or free >= 1 else "cap"
+                continue
+            snap[e][1] += used                     # (the race's other markets see this one's planned levels)
+            plans[e] = {"eid": e, "label": ex.label, "side": "ask" if ask_side else "bid", "p": p, "touch": t,
+                        "other": other, "edge": edge0, "levels": levels, "coll": used}
+            n += 1
+        return plans, why
+
+    def hv_tick(self, now, inv, mine_real, now_m=None, skip=()):
+        """Package 13 B section 4, cycle step 6g: plan (hv_plan); pull a market's levels when it has no plan (unless
+        only "soft") or a level that no longer exists; re-quote a market when a level is > HV_TOL off its target, p moved
+        > HV_TOL or harvest_requote_s passed (an order exactly at its target with life left keeps its queue spot);
+        re-place a missing level at once. Placements and re-quotes within harvest_writes_frac of the writes left
+        (pulls always), batched batch_size orders a write, through the cash gate less the election holdback. Returns
+        the exchanges where orders were placed or cancelled (not quoted this cycle)."""
+        cfg = self.cfg
+        now_m = time.monotonic() if now_m is None else now_m
+        self.alloc_ages = self.refs.ages() if self.refs is not None and hasattr(self.refs, "ages") else {}
+        plans, why = self.hv_plan(dict(inv), now_m, skip)
+        self.hv_plans = plans
+        meta, touched = self.order_meta, set()
+        rest = defaultdict(list)
+        for o in self.hv_orders():
+            rest[o.eid].append(o)
+        # 1. pulls: no plan (unless soft); on a planned market an order on the other side, one whose edge at today's p
+        #    no longer clears harvest_min_edge, or one at / through the other side of the book
+        for e, os_ in sorted(rest.items()):
+            plan = plans.get(e)
+            if plan is None:
+                if why.get(e) == "soft":
+                    continue
+                bad = list(os_)
+            else:
+                bad = [o for o in os_ if not self.hv_order_ok(o, plan)]
+            if not bad or not self.writes_ready(len(bad)):
+                continue
+            if self.cancel(e, bad, whole_exchange=False):
+                touched.add(e)
+                self.orders_stale = True
+                self.hv_totals["pulled"] += len(bad)
+                log.warning("HARVEST %s: %d level(s) pulled (%s)", self.ex[e].label if e in self.ex else e, len(bad),
+                            why.get(e, "?") if plan is None else "no longer clears")
+        for e in [e for e in self.hv_state if e not in plans and why.get(e) != "soft"]:
+            self.hv_state.pop(e, None)
+        # 2. re-quotes (due) and missing levels. A resting order belongs to the target nearest its price.
+        writes = getattr(self.api, "writes_left", lambda: 10 ** 6)()
+        budget = cfg.harvest_writes_frac * max(0, writes)
+        bs = max(1, int(cfg.batch_size))
+        send = []
+        tol = self.HV_TOL + 1e-9
+        for e, plan in sorted(plans.items(), key=lambda kv: (-kv[1]["edge"], kv[0])):
+            ex = self.ex[e]
+            tg = list(plan["levels"])
+            cur = self.hv_orders(e)
+            st = self.hv_state.get(e)
+
+            def near(o, tg=tg):
+                return min(tg, key=lambda t: (abs(t[1] - o.price), t[1]))
+            due = (st is None or abs(plan["p"] - st["p"]) > tol or now_m - st["at"] >= cfg.harvest_requote_s - 1e-9
+                   or len(cur) > len(tg) or len({round(o.price, 3) for o in cur}) < len(cur)
+                   or any(abs(near(o)[1] - o.price) > tol or o.qty > near(o)[2] + 1e-9 for o in cur))
+            if due:
+                keep, left = [], list(tg)
+                for o in sorted(cur, key=lambda o: o.order_id):
+                    t = next((t for t in left if abs(t[1] - o.price) < 1e-9 and abs(t[2] - o.qty) < 1e-9), None)
+                    life = (o.expires - now).total_seconds() if o.expires else 0.0
+                    if t is not None and life >= cfg.harvest_requote_s + self.HV_KEEP_MARGIN:
+                        keep.append(o)            # (exactly at its target: keeps its queue spot)
+                        left.remove(t)
+                want = left
+            else:                                 # (only levels with no order of ours within HV_TOL: filled / gone)
+                keep = list(cur)
+                want = [t for t in tg if not any(abs(o.price - t[1]) <= tol for o in cur)]
+            gone = [o for o in cur if o not in keep]
+            if not gone and not want:
+                if due:
+                    self.hv_state[e] = {"at": now_m, "p": plan["p"], "side": plan["side"]}
+                continue
+            if not self.api.live:                 # dry run: planned and logged once per re-quote, nothing sent
+                if due:
+                    self.hv_state[e] = {"at": now_m, "p": plan["p"], "side": plan["side"]}
+                    log.info("[dry] HARVEST %s: %s YES (p %.3f, touch %.3f): %s", ex.label, plan["side"], plan["p"],
+                             plan["touch"], " ".join(f"{n}@{px:.3f}" for _, px, n, _, _ in plan["levels"]))
+                continue
+            if want and now_m - self.hv_refused.get(e, -1e18) < self.HV_REFUSED_WAIT and not gone:
+                continue                          # (the exchange refused here lately: not re-sent yet)
+            cost = len(gone) + len(want) / bs
+            if cost > budget + 1e-9:
+                continue                          # (this cycle's writes share is spent: next cycle)
+            if gone:
+                if not self.writes_ready(len(gone)) or not self.cancel(e, gone, whole_exchange=False):
+                    continue                      # (never new levels on top of ones not confirmed gone)
+                touched.add(e)
+                self.orders_stale = True
+            budget -= cost
+            if due:
+                self.hv_state[e] = {"at": now_m, "p": plan["p"], "side": plan["side"]}
+            for k, px, n, edge, cov in want:
+                o = {"exchangeId": e, "side": "yes", "action": "sell" if plan["side"] == "ask" else "buy",
+                     "quantity": int(n), "price": px, "tournamentId": self.tid,
+                     "expirationDate": iso(now + timedelta(seconds=MAX_ORDER_TTL))}
+                if plan["side"] == "bid" and cov >= n:
+                    o["_no_sell"] = True          # (buying back NO held: the covered "sell NO")
+                send.append((e, k, edge, plan, o))
+        # 3. the batches (several markets a write), through the cash gate less the election holdback
+        keep_usd, placed = self.el_holdback_left(now), defaultdict(list)
+        for i in range(0, len(send), bs):
+            chunk = send[i:i + bs]
+            if not self.writes_ready(1):
+                break
+            try:
+                results = self.place_orders_keep([c[4] for c in chunk], keep_usd)
+            except ApiError as err:
+                if err.code == "WRITE_BUDGET_WAIT":
+                    break
+                for e in {c[0] for c in chunk}:
+                    self.ex[e].pending_until = now_m + cfg.pending_seconds
+                alert(f"harvest ladder orders failed ({err}) - check positions")
+                if err.code in FATAL_API_CODES:
+                    fatal(f"orders rejected with {err.code}")
+                continue
+            by_index = {r.get("index", j): r for j, r in enumerate(results or []) if isinstance(r, dict)}
+            for j, (e, k, edge, plan, o) in enumerate(chunk):
+                res = by_index.get(j) or {}
+                data = res.get("data") or {}
+                if not res.get("ok"):
+                    if not res.get("cash_gated"):
+                        self.hv_refused[e] = now_m
+                        log.info("HARVEST %s level %d refused: %s", plan["label"], k + 1,
+                                 (data.get("error") or {}).get("message", "?"))
+                    continue                      # (cash gate: tried again next cycle, no write until it fits)
+                touched.add(e)
+                self.orders_stale = True
+                self.remember_order(o, data, now_m)
+                self.hv_totals["placed"] += 1
+                placed[e].append(f"{o['quantity']}@{o['price']:.3f}")
+                if data.get("orderId") is not None:
+                    meta[data["orderId"]] = {"our_side": "ask" if plan["side"] == "ask" else "bid", "price": o["price"],
+                                             "harvest": k + 1, "eid": e, "p": round(plan["p"], 4),
+                                             "edge": round(edge, 4), "t": time.time(),
+                                             **({"no_sell": True} if o.get("_no_sell") else {})}
+                    self.notes_dirty = True
+        for e, lv in sorted(placed.items()):
+            pl = plans[e]
+            log.warning("HARVEST %s: %s YES (p %.3f, touch %.3f, edge at touch %.1f%%): %s", pl["label"],
+                        "ask" if pl["side"] == "ask" else "bid", pl["p"], pl["touch"], 100 * pl["edge"], " ".join(lv))
+        sides = {e: pl["side"] for e, pl in plans.items()}
+        for o in self.hv_orders():
+            sides.setdefault(o.eid, "bid" if o.is_bid else "ask")
+        self.hv_sides = sides
+        on = cfg.tilt_harvest_ladder or sides or self.hv_fills
+        self.hv_info = self.hv_status() if on else {}
+        return touched
+
+    def hv_order_ok(self, o, plan):
+        """A resting harvest order may stay on its planned market: the plan's side, an edge per $ at today's p still >=
+        harvest_min_edge, not at / through the other side of the book (other traders' best)."""
+        p, ask = plan["p"], plan["side"] == "ask"
+        if o.is_bid == ask:
+            return False
+        edge = (o.price - p) / max(1 - o.price, TICK) if ask else (p - o.price) / max(o.price, TICK)
+        if edge < self.cfg.harvest_min_edge - 1e-9:
+            return False
+        other = plan.get("other")
+        return other is None or (o.price > other + 1e-9 if ask else o.price < other - 1e-9)
+
+    def hv_guard_quote(self, ex, q, asks):
+        """Package 13 B: the quote's bid on a market where our harvest asks rest stays at least a tick below the lowest
+        of them (a kept resting bid at / above that is replaced): never a self-cross. None if that is off the grid."""
+        low = round(min(o.price for o in asks), 3)
+        hi = round(low - TICK, 3)
+        if q.bid is None:
+            return q
+        if q.bid < low - 1e-9:
+            if q.bid_limit is not None and q.bid_limit > hi + 1e-9:
+                return replace(q, bid_limit=hi)     # (a resting bid at / above the ladder is never kept)
+            return q
+        if hi < PMIN - 1e-9:
+            return replace(q, bid=None, bid_size=0, bid_limit=None, bid_max=None)
+        return replace(q, bid=hi, bid_limit=min(hi, q.bid_limit) if q.bid_limit is not None else hi)
+
+    def hv_status(self):
+        """status.json "harvest": {markets, levels_resting, collateral_resting, filled_24h, edge_filled_24h, ...}."""
+        now_w = time.time()
+        while self.hv_fills and self.hv_fills[0][0] < now_w - 86400:
+            self.hv_fills.popleft()
+        rest = self.hv_orders() if self.api.live else []
+        return {"enabled": bool(getattr(self.cfg, "tilt_harvest_ladder", False)),
+                "markets": len({o.eid for o in rest}) if self.api.live else len(self.hv_plans),
+                "levels_resting": len(rest),
+                "collateral_resting": round(sum(self.resting_lock(o) for o in rest), 2),
+                "filled_24h": int(sum(x[1] for x in self.hv_fills) + 1e-9),
+                "edge_filled_24h": round(sum(x[2] for x in self.hv_fills), 2),
+                "planned_markets": len(self.hv_plans),
+                "planned_collateral": round(sum(pl["coll"] for pl in self.hv_plans.values()), 2),
+                **{k: int(v) for k, v in self.hv_totals.items()}}
+
+    def p13b_note_fills(self, new):
+        """log_fills: each new fill of a harvest level -> journal "HARVEST fill ..." and the 24-h tallies (shares, edge
+        at p = the market's race-scaled liquid Polymarket price now)."""
+        for f in reversed(new):                   # (oldest first)
+            m = self.order_meta.get(f.get("orderId")) or {}
+            if not m.get("harvest"):
+                continue
+            e = str(f.get("exchangeId"))
+            qty = abs(float(f.get("quantity") or 0))
+            px = float(m.get("price") if m.get("price") is not None else (f.get("price") or 0))
+            p = self.ev_p(e)
+            bid = m.get("our_side") == "bid"
+            edge = 0.0 if p is None else qty * ((p - px) if bid else (px - p))
+            self.hv_fills.append((time.time(), qty, edge))
+            ex = self.ex.get(e)
+            log.warning("HARVEST fill %s: %s %.0f YES @ %.3f (level %s; p %s, edge $%.2f) - a VALUE position, held "
+                        "to the outcome", ex.label if ex else e, "bought" if bid else "sold", qty, px, m.get("harvest"),
+                        f"{p:.3f}" if p is not None else "?", edge)
+
+    # --- section 5: election night ---
+    def el_on(self):
+        return bool(getattr(self.cfg, "election_night", False) or getattr(self, "el_calls", None)
+                    or getattr(self, "el_sides", None) or getattr(self, "el_info", None))
+
+    def el_active(self, now=None):
+        """election_night on and election_start_utc reached: calls and takes."""
+        if not getattr(self.cfg, "election_night", False):
+            return False
+        t = self.p13b_time("election_start_utc")
+        return t is not None and (now or utcnow()) >= t
+
+    def el_update_calls(self, now):
+        """Once a cycle (election active): per market, its RAW liquid Polymarket price (cur_refs; the price the
+        market itself reads, not race-scaled) >= election_called_p -> "win", <= 1 - it -> "lose", held for
+        election_called_min minutes -> CALLED; a reference of exactly 1.0 / 0.0 (or refs.resolved(), if a future feed
+        offers it) -> called at once ("resolved"). A liquid price back inside the band un-calls it; no liquid reading
+        (a closed Polymarket market drops out of the feed) leaves the state as it is."""
+        cfg = self.cfg
+        if not self.el_active(now):
+            if self.el_calls:
+                log.warning("ELECTION calls cleared (%d): election mode off / not started", len(self.el_calls))
+            self.el_calls = {}
+            return
+        now_w = now.timestamp()
+        refs, liquid, cp = self.cur_refs or {}, self.cur_liquid or set(), cfg.election_called_p
+        resolved = {}
+        fn = getattr(self.refs, "resolved", None) if self.refs is not None else None
+        if callable(fn):
+            try:
+                resolved = fn() or {}
+            except Exception as e:                # (a reporting hook: never stops the cycle)
+                log.warning("reference resolved() failed: %s", e)
+        for e in [e for e in self.el_calls if e not in self.ex]:
+            self.el_calls.pop(e)
+        for e, ex in self.ex.items():
+            r, c = refs.get(e), self.el_calls.get(e)
+            rv = resolved.get(f"{ex.group}|{ex.party}")
+            if rv is None and r is not None and (r >= 1 - 1e-9 or r <= 1e-9):
+                rv = r
+            if rv is not None and (rv >= 1 - 1e-9 or rv <= 1e-9):
+                side = "win" if rv >= 0.5 else "lose"
+                if not (c and c.get("resolved") and c["side"] == side):
+                    log.warning("ELECTION %s RESOLVED on Polymarket (%.1f): %s", ex.label, rv,
+                                "won" if side == "win" else "lost")
+                self.el_calls[e] = {"side": side, "since": c["since"] if c and c["side"] == side else now_w,
+                                    "called": True, "resolved": True}
+                continue
+            if r is None or e not in liquid:
+                continue
+            side = "win" if r >= cp - 1e-9 else ("lose" if r <= 1 - cp + 1e-9 else None)
+            if side is None:
+                if c is not None:
+                    if c["called"]:
+                        log.warning("ELECTION %s UN-CALLED: Polymarket %.3f is back inside %.3f..%.3f", ex.label, r,
+                                    1 - cp, cp)
+                    self.el_calls.pop(e)
+                continue
+            if c is None or c["side"] != side:
+                c = {"side": side, "since": now_w, "called": False, "resolved": False}
+            if not c["called"] and now_w - c["since"] >= cfg.election_called_min * 60 - 1e-9:
+                c["called"] = True
+                log.warning("ELECTION %s CALLED: %s (Polymarket %.3f for %.0f min)", ex.label,
+                            "won" if side == "win" else "lost", r, (now_w - c["since"]) / 60)
+            self.el_calls[e] = c
+
+    def el_races(self):
+        """{race: {"winner": eid | None, "losers": [eid]}} of the races with a called leg: a called winner makes every
+        other leg of its race a loser; a race with two called winners (or a leg called both ways) is left out."""
+        out = {}
+        for race, members in sorted(self.groups.items()):
+            calls = {m: self.el_calls.get(m) for m in members}
+            win = [m for m, c in calls.items() if c and c["called"] and c["side"] == "win"]
+            lose = {m for m, c in calls.items() if c and c["called"] and c["side"] == "lose"}
+            if len(win) > 1 or (win and win[0] in lose):
+                continue
+            if win:
+                lose |= {m for m in members if m != win[0]}
+            if win or lose:
+                out[race] = {"winner": win[0] if win else None, "losers": sorted(lose)}
+        return out
+
+    def el_own_resting(self, eid):
+        """An election take of ours still listed as resting on eid (its leftover cancel not confirmed)."""
+        meta = self.order_meta
+        return any(o.eid == eid and (meta.get(o.order_id) or {}).get("election") for o in list(self.my_orders.values()))
+
+    def el_take_plan(self, inv, now_m, skip=(), races=None):
+        """THE PURE TAKE PLANNER (called races only): [(candidate, order)] - on a called winner YES bought at every
+        ask below election_take_max_price (one limit order at the highest of them: it sweeps them), on a called loser
+        YES sold into every bid above 1 - it; a buy where we hold NO is a covered "sell NO" of what is held (cash-free),
+        a sale where we hold YES sells it first; else a purchase / short within the market's and race's collateral
+        room (aggr_max_*, every bucket) and the holdback budget left (election_holdback_usd - cash spent). Reduce-only
+        (the tripwire): only the covered parts. Never a sleeve / basket leg, a market traded by another feature this
+        cycle, one with a write in flight / a take just sent / a take still resting, or inside the stop window (the
+        pre-close windows do not apply: close_override_utc keeps the market open until then)."""
+        cfg = self.cfg
+        races = self.el_races() if races is None else races
+        budget = max(0.0, cfg.election_holdback_usd - self.el_totals.get("cash_spent", 0.0))
+        legs, basket = getattr(self, "mom_legs", None) or {}, getattr(self, "basket_legs", None) or {}
+        mx, cands = cfg.election_take_max_price, []
+        for race, rc in sorted(races.items()):
+            for e, buy in ([(rc["winner"], True)] if rc["winner"] else []) + [(m, False) for m in rc["losers"]]:
+                ex = self.ex.get(e)
+                if (ex is None or e in legs or e in basket or e in skip or ex.group in skip or busy(ex, now_m)
+                        or now_m < self.el_until.get(e, 0.0) or self.el_own_resting(e)
+                        or self.hours_to_close(ex) * 60 <= cfg.stop_minutes_before_close):
+                    continue
+                book = self.alloc_fresh_book(ex, now_m) or {}
+                lv = ([x for x in book.get("asks") or [] if x["price"] < mx - 1e-9] if buy
+                      else [x for x in book.get("bids") or [] if x["price"] > 1 - mx + 1e-9])
+                if not lv:
+                    continue
+                best = lv[0]["price"]
+                cands.append({"eid": e, "race": race, "buy": buy, "levels": lv, "best": best,
+                              "px": max(x["price"] for x in lv) if buy else min(x["price"] for x in lv),
+                              "depth": sum(x["quantity"] for x in lv),
+                              "edge": (1 - best) / max(best, TICK) if buy else best / max(1 - best, TICK)})
+        cands.sort(key=lambda c: (-c["edge"], c["eid"]))
+        out = []
+        snap = self.p13_coll_snapshot(inv, now_m) if cands else {}
+        for c in cands:
+            e, ex = c["eid"], self.ex[c["eid"]]
+            q, px, val = float(inv.get(e, 0.0)), c["px"], self.p13_px(ex, now_m)
+            free = self.cash_free(e)
+            covered = False
+            if c["buy"] and q <= -1:
+                n = int(min(c["depth"], self.cover_no_qty(e, q), free["lone"] + free["set"]) + 1e-9)
+                covered, cash_u = n >= 1, 0.0
+            elif not c["buy"] and free["yes"] >= 1:
+                n, covered, cash_u = int(min(c["depth"], free["yes"]) + 1e-9), True, 0.0
+            else:
+                n = 0
+            if not covered:
+                if self.global_reduce or budget < TICK:
+                    continue
+                cash_u = px if c["buy"] else 1 - px
+                unit = max(px, val) if c["buy"] else max(1 - px, 1 - val)
+                room = self.p13_room(ex, snap, own_orders=True)
+                n = int(min(c["depth"], room / max(unit, TICK), budget / max(cash_u, TICK)) + 1e-9)
+                if n < 1:
+                    continue
+                snap[e][0] += n * unit
+                budget -= n * cash_u
+            if n < 1:
+                continue
+            order = {"exchangeId": e, "side": "yes", "action": "buy" if c["buy"] else "sell", "quantity": n,
+                     "price": round(px, 3), "tournamentId": self.tid}
+            if c["buy"] and covered:
+                order["_no_sell"] = True
+            out.append(({**c, "covered": covered, "cash_unit": cash_u}, order))
+        return out
+
+    def el_takes(self, now, inv, mine_real, now_m, skip=()):
+        """Section 5's takes: el_take_plan's orders sent batch_size a write (the batch path): our own orders a take
+        would cross are cancelled first (only those), the batch goes through the cash gate (immediate-or-cancel:
+        alive take_order_ttl, each leftover cancelled at once), notes "election" (their own fill class). Returns the
+        exchanges traded (not quoted this cycle). Dry run: logged, nothing sent."""
+        cfg, traded = self.cfg, set()
+        plan = self.el_take_plan(inv, now_m, skip)
+        if not plan:
+            return traded
+        if not self.api.live:
+            for c, o in plan:
+                log.info("[dry] ELECTION take %s: %s %d YES @ %.3f (%s)", self.ex[o["exchangeId"]].label, o["action"],
+                         o["quantity"], o["price"], "winner" if c["buy"] else "loser")
+            return traded
+        bs = max(1, int(cfg.batch_size))
+        for i in range(0, len(plan), bs):
+            chunk = plan[i:i + bs]
+            clash = defaultdict(list)             # our orders a take would cross: cancelled first (never a self-trade)
+            for c, o in chunk:
+                for r in list(self.my_orders.values()):
+                    if r.eid == o["exchangeId"] and r.is_bid != c["buy"] and (
+                            r.price <= o["price"] + 1e-9 if c["buy"] else r.price >= o["price"] - 1e-9):
+                        clash[r.eid].append(r)
+            if not self.writes_ready(1 + sum(len(v) for v in clash.values())):
+                log.info("ELECTION takes: write budget busy - %d order(s) wait for the next cycle", len(plan) - i)
+                break
+            bad = {e for e, lst in clash.items() if not self.cancel(e, lst, whole_exchange=False)}
+            chunk = [(c, o) for c, o in chunk if o["exchangeId"] not in bad]
+            if not chunk:
+                continue
+            exp = iso(utcnow() + timedelta(seconds=cfg.take_order_ttl))
+            for _, o in chunk:
+                o["expirationDate"] = exp
+            self.orders_stale = True
+            try:
+                results = self.place_orders([o for _, o in chunk])
+            except ApiError as err:
+                if err.code == "WRITE_BUDGET_WAIT":
+                    break
+                for _, o in chunk:
+                    self.ex[o["exchangeId"]].pending_until = now_m + cfg.pending_seconds
+                alert(f"election takes failed ({err}) - check positions")
+                if err.code in FATAL_API_CODES:
+                    fatal(f"orders rejected with {err.code}")
+                continue
+            by_index = {r.get("index", j): r for j, r in enumerate(results or []) if isinstance(r, dict)}
+            for j, (c, o) in enumerate(chunk):
+                e, ex = o["exchangeId"], self.ex[o["exchangeId"]]
+                res = by_index.get(j) or {}
+                data = res.get("data") or {}
+                self.el_until[e] = now_m + self.EL_TAKE_COOLDOWN
+                if res.get("ok"):
+                    self.remember_order(o, data, now_m)
+                if data.get("orderId") is not None:
+                    self.order_meta[data["orderId"]] = {"our_side": "bid" if c["buy"] else "ask", "price": o["price"],
+                                                        "take": True, "election": True, "eid": e, "t": time.time(),
+                                                        **({"no_sell": True} if o.get("_no_sell") else {})}
+                    self.notes_dirty = True
+                    left = self.my_orders.get(data["orderId"])
+                    if left is not None:          # (the leftover, at once: immediate-or-cancel)
+                        self.cancel(e, [left], whole_exchange=False, quiet=True)
+                if not res.get("ok"):
+                    log.info("ELECTION take %s refused: %s", ex.label, (data.get("error") or {}).get("message", "?"))
+                    continue
+                traded.add(e)
+                done, rem, cash = float(data.get("quantityTraded") or 0), float(data.get("quantityTraded") or 0), 0.0
+                for x in c["levels"]:             # (what it cost, level by level; the cached book follows the trade)
+                    take = min(rem, x["quantity"])
+                    cash += take * (0.0 if c["covered"] else (x["price"] if c["buy"] else 1 - x["price"]))
+                    x["quantity"] -= take
+                    rem -= take
+                    if rem <= 1e-9:
+                        break
+                if ex.book:
+                    key = "asks" if c["buy"] else "bids"
+                    ex.book[key] = [x for x in ex.book.get(key) or [] if x["quantity"] >= 1]
+                self.pending_dirty.add(e)         # (re-read next cycle)
+                self.el_totals["orders"] += 1
+                if done >= 1:
+                    self.el_totals["takes"] += 1
+                    self.el_totals["shares"] += done
+                    self.el_totals["cash_spent"] += cash
+                    inv[e] = float(inv.get(e, 0.0)) + (done if c["buy"] else -done)
+                log.warning("ELECTION take %s (%s, called %s): %s %d YES @ <= %.3f%s -> traded %.0f ($%.0f; holdback "
+                            "left $%.0f)", ex.label, c["race"], "winner" if c["buy"] else "loser",
+                            "buy" if c["buy"] else "sell", o["quantity"], o["price"],
+                            " (covered)" if c["covered"] else "", done, cash,
+                            max(0.0, cfg.election_holdback_usd - self.el_totals["cash_spent"]))
+        return traded
+
+    def el_tick(self, now, inv, mine_real, now_m=None, skip=()):
+        """Package 13 B section 5, cycle step 6f (before the harvest ladder): the calls, the called races' sides (the
+        market maker is reduce-only there: decide / ladder_caps), the takes (election active). Returns the exchanges
+        traded."""
+        cfg = self.cfg
+        now_m = time.monotonic() if now_m is None else now_m
+        self.alloc_ages = self.refs.ages() if self.refs is not None and hasattr(self.refs, "ages") else {}
+        inv = dict(inv)
+        self.el_update_calls(now)
+        races = self.el_races()
+        sides = {}
+        for rc in races.values():
+            if rc["winner"]:
+                sides[rc["winner"]] = "win"
+            for m in rc["losers"]:
+                sides[m] = "lose"
+        self.el_sides = sides
+        traded = self.el_takes(now, inv, mine_real, now_m, skip) if self.el_active(now) and self.running else set()
+        on = cfg.election_night or self.el_totals["orders"] or self.el_calls
+        self.el_info = self.el_status(now, races) if on else {}
+        return traded
+
+    def el_status(self, now=None, races=None):
+        """status.json "election": {active, holdback_active, called_races, takes, cash_spent, ...} plus what a restart
+        restores (calls with their start, totals)."""
+        cfg = self.cfg
+        races = self.el_races() if races is None else races
+
+        def lab(e):
+            return self.ex[e].label if e in self.ex else e
+        return {"enabled": bool(cfg.election_night), "active": self.el_active(now),
+                "holdback_active": self.el_holdback_on(now), "holdback_usd": cfg.election_holdback_usd,
+                "holdback_left": round(self.el_holdback_left(now), 2),
+                "called_races": {r: {"winner": lab(rc["winner"]) if rc["winner"] else None,
+                                     "losers": [lab(m) for m in rc["losers"]]} for r, rc in races.items()},
+                "pending_calls": sum(1 for c in self.el_calls.values() if not c["called"]),
+                "takes": int(self.el_totals["takes"]), "orders": int(self.el_totals["orders"]),
+                "shares": int(self.el_totals["shares"]), "cash_spent": round(self.el_totals["cash_spent"], 2),
+                # (restored by a restart)
+                "calls": {e: dict(c) for e, c in self.el_calls.items()},
+                "totals": {k: round(v, 4) for k, v in self.el_totals.items()}}
+
     # ------------------------------------------------------------------------------ fills
     def log_fills(self, fvs):
         """Fetch fills newer than the last one we logged (paging back up to max_fill_pages pages), and
@@ -12154,6 +12949,10 @@ class Bot:
         if new:
             self.fills.record(new, self.order_meta, fvs)
             self.note_fill_p(new)                             # (mm_carry_24h: Polymarket p at fill time)
+            try:
+                self.p13b_note_fills(new)                     # Package 13 B: "HARVEST fill ..." and its tallies
+            except Exception as e:                            # reporting must never disturb trading
+                log.warning("harvest fill note failed: %s", e)
         for f in reversed(new):                               # oldest first
             oid = f.get("orderId")
             o = self.my_orders.get(oid)
@@ -12814,9 +13613,9 @@ class Bot:
             if meta is None:
                 missing += 1
                 meta = {}
-            if meta.get("momentum") or meta.get("bucket"):   # Package 13 A: their own classes (keys absent until seen)
-                cls = "momentum" if meta.get("momentum") else "bucket"
-                counts[cls] = counts.get(cls, 0)
+            if meta.get("momentum") or meta.get("bucket") or meta.get("harvest") or meta.get("election"):
+                cls = next(k for k in ("momentum", "bucket", "harvest", "election") if meta.get(k))   # Package 13 A /
+                counts[cls] = counts.get(cls, 0)      # B: their own classes (keys absent until such a fill exists)
             elif meta.get("basket"):
                 cls = "basket"
             elif meta.get("alloc") or meta.get("set_ladder"):
@@ -12934,6 +13733,9 @@ class Bot:
                    if getattr(self, "bk_info", None) is not None and self.bk_persist_needed() else {}),
                 **({"momentum": self.mom_info or self.mom_status()}
                    if getattr(self, "mom_info", None) is not None and self.mom_persist_needed() else {}),
+                # Package 13 B: the harvest ladder, election night (absent while unused)
+                **({"harvest": self.hv_info} if getattr(self, "hv_info", None) else {}),
+                **({"election": self.el_info} if getattr(self, "el_info", None) else {}),
                 # ev_outcome_delta_24h's ring of (wall, ev) samples (also what a restart restores)
                 "ev_outcome_history": [list(x) for x in self.ev_hist],
                 "seconds_since_cycle": round(time.monotonic() - self.last_cycle_done, 1)
