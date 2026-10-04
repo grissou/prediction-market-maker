@@ -1214,6 +1214,9 @@ class Config:
     # on the next re-quote). Proceeds are cash the allocator ranks as spare cash on its next run; with the flag the
     # B3 unwind (alloc_set_cost_per_usd) skips a race whose rich leg is laddered. Status: status.json
     # alloc.set_ladder {races, shares_resting, filled}. Dry run: the ladder is planned and logged, nothing sent.
+    # P12 red team: a race that cannot be judged ("soft") keeps its ladder only while the rich leg's OWN p is known and
+    # every level <= p + value_sell_margin (RT12-1); a ladder the exchange refuses whole is not re-sent for
+    # ALLOC_LADDER_REFUSED_WAIT (RT12-3); with tilt_exit_take_split_sets also on, a warning (RT12-5).
     alloc_set_rich_leg: bool = False
     alloc_set_ladder: tuple = (0.0, -0.02, -0.04)   # YES-price offsets from the favourite's best bid (<= 0)
     # L2 alloc_prefer_short True (LIT_REVIEW F5, CMP-1): in a 2-leg race whose best bids (other traders only) sum
@@ -1226,6 +1229,8 @@ class Config:
     # fires only while the race's best asks sum <= 1 + pair_no_unwind_max_cost (its own threshold; an allocator B3
     # registration keeps its own cost) AND the best bids (other traders' levels only, arb_levels) do NOT sum above 1:
     # then the set is worth more sold leg by leg (L1) than bought back at the asks. False = unchanged.
+    # P12 red team: the allocator plans no B3 set unwind this gate would refuse (blocked_by "set_bids_gt_1", RT12-2),
+    # and no unwind at a cost (asks sum > 1) while our L1 ladder rests in the race (RT12-6).
     pair_no_unwind_asks_le1: bool = False
     # --- Package 12 M (analysis/p11/SPEC_P12.md Part M; LIT_REVIEW F1 part 1 and B1) ---
     # M1 close_override_utc (LIT_REVIEW F1, lit_electionnight.md): load_markets sets each market's close to
@@ -1245,6 +1250,9 @@ class Config:
     # (a +EV position we hold to the outcome), else 0 (as before). The race netting is the same as eff_inv's, applied
     # to (inv - target). With value_mode on, age_skew is 0 for a holding with edge-held > 0. The quote still never
     # crosses (step 4 of compute_quote) and the reducing side still keeps the value_mode floor (value_floor_quote).
+    # P12 red team: never in reduce-only (global_reduce / the flatten window: the skew from flat, RT12-4); a target
+    # that is only the holding (no allocator plan for the market) leaves the ADDING side its skew from flat (RT12-7:
+    # else every +EV holding - edge-held > 0 whenever p is above the bid - would bid on unskewed to the hard limit).
     skew_target_inventory: bool = False
 
 
@@ -2874,7 +2882,8 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
                   position_limit=None, min_edge=None, reduce_size=None, net_inv=None, age_hours=0.0,
                   adding_factor=1.0, bias_side=None, bias_edge=0.0, bias_size=1.0, unload_side=None,
                   unload_edge=0.0, unload_size=None, adding_limit_factor=1.0, frag_limit=None, behind_best=True,
-                  reduce_fv=None, why=None, adding_per_market=False, value_p=None, skew_inv=None, age_off=False):
+                  reduce_fv=None, why=None, adding_per_market=False, value_p=None, skew_inv=None, age_off=False,
+                  skew_add_flat=False):
     """
     fv         fair YES probability
     inv        our net YES shares on THIS exchange (negative = net NO); drives the hard position limit
@@ -2931,6 +2940,9 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
                        race-netted (inv - target) (Bot.skew_target_inputs); None = eff_inv (as before). Only the
                        reservation-price skew changes: limits, reduce-only and reduce_join_best still use inv / eff_inv
     age_off            Package 12 M2: no age skew (a +EV holding in value_mode); False = age_skew as before
+    skew_add_flat      P12 red team RT12-7: with skew_inv, the side that ADDS to the (race-netted) position keeps the
+                       skew from flat when that is the more cautious price (a target that is just the current holding
+                       must not unbrake buying more of it); False = skew_inv on both sides
     """
     bankroll = bankroll or DEFAULT_BANKROLL
     max_order_cash = cfg.max_order_cash_frac * bankroll
@@ -2958,6 +2970,14 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
     r = fv - skew - shift
     # 1a. reduce_from_book (A): the reducing side's own reservation price, from the book when that is closer to it.
     r_bid = r_ask = r
+    if skew_add_flat and skew_inv is not None and abs(eff_inv) >= 1:   # (P12 red team RT12-7: adding side braked)
+        flat = (cfg.skew_per_quote * eff_inv / order_size if cfg.skew_mode == "quote" and order_size > 0
+                else cfg.skew_per_share * eff_inv)
+        flat = max(-cfg.skew_max, min(cfg.skew_max, flat)) + (0.0 if age_off else age_skew(age_hours, eff_inv, cfg))
+        if eff_inv > 0:
+            r_bid = min(r_bid, fv - flat - shift)
+        else:
+            r_ask = max(r_ask, fv - flat - shift)
     fv_bid = fv_ask = fv
     a_bid = a_ask = False
     if reduce_fv is not None:
@@ -5785,7 +5805,9 @@ class Bot:
                 reduce_fv = None
         why = {}
         skew_inv, age_off = None, False
-        if getattr(cfg, "skew_target_inventory", False):   # Package 12 M2: skew from the target holding
+        # Package 12 M2: skew from the target holding - never in reduce-only (global_reduce: the risk cap is over, or
+        # the flatten window): there the skew is from flat as before (red team RT12-4)
+        if getattr(cfg, "skew_target_inventory", False) and not reduce_only:
             skew_inv, age_off = self.skew_target_inputs(ex, inv, inv_for_quote,
                                                         hrs <= self.close_window("flatten_per_market_hours", cfg),
                                                         cfg, now_m)
@@ -5798,7 +5820,9 @@ class Bot:
                              adding_limit_factor=adding_limit, frag_limit=frag_limit,
                              behind_best=ex.eid not in self.ref_only, reduce_fv=reduce_fv, why=why,
                              adding_per_market=bool(getattr(cfg, "adding_factor_per_market", False)),
-                             value_p=vp, skew_inv=skew_inv, age_off=age_off)
+                             value_p=vp, skew_inv=skew_inv, age_off=age_off,
+                             skew_add_flat=skew_inv is not None and not (cfg.alloc_enabled and ex.eid in
+                                                                         (getattr(self, "alloc_targets", None) or {})))
         ex.ro_clip = why.get("ro_clip", "")
         ex.bb_tag = " bb" if q.behind else ""
         ex.lad_ctx = (adding, adding_limit, frag_limit)   # (R3 ladder: the same factors and limits)
@@ -7666,9 +7690,13 @@ class Bot:
         """Package 12 L3 (pair_no_unwind_asks_le1): True = a NO+NO set race's pair unwind waits - its best asks sum
         above 1 + pair_no_unwind_max_cost (an allocator B3 registration: its own cost, already arb_plan's floor), or
         its best bids (other traders' levels only, arb_levels: a price we bid at is skipped whole) sum above 1 (the
-        set is worth more sold leg by leg, L1). A leg with no other trader's bid: the bids do not sum above 1."""
+        set is worth more sold leg by leg, L1). A leg with no other trader's bid: the bids do not sum above 1.
+        P12 red team RT12-6: also waits (at a cost, asks sum > 1) while our L1 set ladder rests on a leg - it sells
+        this set leg by leg, and arb_levels skips its levels (at the best bid) whole, so the bids sum would read low."""
         cfg = self.cfg
         if alloc_cost is None and asks_sum > 1 + max(0.0, cfg.pair_no_unwind_max_cost) + 1e-9:
+            return True
+        if asks_sum > 1 + 1e-9 and any(self.sl_orders(m) for m in members):
             return True
         bids = self.arb_levels(members, "bids")
         return bool(bids) and sum(p for p, _ in bids.values()) > 1 + 1e-9
@@ -9924,6 +9952,7 @@ class Bot:
         self.alloc_ages = {}
         self.alloc_ladder = {}                    # Package 12 L1: race -> the resting rich-leg ladder's state
         self.alloc_ladder_info = {}               # its status (alloc.set_ladder), absent while never used
+        self.alloc_ladder_refused = {}            # race -> when the exchange last refused its whole ladder (RT12-3)
         self.alloc_targets = {}                   # Package 12 M2: the latest plan's intended holdings {eid: shares}
 
     def alloc_persist_needed(self):
@@ -10130,6 +10159,10 @@ class Bot:
                 free = len(members) - sum(asks)           # cash freed per set (covered NO sales at 1 - ask)
                 if free <= 0:
                     continue
+                if getattr(cfg, "pair_no_unwind_asks_le1", False) and self.nono_unwind_gated(members, sum(asks),
+                                                                                           sum(asks) - 1):
+                    blocked["set_bids_gt_1"] += 1         # (red team RT12-2: arb_plan's L3 gate would refuse it,
+                    continue                              #  the pair waiting ALLOC_SET_WAIT with the allocator stalled)
                 cpu = (sum(asks) - 1) / free             # the set's EV given up per $ freed
                 n = int(min([sets] + [b["asks"][0]["quantity"] for b in books]) + 1e-9)
                 if cpu <= cfg.alloc_set_cost_per_usd + 1e-9 and n * free >= self.ALLOC_MIN_USD:
@@ -10669,6 +10702,7 @@ class Bot:
     # ------------------------------------------------------------------------------ Package 12 L1: rich-leg ladder
     ALLOC_LADDER_REQUOTE = 3600.0  # a race's resting rich-leg ladder is re-quoted at most this often (s)
     ALLOC_LADDER_KEEP = 3000.0     # at a re-quote, an order exactly at its target stays with at least this life left (s)
+    ALLOC_LADDER_REFUSED_WAIT = 900.0   # the exchange refused a race's whole ladder: not re-sent before this (s)
 
     def sl_orders(self, eid=None):
         """Package 12 L1: our resting rich-leg ladder orders (order_meta "set_ladder"), on eid or everywhere."""
@@ -10766,7 +10800,9 @@ class Bot:
                 bad = list(os_)
                 if why.get(race) == "soft" and race in self.alloc_ladder:
                     e = os_[0].eid
-                    if (all(o.eid == e for o in os_)
+                    p_e = self.alloc_p(self.ex[e], now_m) if e in self.ex else None   # (red team RT12-1: the
+                    if (all(o.eid == e for o in os_) and p_e is not None              #  ladder's own p known, every
+                            and all(o.price <= p_e + cfg.value_sell_margin + 1e-9 for o in os_)   # bid within it)
                             and sum(o.qty for o in os_) <= self.nono_set_part(e, float(inv.get(e, 0.0))) + 1e-9):
                         bad = []                  # (cannot be judged now, still within the set part: it stays)
             else:
@@ -10784,7 +10820,8 @@ class Bot:
                     touched.add(e)
                     self.orders_stale = True
                     log.warning("ALLOC LADDER %s: %d order(s) pulled (%s)", race, len(lst),
-                                "unsafe" if plan is not None else why.get(race, "no ladder"))
+                                "unsafe" if plan is not None or why.get(race) == "soft"
+                                else why.get(race, "no ladder"))
                     self.alloc_ladder.pop(race, None)     # (re-planned as soon as it can be, within the set part)
         for race in [r for r in self.alloc_ladder if r not in plans and why.get(r) != "soft"]:
             self.alloc_ladder.pop(race, None)
@@ -10793,6 +10830,9 @@ class Bot:
             st = self.alloc_ladder.get(race)
             if st is not None and now_m - st["at"] < self.ALLOC_LADDER_REQUOTE:
                 continue
+            refused = getattr(self, "alloc_ladder_refused", {})
+            if st is None and now_m - refused.get(race, -1e18) < self.ALLOC_LADDER_REFUSED_WAIT:
+                continue                          # (red team RT12-3: never one batch write a cycle into refusals)
             e = plan["eid"]
             ex = self.ex[e]
             cur = [o for o in self.sl_orders(e) if (self.order_meta.get(o.order_id) or {}).get("sl_race") == race]
@@ -10817,7 +10857,7 @@ class Bot:
                     continue                      # (never a new ladder on top of one not confirmed gone)
                 touched.add(e)
                 self.orders_stale = True
-            sent = 0.0
+            sent, n_refused = 0.0, 0
             if want:
                 orders = [{"exchangeId": e, "side": "yes", "action": "buy", "quantity": int(n), "price": px,
                            "tournamentId": self.tid, "expirationDate": iso(now + timedelta(seconds=MAX_ORDER_TTL)),
@@ -10829,6 +10869,7 @@ class Bot:
                         self.alloc_block("writes")
                         continue
                     ex.pending_until = now_m + cfg.pending_seconds
+                    refused[race] = now_m
                     alert(f"set ladder order on {ex.label} failed ({err}) - check positions")
                     if err.code in FATAL_API_CODES:
                         fatal(f"orders rejected with {err.code}")
@@ -10842,6 +10883,7 @@ class Bot:
                     data = res.get("data") or {}
                     if not res.get("ok"):
                         self.alloc_block("cash" if res.get("cash_gated") else "refused")
+                        n_refused += 0 if res.get("cash_gated") else 1
                         continue
                     self.remember_order(o, data, now_m)
                     sent += float(o["quantity"])
@@ -10860,6 +10902,10 @@ class Bot:
                             f" ({len(keep)} kept)" if keep else "")
             else:
                 self.alloc_ladder.pop(race, None)     # (the gate refused it all: the race waits, tried next cycle)
+                if want and n_refused:                # (the EXCHANGE refused it: tried again after the wait)
+                    refused[race] = now_m
+                    log.warning("ALLOC LADDER %s: the exchange refused every level - not re-sent for %.0f s", race,
+                                self.ALLOC_LADDER_REFUSED_WAIT)
         self.alloc_ladder_status(inv)
         return touched
 
@@ -11564,6 +11610,13 @@ class Bot:
             log.warning("alloc_enabled is on without cash_gate_enabled: the allocator does nothing without the gate's "
                         "fresh cash read - turn cash_gate_enabled on")
         self.warned_alloc_cash = bad
+        bad = bool(getattr(self.cfg, "alloc_set_rich_leg", False)) and bool(getattr(self.cfg,
+                                                                                 "tilt_exit_take_split_sets", False))
+        if bad and not getattr(self, "warned_ladder_split", False):   # (P12 red team RT12-5)
+            log.warning("alloc_set_rich_leg is on with tilt_exit_take_split_sets: the ladder sells the favourite-NO "
+                        "set leg while F2b sells the LONGSHOT-NO set leg (the value leg the ladder never sells) - "
+                        "together they break the same sets from both sides; turn tilt_exit_take_split_sets off")
+        self.warned_ladder_split = bad
         unknown = tuple(sorted(self.alloc_pins() - {x.label for x in self.ex.values()})) if self.ex else ()
         if unknown and unknown != getattr(self, "warned_alloc_pin", ()):   # (P10 red team RT-6: a typo pins nothing)
             log.warning("alloc_pin names no market: %s - those labels pin nothing (labels are matched exactly, e.g. "
