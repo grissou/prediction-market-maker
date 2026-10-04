@@ -1,9 +1,9 @@
 <!-- STATUS (Finisher 2b, updated on every push) -->
-**STATUS 00:15 UTC 4 Oct (branch claude/finisher-package9):** phase = Package 9 Phase 1 done (78 ideas, analysis/p9/ideas_A-D.md + SYNTHESIS.md); Phase 3 build starting. READY: Package 8 (7b298a4, PR #10, LIVE), 7 (PR #9), 6 (PR #8), 5 (PR #7).
-Package 9 = the catch-up package. Finding: the leader's +600% = LONG the favourite-longshot tilt (longshot YES / favourite NO, x3.9 since 28 Sep); our +35.9k toward-Polymarket book is the OTHER side (-356/point; +15k of it from stale-quote takes measured from raw Polymarket). Only a cushion-sized long-tilt basket reaches 150k: P(>=150k) 42-46% bought at once (P(<=85k) 1-2.5%, DD>20% 4-7%), ~27% if deployed in the morning and built over 12 h; 0% for anything we run now.
-Numbers: analysis/p9/SYNTHESIS.md section 2 (B_mc.py / D_mc.py Monte Carlo on a logistic tilt with judgement priors; K ceiling dominates: 7% at K 0.15, 47% at 0.30).
-Deploy: nothing new yet. Config-only hygiene recommended now: take_tilted_ref true (+ take_edge 0.08), ref_tilt_max 0.20, pair_no_unwind_max_cost 0.
-Next: build F1 tilt_basket planner (+ stress risk model, kill-switches), F2 tilt_exit_take, F5 set carousel/arb cash rule; red team; "READY: Package 9" by 07:00 with the catch-up plan.
+**STATUS 01:20 UTC 4 Oct (branch claude/finisher-package9):** phase = Package 9 READY ("READY: Package 9", PR PR_NUM). READY: Package 8 (7b298a4, PR #10, LIVE since 22:42), 7 (PR #9), 6 (PR #8), 5 (PR #7).
+Package 9 = the catch-up package: F1 `basket_*` long-tilt basket (CPPI on the cushion above max(86k, 0.85 x peak), m 5 / cap 80k, kill at -15% or the floor, exit 18 Oct, T-72h backstop, 36-h test, stress risk model), F2 `tilt_exit_take` (taker exits for the short-tilt book within 1c of tilted fv), F5 `arb_cash_rule` / `arb_sellback`; config hygiene (`take_tilted_ref`, `ref_tilt_max` 0.20, sets kept).
+Numbers (Monte Carlo, analysis/p9/PLAN_MC.txt; switch-on ~09:00 UTC): hold the book P150 0%; m 5 29% (D prior 22%) / P200 1% / P<=85k 1.2% / DD>20% 4.2%; m 6 + carry 40% (29%) / 11% / 0.7% / 4.5%; every 10 h of delay ~-10 points; half size 3%. Red team 2 high / 5 medium / 3 low, all fixed; 35 suites + STRESS_LADDER 20/20 green.
+Deploy: deploy/package9 stage0 -> stage1_hygiene -> stage2_flatten -> stage3_basket (when worst_case_loss < 40k, cash_gate_left > 20k) -> stage4_carry; plan: analysis/p9/CATCHUP_PLAN.md.
+Next: owner decides the basket (m 5 vs m 6) this morning; the executor stays subscribed to PRs #7-#10 and PR_NUM.
 
 # START HERE (Team run, branch `claude/run-c-tournament-improvements-pycdet`)
 
@@ -11,6 +11,76 @@ Status: **complete** (Team complete at 14:45 UTC) (started 2026-10-02 08:50 UTC;
 The Builder's previous START_HERE is kept as `START_HERE_BUILDER.md`; Run A's notes are `ENGINEERING_NOTES.md`.
 Plan: `PLAN.md`. Packages appear below as they become READY (commit messages start "READY: Package N").
 Deploy only commits whose message starts "READY"; the branch is cumulative.
+
+## Package 9 (READY, Finisher 2b, 4 Oct ~01:30 UTC; branch `claude/finisher-package9` from Package 8 7b298a4; draft PR PR_NUM): the catch-up package — the long-tilt basket with kill-switches, taker exits for the short-tilt book, arbitrage with a cash rule (all OFF; staged files in `deploy/package9/`; the plan in `analysis/p9/CATCHUP_PLAN.md`)
+**Objective (owner, 3 Oct 22:50-23:00):** P(account >= 150k by 4 Nov) first, P(>= 200k) second, P(<= 85k) < ~10%, max drawdown < ~20%;
+rank strategies by those numbers, not by mean P&L; the smallest risk that gets P(>= 150k) above ~40%, or say plainly that none can.
+**Research (78 ideas, `analysis/p9/ideas_A-D.md`; synthesis `analysis/p9/SYNTHESIS.md`; data = `ops-snapshot-2026-10-03`, to 22:47 UTC):**
+the leader's +600% is the favourite-longshot tilt: longshot YES / favourite NO bought on 28 Sep went x3.89 (top 10 x5.74, best x11.5:
+Dem Montana Senate 0.010 -> 0.115) as s rose 1.7% -> 12.6% in 54 h (longshot mids 3.6c -> 9.4c with Polymarket flat at 2.5c); it fits a
+logistic (K 0.35 +- 0.18; K < 0.20 rejected, 0.25-2 equally likely; the equal-weight series bends at ~0.18); its fuel is new entrants
+(~6/h) and bid-heavy cheap-side books whose depth halved in 30 h. Our +35.9k toward-Polymarket book is the OTHER side (-356/point); the
+stale-quote takes, measured from RAW Polymarket, added +15.0k of it (276 fills, 100% toward Polymarket, -406 at the mid). Rivals' stale
+quotes are the tilt (nothing to take after removing it: -0.6 to +0.3 c/share); riskless sets return ~3.4%/month held, a set carousel
+0.3-0.5k/day; market making 1-2k/day with capital, +149/day at 0 cash. **Nothing we run reaches 150k (P 0%).** The one plan that does:
+hold the long side of the tilt, sized on the cushion above a floor, exited before the close.
+**Built (each OFF, own setting, in OVERRIDABLE; flags off pinned byte-identical to Package 8 on a grid; `mm_bot.py` +1,476 lines):**
+- F1 `basket_*` (28 settings; tests/test_basket.py 149): basket $ = `basket_mult` 5 x (liquidation value - floor), floor = max(`basket_floor`
+  86k, `basket_floor_peak_frac` 0.85 x confirmed peak), cushion net of our own last-24 h buying x `basket_impact_frac` 0.06, cap min(80k,
+  0.85 x account); legs = longshot YES (Polymarket < `basket_max_ref` 0.10) or favourite NO (short YES, only with covered NO sales and no
+  NO+NO set), cheapest route per race, laggards first, no headline races, no independents, <= 25c a share, >= 20 legs at <= 5% each;
+  built over `basket_build_hours` 4 as an IOC taker at ask + 0.5c (first build <= 75% of visible asks, then <= 25%/h per market), <= 4
+  orders and 50% of the write budget per cycle, cash-gated (needs `cash_gate_enabled` and a cash read < 5 min old), never on a market or
+  race another feature traded this cycle, never where we rest an order (the market maker does not quote basket legs; takes, pair unwinds
+  and tilt exits skip them; skew and `tilt_exposure` exclude them: status `basket.tilt_exposure`). **Kill:** liquidation value < floor or
+  < 85% of peak for 120 s -> sold down over `basket_kill_hours` 2, latched off across restarts (reset only by an explicit false then true).
+  **Exit:** from `basket_exit_utc` 2026-10-18T12:00:00Z over 24 h, no adds from 7 days before, never past T-72 h (hard-coded, per market
+  too). **36-h test:** tilt_s < 0.15 or 12-h slope <= 0 -> m `basket_mult_after_fail` 1.5 (can only cut). **Risk model:** basket legs counted
+  at `basket_stress_frac` 0.4 x value in both measures; exempt from reduce-only; buys refused while the stressed worst case exceeds
+  `worst_case_backstop_frac` x account (the last resort). Legs valued at max(fair value, book) for sizing (no over-buying). A crash in the
+  planner never stops the market maker. status.json "basket" {state, peak, floor, cushion, target, held, legs, impact, test, ...} and the
+  2-hourly " | basket $X (N legs, state)".
+- F2 `tilt_exit_take` (+ `_max_cost` 0.01, `_per_hour` 15000, `_max_per_cycle` 3, `_max_leg_frac` 0.5; tests/test_tilt_exit_take.py 50): the
+  tilt exits (sides shrinking a position that adds to |tilt_exposure|) are TAKEN at the best other level when within 1c of the TILTED fair
+  value (never raw Polymarket); longshot NO first, favourite YES next, lines marked below their exit price first; never flips, never beyond
+  depth, never during a jump guard, never set legs beyond the lone part, never basket legs; IOC, cash-gated, covered sales for NO.
+- F5 `arb_cash_rule` (+ `arb_cash_mult` 1.25, `arb_cash_reserve` 2000, `arb_leg_depth_frac` 0.8), `arb_sellback` (+ `_min_sum` 1.00;
+  tests/test_arb_cash.py 53): arbitrage sets only when `cash_left` >= 1.25 x need + 2k (shrunk to what fits), own quotes excluded from
+  bid-sums and depth, size <= 0.8 x the thinnest leg, unequal legs owed and completed or reversed the same cycle (never flips, never a
+  one-legged set); YES+YES sets sold back at bids >= 1.00. status `arb_cash_blocked`, `tilt_exit_takes`.
+**Simulation evidence:** the Monte Carlo `analysis/p9/B_mc.py` / `D_mc.py` / `P9_plan_mc.py` (output `PLAN_MC.txt`) IS the screen for the
+basket: live_sim's 3-h world cannot hold a 30-day position and has no cash or set collateral (items F1/F5 are unit-test evidence as
+Packages 7-8). The tilt model is a logistic with judgement priors (K median 0.30 base / 0.18 bear / 0.45 bull; 12% crash hazard; 35%
+chance of an endgame unwind; D's greater-fool world at 20% in the "D prior"); own impact 0.010 of tilt per 80k bought, 10% extra
+slippage after a crash, stops on liquidation value. **Odds (switch-on ~09:00 UTC 4 Oct):** hold the book 0% / 0% / 6% / 10%; m 5 cap 80k
+built in 4 h **29%** (D prior 22%) / 1% / 1.2% / 4.2%; + carry 300/day 36% / 4% / 0.5% / 4.2%; **m 6 cap 90k + carry 40% (29%) / 11% /
+0.7% / 4.5%** (P150 / P200 / P<=85k / P(DD>20%)); built over 12 h 26%; half size 3%; 20 h later 20%, 34 h later 7.5%; 5% exit failure under
+the settled rule 28%. Plain answer: ~40% needs m 6 / cap 90k with carry, switched on this morning; m 5 gives 29-36%; delay costs ~10 points
+per 10 h; P(>= 200k) is 1-11%.
+**Red team (opus, `analysis/p9/REDTEAM.md`): 2 high** (the basket's shares flipped the sign of `tilt_exposure`, turning the tilt exits
+against it: excluded; same-cycle buy on a market another feature just sold: refused), **5 medium** (ordinary shares on a basket leg
+unmanaged: adopted; sizing at fair value could over-buy 2-2.7x: valued at max(fv, book); a leg with no bids kept its lagged mark so the
+kill could miss a crash: counts at 0/1; kill/exit sales blocked by the cash gate or a set only logged: alert; the backstop no longer
+bounded the basket: buys refused above it), **3 low** (mult_after_fail could raise m; ask-share windows lost on restart; two ranges too
+wide: `basket_slip` <= 0.02, `basket_stress_frac` >= 0.2): all fixed. Documented, not fixed: `basket_enabled` false during a kill releases
+the legs (use the exit date to sell instead); no kill check while the account value is missing; a positions read lagging > 120 s can
+leave part of a leg unmanaged; `basket_floor` 50k / `basket_kill_dd` 0.5 are allowed by the ranges (keep >= 86k / <= 0.15 live).
+**Suites:** 35 files green (test_basket 149, test_tilt_exit_take 50, test_arb_cash 53, test_mm_bot 600, test_cash_gate 83, test_tilt_exit 62,
+test_nono_sets 103, test_pair_followup 42, test_pair_sizing 29, test_live_sim_marks 115, the rest as Package 8) + STRESS_LADDER=1 20/20 (0 duplicates);
+py_compile under Python 3.10.
+**Deploy (owner; `deploy/package9/README.md`):** code by handover restart (stage0) -> stage1_hygiene (config only: `take_tilted_ref`,
+`take_edge` 0.08, `ref_tilt_max` 0.20, `pair_no_unwind_max_cost` 0.0) -> stage2_flatten (`tilt_exit_take`) -> when `worst_case_loss` < ~40k and
+`cash_gate_left` > ~20k: stage3_basket (or stage3b m 6 / 90k; also `worst_case_backstop_frac` 0.9) -> stage4_carry after the basket is at
+target. **Watch, stage 2 first hour:** "TILT EXIT TAKE" lines at <= 1c cost vs tilted fv, `tilt_exposure` falling, `cash_gate_left` rising,
+`worst_case_loss` falling; no take against our own order. **Stage 3 first 4 h:** `basket.state` building -> tracking, `basket.held` rising to
+the target in 2-4 h (if it stalls: `cash_gate_left` 0 or the stressed worst case above the backstop: wait for stage 2 to free more), legs
+>= 20, each <= 5%, prices <= 25c, no basket order on a market we quote, writes <= 28, `basket.impact` ~1-5k; liquidation value within ~3%
+of the account (the mark lags); `tilt_s` rising. **Days 1-2:** the 36-h test result in `basket.test`; peak and floor ratcheting.
+**Rollback triggers:** the kill fires (it is the rollback: then `rollback_basket_off`); a basket order on a market with our own resting
+order (bug: off at once); `basket.held` above target + 10%; 429s; a refused override. Code rollback = handover to 7b298a4.
+**Untested:** the basket against the real exchange (IOC fills as `quantityTraded`, partial fills between placement and the leftover cancel
+are not booked to the basket and stay ordinary inventory); `tilt_exit_take`'s hourly cap and the owed-arbitrage state are not saved across
+restarts; nothing here ran in live_sim; the tilt model's ceiling K is a judgement prior (the whole bet).
 
 ## Package 8 (READY, Finisher 2b, 3 Oct ~21:45 UTC; branch `claude/finisher-package8` from Package 7 2ef6d12; draft PR #10): the cash gate (ends the 400 refusals), pair-unwind sizing in sets, and the tilt exits (all OFF; staged files in `deploy/package8/`)
 Live at the time of writing: Package 7 since 19:15 UTC with tilt on at `ref_tilt_max` 0.11 (`tilt_s` 0.110, +0.0036/h), headline on,

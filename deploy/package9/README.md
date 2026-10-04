@@ -1,0 +1,22 @@
+# Package 9 staged settings_override.json files (owner deploys; each read within overrides_seconds = 30 s; write a temp file and mv it)
+Base = the live overrides as of 3 Oct 22:47 UTC (Package 8 stages 1-3 on, `arb_enabled` false, `capital_ceiling_adding_size_factor` 0,
+`ref_tilt_headline` true: none of these is reset by any file here; stage4 is the only file that turns `arb_enabled` back on, by design).
+Every file validates against OVERRIDABLE (checked). Order: 0 -> 1 -> 2 -> 3 (or 3b) -> 4 (optional). Rollback = the previous stage's
+file; `rollback_basket_off` = stage 3 with `basket_enabled` false (the basket legs are RELEASED to the ordinary book, not sold: to sell
+them instead, leave the basket on and set `basket_exit_utc` to now + 1 h, then switch off after the exit).
+- stage0_code_only: Package 9 code (handover restart), every new flag off = Package 8 behaviour + status fields.
+- stage1_hygiene (config only; works on the Package 8 code too): `take_tilted_ref` true + `take_edge` 0.08 (the stale-quote takes measure
+  their edge from the tilted reference: they added +15.0k of the +35.9k short-tilt exposure and lost ~400 at the mid), `ref_tilt_max` 0.20
+  (the estimator reads 0.14-0.16 and is clipped at 0.11), `pair_no_unwind_max_cost` 0.0 (the 16.8k NO+NO sets pay +594 at settlement and
+  are marked 21.4k: sell them back only at an asks sum <= 1.000).
+- stage2_flatten: + `tilt_exit_take` (the tilt exits are TAKEN at the book within 1c of the tilted fair value, 15k$/h, longshot NO first,
+  then favourite YES, lines marked below their exit price first). Expect: "TILT EXIT TAKE" lines, `tilt_exposure` falling by ~15-20k in
+  the first hours, `cash_gate_left` rising, `worst_case_loss` falling from ~79k. Go to stage 3 when `worst_case_loss` < ~40k and
+  `cash_gate_left` > ~20k (the basket refuses to buy while the stressed worst case is above the backstop fraction of the account).
+- stage3_basket: + `basket_enabled` with m 5, cap 80k, floor max(86k, 0.85 x peak liquidation value), kill at -15% from the peak or
+  below the floor (latched), exit from 18 Oct 12:00 UTC over 24 h, 36-h test (tilt_s >= 0.15 and rising, else m 1.5), stress risk model
+  0.4, `worst_case_backstop_frac` 0.9 as the last resort. stage3b = m 6, cap 90k (the owner's "40%" needs it, see the catch-up plan).
+- stage4_carry (optional, after the basket is built): `arb_enabled` true + `arb_cash_rule` (sets only when the cash gate has 1.25 x the
+  need + 2k, own quotes excluded, thinnest-leg sizing, unequal legs completed or reversed the same cycle) + `arb_sellback` (YES+YES sets
+  sold back at bids >= 1.00).
+Watch list, rollback triggers and the odds: START_HERE.md "Package 9" and analysis/p9/CATCHUP_PLAN.md.
