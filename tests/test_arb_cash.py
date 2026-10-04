@@ -263,6 +263,36 @@ arb(api, b)
 check("rule off: the old behaviour (alert, nothing owed)", not b.pair_owed and any("partly filled" in a for a in ALERTS),
       (b.pair_owed, ALERTS))
 
+print("--- arb_sellback: a held YES+YES set sold back at bids >= arb_sellback_min_sum")
+check("defaults: arb_sellback False, min_sum 1.00", (c.arb_sellback, c.arb_sellback_min_sum) == (False, 1.0))
+good, bad = M.validate_overrides({"arb_sellback": True, "arb_sellback_min_sum": 0.95}, c)
+check("accepted (True, 0.95)", len(good) == 2 and not bad, (good, bad))
+good, bad = M.validate_overrides({"arb_sellback_min_sum": 0.94}, c)
+check("0.94 refused", not good and bad, (good, bad))
+api, b = bot(inv={"11": 200, "12": 300}, rule=False, bk=books(b11=(0.20, 100), b12=(0.80, 1000)))   # bids 1.00
+check("flag off: bids 1.00 < 1 + pair_unwind_min_profit -> nothing", b.arb_plan(OHIO, invd(api, b), FVS, False) is None)
+api, b = bot(inv={"11": 200, "12": 300}, rule=False, bk=books(b11=(0.20, 100), b12=(0.80, 1000)), arb_sellback=True)
+plan = b.arb_plan(OHIO, invd(api, b), FVS, False)
+check("flag on: a long-set sale at 1.00, sized to the smallest leg / depth (100)",
+      plan == ("unwind", "sell", {"11": (0.20, 100), "12": (0.80, 1000)}, 100), plan)
+done = arb(api, b)
+check("take_arbitrage: one batch, both legs sell 100 YES, positions 100 / 200 (never flipped)",
+      done == {"Ohio Senate"} and sorted(sent(api)) == [("11", "yes", "sell", 100, 0.2), ("12", "yes", "sell", 100, 0.8)]
+      and api.inv == {"11": 100, "12": 200}, (sent(api), api.inv))
+api, b = bot(inv={"11": 200, "12": 300}, rule=False, bk=books(b11=(0.16, 100), b12=(0.80, 1000)), arb_sellback=True,
+             arb_sellback_min_sum=0.95)
+check("min_sum 0.95: bids 0.96 sold back", (b.arb_plan(OHIO, invd(api, b), FVS, False) or ("",))[0] == "unwind")
+api, b = bot(inv={"11": 200, "12": 300}, rule=False, bk=books(b11=(0.14, 100), b12=(0.80, 1000)), arb_sellback=True,
+             arb_sellback_min_sum=0.95)
+check("bids 0.94 < 0.95: kept", b.arb_plan(OHIO, invd(api, b), FVS, False) is None)
+api, b = bot(inv={"11": 200, "12": 300}, rule=False, bk=books(b11=(0.20, 100), b12=(0.80, 1000)), arb_sellback=True)
+b.my_orders["o5"] = M.Resting("o5", "12", True, 0.80, 10, None)
+check("an own bid at 12's 0.80 level: skipped (0.80 is the next level too here, but ours) -> nothing",
+      b.arb_plan(OHIO, invd(api, b), FVS, False) is None, b.arb_plan(OHIO, invd(api, b), FVS, False))
+api, b = bot(inv={"11": -200, "12": -300}, rule=False, bk=books(b12=(0.70, 1000), a11=(0.21, 100), a12=(0.80, 1000)), arb_sellback=True)
+check("a short set is not touched by arb_sellback (asks 1.01: nothing)", b.arb_plan(OHIO, invd(api, b), FVS, False)
+      is None)
+
 print("--- status.json arb_cash_blocked")
 
 

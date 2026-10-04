@@ -1050,6 +1050,14 @@ class Config:
     arb_cash_mult: float = 1.25
     arb_cash_reserve: float = 2000.0
     arb_leg_depth_frac: float = 0.8
+    # F5 arb_sellback True (C-4, the mirror of pair_no_unwind_max_cost for long sets; needs pair_unwind_enabled): a
+    # held YES+YES set (long every leg of a race) is sold back as one immediate-or-cancel pair-unwind batch once
+    # other traders' bids add up to >= arb_sellback_min_sum (instead of 1 + pair_unwind_min_profit; below 1.00 =
+    # at a cost, to free the capital), a level at a price of ours skipped whole, sized to the smallest leg held and
+    # the depth (and pair_unwind_max_frac per order, as every pair unwind). A sale only the lower threshold allows
+    # counts against pair_no_unwind_max_per_cycle like a short-set unwind at a cost. False = unchanged.
+    arb_sellback: bool = False
+    arb_sellback_min_sum: float = 1.00
 
 
 CFG = Config()
@@ -1284,6 +1292,8 @@ OVERRIDABLE = {
     "arb_cash_mult": (1.0, 3.0),
     "arb_cash_reserve": (0.0, 20000.0),
     "arb_leg_depth_frac": (0.1, 1.0),
+    "arb_sellback": (False, True),
+    "arb_sellback_min_sum": (0.95, 1.1),
 }
 MAX_ORDER_TTL = 7200.0    # no order of ours lives longer than this (dead-man's switch), whatever the TTL settings
 LADDER_MAX_LEVELS = 8
@@ -7022,6 +7032,8 @@ class Bot:
             held = [inv.get(e, 0.0) for e in members]
             for sign, levels, action in ((+1, bids, "sell"), (-1, asks, "buy")):
                 sets = min(sign * h for h in held)
+                if sign > 0 and sets >= 1 and getattr(cfg, "arb_sellback", False):
+                    levels = self.arb_levels(members, "bids")   # Package 9 F5: never a level at a price of ours
                 if sets < 1 or not levels:
                     continue
                 total = sum(p for p, _ in levels.values())
@@ -7032,6 +7044,9 @@ class Bot:
                     # Package 7: a NO+NO set is unwound as a pair even at a small cost (asks <= 1 + max_cost): the
                     # only way to free it without cash (selling one leg breaks the set's collateral)
                     floor = min(floor, -cfg.pair_no_unwind_max_cost)
+                if sign > 0 and getattr(cfg, "arb_sellback", False):
+                    # Package 9 F5 (C-4): a held YES+YES set is sold back once the bids add up to arb_sellback_min_sum
+                    floor = min(floor, cfg.arb_sellback_min_sum - 1)
                 if edge < floor - 1e-9:   # (buying back a short set below 0.90 only cuts risk)
                     continue
                 max_sets = int(getattr(cfg, "pair_no_unwind_max_sets", 0) or 0)
