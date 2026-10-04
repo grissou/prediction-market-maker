@@ -12118,6 +12118,7 @@ class Bot:
                 m, px0 = cfg.value_sell_margin, lv[0]["price"]
                 if (px0 < p - m - 1e-9) if it["kind"] == "long" else (px0 > p + m + 1e-9):
                     items.remove(it)
+                    self.ma_fund_refused[it["eid"]] = now_w
                     log.info("MOMENTUM funding: %s not sold - %.3f is beyond the value floor (p %.3f, margin %.3f)",
                              ex.label, px0, p, m)
                     continue
@@ -12169,8 +12170,8 @@ class Bot:
                     self.bk_run["sell_orders"] = self.bk_run.get("sell_orders", 0) + 1
                     log.warning("BUCKETS sold %s %s%.0f @ %.3f (edge-held %.1f%%, $%.0f; value floor exempt)", ex.label,
                                 "NO " if it["kind"] == "short" else "", done, best, 100 * it["edge"], usd)
-            if done < 1 or it["usd_left"] < self.ALLOC_MIN_USD:
-                items.remove(it)
+            if done < 1 or it["usd_left"] < self.ALLOC_MIN_USD or (fund and done >= cap - 1e-9):
+                items.remove(it)                  # (a funding sale that sold all it could: done, never a 1-share churn)
         return traded, n_left
 
     # --- the momentum sleeve (section 3) ---
@@ -12590,6 +12591,8 @@ class Bot:
     MA_LOG_SECONDS = 600.0        # a "MOMENTUM eval" journal line at most this often (and at every change)
     MA_PT_SECONDS = 120.0         # the profit target must hold this long (as the kill: one glitchy mid never flips)
     MA_SLOPE_6H = 6.0             # slope_6h's look-back (hours)
+    MA_FUND_REPLAN_S = 600.0      # funding (c): a new sale plan at most this often (s)
+    MA_FUND_REFUSED_S = 3600.0    # ...a market refused at the value floor is not planned again for this long (s)
 
     def mom_auto_init(self, mom=None):
         """Package 13 C state, restored from status.json "momentum" (its "auto" and "slope" parts)."""
@@ -12609,6 +12612,8 @@ class Bot:
         self.ma_pool = num(a.get("pool"), 0.0)    # funding-sale proceeds the sleeve has not spent yet
         self.ma_unseen = deque()                  # (monotonic, $) funding-sale proceeds no cash read shows yet (run)
         self.ma_fund_sell = []                    # the funding sales planned (bucket_sell_plan rows; this run)
+        self.ma_fund_at = -1e18                   # wall time of the last funding plan (MA_FUND_REPLAN_S)
+        self.ma_fund_refused = {}                 # eid -> wall time a funding sale there met the value floor
         self.ma_hold = 0.0                        # $ the allocator's spare cash / the ladder / the quoter leave alone
         self.ma_cand_raw = set()                  # this cycle's momentum candidates before rule 5 (the hold, the ladder)
         self.ma_cands = 0
@@ -12908,7 +12913,7 @@ class Bot:
         log.warning("MOMENTUM eval: %s - %s | slope24 %s (>= %g), slope6 %s pts/day | %d bins (%s) | sleeve $%.0f of "
                     "target $%.0f", a["state"], a["reason"], self.ma_fmt(self.ma_s24), self.cfg.momentum_on_slope,
                     self.ma_fmt(self.ma_s6), len(self.tslope.bins), self.tslope.source or "none", cost,
-                    a["target_usd"] if a["state"] == "on" else 0.0)
+                    self.mom_buy_target(eq) or 0.0)
 
     # --- funding (c) and attribution ---
     def ma_attribute(self, usd, cash_before):
@@ -12943,10 +12948,15 @@ class Bot:
             self.ma_unseen.popleft()              # (a cash read since: those proceeds are in cash_left)
         pending = sum(u for _, u in self.ma_unseen)
         need = tgt - cost - max(0.0, self.ma_cash_avail()) - pending
-        if not self.ma_fund_sell and need >= self.ALLOC_MIN_USD:
+        for e in [e for e, t in self.ma_fund_refused.items() if now_w - t >= self.MA_FUND_REFUSED_S]:
+            self.ma_fund_refused.pop(e)
+        if (not self.ma_fund_sell and need >= self.ALLOC_MIN_USD
+                and now_w - self.ma_fund_at >= self.MA_FUND_REPLAN_S - 1e-9):
+            self.ma_fund_at = now_w
             budget = min(need, cfg.bucket_turnover_per_hour - self.bucket_turnover(now_w))
             if budget >= self.ALLOC_MIN_USD:
-                self.ma_fund_sell = self.bucket_sell_plan(inv, now_m, budget, skip, cls)
+                plan = self.bucket_sell_plan(inv, now_m, budget, set(skip) | set(self.ma_fund_refused), cls)
+                self.ma_fund_sell = [x for x in plan if x["usd_left"] >= self.ALLOC_MIN_USD]
                 if self.ma_fund_sell:
                     log.warning("MOMENTUM funding (c): selling VALUE for $%.0f of the sleeve's $%.0f shortfall, lowest "
                                 "edge-held first (%s), %s", sum(x["usd_left"] for x in self.ma_fund_sell), tgt - cost,

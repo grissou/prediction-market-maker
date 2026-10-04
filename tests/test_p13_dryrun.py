@@ -9,8 +9,9 @@ Scenarios (analysis/p12/SPEC_P13_AGGRESSIVE.md section 6):
   0  base = the live file + alloc_mm_reserve 20000, backstop 0.90, mm_risk_reserve_wc 5000 / _corr 4000, every P13 flag
      off: identical orders and status to the Package 13 staged commit 3e635d7 (and to the pre-Package-13 code 663ede1);
   1  the staged file deploy/package13/settings_override.aggressive.json (everything on): 2 h, hourly rebalance twice;
-  1F the "funded sleeve" fixture (the momentum bucket starves in scenario 1, see the report): the staged file with the
-     harvest ladder, the allocator and the stale-quote takes off for 1 h and +45k of cash, then the staged file 1 h;
+  1F the "funded sleeve" fixture (the momentum bucket buys nothing in scenario 1, see the report): the staged file with
+     the harvest ladder, the allocator and the stale-quote takes off and the sleeve forced on (momentum_force: Package
+     13 C's staged file only ARMS it) for 1 h and +45k of cash, then the staged file 1 h (books refilled every 10 min);
   2  a +3c tilt rise (in 3 steps of 1c over 1 h) on the fixture: harvest fills, the sleeve's mark vs cost, EV;
   3  the momentum kill (-30% mid move against the sleeve for > 120 s), the exit, the latch, harvest taking over;
   4  the manual exit (momentum_exit true): the 6-h linear schedule, never re-bought;
@@ -777,13 +778,18 @@ def fixture(tag):
     api, b = build(write_file(base_file(), "base.json"), cash_add=45000.0)
     P.cycles(b, 4, step=60.0, stage=f"{tag}-warm")
     d = staged()
-    d.update(tilt_harvest_ladder=False, alloc_enabled=False, take_enabled=False)
+    # (Package 13 C: the staged file only ARMS the sleeve - momentum_auto - and the snapshot harness has no recorder
+    #  history, so its trigger never fires here; this fixture is about what the sleeve buys, so it forces it on)
+    d.update(tilt_harvest_ladder=False, alloc_enabled=False, take_enabled=False, momentum_force=True)
     P.apply_stage(b, write_file(d, "momfirst.json"))
     STATE["t_epoch"] = P.CLK.off
     t0, n0 = P.CLK.off, len(P.CAP.lines)
-    run(b, 60, stage=tag, refill_hours=True)
-    P.apply_stage(b, STAGED)
-    run(b, 60, stage=tag, refill_hours=True)
+    # (books replenished every 10 min, as in scenarios 3 / 4: with Package 13 C the sleeve gets the cash first and
+    #  sweeps a book's whole side within the hour; a side left empty puts its leg's mark at the fair value and a
+    #  never-replenished fake book then KILLS the sleeve with no market move)
+    run(b, 60, stage=tag, refill_hours=True, refill_s=600.0)
+    P.apply_stage(b, STAGED)                      # (hour 2: the staged file as it is - the sleeve held, armed)
+    run(b, 60, stage=tag, refill_hours=True, refill_s=600.0)
     return api, b, t0, n0
 
 
@@ -803,8 +809,9 @@ def scenario1f():
     check(f"s1F: writes of every feature but the quoter <= {WPM} in any simulated minute", mw_nq <= WPM, mw_nq)
     sold, bought = sales_and_buys(n0, t0, P.CLK.off)
     STATE["s1f"] = dict(st=st, bought=bought, sold=sold, mw_nq=mw_nq, mw=minute_writes(api, t0)[0])
-    out(f"- hour 1: staged file with tilt_harvest_ladder / alloc_enabled / take_enabled false and +45,000 cash given "
-        f"to the fake; hour 2: the staged file. Sleeve after 2 h: {mo.get('markets')} legs, cost "
+    out(f"- hour 1: staged file with tilt_harvest_ladder / alloc_enabled / take_enabled false, momentum_force true "
+        f"(Package 13 C: the staged file only arms the sleeve) and +45,000 cash given to the fake; hour 2: the staged "
+        f"file (the sleeve held, armed); books replenished every 10 min. Sleeve after 2 h: {mo.get('markets')} legs, cost "
         f"${mo.get('cost', 0):,.0f} (target ${mo.get('target', 0):,.0f}), mark ${mo.get('value_mark', 0):,.0f}, at p "
         f"${mo.get('value_outcome', 0):,.0f}; state {mo.get('state')}")
     out()
@@ -1286,11 +1293,14 @@ def findings():
         f"{pct(r0, 'mom'):.0f}% at hour 0 -> {pct(r2, 'mm'):.0f} / {pct(r2, 'value'):.0f} / {pct(r2, 'mom'):.0f}% "
         f"after 2 h (targets 20 / 40 / 40). VALUE converges (sell-down "
         f"${sum(x['usd'] for h in s1.get('sold', []) for x in h):,.0f} in {sum(len(h) for h in s1.get('sold', []))} "
-        f"IOC sales, lowest edge-held first); **MOMENTUM buys nothing**: the sleeve only spends free cash ABOVE "
-        f"alloc_mm_reserve, and every free dollar is locked first by the harvest ladder (${r2.get('hv_coll', 0):,.0f} "
-        f"resting after 2 h, counted in no bucket), the quoter, the allocator's spare-cash buys and the stale-quote "
-        f"takes (the gate's cash left is ~0 every cycle). Not changed (a strategy choice for the owner; see Findings).",
-        f"- **Funded sleeve (fixture 1F: harvest / allocator / takes off for 1 h, +45k cash)**: {mo.get('markets')} "
+        f"IOC sales, lowest edge-held first); **MOMENTUM buys nothing**: Package 13 C - the staged file ARMS the "
+        f"sleeve (momentum_auto) and this harness has no recorder history, so the tilt slope is unknown and the "
+        f"trigger never fires (status momentum.reason: "
+        f"'{((s1.get('st') or {}).get('momentum') or {}).get('reason')}'). The ladder rests "
+        f"${r2.get('hv_coll', 0):,.0f} after 2 h (counted in no bucket). Once the trigger is on, the sleeve gets the "
+        f"cash first (finding F1, addressed in Package 13 C).",
+        f"- **Funded sleeve (fixture 1F: harvest / allocator / takes off and the sleeve forced on (momentum_force) for "
+        f"1 h, +45k cash, books replenished every 10 min)**: {mo.get('markets')} "
         f"legs, ${mo.get('cost', 0):,.0f} at cost; every buy a momentum market, none opposite a position, none on a "
         f"VALUE short.",
         f"- **Harvest ladder**: {len(s1.get('lad') or {})} markets, "
@@ -1342,9 +1352,10 @@ def findings():
         f"gate's free cash at 23:30: ${(A.get('free_2330') or (0,))[0]:,.0f}).",
         "",
         "## Findings (not changed: strategy / owner's call)",
-        "- F1 MOMENTUM starves under the staged file (above). Options: the harvest ladder keeps cash_reserve() plus "
-        "the sleeve's shortfall while a buy round is open; the allocator's spare-cash buys pause while MOMENTUM is "
-        "under target (they re-buy VALUE with the sell-down's proceeds); or the sleeve gets the free cash first.",
+        "- F1 MOMENTUM starved under the staged file (the free cash went to the ladder, the quoter, the allocator's "
+        "spare-cash buys). Addressed in Package 13 C: while the sleeve's round is open with a shortfall the "
+        "allocator's spare-cash buys pause, the harvest ladder keeps alloc_mm_reserve + the shortfall back and yields "
+        "the candidates' races, and the quoter's plan budget leaves the shortfall (status momentum.hold_usd).",
         "- F2 The harvest ladder's resting collateral is in no bucket (MM falls to ~7% because the gate's cash, which "
         "caps MM, is locked by the ladder).",
         f"- F3 The exits dribble: ~5 IOC orders a cycle of a few $ each (scenario 3: {s3.get('n_exit', 0)} orders for "
@@ -1380,8 +1391,8 @@ def findings():
         "unlimited.")
     out("- The fake's cash rule: an order needing more than the free cash is refused (no set-collateral rule here); "
         "the self-test is off; no restarts; the realtime feed is off.")
-    out("- Scenario 1F is a fixture, not the staged file's behaviour: see the findings for why the momentum bucket "
-        "gets no cash under the staged file.")
+    out("- Scenario 1F is a fixture, not the staged file's behaviour: the sleeve is forced on for its first hour "
+        "(the staged file arms it; the trigger needs the recorder's tilt history, which this harness does not have).")
 
 
 if __name__ == "__main__":
