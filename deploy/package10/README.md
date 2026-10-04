@@ -1,4 +1,4 @@
-# Package 10 staged settings_override.json files (FIRST DRAFT; owner deploys; each read within overrides_seconds = 30 s; write a temp file and mv it)
+# Package 10 staged settings_override.json files (owner deploys; each read within overrides_seconds = 30 s; write a temp file and mv it)
 Base = the owner's LIVE value-mode file (Package 8 in value mode, 4 Oct): `ref_tilt_enabled`, tilt exits, `ref_guard_*` and
 `take_tilted_ref` off; `pair_no_unwind_max_cost` 0.003; cash gate on; `arb_enabled` false; `capital_ceiling_adding_size_factor` 0;
 `ref_tilt_headline` true; backstop 0.8; writes 28. No file resets `arb_enabled` or `ref_tilt_headline`. Only stage 3 changes
@@ -33,17 +33,19 @@ Numbers below are from the dry run on the 3 Oct 22:47 live state (analysis/p10/D
   - The sets free ~4.6k in hour 1 and ~2k/h after (depth). That is ~11k in 4 h, at ~3% per $ of EV (~$350).
   - **The stale-quote takes spend that cash as it arrives**: 12.7k in 4 h, at +7.7% per $ at the outcome. So the reserve is
     NOT reached and `cash_gate_left` stays ~0. With `take_enabled` false it would be ~6k / 8k / 10k / 12k after hours 1-4.
-  - Decide which you want before stage 3 (REDTEAM.md C-1).
+  - Stage 3 resolves this with `take_respect_reserve` (REDTEAM.md C-1); until then the takes buy value with the freed cash.
   - Watch: `alloc.state`, `alloc.blocked_by` (cash / writes / depth / bloc / risk), `alloc.set_unwinds_registered`, and the
     journal's "ALLOC sold / unwound / bought" lines. No allocator order or set unwind should ever touch a pinned label.
-- **stage3_value_mm**: + `value_quote_hurdle` 0.08 and `capital_ceiling_adding_size_factor` 0.5 (the owner's call).
+- **stage3_value_mm**: + `value_quote_hurdle` 0.08, `capital_ceiling_adding_size_factor` 0.5 (the owner's call) and `take_respect_reserve`
+  (a stale-quote take is skipped when its cash would leave less than `alloc_mm_reserve` free: the answer to C-1 below, so the reserve
+  the allocator builds is kept for the market maker; the takes still buy value with cash above it).
   - Rule: in the tails (p < 15c or > 85c) an adding bid is <= p / 1.08 and an adding ask >= 1 - (1 - p) / 1.08, so only
     favourite bids and longshot asks reach the top of the book. The middle is two-way at the normal min_edge, capped at
     2 x the quote size.
   - Expect: decide computes ~210 adding sides in ~125 markets (~64 at the top; 62 middle markets two-way). That needs ~18k
     of cash if all filled, worth ~1.4k/day on F's side-hour model.
-  - But they rest only as far as the cash gate allows: in the dry run the takes took 19.3k of a +20k in 10 cycles, and 5
-    adding sides rested.
+  - They rest only as far as the cash gate allows; in the dry run WITHOUT `take_respect_reserve` the takes took 19.3k of a +20k in
+    10 cycles and 5 adding sides rested; with it the reserve stays for the quotes.
   - Headline caveat: the middle-band cap is 2 x the headline quote size (~24k shares). Stage 3 rests an adding Dem U.S.
     Senate ask of ~3.3k on a 5k short.
 - **Scenarios** (dry run):

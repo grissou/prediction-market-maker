@@ -4433,7 +4433,6 @@ class Bot:
                        "realtime_events": self.feed.events if self.feed else 0,
                        "takes_total": self.takes_total,
                        "takes_skipped_budget": self.takes_skipped_budget,
-                       "take_reserve_blocked": getattr(self, "take_reserve_blocked", 0),
                        "arbs_skipped_budget": self.arbs_skipped_budget,
                        "write_budget_wait_total": getattr(self.api, "write_budget_wait_total", 0),
                        "quote_capital_planned": round(getattr(self, "plan_capital", 0.0)),
@@ -4450,6 +4449,8 @@ class Bot:
                        "positions": {self.ex[e].label: q for e, q in inv.items() if q and e in self.ex}}
 
         self.health.update(books_loaded=self.books_loaded(), markets_priced_from_tops=len(self.ref_tops))
+        if getattr(cfg, "take_respect_reserve", False) or getattr(self, "take_reserve_blocked", 0):   # P10 (absent while off)
+            self.health["take_reserve_blocked"] = getattr(self, "take_reserve_blocked", 0)
         if cfg.bloc_delta_enabled:                # Package 10 A2 (absent while off)
             self.health["bloc_delta"] = round(self.bloc_delta, 2)
             self.health["bloc_delta_frac"] = round(self.bloc_delta / equity, 4) if equity else None

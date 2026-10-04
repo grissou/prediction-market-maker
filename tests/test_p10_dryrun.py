@@ -528,7 +528,8 @@ def stage3(api, b):
         out("- the biggest adding quotes at the top of the book:")
         out()
         for r in top_rows:
-            out(f"    {r['label']:<30} {'BID' if r['bid'] else 'ASK'} {r['q']:>6} @ {r['px']:.3f} (p {r['p']:.3f}, "
+            p_txt = f"{r['p']:.3f}" if r.get('p') is not None else "none"
+            out(f"    {r['label']:<30} {'BID' if r['bid'] else 'ASK'} {r['q']:>6} @ {r['px']:.3f} (p {p_txt}, "
                 f"pos {r['pos']:+.0f}, {r.get('kind')})")
         out()
     P.summarise(api, "stage3", "stage3")
