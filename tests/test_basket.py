@@ -455,7 +455,8 @@ check("write budget for 3 writes not there: nothing sent", len(api.wire) == n0)
 del b.api.writes_left
 b.cg_cash, b.cg_spent, b.cg_reserved = 10.0, 0.0, 0.0
 tick(b)
-check("cash 10 (< the 25 reserve): no buy", len(api.wire) == n0 and b.basket_info.get("refused") is None)
+check("cash 10 (< the 25 reserve): no buy, status says why (P9 dry run: refused was None, no log line)",
+      len(api.wire) == n0 and b.basket_info.get("refused") == "no free cash (cash gate)", b.basket_info.get("refused"))
 b.cg_cash = 50000.0
 b.cg_read_at = time.monotonic() - 1000
 tick(b)
@@ -961,6 +962,27 @@ b.cfg.basket_mult, b.cfg.basket_mult_after_fail = 2.0, 8.0
 b.basket_test = "failed"
 check("RT-5: a failed test never RAISES the multiplier (mult_after_fail 8 > mult 2 -> 2)",
       b.basket_target(1e9, 1e5, 1e5)[3] == 2.0, b.basket_target(1e9, 1e5, 1e5))
+
+# P9 dry run (analysis/p9/DRYRUN.md): a kill / exit over more legs than basket_max_orders_per_cycle sold only the first
+# (richest) legs on schedule - each new cycle gave them a small new increment that took every order slot again
+print("--- P9 dry run")
+dr_races = {k: (0.08, 0.90) for k in (3, 4, 5, 7, 8, 9)}
+apid, bd = basket_bot(races=dr_races)
+fvd = warm(bd)
+nw = time.time()
+legs_d = {f"{k}2": 1000.0 for k in dr_races}
+bd.basket_legs, apid.inv = dict(legs_d), dict(legs_d)
+bd.basket_killed, bd.basket_state, bd.basket_killed_wall, bd.basket_kill_start = True, "killed", nw - 0.1 * H, dict(legs_d)
+sched_d = bd.basket_schedule()
+o1 = bd.basket_orders(nw, fvd, fvd, dict(apid.inv), None, 0.0, 0.0, False, 10 ** 6, sched_d)
+for x in o1:
+    bd.basket_legs[x["eid"]] -= x["qty"]
+o2 = bd.basket_orders(nw + 60, fvd, fvd, dict(bd.basket_legs), None, 0.0, 0.0, False, 10 ** 6, sched_d)
+waiting = set(legs_d) - {x["eid"] for x in o1}
+check("P9 dry run: kill over 6 legs at 4 orders a cycle: the 2 legs left out of cycle 1 are sold first in cycle 2 "
+      "(furthest behind the schedule), not the same 4 again", len(o1) == 4 and len(o2) == 4
+      and waiting <= {x["eid"] for x in o2} and all(not x["add"] for x in o1 + o2),
+      ([x["eid"] for x in o1], [x["eid"] for x in o2]))
 
 # ============================================================================================ py_compile 3.10
 print("--- Python 3.10 syntax")

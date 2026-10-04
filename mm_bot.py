@@ -8834,7 +8834,7 @@ class Bot:
         """THE PURE PLANNER: [{"eid", "buy" (YES buy), "qty", "limit", "add" (grows |basket leg|), "key" (book side),
         "s_i"}], at most min(basket_max_orders_per_cycle, basket_writes_frac x writes_left / 3) orders (exiting /
         killed: at least 1). Forced sales first: legs above their hold fraction (exit schedule, kill, own backstop),
-        richest first. Then, in a live state: below target - band -> adds (laggards first, each leg <= full x
+        furthest behind that schedule first (richest first among equals). Then, in a live state: below target - band -> adds (laggards first, each leg <= full x
         min(max_leg_frac, 1/min_legs), <= the hour's ask share, <= the cached depth within the limit, <= cash: a long
         price x qty, a short (1 - price) x qty, all at the limit); above target + band -> sales (richest first, the
         hour's bid share). No request, no state change. P9 red team: no add on a market / race in skip (another
@@ -8874,16 +8874,23 @@ class Bot:
             q = int(q + 1e-9)
             return {"eid": e, "buy": buy, "qty": q, "limit": limit, "add": False, "key": key,
                     "s_i": rich.get(e, 0.0)} if q >= 1 else None
-        for e in by_rich:                                 # forced: exit schedule / kill / the leg's own backstop
-            if len(orders) >= n_max:
-                return orders
+        forced = []                                       # forced: exit schedule / kill / the leg's own backstop
+        for e in by_rich:
             f = self.basket_hold_frac(e, now_w, sched)
             if f >= 1:
                 continue
             start = (self.basket_kill_start if state == "killed" else self.basket_exit_start).get(e)
             start = start if start is not None else self.basket_legs[e]
-            keep = abs(start) * f
-            o = sale(e, math.ceil(abs(self.basket_legs[e]) - keep - 1e-9))
+            behind = abs(self.basket_legs[e]) - abs(start) * f
+            forced.append((-behind / max(1.0, abs(start)), e, behind))
+        # P9 dry run: the legs furthest behind their schedule first (richest first among equals). In plain richest-first
+        # order the first basket_max_orders_per_cycle legs took every slot each cycle with their small new increment and
+        # the rest of a 60-leg basket was not sold at all until the kill / exit window had ended
+        forced.sort(key=lambda x: x[0])
+        for _, e, behind in forced:
+            if len(orders) >= n_max:
+                return orders
+            o = sale(e, math.ceil(behind - 1e-9))
             if o:
                 orders.append(o)
         if state not in self.BASKET_LIVE or target is None:
@@ -9088,6 +9095,13 @@ class Bot:
         elif not (self.cash_gate_on() and getattr(self, "cg_cash", None) is not None):
             refuse = "no fresh cash read (cash_gate_enabled needed)"
         cash = self.cash_left() if refuse is None else 0.0
+        if (refuse is None and cash < 1 and target is not None
+                and target - self.basket_value(fvs, book_fvs) > self.BASKET_TRACK_BAND * max(target, 0.0)):
+            # P9 dry run: below target with the cash gate at 0 (stage 3 switched on before stage 2 freed cash) the build
+            # stalled with refused None and no log line - say why (it buys as soon as the gate has cash again)
+            refuse = "no free cash (cash gate)"
+        if refuse != (self.basket_info or {}).get("refused"):
+            log.info("BASKET adds %s", f"refused: {refuse}" if refuse else "allowed again")
         writes = getattr(self.api, "writes_left", lambda: 10 ** 6)() if self.api.live else 10 ** 6
         orders = self.basket_orders(now_w, fvs, book_fvs, inv, target, full, cash, refuse is None, writes, sched, now_m,
                                     skip=skip)
