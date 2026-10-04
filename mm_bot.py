@@ -4089,7 +4089,7 @@ class Bot:
         if cfg.hold_target_hours > 0 and self.running:      # C hold target: aged lots taken within the hourly budget
             taken |= self.take_aged(inv, book_fvs, mine_real, now_m)
         # 6c. Package 9 F1: the long-tilt basket (immediate-or-cancel takes; exempt from reduce-only, see Config)
-        if self.running and (cfg.basket_enabled or self.basket_legs or self.basket_state != "off"):
+        if self.running and (cfg.basket_enabled or self.basket_legs or self.basket_state != "off" or self.basket_killed):
             taken |= self.basket_tick(now, inv, fvs, book_fvs, equity, mine_real, now_m)
 
         self.phase_mark("fills_risk_takes")
@@ -8004,6 +8004,7 @@ class Bot:
         self.basket_last_action = str(d.get("last_action") or "")
         self.basket_hours = {}                # (eid, "asks"/"bids") -> [hour start wall, top-3 depth then, shares done]
         self.basket_breach_since = None       # wall time the current kill breach started
+        self.basket_liq_hist = deque()        # (wall, liquidation value) of the last ticks (the confirmed peak)
         self.basket_off_explicit = False      # the overrides file said basket_enabled false (clears the kill latch)
         self.basket_target_frozen, self.basket_target_at = None, None   # hourly tracking target, when computed
         self.basket_last_trade = {}           # eid -> wall time of our last basket trade there
@@ -8202,7 +8203,10 @@ class Bot:
             c = 1.0 / len(members)
             fav = max(members, key=lambda e: sc[e])
             fx = self.ex[fav]
-            fav_ok = (sc[fav] > c and fav in liquid and not self.basket_independent(fx) and not opposite(fav, False))
+            # the NO route only with covered NO sales in effect (its exit then needs no cash) and no NO held on another
+            # leg of the race (that would make a NO+NO set, whose legs cannot be sold one at a time)
+            fav_ok = (sc[fav] > c and fav in liquid and not self.basket_independent(fx) and not opposite(fav, False)
+                      and self.reduce_no_on() and not any((inv or {}).get(m, 0.0) <= -1 for m in members if m != fav))
             fbid = top(fx, "bids") if fav_ok else None
             if fbid is None or fbid < 1 - cfg.basket_max_price - 1e-9:
                 fav_ok = False
@@ -8267,7 +8271,7 @@ class Bot:
 
         def sale(e, qty, share=None):
             ex, held = self.ex.get(e), self.basket_legs.get(e, 0.0)
-            if ex is None or ex.book is None or now_m - ex.verified >= cfg.book_stale or qty < 1:
+            if ex is None or ex.book is None or qty < 1:  # (an old cached book is fine: the send downloads a fresh one)
                 return None
             buy = held < 0                                # a short (NO held) is bought back
             key = "asks" if buy else "bids"
@@ -8406,8 +8410,19 @@ class Bot:
         self.basket_reconcile(inv, now_w)
         sched = self.basket_schedule()
         liq = self.basket_liquidation(inv, equity, book_fvs)
+        # the peak only rises on a value that held for the confirmation time: one glitchy high read must never raise the
+        # floor (it would kill on the next normal read)
+        if liq is not None:
+            self.basket_liq_hist.append((now_w, liq))
+        while self.basket_liq_hist and self.basket_liq_hist[0][0] < now_w - 2 * self.BASKET_KILL_CONFIRM_SECONDS:
+            self.basket_liq_hist.popleft()
         if liq is not None and self.basket_state not in ("killed", "done"):
-            self.basket_peak = liq if self.basket_peak is None else max(self.basket_peak, liq)
+            win = [v for t, v in self.basket_liq_hist if t >= now_w - self.BASKET_KILL_CONFIRM_SECONDS]
+            covered = any(t <= now_w - self.BASKET_KILL_CONFIRM_SECONDS for t, _ in self.basket_liq_hist)
+            if self.basket_peak is None:
+                self.basket_peak = liq                    # (the switch-on value)
+            elif covered:
+                self.basket_peak = max(self.basket_peak, min(win))
         floor, cushion, impact, mult, full, ramped = self.basket_target(now_w, liq, equity)
         # kill: on the liquidation value, confirmed over BASKET_KILL_CONFIRM_SECONDS
         if self.basket_state in self.BASKET_LIVE + ("exiting",) and liq is not None and self.basket_peak is not None:
@@ -8508,6 +8523,9 @@ class Bot:
             if ex is None:
                 continue
             what = f"{'buy' if p['buy'] else 'sell'} {p['qty']} YES @ {p['limit']:.3f}"
+            if busy(ex, now_m):                           # a write of ours still running there / outcome unknown: it
+                log.info("BASKET %s skipped: a write is in flight there (next cycle)", ex.label)   # could land after
+                continue                                  # our cancel and meet the IOC
             if not self.api.live:
                 log.info("[dry] BASKET %s %s", ex.label, what)
                 continue

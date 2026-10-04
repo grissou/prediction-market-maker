@@ -90,6 +90,8 @@ def basket_bot(races=None, cash=50000.0, enabled=True, extra_markets=(), extra_b
     b.refs = FakeRefs(refs)
     c = b.cfg
     c.selftest_enabled = False
+    c.reduce_no_as_sell = True                    # (live: on; the favourite-NO route needs covered NO sales)
+    c.arb_enabled = False                         # (live: off; race 6's bids add up to 1.03)
     c.cash_gate_enabled = True
     c.basket_enabled = enabled
     c.basket_exit_utc = M.iso(NOW + timedelta(days=20))
@@ -318,12 +320,13 @@ check("headline race (U.S. Senate) excluded; an independent longshot never bough
 b.cfg.basket_exclude_headline = False
 check("basket_exclude_headline False: the headline race qualifies", {"32", "72"} <= {c_["eid"] for c_ in
                                                                                       b.basket_candidates({}, fv)})
-api, b = basket_bot(races={3: (0.080, 0.90), 4: (0.080, 0.90)})
+api, b = basket_bot(races={3: (0.080, 0.90), 4: (0.080, 0.90), 6: (0.120, 0.92)})
 fv = warm(b)
-check("a leg where we hold the OPPOSITE position (NO on the longshot): its YES route skipped (the favourite's NO "
-      "route of that race instead)", {c_["eid"] for c_ in b.basket_candidates({"42": -500}, fv)} == {"32", "41"})
-check("...and with YES held on that favourite too: nothing in that race",
-      {c_["eid"] for c_ in b.basket_candidates({"42": -500, "41": 200}, fv)} == {"32"})
+check("a leg where we hold the OPPOSITE position (NO on the longshot): skipped (and so is that race's favourite NO)",
+      {c_["eid"] for c_ in b.basket_candidates({"42": -500}, fv)} == {"32", "61"})
+ids = {c_["eid"]: c_["yes"] for c_ in b.basket_candidates({"61": 200}, fv)}
+check("YES held on a favourite: not shorted; that race falls back to YES on its longshot", "61" not in ids
+      and ids.get("62") is True, ids)
 b.cur_liquid.discard("32")
 check("an illiquid Polymarket price: not a candidate", "32" not in {c_["eid"] for c_ in b.basket_candidates({}, fv)})
 b.cur_refs.pop("41", None)
@@ -777,6 +780,66 @@ check("full cycle 2 h later: basket bought (takes), its legs not quoted", b.bask
     o_["exchangeId"] not in b.basket_legs for o_ in api.orders.values()), (b.basket_legs, b.basket_info))
 check("...within the ramped target (+ one order's slack)", b.basket_value(fvs_of(b)) <= b.basket_info["target"] * 1.05 + 1,
       b.basket_info)
+
+# ============================================================================================ red team
+print("--- red team")
+api, b = basket_bot()
+fv = warm(b)
+b.cfg.reduce_no_as_sell = False
+ids = {c_["eid"]: c_["yes"] for c_ in b.basket_candidates({}, fv)}
+check("covered NO sales off: never the favourite-NO route (its exit would need cash); race 6 falls back to YES",
+      "61" not in ids and ids.get("62") is True, ids)
+b.cfg.reduce_no_as_sell = True
+ids = {c_["eid"] for c_ in b.basket_candidates({"62": -100}, fv)}
+check("NO held on the longshot: neither its YES (opposite) nor the favourite's NO (a NO+NO set) in that race",
+      not ({"61", "62"} & ids), ids)
+b.basket_state, b.basket_on_wall, b.basket_peak = "tracking", time.time() - 5 * H, 100000.0
+for e_ in ("32", "42", "52", "61"):
+    b.ex[e_].writes = 1
+n0 = len(api.wire)
+tick(b)
+check("a write of ours in flight on the leg (busy): skipped (it could land after our cancel)", len(api.wire) == n0
+      and not b.basket_legs)
+for e_ in ("32", "42", "52", "61"):
+    b.ex[e_].writes = 0
+api, b = basket_bot(races={3: (0.080, 0.90)})
+fv = warm(b)
+b.cfg.basket_cap = 0.0                            # (no trading: the peak alone)
+b.basket_state, b.basket_on_wall = "tracking", time.time() - 5 * H
+t0 = M.utcnow()
+tick(b, now=t0, equity=100000.0)
+tick(b, now=t0 + timedelta(seconds=10), equity=130000.0)
+tick(b, now=t0 + timedelta(seconds=20), equity=100000.0)
+check("a single glitchy high liquidation read does not raise the peak (no false kill after it)",
+      b.basket_peak < 101000 and b.basket_breach_since is None, b.basket_peak)
+for k in range(0, 200, 20):
+    tick(b, now=t0 + timedelta(seconds=300 + k), equity=110000.0)
+check("a value held for the confirmation time raises the peak", 109000 < b.basket_peak < 111000, b.basket_peak)
+b.basket_killed, b.basket_state = True, "killed"
+b.cfg.basket_enabled = False
+b.overrides = {}
+tick(b)
+check("killed, then off by default (not the file): released, latch kept", b.basket_state == "off" and b.basket_killed)
+cycle(b)
+b.overrides = {"basket_enabled": False}
+cycle(b)
+b.cfg.basket_enabled, b.overrides = True, {"basket_enabled": True}
+cycle(b)
+check("...later the file says false (state already off: still observed by the cycle), then true: latch cleared",
+      not b.basket_killed and b.basket_state == "building", (b.basket_killed, b.basket_state))
+api, b = basket_bot(races={6: (0.120, 0.92)}, cash=0.0)
+api.inv["61"] = -3000
+fv = warm(b)
+b.basket_state, b.basket_on_wall, b.basket_peak = "exiting", time.time() - 50 * H, 100000.0
+b.basket_legs, b.basket_exit_start = {"61": -3000.0}, {"61": -3000.0}
+b.cfg.basket_exit_utc = M.iso(M.utcnow() - timedelta(hours=30))
+b.cg_cash, b.cg_spent, b.cg_reserved = 0.0, 0.0, 0.0
+n0 = len(api.wire)
+tick(b)
+w61 = [w for w in api.wire[n0:] if w["exchangeId"] == "61"]
+check("exit of a short (NO) leg at 0 cash: bought back as a covered 'sell NO' (no cash), state done",
+      w61 and all(w["side"] == "no" and w["action"] == "sell" for w in w61) and not b.basket_legs
+      and b.basket_state == "done" and api.inv.get("61") == 0, (w61, b.basket_legs, api.inv.get("61")))
 
 # ============================================================================================ py_compile 3.10
 print("--- Python 3.10 syntax")
