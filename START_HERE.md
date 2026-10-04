@@ -1,9 +1,9 @@
 <!-- STATUS (Finisher 2b, updated on every push) -->
-**STATUS 03:05 UTC 4 Oct (branch claude/finisher-package9):** phase = Package 9 READY ("READY: Package 9", PR #11). READY: Package 8 (7b298a4, PR #10, LIVE since 22:42), 7 (PR #9), 6 (PR #8), 5 (PR #7).
-Package 9 = the catch-up package: F1 `basket_*` long-tilt basket (CPPI on the cushion above max(86k, 0.85 x peak), m 5 / cap 80k, kill at -15% or the floor, exit 18 Oct, T-72h backstop, 36-h test, stress risk model), F2 `tilt_exit_take` (taker exits for the short-tilt book within 1c of tilted fv), F5 `arb_cash_rule` / `arb_sellback`; config hygiene (`take_tilted_ref`, `ref_tilt_max` 0.20).
-Numbers, CORRECTED by the dry run on the live books (analysis/p9/DRYRUN.md, PLAN_MC2.txt): funding is slow (taker exits free ~8k/day within 2c; sets 21k at 2c) and the basket is spread-bound (m 5 settles ~40k, m 6 ~45k): P150 0.3-2% as staged, ~9% with carry; best achievable stage3c (floor 80k, m 6, cap 60k) ~15-20% at P<=85k ~0.5-1.5%, DD>20% ~4%; the 29-40% of 01:20 assumed an 80-90k basket in 4 h and is NOT achievable. P200 ~0%. Red team 2 high / 5 medium / 3 low + dry run 1 medium fixed; 36 suites + STRESS_LADDER green.
-Deploy: deploy/package9 stage0 -> stage1_hygiene -> stage2_flatten (2c taker exits + set splits: ~21k cash in 3 h on the live books) -> stage3c (cash_gate_left > 15k) -> stage4_carry; plan: analysis/p9/CATCHUP_PLAN.md.
-Next: owner decides whether ~15-20% for 150k at ~1% ruin is worth the switch (stage3c) this morning; the executor stays subscribed to PRs #7-#10 and #11.
+**STATUS 07:15 UTC 4 Oct (branch claude/finisher-package9):** phase = Package 10 "go crazier" Phase 1 (explore to ~09:30; READY by ~17:00). READY: Package 9 (024d5a1, PR #11), 8 (PR #10, LIVE), 7, 6, 5.
+Package 10 = the owner's "market making can make the money if it is quick enough + ideas outside the risk limit": MM velocity ceiling (flow, capture, write budget 28 batches x 10 orders/min), tilt rotation and intraday day-trade backtests, the basket's risk frontier outside the limits, funding at any price; plan in PLAN_P10.md.
+Numbers: none yet (explorers E/F/G writing analysis/p10/).
+Deploy: Package 9 files unchanged (deploy/package9/); nothing new.
+Next: backtests + live_sim screens of quoting-side changes -> build passers behind OFF flags -> "READY: Package 10" with a frontier table.
 
 # START HERE (Team run, branch `claude/run-c-tournament-improvements-pycdet`)
 
