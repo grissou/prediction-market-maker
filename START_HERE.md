@@ -1,9 +1,9 @@
 <!-- STATUS (Finisher 2b, updated on every push) -->
-**STATUS 12:50 UTC 4 Oct (branch claude/finisher-package9):** phase = Package 11 literature sweep DONE (analysis/p11/LIT_REVIEW.md; 4 readers, ~150 sources, 56 ideas). READY: Package 10 (2abf782 + f17f63e, PR #11, VALUE MODE), 9 (superseded), 8 (LIVE in value mode), 7, 6, 5.
-Package 11 findings that change the plan: the Rep Senate sleeve is roughly FAIR (the seat-count edge was Ohio at 0.40 vs the market's 0.6); a rank bet, if any, is ONE digital = Texas Rep <= $20k (P150 ~30% vs 16%, P85 6.5%); assume NO tilt reversion before the close (keep 10-15k back for the last days); the NO+NO sets are stock: sell the rich favourite-NO leg, keep the longshot-NO (+0.5-0.9k vs unwinding at cost; the P9 set split does the opposite and stays off); stage-3 hurdle 0.08 -> 0.05 (bids would not fill); the rules accept trades until 12:00 pm ET on 4 Nov vs the API's 00:00 UTC settlementDate: ask SIG - if open, election-night taking is the biggest P150 lever (+10-40k).
-Numbers: VALUE_PLAN.md corrected; stage3 file hurdle 0.05.
-Deploy: Package 10 files (deploy/package10/) stand; stage3 hurdle now 0.05.
-Next: owner asks SIG about the trading close and the control rule; Package 12 candidates: rich-leg set sale ladder, skew toward target inventory, writes by expected value per write, consensus-band buy filter, TX/KS shade.
+**STATUS 14:35 UTC 4 Oct (branch claude/finisher-package9):** phase = Package 12 READY ("READY: Package 12", PR #11 updated). READY: Package 12 (literature sweep + five small builds), 10 (VALUE MODE, 2abf782), 9 (superseded), 8 (LIVE in value mode), 7, 6, 5.
+Package 11/12 = ~180 sources read (analysis/p11/LIT_REVIEW.md, 70 ideas): the Rep Senate sleeve is roughly FAIR (Ohio at 0.4 vs the market's 0.6) - a rank bet, if any, is ONE digital = Texas Rep <= $20k (P150 ~30%, P85 6.5%); no tilt reversion before the close (keep 10-15k back); the NO+NO sets are stock (sell the rich favourite-NO leg as a ladder, keep the longshot-NO); hurdle 0.08 -> 0.05; the rules accept trades until 12:00 pm ET on 4 Nov while the bot stops at 23:45 UTC - ASK SIG (election-night taking = +5-15k if allowed). Built OFF: `alloc_set_rich_leg` ladder, `alloc_prefer_short`, `pair_no_unwind_asks_le1`, `close_override_utc` (+ overridable stop), `skew_target_inventory`.
+Numbers: red team 1 high / 4 medium / 2 low fixed; 43 suites + STRESS_LADDER 20/20 green; flags off identical to Package 10 stage 3.
+Deploy: deploy/package12 stage0 -> stage1_sets_skew -> stage2 ONLY if SIG confirms trading after 00:00 UTC; Package 10 stages first. Web budget for this session is spent (200 searches): more reading needs it raised.
+Next: owner asks SIG (trading close, public returns, overnight payouts, control rule); election-night mode on a yes; the executor stays subscribed to PR #11.
 
 # START HERE (Team run, branch `claude/run-c-tournament-improvements-pycdet`)
 
@@ -11,6 +11,68 @@ Status: **complete** (Team complete at 14:45 UTC) (started 2026-10-02 08:50 UTC;
 The Builder's previous START_HERE is kept as `START_HERE_BUILDER.md`; Run A's notes are `ENGINEERING_NOTES.md`.
 Plan: `PLAN.md`. Packages appear below as they become READY (commit messages start "READY: Package N").
 Deploy only commits whose message starts "READY"; the branch is cumulative.
+
+## Package 12 (READY, Finisher 2b, 4 Oct ~14:30 UTC; branch `claude/finisher-package9` on top of Package 10; draft PR #11 updated): the literature sweep (Package 11, ~180 sources) and its five small builds — the rich-leg set ladder, prefer-short, the pair-unwind gate, the close override, skew toward the target inventory (all OFF; staged files in `deploy/package12/`)
+**Package 11 (owner 11:15: "spend 5 hours reading papers and online resources for ideas"; `analysis/p11/LIT_REVIEW.md`, six readers,
+lit_anomalies 34 sources / lit_marketmaking 31 / lit_portfolio 37 / lit_forecasting 44 / lit_electionnight 31 / lit_competitions 19 from
+memory - the session's 200 WebSearch calls ran out and WebFetch then needed per-URL approval; 70 ideas).** What changed the plan:
+(A1) the Rep U.S. Senate sleeve is roughly FAIR: the seat-count "edge" was Ohio at pDem 0.40 vs the market's ~0.6 (P(Dem control) 0.58-0.63
+vs 0.645), and political race prices are themselves pulled toward 50% (Le 2026) - VALUE_PLAN corrected; (A2) a rank bet, if any, is "floor +
+ONE digital" (Browne 1999; Gaba-Tsetlin-Winkler; Haugh-Singal): Texas Rep <= $20k (P150 ~30% vs 16%, E 112.1k vs 110.6k, P85 6.5%, cliff at
+~$22k; TX/KS are the two races where every model and red-state polling history agree on an R shade); (A3) NO tilt reversion before the
+close (Page & Clemen: the bias shrinks only as resolution approaches; Restocchi 2019: PredictIt mispricing JUMPS in the last 24 h; contest
+theory: laggards buy longshots late) - keep 10-15k back for the last 72 h; (A4) the NO+NO sets are STOCK: the NO on the favourite is the
+rich leg (~2c fair, 7-12c priced): sell it as a ladder, keep the longshot-NO (the P9 `tilt_exit_take_split_sets` sold the OPPOSITE leg:
+off in value mode); (A5) stage-3 `value_quote_hurdle` 0.08 put favourite bids ~2.5c behind the book: 0.05 (file changed); (A6/F1) the
+rules say "all trades must be received prior to 12:00pm EST on November 4" and "rank ... as of the resolution of all Markets" while the
+API's markets close 00:00 UTC and the bot stops itself at 23:45 UTC (`stop_minutes_before_close`): ASK SIG; if orders are accepted
+00:00-17:00 UTC, election-night taking on AP-called races (+5-15k, more if payouts arrive overnight) is the one lever that moves P150 by
+tens of points; (B) market making: adverse selection on our fills ~0 (retail flow: size up on the value side, no toxicity spreads); the top
+80 markets carry 90% of fill edge; 88-94% of snapshots show no resting quote of ours (capital-bound, not write-bound); skew toward a target
+inventory, not toward flat; two-way only in the ~35-65c middle; spend writes by expected value per write; sell the longshot rather than buy
+the favourite when a race's bids sum > 1 (48% of 2-leg snapshots); Dutch books last a median 2 min (nobody runs a fast set-arb bot);
+(C) fair value: consensus band (add only where Polymarket and the forecast models agree on the side of the tournament price: our
+Senate/House/control edge is +5.5k at Polymarket but +1.1k at Decision Desk's; NH Governor PM 0.96 vs DDHQ 0.64; Dem House +8,876 at 0.84 is
++865 at PM, -777 at DDHQ: hold, don't add), don't extremise Polymarket, rho 0.55, 3-5% of Senate control unresolved (independents);
+(D) rules and settlement: no tiebreakers; SIG may change outcomes; Polymarket's control rule counts caucusing independents; GA runoff
+1 Dec, AK/ME RCV +2 weeks delay the standings, not our balance; poll-closing timeline in `lit_electionnight.md`.
+**Built (each OFF, in OVERRIDABLE; flags off pinned byte-identical on a grid):**
+- L1 `alloc_set_rich_leg` (+ `alloc_set_ladder` "0,-0.02,-0.04" YES offsets; tests/test_p12_alloc.py 95): the NO+NO sets' rich leg (NO on the
+  favourite = the race leg with the strictly highest liquid p, passing the allocator's edge-held test) is sold as a RESTING ladder of
+  covered "sell NO" orders = YES bids on the favourite at the best bid, -2c, -4c (the lower levels fill in a late spike), 1/3 of the set
+  part each, capped at p + `value_sell_margin`, a tick below the book's ask and below our own ask; through `place_orders` and the cash
+  gate's set tier (1.0 a share: at ~0 cash only lone parts go out); hidden from the quote planner (`plan_exchange` wrapper), re-quoted
+  hourly (queue position), pulled at once when the race stops being a set, the favourite is no longer rich, its p is unknown or every
+  level is not <= p + margin (RT12-1), pinned, pre-close, or off; a refused race waits 900 s (RT12-3); the longshot-NO leg is never sold;
+  warning when `tilt_exit_take_split_sets` is also on (RT12-5). status `alloc.set_ladder` {races, shares_resting, filled}.
+- L2 `alloc_prefer_short`: when the race's best bids sum > 1 (own quotes excluded, 2-leg races) the allocator sells the longshot YES
+  instead of buying the favourite YES (same exposure, better price, less cash) if the short passes edge / caps; `blocked_by.prefer_short`.
+- L3 `pair_no_unwind_asks_le1`: no NO+NO pair unwind at a cost while the race's bids sum > 1 (the set is worth more leg by leg) or a ladder
+  rests there (RT12-6); the allocator's B3 refill skips such races instead of stalling (RT12-2); profitable unwinds (asks < 1) unaffected.
+- M1 `close_override_utc` ("" = off; ISO UTC within 2026-11-01..07; tests/test_p12_quote.py 80): every market's effective close =
+  max(API close, override) through `effective_close` -> `hours_to_close`, the 15-min stop, `close_window` (takes, arbitrage, allocator), the
+  phase line and `carry_ramp`; can only EXTEND a close; invalid -> ignored with one alert; the basket keeps the API close.
+  `stop_minutes_before_close` is OVERRIDABLE (0-120; keep >= 5). No election-night taking yet (waits for SIG's answer).
+- M2 `skew_target_inventory`: `compute_quote`'s inventory skew is measured from (inv - target), target = the allocator's latest planned
+  holding (`alloc_target_for`) or, in value mode, the current holding when its edge-held > 0; `age_skew` 0 on +EV holdings; the ADDING side
+  keeps its skew-from-flat so the target cannot ratchet (RT12-7); no target skew in reduce-only (RT12-4); race-netted like `eff_inv`; the
+  reduce side keeps the value_mode floor; never crosses (Bergault-Guéant / Fodra-Labadie "informed market maker").
+**Red team (`analysis/p11/REDTEAM_P12.md`): 1 high, 4 medium, 2 low, all fixed or warned** (tests/test_p12_redteam.py 21). Caveats: at
+~0 cash the ladder sells little (lone parts only) until the reserve builds; a take on the favourite cancels the ladder until the hourly
+re-quote; `alloc_prefer_short` does not check the short leg's depth (a missed buy at worst); `close_override_utc` extends every market;
+stale allocator targets last until the next run; over-cap +EV positions are blocked from adding but not pushed to unload.
+**Suites:** 43 files green (test_p12_alloc 95, test_p12_quote 80, test_p12_redteam 21, test_alloc 123, test_value_mode 101, test_mm_bot 600,
+the rest as Package 10) + STRESS_LADDER=1 20/20; py_compile under Python 3.10.
+**Deploy (owner; `deploy/package12/README.md`; base = Package 10 stage 3):** Package 10 stages first; then stage0 (code) -> stage1_sets_skew
+(`alloc_set_rich_leg`, `alloc_prefer_short`, `pair_no_unwind_asks_le1`, `skew_target_inventory`, `bloc_rho` 0.55) -> stage2 ONLY IF SIG
+CONFIRMS trading after 00:00 UTC on 4 Nov (`close_override_utc` 2026-11-04T17:00:00Z, `stop_minutes_before_close` 5). **Watch, stage 1:**
+`alloc.set_ladder` appearing (<= 15 races), no ladder level above Polymarket + 0.5c or at/above our own ask, writes <= 28, `pair_owed`
+quiet, fewer reducing asks on +EV favourites. **Rollback:** the previous file; a ladder level above the floor = bug (stage 0 at once).
+**Open with SIG (the owner):** the per-market trading close vs the 12:00 pm ET rule; whether trading on public returns is allowed; whether
+called races pay out overnight; how control / independents / recounts / runoffs resolve. **Not built:** election-night mode (F1 part 2,
+~150-200 lines: a "certain" class on AP-called + Polymarket >= 0.98 races, takes batched 10 per write, funded by selling called winners;
+only on SIG's yes), writes by expected value per write (B3), the consensus-band buy filter and TX/KS shade (C1-C3), the factor-stress cap (C5),
+the target-aware allocator score (C6).
 
 ## Package 10 (READY, Finisher 2b, 4 Oct ~09:45 UTC; branch `claude/finisher-package9` on top of Package 9; draft PR #11 updated): VALUE MODE — SIG pays at the outcome: the no-value-selling guard, bloc-correlated settlement risk, the capital allocator with a market-making reserve, value market making (all OFF; staged files in `deploy/package10/`; the plan in `analysis/p10/VALUE_PLAN.md`)
 **The owner's strategy change (07:30):** SIG settles positions at the OUTCOME. Package 9's long-tilt basket is negative-EV there (the
