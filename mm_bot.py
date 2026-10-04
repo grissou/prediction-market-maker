@@ -4019,6 +4019,7 @@ class Bot:
                 book_fvs.update(normalise({e: book_fvs[e] for e in members}))
         refs, liquid = self.reference_prices(book_fvs)
         self.cur_refs, self.cur_liquid = refs, liquid
+        self.cur_book_fvs = book_fvs              # (Package 9: the basket's stress value, see basket_leg_value)
         self.mark_ref_moves()
         self.reference_jump_guard(now_m)
         fvs = dict(book_fvs)
@@ -4156,7 +4157,7 @@ class Bot:
         # 6c. Package 9 F1: the long-tilt basket (immediate-or-cancel takes; exempt from reduce-only, see Config)
         if self.running and (cfg.basket_enabled or self.basket_legs or self.basket_state != "off" or self.basket_killed):
             try:
-                taken |= self.basket_tick(now, inv, fvs, book_fvs, equity, mine_real, now_m)
+                taken |= self.basket_tick(now, inv, fvs, book_fvs, equity, mine_real, now_m, skip=taken | arb_races)
             except ApiError:
                 raise                                 # (as the takes: the cycle's own error handling)
             except Exception:                         # a basket bug must never stop the market maker
@@ -4475,7 +4476,8 @@ class Bot:
     def update_tilt(self, book_fvs, refs, liquid, inv, now_m):
         """T2.1, every cycle and whatever ref_tilt_enabled says: feed the tilt estimator from the markets that are
         liquid, not R5 (ref_only), not headline, with a book price and Polymarket, and not under a jump guard; and
-        tilt_exposure = sum over held markets of position x (raw Polymarket - c), c = 1/legs."""
+        tilt_exposure = sum over held markets of position x (raw Polymarket - c), c = 1/legs (Package 9: less the
+        basket's shares, counted apart in tilt_exposure_basket)."""
         cfg, samples = self.cfg, []
         for eid, r in refs.items():
             ex = self.ex.get(eid)
@@ -4484,12 +4486,19 @@ class Bot:
                 continue
             samples.append((r, book_fvs[eid], self.legs(ex)))
         self.tilt_s = self.tilt.update(samples, now_m)
-        exposure = 0.0
+        exposure = basket = 0.0
+        legs = getattr(self, "basket_legs", None) or {}
         for eid, q in (inv or {}).items():
             ex, r = self.ex.get(eid), refs.get(eid)
             if q and ex is not None and r is not None:
-                exposure += q * (r - tilted_ref(r, 1.0, self.legs(ex)))    # tilted_ref(r, 1, legs) = c
+                # P9 red team: the basket's shares are its own deliberate bet, outside tilt_exposure (as for the skew,
+                # effective_inventory): counted in, a long-tilt basket flips the total's sign and the Package 8 tilt
+                # exits (and F2's takes, and the T2.4 cap) would turn on the market maker's long-tilt positions
+                qb = legs.get(eid, 0.0)
+                exposure += (q - qb) * (r - tilted_ref(r, 1.0, self.legs(ex)))    # tilted_ref(r, 1, legs) = c
+                basket += qb * (r - tilted_ref(r, 1.0, self.legs(ex)))
         self.tilt_exposure = exposure
+        self.tilt_exposure_basket = basket          # (status.json basket.tilt_exposure)
 
     def reference_jump_guard(self, now_m):
         """After each new Polymarket reading, pull quotes on any market whose Polymarket price moved
@@ -5115,7 +5124,7 @@ class Bot:
         at that stress loss instead of its settlement loss (Config basket_stress_frac)."""
         rest = {e: inv.get(e, 0.0) - self.basket_legs.get(e, 0.0) for e in set(inv) | set(self.basket_legs)}
         pd = party_delta - sum(PARTY_SIGN.get(self.ex[e].party, 0) * q for e, q in self.basket_legs.items() if e in self.ex)
-        return rest, pd, self.cfg.basket_stress_frac * self.basket_value(fvs)
+        return rest, pd, self.cfg.basket_stress_frac * self.basket_value(fvs, getattr(self, "cur_book_fvs", None))
 
     # ------------------------------------------------------------------ turnover control
     def seed_turnover(self):
@@ -8672,15 +8681,27 @@ class Bot:
             haircut += abs(q) * ((m - lv[0]["price"]) if q > 0 else (lv[0]["price"] - m))
         return float(equity) - haircut
 
-    def basket_leg_value(self, eid, q, fvs):
-        """$ value of q basket shares (YES: q x p, NO: |q| x (1 - p)) at the risk model's price for the market."""
+    def basket_leg_value(self, eid, q, fvs, book=None):
+        """$ value of q basket shares (YES: q x p, NO: |q| x (1 - p)) at the risk model's price for the market. book
+        (the tournament book's prices, book_fvs) given: the higher of the two values (P9 red team: sizing on a fair value
+        leaned to Polymarket under the price the basket pays - a longshot's - would buy past the target / leg cap)."""
         if eid not in self.ex or not q:
             return 0.0
         p = self.risk_fv(eid, fvs)
-        return abs(q) * (p if q > 0 else 1 - p)
+        v = abs(q) * (p if q > 0 else 1 - p)
+        b = (book or {}).get(eid)
+        return v if b is None else max(v, abs(q) * (b if q > 0 else 1 - b))
 
-    def basket_value(self, fvs):
-        return sum(self.basket_leg_value(e, q, fvs) for e, q in self.basket_legs.items())
+    def basket_value(self, fvs, book=None):
+        return sum(self.basket_leg_value(e, q, fvs, book) for e, q in self.basket_legs.items())
+
+    def basket_leg_basis(self, eid, yes, inv):
+        """The shares a basket add on eid builds on (signed, YES terms): the basket's own, or the whole position held in
+        the add's direction if larger (P9 red team: an ordinary position there is ADOPTED on the first add - a basket
+        leg is never quoted, so that part would otherwise sit unmanaged past the exit, the kill and the backstop)."""
+        sign = 1.0 if yes else -1.0
+        held = abs(self.basket_legs.get(eid, 0.0))
+        return sign * max(held, max(0.0, sign * float((inv or {}).get(eid, 0.0))))
 
     def basket_impact(self, now_w):
         """basket_impact_frac x our own net $ bought in the last basket_impact_hours (>= 0)."""
@@ -8702,7 +8723,8 @@ class Bot:
         peak = self.basket_peak
         floor = max(cfg.basket_floor, cfg.basket_floor_peak_frac * peak) if peak is not None else cfg.basket_floor
         impact = self.basket_impact(now_w)
-        mult = cfg.basket_mult_after_fail if self.basket_test == "failed" else cfg.basket_mult
+        # (a failed test only ever cuts: basket_mult_after_fail above basket_mult is read as basket_mult - P9 red team)
+        mult = min(cfg.basket_mult_after_fail, cfg.basket_mult) if self.basket_test == "failed" else cfg.basket_mult
         if liq is None or acct is None:
             return floor, None, impact, mult, 0.0, 0.0
         cushion = liq - floor - impact
@@ -8797,14 +8819,17 @@ class Bot:
             return share * depth, depth
         return max(0.0, share * w[1] - w[2]), w[1]
 
-    def basket_orders(self, now_w, fvs, book_fvs, inv, target, full, cash, adding_ok, writes_left, sched, now_m=None):
+    def basket_orders(self, now_w, fvs, book_fvs, inv, target, full, cash, adding_ok, writes_left, sched, now_m=None,
+                      skip=()):
         """THE PURE PLANNER: [{"eid", "buy" (YES buy), "qty", "limit", "add" (grows |basket leg|), "key" (book side),
         "s_i"}], at most min(basket_max_orders_per_cycle, basket_writes_frac x writes_left / 3) orders (exiting /
         killed: at least 1). Forced sales first: legs above their hold fraction (exit schedule, kill, own backstop),
         richest first. Then, in a live state: below target - band -> adds (laggards first, each leg <= full x
         min(max_leg_frac, 1/min_legs), <= the hour's ask share, <= the cached depth within the limit, <= cash: a long
         price x qty, a short (1 - price) x qty, all at the limit); above target + band -> sales (richest first, the
-        hour's bid share). No request, no state change."""
+        hour's bid share). No request, no state change. P9 red team: no add on a market / race in skip (another
+        feature traded there this cycle: never the basket buying what a take or a tilt exit just sold) nor in a race
+        with a passive pair unwind or owed legs running (their orders would trade the basket's leg)."""
         cfg = self.cfg
         now_m = time.monotonic() if now_m is None else now_m
         state = self.basket_state
@@ -8853,7 +8878,7 @@ class Bot:
                 orders.append(o)
         if state not in self.BASKET_LIVE or target is None:
             return orders
-        held = self.basket_value(fvs)
+        held = self.basket_value(fvs, book_fvs)
         band = self.BASKET_TRACK_BAND * max(target, 0.0)
         gap = target - held
         if gap > band and adding_ok:
@@ -8865,7 +8890,9 @@ class Bot:
                 if len(orders) >= n_max or need <= 0 or cash_left <= 0:
                     break
                 e = cnd["eid"]
-                if e in planned or self.basket_hold_frac(e, now_w, sched) < 1:
+                g = self.ex[e].group
+                if (e in planned or e in skip or g in skip or g in (getattr(self, "pp", None) or {})
+                        or g in (getattr(self, "pair_owed", None) or {}) or self.basket_hold_frac(e, now_w, sched) < 1):
                     continue
                 b0, s0 = self.basket_leg_close(e)
                 if s0 is not None and now_w >= s0 - max(0.0, cfg.basket_no_add_days) * 86400:
@@ -8881,7 +8908,7 @@ class Bot:
                     unit = 1 - limit
                 if unit <= 0:
                     continue
-                room = leg_cap - self.basket_leg_value(e, self.basket_legs.get(e, 0.0), fvs)
+                room = leg_cap - self.basket_leg_value(e, self.basket_leg_basis(e, cnd["yes"], inv), fvs, book_fvs)
                 q = min(room, need, cash_left) / unit
                 q = min(q, self.basket_window_left(e, key, share, now_w)[0], self.depth_within(ex.book, key, limit))
                 q = int(q + 1e-9)
@@ -8899,7 +8926,7 @@ class Bot:
                 if len(orders) >= n_max or excess <= 0:
                     break
                 q_h = self.basket_legs[e]
-                v = self.basket_leg_value(e, q_h, fvs) / abs(q_h) if q_h else 0.0
+                v = self.basket_leg_value(e, q_h, fvs, book_fvs) / abs(q_h) if q_h else 0.0
                 if e in planned or v <= 0:
                     continue
                 o = sale(e, math.ceil(min(excess / v, abs(q_h)) - 1e-9), share=cfg.basket_max_ask_share)
@@ -8924,11 +8951,11 @@ class Bot:
                 else:
                     self.basket_legs[e] = q
 
-    def basket_tick(self, now, inv, fvs, book_fvs, equity, mine_real, now_m=None):
+    def basket_tick(self, now, inv, fvs, book_fvs, equity, mine_real, now_m=None, skip=()):
         """Package 9 F1, once a cycle: the state machine (off -> building -> tracking -> (cut) -> exiting -> done, or
         killed), the kill (liquidation < (1 - kill_dd) x peak or < floor for BASKET_KILL_CONFIRM_SECONDS), the
         36-h test, the exit schedule, then plan (basket_orders) and send (basket_send). Returns the exchanges traded
-        (not quoted this cycle)."""
+        (not quoted this cycle). skip: markets / races another feature acted on this cycle (no add there now)."""
         cfg = self.cfg
         now_w = now.timestamp()
         now_m = time.monotonic() if now_m is None else now_m
@@ -9048,16 +9075,18 @@ class Bot:
             refuse = "no fresh cash read (cash_gate_enabled needed)"
         cash = self.cash_left() if refuse is None else 0.0
         writes = getattr(self.api, "writes_left", lambda: 10 ** 6)() if self.api.live else 10 ** 6
-        orders = self.basket_orders(now_w, fvs, book_fvs, inv, target, full, cash, refuse is None, writes, sched, now_m)
+        orders = self.basket_orders(now_w, fvs, book_fvs, inv, target, full, cash, refuse is None, writes, sched, now_m,
+                                    skip=skip)
         traded = self.basket_send(orders, inv, fvs, mine_real, now_w, now_m) if orders and self.running else set()
         if self.basket_state == "exiting" and not self.basket_legs:
             self.basket_state, self.basket_last_action = "done", "exit done"
         self.basket_info = {
-            "held": round(self.basket_value(fvs), 2), "target": None if target is None else round(target, 2),
+            "held": round(self.basket_value(fvs, book_fvs), 2), "target": None if target is None else round(target, 2),
             "target_full": round(full, 2), "floor": round(floor, 2), "peak": self.basket_peak,
             "liquidation": None if liq is None else round(liq, 2),
             "cushion": None if cushion is None else round(cushion, 2), "impact": round(impact, 2), "mult": mult,
             "refused": refuse, "orders_planned": len(orders),
+            "tilt_exposure": round(getattr(self, "tilt_exposure_basket", 0.0)),   # (outside the bot's tilt_exposure)
             "exit_start_utc": iso(datetime.fromtimestamp(sched["start"], timezone.utc)) if sched["start"] else None,
             "backstop_utc": iso(datetime.fromtimestamp(sched["backstop"], timezone.utc)) if sched["backstop"] else None,
             "no_add_utc": iso(datetime.fromtimestamp(sched["no_add"], timezone.utc)) if sched["no_add"] else None}
@@ -9153,7 +9182,12 @@ class Bot:
                 log.info("BASKET %s: %s - nothing traded", ex.label, what)
                 continue
             sign = 1.0 if p["buy"] else -1.0
-            new = self.basket_legs.get(e, 0.0) + sign * done
+            cur = self.basket_legs.get(e, 0.0)
+            base = self.basket_leg_basis(e, p["buy"], inv) if p["add"] else cur   # (an add adopts the position held)
+            if abs(base) >= abs(cur) + 1:
+                log.warning("BASKET %s: the %+.0f shares held there outside the basket adopted into it", ex.label,
+                            base - cur)
+            new = base + sign * done
             if abs(new) < 1:
                 self.basket_legs.pop(e, None)
             else:

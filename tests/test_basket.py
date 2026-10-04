@@ -498,7 +498,8 @@ b.cfg.basket_enabled = False
 plain_w, plain_r = b.total_worst_case(rest, fv), b.settlement_risk(rest, fv, pd_rest)
 full_w = b.total_worst_case(inv, fv)
 b.cfg.basket_enabled = True
-stress = 0.4 * 2000 * fv["32"]
+val32 = max(fv["32"], b.cur_book_fvs["32"])     # (P9 red team: valued at the higher of fair value / book price)
+stress = 0.4 * 2000 * val32
 check("total_worst_case = the rest's + 0.4 x the basket's $ value", abs(b.total_worst_case(inv, fv) - (plain_w + stress)) < 1e-6,
       (b.total_worst_case(inv, fv), plain_w, stress))
 check("settlement_risk = the rest's (party delta less the basket's) + the stress",
@@ -507,7 +508,7 @@ b.cfg.basket_enabled = False
 check("basket_enabled off: the full settlement counting (unchanged)", b.total_worst_case(inv, fv) == full_w)
 b.cfg.basket_enabled = True
 b.cfg.basket_stress_frac = 1.0
-check("stress_frac 1: the basket at its full $ value", abs(b.total_worst_case(inv, fv) - (plain_w + 2000 * fv["32"])) < 1e-6)
+check("stress_frac 1: the basket at its full $ value", abs(b.total_worst_case(inv, fv) - (plain_w + 2000 * val32)) < 1e-6)
 b.cfg.basket_stress_frac = 0.4
 eff = b.effective_inventory({"31": 0, "32": 2500})
 check("effective_inventory (skew) ignores the basket's shares: race 3 nets 500, not 2500", eff["31"] == -500
@@ -858,6 +859,61 @@ w61 = [w for w in api.wire[n0:] if w["exchangeId"] == "61"]
 check("exit of a short (NO) leg at 0 cash: bought back as a covered 'sell NO' (no cash), state done",
       w61 and all(w["side"] == "no" and w["action"] == "sell" for w in w61) and not b.basket_legs
       and b.basket_state == "done" and api.inv.get("61") == 0, (w61, b.basket_legs, api.inv.get("61")))
+
+# ============================================================================================ P9 red team (REDTEAM.md)
+print("--- P9 red team (analysis/p9/REDTEAM.md)")
+api, b = basket_bot(races={3: (0.080, 0.90)})
+fv = warm(b)
+inv = dict(api.inv)
+b.update_tilt(fv, b.cur_refs, b.cur_liquid, inv, time.monotonic())
+te0 = b.tilt_exposure
+b.basket_legs = {"32": 20000.0}
+b.update_tilt(fv, b.cur_refs, b.cur_liquid, dict(inv, **{"32": inv.get("32", 0) + 20000}), time.monotonic())
+check("RT-1: tilt_exposure leaves the basket's shares out (a long-tilt basket never flips the Package 8 exits)",
+      b.tilt_exposure == te0 and b.tilt_exposure_basket < -9000, (te0, b.tilt_exposure, b.tilt_exposure_basket))
+api, b = basket_bot(races={3: (0.080, 0.90)})
+fv = warm(b)
+b.basket_state, b.basket_on_wall, b.basket_peak = "tracking", time.time() - 5 * H, 100000.0
+b.cfg.tilt_exit_take = True
+b.tilt_exit_takes = lambda *a, **k: {"32"}       # (a tilt exit / take traded the longshot this cycle)
+n0 = len(api.wire)
+cycle(b)
+check("RT-2: no basket add on a market another feature traded this cycle (never a sell then a buy there)",
+      not [w for w in api.wire[n0:] if w["exchangeId"] == "32"] and "32" not in b.basket_legs, api.wire[n0:])
+b.pp[race_name(3)] = {"leg": "31", "other": "32", "sign": 1, "base_x": 0}   # (a passive pair unwind running there)
+o = b.basket_orders(time.time(), fv, fv, dict(api.inv), 10000.0, 70000.0, 1e6, True, 10 ** 6, b.basket_schedule())
+check("RT-2: ...nor in a race with a passive pair unwind running", not [x for x in o if x["eid"] == "32"], o)
+b.pp.clear()
+o = b.basket_orders(time.time(), fv, fv, dict(api.inv), 10000.0, 70000.0, 1e6, True, 10 ** 6, b.basket_schedule(),
+                    skip={race_name(3)})
+check("RT-2: ...nor in a race arbitrage / a follow-up acted on (skip by race)", not o, o)
+api, b = basket_bot(races={3: (0.080, 0.90)})
+api.inv["32"] = 500
+fv = warm(b)
+b.basket_state, b.basket_on_wall, b.basket_peak = "tracking", time.time() - 5 * H, 100000.0
+n0 = len(api.wire)
+tick(b)
+check("RT-3: an ordinary long on the leg is ADOPTED by the first add (a basket leg is never quoted: it would sit "
+      "unmanaged past the exit / kill / backstop)", b.basket_legs.get("32") == api.inv.get("32") and api.inv["32"] > 500,
+      (b.basket_legs, api.inv.get("32")))
+o = b.basket_orders(time.time(), fv, fv, {"32": 4000}, 1e6, 10000.0, 1e6, True, 10 ** 6, b.basket_schedule())
+b.basket_legs = {}
+o2 = b.basket_orders(time.time(), fv, fv, {"32": 4000}, 1e6, 10000.0, 1e6, True, 10 ** 6, b.basket_schedule())
+check("RT-3: ...and the leg cap counts the position held in the add's direction (4000 held: room 500 $ - 4000 x 0.07)",
+      not [x for x in o2 if x["eid"] == "32"] or next(x for x in o2 if x["eid"] == "32")["qty"] * 0.085 <= 500 - 4000 * 0.07 + 1,
+      o2)
+api, b = basket_bot(races={3: (0.080, 0.90)})
+fv = warm(b)
+b.basket_state, b.basket_on_wall, b.basket_peak = "tracking", time.time() - 5 * H, 100000.0
+low = dict(fv, **{"32": 0.03, "31": 0.97})       # fair value leaned to Polymarket far under the price paid (~0.08)
+b.basket_legs = {"32": 10000.0}
+o = b.basket_orders(time.time(), low, fv, {"32": 10000}, 600.0, 70000.0, 1e6, True, 10 ** 6, b.basket_schedule())
+check("RT-4: held valued at the higher of fair value / book price: 10000 x ~0.07 >= a 600 $ target, no more bought",
+      o and not [x for x in o if x["add"]], o)
+b.cfg.basket_mult, b.cfg.basket_mult_after_fail = 2.0, 8.0
+b.basket_test = "failed"
+check("RT-5: a failed test never RAISES the multiplier (mult_after_fail 8 > mult 2 -> 2)",
+      b.basket_target(1e9, 1e5, 1e5)[3] == 2.0, b.basket_target(1e9, 1e5, 1e5))
 
 # ============================================================================================ py_compile 3.10
 print("--- Python 3.10 syntax")
