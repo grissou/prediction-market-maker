@@ -1013,6 +1013,43 @@ class Config:
     # max_worst_case_frac caps it at ~25k: this is what makes the bet possible at all. The CPPI floor + kill are the
     # real control.
     basket_stress_frac: float = 0.4
+    # --- Package 9 F2/F5 (analysis/p9/SPEC_F2_F5.md; everything OFF by default) ---
+    # F2 tilt_exit_take True: the Package 8 tilt exits (the side shrinking a position that ADDS to |tilt_exposure|,
+    # tilt_exit_side) are TAKEN, not only rested: once a cycle (after the stale-quote takes, before the basket and the
+    # quotes) up to tilt_exit_take_max_per_cycle immediate-or-cancel orders (alive take_order_ttl, leftovers
+    # cancelled at once) sell a long at the best other bid / buy back a short at the best other ask (a covered
+    # "sell NO" with reduce_no_as_sell), only when that price gives up at most tilt_exit_take_max_cost a share vs
+    # the market's TILTED fair value tilted_ref_for(Polymarket) (the r' the quotes use; never raw Polymarket).
+    # Order: longshot NO first (shorts where Polymarket < 0.10), then favourite YES (longs where Polymarket > 0.90),
+    # then the rest; in each group the positions the exchange marks BELOW what the exit gets (pos_marks) first.
+    # Size <= the position (never flips; a short's NO in a NO+NO set is never sold), <= the best level's depth,
+    # <= tilt_exit_take_max_leg_frac x the position (1 share at least), and the $ traded (a sale: shares x bid; a
+    # buy-back: shares x (1 - ask), the NO sold) <= tilt_exit_take_per_hour in any rolling hour, bot-wide. Skipped:
+    # no liquid Polymarket, a Polymarket move within ref_jump_cooldown_seconds (urgent_ref_move / ref_jump_threshold,
+    # as ref_guard_exits), basket legs, a market just acted on, write budget short of 3 writes (cancel ours, the
+    # order, the leftover cancel), the cash gate refusing it (pre-checked before our quotes are pulled). One market
+    # rests take_cooldown_seconds after a take. status.json tilt_exit_takes {count, shares, usd, cost}; journal
+    # "TILT EXIT TAKE <label> <side> <qty> @ <px> (tilted fv <fv>, cost <c>)". False = unchanged.
+    tilt_exit_take: bool = False
+    tilt_exit_take_max_cost: float = 0.01
+    tilt_exit_take_per_hour: float = 15000.0
+    tilt_exit_take_max_per_cycle: int = 3
+    tilt_exit_take_max_leg_frac: float = 0.5
+    # F5 arb_cash_rule True (live 3 Oct: at 0 cash the race arbitrage left one-legged sets, some legs refused for
+    # cash): an ARBITRAGE (kind "arb", sell side: bids sum >= 1 + arb_min_profit; buy side: asks sum <= 1 -
+    # arb_min_profit_buy; pair unwinds are not changed) is planned on other traders' levels only, a level at a price
+    # where we have an order of our own (resting, just sent or unconfirmed) being skipped whole, sized <=
+    # arb_leg_depth_frac x the thinnest leg's depth there, and sent only for the sets whose whole cash need (the cash
+    # gate's own per-order rule, all legs together) fits: cash_left() >= arb_cash_mult x need + arb_cash_reserve
+    # (fewer sets when that is what fits, none below 1; no cash figure = none: it needs cash_gate_enabled). If the
+    # batch fills its legs unequally, the lagging legs are OWED (pair_owe) and the next cycle's follow-up completes
+    # them within pair_unwind_followup_max_cost of the planned price; from the second try on the extra legs are
+    # bought / sold BACK instead (within arb_min_profit + pair_unwind_followup_max_cost), so no one-legged set is
+    # kept. status.json arb_cash_blocked; journal "ARB skipped: cash rule (need X, left Y)". False = unchanged.
+    arb_cash_rule: bool = False
+    arb_cash_mult: float = 1.25
+    arb_cash_reserve: float = 2000.0
+    arb_leg_depth_frac: float = 0.8
 
 
 CFG = Config()
@@ -1237,6 +1274,16 @@ OVERRIDABLE = {
     "basket_max_orders_per_cycle": (1, 20),
     "basket_slip": (0.0, 0.05),
     "basket_stress_frac": (0.0, 1.0),
+    # --- Package 9 F2/F5 ---
+    "tilt_exit_take": (False, True),
+    "tilt_exit_take_max_cost": (0.0, 0.05),
+    "tilt_exit_take_per_hour": (0.0, 200000.0),
+    "tilt_exit_take_max_per_cycle": (1, 20),
+    "tilt_exit_take_max_leg_frac": (0.0, 1.0),
+    "arb_cash_rule": (False, True),
+    "arb_cash_mult": (1.0, 3.0),
+    "arb_cash_reserve": (0.0, 20000.0),
+    "arb_leg_depth_frac": (0.1, 1.0),
 }
 MAX_ORDER_TTL = 7200.0    # no order of ours lives longer than this (dead-man's switch), whatever the TTL settings
 LADDER_MAX_LEVELS = 8
@@ -3637,6 +3684,10 @@ class Bot:
         self.hold_takes = deque()         # C hold target: (now_m, notional) of takes in the last hour (take_aged)
         self.hold_open_at = None          # ...now_m from which takes may start (first enabled call + 1 h: restart-safe)
         self.hold_takes_total = 0         # ...takes sent since start
+        self.tet_hour = deque()           # Package 9 F2 tilt_exit_take: (now_m, $ traded) in the last hour
+        self.tet_until = {}               # ...eid -> now_m until which no tilt exit is taken there (after a take)
+        self.tet_stats = {"count": 0, "shares": 0, "usd": 0.0, "cost": 0.0}   # ...since start (status.json)
+        self.arb_cash_blocked = 0         # Package 9 F5 arb_cash_rule: arbitrages refused by the cash rule
         self.ops_last = {}                # ops fields of the latest status write (ops_fields): recorder, summary
         self.ops_cache = {}               # ops_fields: fills.csv-derived numbers, recomputed when the file changes
         self.ops_warned = False           # ops_fields failed once (logged once)
@@ -4088,6 +4139,9 @@ class Bot:
             self.hold_open_at = None                        #   restarts the 1-hour hold-off
         if cfg.hold_target_hours > 0 and self.running:      # C hold target: aged lots taken within the hourly budget
             taken |= self.take_aged(inv, book_fvs, mine_real, now_m)
+        # 6b'. Package 9 F2: tilt exits taken inside a cost cap from the tilted fair value (immediate-or-cancel)
+        if cfg.tilt_exit_take and self.running:
+            taken |= self.tilt_exit_takes(refs, liquid, inv, mine_real, now_m, skip=taken | arb_races)
         # 6c. Package 9 F1: the long-tilt basket (immediate-or-cancel takes; exempt from reduce-only, see Config)
         if self.running and (cfg.basket_enabled or self.basket_legs or self.basket_state != "off" or self.basket_killed):
             try:
@@ -4143,6 +4197,11 @@ class Bot:
             self.health["cash_gate_left"] = round(self.cash_left(), 2) if getattr(self, "cg_cash", None) is not None else None
             age = self.cash_read_age()
             self.health["cash_gate_read_age"] = round(age, 1) if age is not None else None   # s since a good read
+        if cfg.tilt_exit_take or self.tet_stats["count"]:   # Package 9 F2 (absent while never used)
+            self.health["tilt_exit_takes"] = {k: (round(v, 2) if isinstance(v, float) else v)
+                                              for k, v in self.tet_stats.items()}
+        if cfg.arb_cash_rule:                             # Package 9 F5 (absent while off)
+            self.health["arb_cash_blocked"] = self.arb_cash_blocked
         self.health["fast_unload_windows"] = sum(1 for e in list(self.unloads)
                                                  if e in self.ex and self.unload_side(self.ex[e], now_m))
         self.health["fl_bias_markets"] = {k: sum(1 for x in self.ex.values() if x.fl_tag.startswith(f" fl:{k}"))
@@ -5518,11 +5577,13 @@ class Bot:
                 1 if reprice else 0,
                 -self.size_plan.get(ex.eid, 0))
 
-    def tilt_exit_side(self, ex):
+    def tilt_exit_side(self, ex, r=None, pos=None):
         """Package 8: "bid" / "ask" = the side shrinking this market's own position when that position adds to
         |tilt_exposure| (its contribution pos x (raw Polymarket - c), c = 1/legs, has the sign of the total, or is
-        positive while the total is 0); None otherwise. Reads ex.inv / ex.ref as decide() set them this cycle."""
-        r, pos = getattr(ex, "ref", None), ex.inv
+        positive while the total is 0); None otherwise. Reads ex.inv / ex.ref as decide() set them this cycle
+        (Package 9 F2: r / pos given = this cycle's, before decide)."""
+        r = getattr(ex, "ref", None) if r is None else r
+        pos = ex.inv if pos is None else pos
         if r is None or not pos or ex.eid in getattr(self, "basket_legs", ()):   # (Package 9: never a basket leg)
             return None
         contrib = pos * (r - tilted_ref(r, 1.0, self.legs(ex)))     # tilted_ref(r, 1, legs) = c
@@ -7743,6 +7804,179 @@ class Bot:
             self.notes_dirty = True
         log.info("take on %s: traded %s of %d", ex.label, data.get("quantityTraded", "?"), order["quantity"])
         return True
+
+    # ------------------------------------------------------------------------------ Package 9 F2: tilt exit takes
+    TET_LONGSHOT, TET_FAVOURITE = 0.10, 0.90   # longshot NO (shorts below) first, then favourite YES (longs above)
+
+    def tet_jump_guard(self, ex, now_m):
+        """F2: Polymarket moved on this market within ref_jump_cooldown_seconds (urgent_ref_move / ref_jump_threshold)
+        or its jump cooldown runs: as ref_guard_exits, no exit is taken there now."""
+        return (now_m < ex.cooldown_until
+                or now_m - max(ex.ref_moved_at, ex.ref_jump_at) < self.cfg.ref_jump_cooldown_seconds)
+
+    def tet_set_part(self, eid, inv):
+        """F2: NO shares of eid locked in NO+NO sets on THIS cycle's positions (inv), the nono_set_part rule: min(NO
+        held, the most NO held on another leg of the race); 0 outside a 2+-leg race or below 1 NO."""
+        ex = self.ex.get(eid)
+        members = self.groups.get(ex.group) if ex is not None else None
+        if not members or len(members) < 2 or any(m not in self.ex for m in members):
+            return 0.0
+        n = -float(inv.get(eid, 0.0))
+        if n < 1:
+            return 0.0
+        others = max(max(0.0, -float(inv.get(m, 0.0))) for m in members if m != eid)
+        return min(n, others) if others >= 1 else 0.0
+
+    def tet_hour_used(self, now_m):
+        """F2: $ traded by tilt exit takes in the last hour (bot-wide)."""
+        while self.tet_hour and now_m - self.tet_hour[0][0] >= 3600.0:
+            self.tet_hour.popleft()
+        return sum(v for _, v in self.tet_hour)
+
+    def tet_market(self, ex, r, pos, inv, now_m):
+        """F2: one market's tilt exit take on its current (other traders') book, or None: {"sell", "price", "qty",
+        "fv", "cost", "unit"}. sell = a long sold at the best bid, else a short bought back at the best ask; fv =
+        tilted_ref_for(r) (never raw Polymarket); cost a share = fv - bid / ask - fv, at most tilt_exit_take_max_cost;
+        qty <= the position (a short: less its NO+NO set part), the best level's depth and max_leg_frac x the
+        position (1 share at least); unit = $ a share (bid, or 1 - ask: the NO sold)."""
+        cfg = self.cfg
+        if r is None or abs(pos) < 1 or self.tilt_exit_side(ex, r, pos) is None:
+            return None
+        sell = pos > 0
+        levels = (ex.book or {}).get("bids" if sell else "asks") or []
+        if not levels:
+            return None
+        price, depth = float(levels[0]["price"]), float(levels[0]["quantity"])
+        fv = self.tilted_ref_for(ex, r, now_m)
+        cost = (fv - price) if sell else (price - fv)
+        if cost > cfg.tilt_exit_take_max_cost + 1e-9:
+            return None
+        held = pos if sell else -pos - self.tet_set_part(ex.eid, inv)
+        frac = cfg.tilt_exit_take_max_leg_frac
+        cap = max(1, int(frac * abs(pos) + 1e-9)) if frac > 0 else 0
+        qty = int(min(held, depth, cap) + 1e-9)
+        if qty < 1:
+            return None
+        return {"sell": sell, "price": price, "qty": qty, "fv": fv, "cost": cost,
+                "unit": price if sell else 1.0 - price}
+
+    def tet_order_key(self, ex, r, pos, plan):
+        """F2 take order: longshot NO (short, Polymarket < 0.10) first, then favourite YES (long, Polymarket > 0.90),
+        then the rest; within a group the positions the exchange marks BELOW what the exit gets first (pos_marks: a
+        long's bid above its mark, a short's ask below it; no mark = after those), then the larger tilt contribution."""
+        g = 0 if (pos < 0 and r < self.TET_LONGSHOT) else 1 if (pos > 0 and r > self.TET_FAVOURITE) else 2
+        mark = self.pos_marks.get(ex.eid)
+        below = 0 if mark is not None and ((plan["sell"] and plan["price"] > mark + 1e-9)
+                                           or (not plan["sell"] and plan["price"] < mark - 1e-9)) else 1
+        contrib = abs(pos * (r - tilted_ref(r, 1.0, self.legs(ex))))
+        return (g, below, -contrib, ex.label)
+
+    def tilt_exit_takes(self, refs, liquid, inv, mine_real, now_m, skip=()):
+        """Package 9 F2 (tilt_exit_take): take the tilt exits inside the cost cap, in tet_order_key order, at most
+        tilt_exit_take_max_per_cycle orders and tilt_exit_take_per_hour $ an hour. Each: the book re-downloaded and
+        the plan re-checked, the cash gate pre-checked, THEN our orders there cancelled (no self-cross), one
+        immediate-or-cancel order (take_order_ttl), the leftover cancelled. Returns the markets acted on (not quoted
+        this cycle). skip: markets / races already acted on this cycle."""
+        cfg = self.cfg
+        taken = set()
+        if not cfg.tilt_exit_take or not self.running:
+            return taken
+        cands = []
+        for eid, ex in self.ex.items():
+            pos, r = float(inv.get(eid, 0.0)), refs.get(eid)
+            if (abs(pos) < 1 or r is None or eid not in liquid or eid in skip or ex.group in skip
+                    or eid in self.basket_legs or now_m < self.tet_until.get(eid, 0.0)
+                    or busy(ex, now_m) or self.tet_jump_guard(ex, now_m)):
+                continue
+            plan = self.tet_market(ex, r, pos, inv, now_m)
+            if plan is not None:
+                cands.append((self.tet_order_key(ex, r, pos, plan), eid))
+        cands.sort()
+        sent = 0
+        for _, eid in cands:
+            if sent >= cfg.tilt_exit_take_max_per_cycle or not self.running:
+                break
+            ex, pos, r = self.ex[eid], float(inv.get(eid, 0.0)), refs[eid]
+            room = cfg.tilt_exit_take_per_hour - self.tet_hour_used(now_m)
+            if room <= 0:
+                log.info("tilt exit takes: the hourly $ cap (%.0f) is used up - the rest wait",
+                         cfg.tilt_exit_take_per_hour)
+                break
+            if not self.writes_ready(3):          # cancel ours + the take + the leftover cancel
+                self.takes_skipped_budget += 1
+                log.info("tilt exit takes: write budget busy - the rest wait (next cycle)")
+                break
+            try:                                  # the cached book may be old: re-check on a fresh one
+                ex.book = strip_own(self.api.book(eid, self.tid), mine_real.get(eid, []))
+                ex.book_time = ex.verified = time.monotonic()
+            except ApiError as e:
+                log.warning("tilt exit take on %s skipped: book download failed (%s)", ex.label, e)
+                continue
+            plan = self.tet_market(ex, r, pos, inv, now_m)
+            if plan is None:
+                continue
+            qty = int(min(plan["qty"], room / max(plan["unit"], 1e-9)) + 1e-9)
+            if qty < 1:
+                continue
+            sell = plan["sell"]
+            order = {"exchangeId": eid, "side": "yes", "action": "sell" if sell else "buy", "quantity": qty,
+                     "price": plan["price"], "tournamentId": self.tid}
+            if not sell:                          # buying back a short: a covered "sell NO" of the NO held
+                order = self.no_sell_order(order, pos)
+                if order is None or order["quantity"] < 1:
+                    continue
+            if self.cash_gate_blocks([order]):    # before our quotes are pulled: nothing fits the cash -> nothing
+                self.cash_gate_log(eid, "tilt exit take on %s skipped: not enough available cash (cash gate)",
+                                   ex.label)
+                continue
+            self.tet_until[eid] = now_m + cfg.take_cooldown_seconds
+            qty = int(order["quantity"])
+            log.warning("%sTILT EXIT TAKE %s %s %d @ %.3f (tilted fv %.4f, cost %.4f)%s",
+                        "" if self.api.live else "[dry] ", ex.label, "sell" if sell else "buy", qty, plan["price"],
+                        plan["fv"], plan["cost"], " (sell NO)" if order.get("_no_sell") else "")
+            sent += 1
+            taken.add(eid)
+            if not self.api.live:
+                continue
+            if not self.cancel(eid, [], whole_exchange=True):   # our own orders there first: never a self-cross
+                log.warning("tilt exit take on %s abandoned: could not clear our own orders", ex.label)
+                continue
+            order["expirationDate"] = iso(utcnow() + timedelta(seconds=cfg.take_order_ttl))
+            self.orders_stale = True
+            try:
+                results = self.place_orders([order])
+            except ApiError as e:
+                if e.code == "WRITE_BUDGET_WAIT":         # never sent: nothing traded; quotes back next cycle
+                    self.takes_skipped_budget += 1
+                    log.warning("tilt exit take on %s not sent: write budget busy", ex.label)
+                    continue
+                ex.pending_until = now_m + cfg.pending_seconds
+                alert(f"tilt exit take on {ex.label} failed ({e}) - check positions")
+                if e.code in FATAL_API_CODES:
+                    fatal(f"orders rejected with {e.code}")
+                continue
+            res = results[0] if results else {}
+            data = res.get("data") or {}
+            if res.get("ok"):
+                self.remember_order(order, data, now_m)   # a leftover whose cancel fails is still known about
+            self.cancel(eid, [], whole_exchange=True, quiet=True)   # immediate-or-cancel: the leftover goes
+            traded = float(data.get("quantityTraded") or 0) if res.get("ok") else 0.0
+            if data.get("orderId") is not None:
+                self.order_meta[data["orderId"]] = {"our_side": "ask" if sell else "bid", "price": plan["price"],
+                                                    "take": True, "tilt_exit": True, "fv": plan["fv"],
+                                                    "t": time.time(), "eid": eid,
+                                                    **({"no_sell": True} if order.get("_no_sell") else {})}
+                self.notes_dirty = True
+            if traded > 0:
+                usd = traded * plan["unit"]
+                self.tet_hour.append((now_m, usd))
+                st = self.tet_stats
+                st["count"] += 1
+                st["shares"] += int(round(traded))
+                st["usd"] += usd
+                st["cost"] += traded * plan["cost"]
+            log.info("tilt exit take on %s: traded %.0f of %d", ex.label, traded, qty)
+        return taken
 
     # ------------------------------------------------------------------------------ C hold target (Package 5)
     HOLD_FLOOR = 0.01             # never more than 1c through the book's own price on the losing side
