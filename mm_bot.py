@@ -1291,8 +1291,8 @@ class Config:
     # older than mm_inv_max_age_h, or its $ at p (long q x p, short |q| x (1 - p)) exceeds mm_inv_max_usd (0 = no $
     # limit): stale shares = max(the aged lots, the shares over the $ limit).
     # 1. mm_recycle_enabled True: the stale shares are worked out FIRST, through the quoter itself (decide, after
-    #    hold_quote, before the value floor): the REDUCING side of that market is moved in to fair - mm_recycle_concession
-    #    (long; fair + it for a short), never crossing the best other bid / ask, never past the value floor in value
+    #    hold_quote, before the value floor): the REDUCING side of that market is moved in to fair -
+    #    mm_recycle_concession (long; fair + it for a short), never crossing the best other bid / ask, never past the value floor in value
     #    mode (value_floor_quote runs after it), sized max(the quoter's, the stale shares) <= the position; our adding
     #    side is pulled a tick behind it and otherwise keeps quoting. One order per side as ever (the quoter's reduce
     #    side IS the recycler's order: no duplicate); a side the quoter left out (a guard, the cooldown) stays out.
@@ -5730,14 +5730,15 @@ class Bot:
         if mm_part is not None:                   # P14 3: the value book's share of each room
             v_wc, v_corr = room_wc + min(mm_part[0], res_wc), room_corr + min(mm_part[1], res_corr)
             self.mmf_room_mm, self.mmf_room_value = tuple(mm_part), (v_wc, v_corr)
-            guard = (f" [mm_room_guard: MM inventory {mm_part[0]:.0f} wc / {mm_part[1]:.0f} corr counted against the MM "
-                     f"room first; value share {v_wc:.0f} / {v_corr:.0f}]")
+            guard = (f" [mm_room_guard: MM inventory {mm_part[0]:.0f} wc / {mm_part[1]:.0f} corr counted against "
+                     f"the MM room first; value share {v_wc:.0f} / {v_corr:.0f}]")
         short = ((res_wc > 0 and v_wc < res_wc - 1e-9) or (res_corr > 0 and v_corr < res_corr - 1e-9))
         clear = ((res_wc <= 0 or v_wc >= MM_RISK_HYST * res_wc - 1e-9)
                  and (res_corr <= 0 or v_corr >= MM_RISK_HYST * res_corr - 1e-9))
         paused = short or (self.mmr_paused and not clear)
         if paused != self.mmr_paused:
-            log.warning("%s: risk room worst case %.0f (reserve %.0f), correlated %.0f (reserve %.0f), account %.0f%s%s",
+            log.warning("%s: risk room worst case %.0f (reserve %.0f), correlated %.0f (reserve %.0f), account "
+                        "%.0f%s%s",
                         "VALUE ADDS PAUSED (mm_risk_reserve: takes, allocator buys, basket buys and tail adds stop; "
                         "middle-band two-way quoting goes on)" if paused else "value adds resumed (mm_risk_reserve)",
                         room_wc, res_wc, room_corr, res_corr, equity,
@@ -11257,11 +11258,11 @@ class Bot:
     # ------------------------------------------------------------------------------ P14: market-making funding
     MM_FUNDING_KEYS = ("mm_funding",)   # read-only status.json key(s): identity checks ignore them (as EV_KEYS)
     MM_LOTS_MAX = 20              # MM lots kept per market (beyond it the two oldest merge: older time, mean price)
-    MM_SEED_HOURS = 24.0          # first start without status.json mm_funding: fills.csv this far back (order notes: 1 day)
+    MM_SEED_HOURS = 24.0          # no status.json mm_funding at start: fills.csv this far back (order notes: 1 day)
     MM_REFILL_GAP = 60.0          # mm_refill_fast: a refill is planned at most this often (s)
     MM_FAST_EXPIRE = 300.0        # ...a fast refill sale still not sent after this long is dropped (re-planned) (s)
-    MM_SENT_LAG = 120.0           # ...a market a refill IOC sold is not planned again until the positions read shows the
-                                  #    sale, or this long after it (red team RT13-3: a positions read lagging a sale) (s)
+    MM_SENT_LAG = 120.0           # ...a market a refill IOC sold is not planned again until the positions read
+                                  #    shows the sale, or this long after it (red team RT13-3: a lagging read) (s)
     MM_MAKER_SKIP = ("basket", "alloc", "set_ladder", "arb", "take")   # order notes that are not resting quotes
 
     def mmf_init(self, d=None):
@@ -11292,7 +11293,7 @@ class Bot:
         self.mmf_below_since = num(d.get("below_half_since_wall"))   # wall time cash / a room fell below half
         self.mmf_alerted = bool(d.get("alerted")) and self.mmf_below_since is not None
         self.mmf_refill_last_m = -1e18            # monotonic time of the latest fast refill plan
-        self.mmf_recycling = {}                   # eid -> {"side", "qty", "price", "why"}: this cycle's recycler (decide)
+        self.mmf_recycling = {}                   # eid -> {"side", "qty", "price", "why"}: this cycle's recycler
         self.mmf_logged = {}                      # eid -> the latest "MM RECYCLE" line's (side, price, qty)
         self.mmf_sent = {}                        # eid -> (now_m, |q| before, shares sold): refill IOC sales (RT13-3)
         self.mmf_room_mm = (None, None)           # mm_room_guard: the MM lots' worst-case / correlated contribution
@@ -11489,8 +11490,8 @@ class Bot:
         the position; our adding side a tick behind it. A side the quoter left out stays out (recorded as blocked).
         +EV inventory (edge-held >= mm_hurdle) is handed over instead (mm_hand_over)."""
         self.mmf_recycling.pop(ex.eid, None)
-        if fv is None or abs(ex.inv) < 1 or ex.eid not in self.mm_lots:
-            return q
+        if fv is None or abs(ex.inv) < 1 or ex.eid not in self.mm_lots or ex.label in self.alloc_pins():
+            return q                              # (a pinned label is never pushed out: alloc_pin, as the allocator)
         v = self.mm_view(time.time(), [ex.eid]).get(ex.eid)
         if v is None or v["stale"] < 1 or v["q"] * ex.inv <= 0:
             return q
@@ -11557,8 +11558,8 @@ class Bot:
         key = (rec["side"], rec["price"], n)
         if self.mmf_logged.get(ex.eid) != key:
             self.mmf_logged[ex.eid] = key
-            log.warning("MM RECYCLE %s %s %d @ %.3f (fair %.3f %s %.3f concession%s; MM inventory %+.0f, oldest %.1f h, "
-                        "$%.0f; stale by %s)", ex.label, "sell" if ex.inv > 0 else "buy back", n, price, fv,
+            log.warning("MM RECYCLE %s %s %d @ %.3f (fair %.3f %s %.3f concession%s; MM inventory %+.0f, oldest "
+                        "%.1f h, $%.0f; stale by %s)", ex.label, "sell" if ex.inv > 0 else "buy back", n, price, fv,
                         "-" if ex.inv > 0 else "+", conc, ", value floor" if value else "", v["q"], v["oldest_h"],
                         v["usd"], v["why"])
         return q
@@ -12441,7 +12442,9 @@ class Bot:
         [value_mid_low, value_mid_high] are the middle band: their buys and sells are FIFO-matched per market in time
         order, realised = sum matched qty x (sell - buy); what stays unmatched is unmatched_shares, valued at p -
         price (unmatched_ev, not realised). value_adds_ev = tail maker fills' edge to p at fill (buy q x (p - price),
-        sell q x (price - p)); takes_ev the same for take fills. per_day = realised x 24 / hours covered."""
+        sell q x (price - p)); takes_ev the same for take fills. per_day = realised x 24 / hours covered.
+        P14: a fill of a side the recycler priced (note "recycle") counts as fills.recycle (not maker_mid) and its edge
+        to p in recycle_ev - both keys only once such a fill exists; in the band it still closes the FIFO lots."""
         cfg = self.cfg
         c = self.ops_fills(now)
         notes = {str(k): v for k, v in (self.order_meta or {}).items()}

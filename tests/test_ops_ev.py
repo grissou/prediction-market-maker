@@ -343,8 +343,8 @@ if old_src:
         run_cycles(bot, 5)
         fills = len(api.fills)
         st = json.load(open(cfg.status_file))
-        drop = NEW_KEYS | set(getattr(M.Bot, "MM_FUNDING_KEYS", ())) | {"updated", "seconds_since_cycle", "tilt_state", "polymarket_fetch_seconds",
-                           "cycle_seconds", "phases"}
+        drop = NEW_KEYS | set(getattr(M.Bot, "MM_FUNDING_KEYS", ())) | {  # (and the later P14 report key)
+            "updated", "seconds_since_cycle", "tilt_state", "polymarket_fetch_seconds", "cycle_seconds", "phases"}
         st = {k: v for k, v in st.items() if k not in drop and not k.endswith("_seconds")}
         orders = sorted((o["exchangeId"], o.get("action"), o.get("side"), o["price"], o["quantity"])
                         for o in api.wire)

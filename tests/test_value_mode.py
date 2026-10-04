@@ -578,7 +578,8 @@ if base is not None:
                 bn.write_status(True)
                 bb_.write_status(True)
                 with open(bn.cfg.status_file) as f:     # (less the later read-only ev / carry report keys)
-                    kn = set(json.load(f)) - set(getattr(M.Bot, "EV_KEYS", ())) - {"ev_outcome_history"} - set(getattr(M.Bot, "MM_FUNDING_KEYS", ()))
+                    kn = (set(json.load(f)) - set(getattr(M.Bot, "EV_KEYS", ())) - {"ev_outcome_history"}
+                          - set(getattr(M.Bot, "MM_FUNDING_KEYS", ())))   # (and the later P14 report key)
                 with open(bb_.cfg.status_file) as f:
                     kb = set(json.load(f))
                 if kn != kb or set(bn.health) != set(bb_.health) or bn.status_report() != bb_.status_report():
