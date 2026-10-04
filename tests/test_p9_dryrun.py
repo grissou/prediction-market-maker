@@ -398,9 +398,10 @@ def main():
     # ---- stage 1: hygiene
     bad, al = apply_stage(b, files["stage1_hygiene"])
     check("stage1: applied with no refused key / alert", not bad and not al, (bad, al))
-    check("stage1: take_tilted_ref, take_edge 0.08, ref_tilt_max 0.20, pair_no_unwind_max_cost 0 in force",
+    check("stage1: take_tilted_ref, take_edge 0.08, ref_tilt_max 0.20, pair_no_unwind_max_cost 0.02 (56dff74: the "
+          "sets keep draining at the live 0.02) in force",
           b.cfg.take_tilted_ref and b.cfg.take_edge == 0.08 and b.cfg.ref_tilt_max == 0.20
-          and b.cfg.pair_no_unwind_max_cost == 0.0)
+          and b.cfg.pair_no_unwind_max_cost == 0.02, b.cfg.pair_no_unwind_max_cost)
     cycles(b, 10, stage="stage1")
     o1 = orders(api, "stage1")
     take1 = [o for o in o1 if o["tag"] == "take_stale_quotes"]
@@ -438,6 +439,8 @@ def main():
     hours = float(os.environ.get("P9_DRYRUN_HOURS", "3"))
     per_h = 60
     hourly = []
+    t_stage2, nono0 = CLK.off, status_of(b).get("nono_sets") or {}
+    sc_prev, api.set_collateral = api.set_collateral, True   # F2b: the exchange's set rule (1 cash a broken share)
     for h in range(int(hours)):
         cycles(b, per_h, step=60.0, stage="stage2", refill_every=None)
         st = status_of(b)
@@ -447,11 +450,13 @@ def main():
         if h == 0:
             first_hour_depth_only = (api.cash - cash_before2, exp_before2 - b.tilt_exposure)
         api.refill()                                      # the books replenish to the snapshot's depth every hour
+    api.set_collateral = sc_prev
     o2 = orders(api, "stage2")
     tet = [o for o in o2 if o["tag"] == "tilt_exit_takes"]
     lines = [m for _, lv, m in CAP.lines if "TILT EXIT TAKE" in m]
+    split_lines = [m for _, lv, m in CAP.lines if "TILT EXIT SPLIT" in m]
     out("## Stage 2 (flatten: tilt exit takes)")
-    viol = []
+    viol, splits, fav_viol = [], [], []
     per_cycle = Counter(o["cycle"] for o in tet)
     for o in tet:
         ex = b.ex[o["eid"]]
@@ -465,19 +470,24 @@ def main():
         if pos < 0:                                       # never NO out of a NO+NO set: at most the lone part
             others = max([max(0.0, -q) for m, q in o["race_pos"].items() if m != o["eid"]] or [0.0])
             lone = -pos - (min(-pos, others) if others >= 1 else 0.0)
-            if o["qty"] > lone + 1e-9:
-                viol.append(("NO sold out of a NO+NO set", o["label"], o["qty"], lone))
+            if o["qty"] > lone + 1e-9:                    # F2b: allowed only as a longshot-leg set split
+                rmax = max([b.cur_refs.get(m, 1.0) for m in o["race_pos"] if m != o["eid"]] or [0.0])
+                if (b.cfg.tilt_exit_take_split_sets and r < b.cfg.tilt_exit_split_max_ref and r < rmax):
+                    splits.append(dict(o, lone=lone))
+                else:
+                    fav_viol.append((o["label"], r, o["qty"], lone))
+                    viol.append(("NO sold out of a NO+NO set", o["label"], o["qty"], lone))
         if not (contrib > 0 and shrinks and o["qty"] <= abs(pos) + 1e-9):
             viol.append(("not a short-tilt shrink", o["label"], pos, o["yes_buy"]))
-        if cost > 0.0105:
-            viol.append(("cost > 1c", o["label"], o["yes_price"], round(fv, 4), round(cost, 4)))
+        if cost > b.cfg.tilt_exit_take_max_cost + 0.0005:      # (56dff74: the stage2 file allows 2c)
+            viol.append(("cost > max_cost", o["label"], o["yes_price"], round(fv, 4), round(cost, 4)))
         if o["own_resting"]:
             viol.append(("own order resting at send", o["label"], o["own_resting"]))
         if o["side"] == "yes" and o["yes_buy"] and pos < 0:
             viol.append(("short bought back as a YES purchase (not a covered NO sale)", o["label"]))
     check("stage2: tilt exit takes were sent", len(tet) > 0, len(tet))
-    check("stage2: every tilt exit shrinks a short-tilt position, within 1c of tilted fv, no own order resting, "
-          "short buy-backs as covered NO sales, never NO out of a NO+NO set", not viol, viol[:5])
+    check("stage2: every tilt exit shrinks a short-tilt position, within max_cost of tilted fv, no own order resting, "
+          "short buy-backs as covered NO sales, NO out of a NO+NO set only as a longshot split", not viol, viol[:5])
     check("stage2: <= 3 tilt exit takes per cycle", max(per_cycle.values() or [0]) <= 3, per_cycle.most_common(3))
     # the $ cap: any 3600-s window
     worst_h = 0.0
@@ -512,6 +522,47 @@ def main():
     out("Sample TILT EXIT TAKE log lines:")
     out()
     for m in lines[:10]:
+        out(f"    {m}")
+    out()
+    # ---- F2b: the set splits inside stage 2 (tilt_exit_take_split_sets true in the stage2 file)
+    check("stage2 F2b: the split flag is on in the stage2 file", b.cfg.tilt_exit_take_split_sets)
+    check("stage2 F2b: set splits were sent (longshot NO legs of NO+NO sets)", len(splits) > 0, len(splits))
+    check("stage2 F2b: never the favourite leg's set part (only legs below tilt_exit_split_max_ref and the race max)",
+          not fav_viol, fav_viol[:5])
+    refused = [o for o in splits if not o["ok"]]
+    check("stage2 F2b: a refused split is not retried in that race within take_cooldown_seconds x 10",
+          all(not [x for x in splits if x["eid"] in b.groups.get(b.ex[o["eid"]].group, ())
+                   and 0 < x["t"] - o["t"] < 10 * b.cfg.take_cooldown_seconds] for o in refused))
+    nono1 = status_of(b).get("nono_sets") or {}
+    out("### Stage 2 with set splits (F2b `tilt_exit_take_split_sets` true in the stage2 file)")
+    out("The F2 exit of a short longshot (raw Polymarket < 0.10, below its race's favourite) also sells the SET part "
+        "of its NO as one covered sale, sized to the cash gate at 1.0 a set share (the fake exchange's set rule on: "
+        "it refuses a set-breaking sale beyond 1 cash a broken share). The favourite-NO legs stay (long the tilt). "
+        "For comparison, the 62a7fb2 run (same seed, max_cost 0.01, no splits) freed +7,990 of cash in hour 1 and "
+        "~9,000 by hour 3; here (max_cost 0.02 as the stage2 file now says, splits on) 'cash from splits' is what the "
+        "splits add and the rest of 'all tilt exits' the ordinary (lone-part / long) exits. The rolling-hour $ cap "
+        f"(tilt_exit_take_per_hour {b.cfg.tilt_exit_take_per_hour:,.0f}) and the snapshot depth within the cost cap "
+        "(books refilled hourly) bound both.")
+    out()
+    out("| hour | split orders (refused) | set shares sold | cash from splits | cash from all tilt exits | cash at the end "
+        "of the hour |")
+    out("|---|---|---|---|---|---|")
+    prev_cash = cash_before2
+    for h, cash, *_ in hourly:
+        lo, hi = t_stage2 + 3600 * (h - 1), t_stage2 + 3600 * h
+        xs = [o for o in splits if lo <= o["t"] < hi]
+        allx = [o for o in tet if lo <= o["t"] < hi]
+        out(f"| {h} | {len(xs)} ({sum(1 for o in xs if not o['ok'])}) | "
+            f"{sum(max(0.0, o['traded'] - o['lone']) for o in xs):,.0f} | {sum(o['cash'] for o in xs):,.0f} | "
+            f"{sum(o['cash'] for o in allx):,.0f} | {cash:,.0f} (+{cash - prev_cash:,.0f}) |")
+        prev_cash = cash
+    out()
+    out(f"- NO+NO sets: {nono0.get('sets', 0):,} sets ({nono0.get('capital', 0):,.0f} of capital) before stage 2, "
+        f"{nono1.get('sets', 0):,} ({nono1.get('capital', 0):,.0f}) after; status splits "
+        f"{(status_of(b).get('tilt_exit_takes') or {}).get('splits')}")
+    out(f"- refused splits: {len(refused)}" + (f" ({refused[0]['err']})" if refused else ""))
+    out()
+    for m in split_lines[:6]:
         out(f"    {m}")
     out()
     STATE["seed"], STATE["hourly"] = seed, hourly

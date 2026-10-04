@@ -10,7 +10,12 @@ them instead, leave the basket on and set `basket_exit_utc` to now + 1 h, then s
   (the estimator reads 0.14-0.16 and is clipped at 0.11), `pair_no_unwind_max_cost` stays at the live 0.02: the 16.8k NO+NO sets
   (21.9k of capital) are the cheapest cash for the basket, 2c a set.
 - stage2_flatten: + `tilt_exit_take` with `_max_cost` 0.02 (the tilt exits are TAKEN at the book within 2c of the tilted fair value, 15k$/h, longshot NO first,
-  then favourite YES, lines marked below their exit price first). Expect: "TILT EXIT TAKE" lines, `tilt_exposure` falling by ~15-20k in
+  then favourite YES, lines marked below their exit price first) + `tilt_exit_take_split_sets` (F2b set split, C-9: the longshot-NO leg of
+  each NO+NO set is sold too, FIRST, as a covered "sell NO" sized to the cash gate at 1.0 a set share; the favourite-NO legs stay = long
+  tilt for free; a refusal pauses splits in that race 10 x take_cooldown_seconds; "TILT EXIT SPLIT" lines, status
+  `tilt_exit_takes.splits`; dry run: +6.1k of cash from splits in hour 1, ~8.8k over 3 h, sets 16.8k -> 9.7k; roll back to F2 alone by
+  setting it false - NOTE the stage3* files do not carry it, so moving to stage 3 switches splits off unless it is added there).
+  Expect: "TILT EXIT TAKE" lines, `tilt_exposure` falling by ~15-20k in
   the first hours, `cash_gate_left` rising, `worst_case_loss` falling from ~79k. Go to stage 3 when `worst_case_loss` < ~40k and
   `cash_gate_left` > ~20k (the basket refuses to buy while the stressed worst case is above the backstop fraction of the account).
 - stage3_basket: + `basket_enabled` with m 5, cap 80k, floor max(86k, 0.85 x peak liquidation value), kill at -15% from the peak or

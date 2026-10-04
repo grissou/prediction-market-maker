@@ -318,6 +318,207 @@ a, bb = cycle_bot(False)
 bb.cycle()
 check("cycle, flag off: no tilt_exit_takes in status.json", "tilt_exit_takes" not in bb.health)
 
+print("--- F2b tilt_exit_take_split_sets: sell the LONGSHOT-NO leg of a NO+NO set (C-9)")
+c = M.Config()
+check("F2b defaults: tilt_exit_take_split_sets False, tilt_exit_split_max_ref 0.10",
+      (c.tilt_exit_take_split_sets, c.tilt_exit_split_max_ref) == (False, 0.10))
+good, bad = M.validate_overrides({"tilt_exit_take_split_sets": True, "tilt_exit_split_max_ref": 0.5}, c)
+check("F2b: both overridable (upper bounds accepted)", len(good) == 2 and not bad, (good, bad))
+good, bad = M.validate_overrides({"tilt_exit_split_max_ref": 0.005}, c)
+good2, bad2 = M.validate_overrides({"tilt_exit_split_max_ref": 0.51, "tilt_exit_take_split_sets": 1}, c)
+check("F2b: max_ref 0.005 / 0.51 / a non-bool flag refused", not good and len(bad) == 1 and not good2
+      and len(bad2) == 2, (bad, bad2))
+
+SET = {"11": -1000, "12": -1000, "21": 3000}     # Ohio: 1000 NO+NO sets; 21 makes tilt_exposure > 0 (+150)
+
+
+def sbot(inv, cash, books=None, split=True, api_cash=None, **cfg):
+    kw = dict(tilt_exit_take_max_leg_frac=1.0, cash_gate_enabled=True, cash_gate_reserve=0.0,
+              tilt_exit_take_split_sets=split)
+    kw.update(cfg)
+    api, b = bot(inv, books=books, **kw)
+    b.cg_cash, b.cg_reserved, b.cg_spent, b.cg_read_at = float(cash), 0.0, 0.0, time.monotonic()
+    if api_cash is not None:
+        api.cash, api.set_collateral = float(api_cash), True
+    return api, b
+
+
+def of(api, eid):
+    return [x for x in sent(api) if x[0] == eid]
+
+
+api, b = sbot(SET, 5000, split=False)
+run(api, b)
+check("F2b flag off: the set leg 11 never sold (all its NO is in a set), 12 untouched", not of(api, "11")
+      and not of(api, "12") and api.inv["11"] == -1000, sent(api))
+api, b = sbot(SET, 5000)
+run(api, b)
+check("F2b on, cash 5000: 11 (longshot NO) sells NO 1000 @ 0.895 (its whole set part), FIRST",
+      sent(api)[0] == ("11", "no", "sell", 1000, 0.895), sent(api))
+check("F2b: the favourite leg 12 keeps its 1000 NO (never sold); 11 flat", not of(api, "12")
+      and api.inv["11"] == 0 and api.inv["12"] == -1000, (sent(api), api.inv))
+check("F2b: the gate is charged 1.0 a set share (cg_spent 1000)", abs(b.cg_spent - 1000.0) < 1e-6, b.cg_spent)
+sp = b.tet_splits
+check("F2b stats: splits {count 1, shares 1000, cash_freed 895}", sp["count"] == 1 and sp["shares"] == 1000
+      and abs(sp["cash_freed"] - 895.0) < 1e-6, sp)
+check("F2b: no basket leg created (the remaining favourite NO is ordinary inventory)", not b.basket_legs,
+      b.basket_legs)
+check("F2b: the remaining favourite NO is no tilt exit while tilt_exposure > 0 (contribution < 0)",
+      b.tilt_exposure > 0 and -1000 * (0.95 - 0.5) < 0 and b.tilt_exit_side(b.ex["12"], 0.95, -1000) is None
+      and b.tet_market(b.ex["12"], 0.95, -1000, {"11": 0.0, "12": -1000.0}, time.monotonic()) is None)
+api, b = sbot({"12": -1000, "21": 3000}, 5000)   # (after the split: 12 alone, lone NO now)
+run(api, b)
+check("F2b: ... and F2 does not take it either (lone favourite NO, total > 0)", not of(api, "12"), sent(api))
+api, b = sbot(SET, 300)
+run(api, b)
+check("F2b: cash 300 -> only 300 of the set part (partial sizing to the cash)", of(api, "11") ==
+      [("11", "no", "sell", 300, 0.895)], sent(api))
+api, b = sbot(SET, 0)
+run(api, b)
+check("F2b: cash 0 -> no split (no lone part: 11 untouched)", not of(api, "11"), sent(api))
+api, b = sbot({"11": -1000, "12": -600, "21": 3000}, 250)
+run(api, b)
+check("F2b: lone 400 + set 600, cash 250 -> 650 (the lone part free, 250 of the set part)",
+      of(api, "11") == [("11", "no", "sell", 650, 0.895)] and api.inv["12"] == -600, (sent(api), api.inv))
+check("F2b: split stats count the set part only (250 shares, 223.75)", b.tet_splits["shares"] == 250
+      and abs(b.tet_splits["cash_freed"] - 250 * 0.895) < 1e-6, b.tet_splits)
+api, b = sbot(SET, 5000, cash_gate_enabled=False)
+run(api, b)
+check("F2b: cash gate off -> no split (the set part cannot be sized to the cash)", not of(api, "11"), sent(api))
+api, b = sbot(SET, 5000, reduce_no_as_sell=False)
+run(api, b)
+check("F2b: reduce_no_as_sell off -> no split", not of(api, "11"), sent(api))
+api, b = sbot(SET, 5000, tilt_exit_split_max_ref=0.05)
+run(api, b)
+check("F2b: max_ref 0.05 (11's raw 0.05 not below) -> no split", not of(api, "11"), sent(api))
+
+print("--- F2b: the favourite leg, cost cap, hourly cap, order")
+api, b = sbot({"11": -1000, "12": -1000}, 5000)
+b.tilt_exposure = -500.0                          # a long-tilt total: 12 (short the favourite) is the exit side
+run(api, b)
+check("F2b: long-tilt total -> 12 is an exit but its set part is never sold; 11 is no exit: nothing",
+      b.tilt_exit_side(b.ex["12"], 0.95, -1000) == "bid" and not api.wire, sent(api))
+check("F2b: tet_split_ok never on the race's highest-priced leg (even with max_ref 0.5 and the gate on)",
+      not M.Bot.tet_split_ok(b, b.ex["12"], 0.95, time.monotonic()))
+bk = books_a()
+bk["11"]["asks"] = [lvl(0.11, 1000)]             # cost 0.11 - 0.0995 = 1.05c > 1c
+api, b = sbot(SET, 5000, books=bk)
+run(api, b)
+check("F2b: ask 0.11 is 1.05c above the TILTED fv 0.0995 -> no split", not of(api, "11"), sent(api))
+bk["11"]["asks"] = [lvl(0.109, 1000)]            # 0.95c
+api, b = sbot(SET, 5000, books=bk)
+run(api, b)
+check("F2b: ask 0.109 (0.95c; raw Polymarket 0.05 would say 5.9c) -> split 1000 @ 0.891",
+      of(api, "11") == [("11", "no", "sell", 1000, 0.891)], sent(api))
+api, b = sbot(SET, 5000, tilt_exit_take_per_hour=300.0)
+run(api, b)
+check("F2b: per_hour 300 -> 335 shares (300 / 0.895), nothing else this hour",
+      sent(api) == [("11", "no", "sell", 335, 0.895)], sent(api))
+REFS_U = {"11": 0.05, "12": 0.95, "21": 0.97, "22": 0.03}
+bk = books_a()
+bk["22"] = {"bids": [lvl(0.07, 1000)], "asks": [lvl(0.085, 1000)]}   # 22 tilted fv 0.0817: cost 0.33c
+api, b = sbot({"11": -1000, "12": -1000, "22": -1000}, 5000, books=bk)
+b.tilt_exposure = 450 - 450 + 470.0
+run(api, b, refs=REFS_U, liquid=set(REFS_U))
+check("F2b order: the split (11, contribution 450) BEFORE the lone longshot NO (22, contribution 470)",
+      [x[0] for x in sent(api)] == ["11", "22"], sent(api))
+bk = books_a()                                    # (the run above consumed the books)
+bk["22"] = {"bids": [lvl(0.07, 1000)], "asks": [lvl(0.085, 1000)]}
+api, b = sbot({"11": -1000, "12": -1000, "22": -1000}, 5000, books=bk, split=False)
+b.tilt_exposure = 470.0
+run(api, b, refs=REFS_U, liquid=set(REFS_U))
+check("... flag off: only the lone 22", [x[0] for x in sent(api)] == ["22"], sent(api))
+
+print("--- F2b: exchange refusal -> split cooldown (no loop); the fake exchange's set rule")
+grab2 = []
+
+
+class Grab2(logging.Handler):
+    def emit(self, rec):
+        grab2.append(rec.getMessage())
+
+
+h2 = Grab2()
+M.log.addHandler(h2)
+old2 = M.log.level
+M.log.setLevel(logging.INFO)
+api, b = sbot(SET, 5000, api_cash=100)           # the gate thinks 5000, the exchange has 100 (< 1 a share x 1000)
+t0 = time.monotonic()
+run(api, b, now=t0)
+check("F2b refused by the exchange (set_collateral, cash 100 < 1000): 11 unchanged, the gate refunded",
+      of(api, "11") == [("11", "no", "sell", 1000, 0.895)] and api.inv["11"] == -1000 and abs(b.cg_spent) < 1e-6
+      and b.tet_splits["count"] == 0, (sent(api), api.inv, b.cg_spent))
+cd = b.cfg.take_cooldown_seconds
+check("F2b: the race is blocked for take_cooldown_seconds x 10", abs(b.tet_split_block.get("Ohio Senate", 0)
+                                                                     - (t0 + 10 * cd)) < 1e-6, b.tet_split_block)
+n = len(of(api, "11"))
+run(api, b, now=t0 + cd + 1)
+check("F2b: past the market's take cooldown but inside the split cooldown: no new split", len(of(api, "11")) == n,
+      sent(api))
+run(api, b, now=t0 + 10 * cd + 1)
+check("F2b: after the split cooldown it is tried again (and refused again)", len(of(api, "11")) == n + 1,
+      sent(api))
+check("F2b: the refusal is logged once per race an hour", sum("tilt exit split on" in m and "refused" in m
+                                                              for m in grab2) == 1,
+      [m for m in grab2 if "refused" in m])
+api, b = sbot(SET, 5000, api_cash=1000)          # exactly 1 a share: the exchange accepts
+run(api, b)
+fills11 = [f for f in api.fills if f["exchangeId"] == "11"]
+check("F2b fake exchange, cash 1000 >= 1 x 1000: split accepted, 1000 NO sold at the 0.105 ask (proceeds 895)",
+      api.inv["11"] == 0 and sum(f["quantity"] for f in fills11) == 1000
+      and all(abs(f["price"] - 0.105) < 1e-9 for f in fills11) and abs(b.tet_splits["cash_freed"] - 895) < 1e-6,
+      (api.inv, fills11, b.tet_splits))
+check("F2b journal: 'TILT EXIT SPLIT <label> sells NO 1000 @ 0.895 (set part; frees ~$895)'",
+      any(m.startswith("TILT EXIT SPLIT") and "sells NO 1000 @ 0.895 (set part; frees ~$895)" in m for m in grab2),
+      [m for m in grab2 if "SPLIT" in m])
+M.log.removeHandler(h2)
+M.log.setLevel(old2)
+
+print("--- F2b: a 3-leg race with NO on all three splits only the longshot legs")
+lib = market("5", "13", "Libertarian", "Ohio Senate")
+bk3 = books_a()
+bk3["11"] = {"bids": [lvl(0.07, 1000)], "asks": [lvl(0.085, 1000)]}   # 3 legs: tilted fv 0.0812 (cost 0.38c)
+bk3["13"] = {"bids": [lvl(0.09, 1000)], "asks": [lvl(0.11, 1000)]}    # tilted fv 0.1079 (cost 0.21c)
+bk3["12"] = {"bids": [lvl(0.80, 1000)], "asks": [lvl(0.82, 1000)]}    # tilted fv 0.8110
+api3, b3 = make_bot(live=True, books=bk3, extra_markets=(lib,))
+for k_, v in dict(tilt_exit_take=True, ref_tilt_enabled=True, ref_tilt_rampin_min=0.0, selftest_enabled=False,
+                  reduce_no_as_sell=True, tilt_exit_take_max_leg_frac=1.0, cash_gate_enabled=True,
+                  cash_gate_reserve=0.0, tilt_exit_take_split_sets=True).items():
+    setattr(b3.cfg, k_, v)
+b3.tilt_s = S
+inv3 = {"11": -1000, "12": -1000, "13": -1000, "21": 3000}
+api3.inv = dict(inv3)
+for e in b3.ex:
+    b3.ex[e].inv = float(inv3.get(e, 0))
+    b3.ex[e].book = api3.full_book(e)
+b3.cg_cash, b3.cg_reserved, b3.cg_spent, b3.cg_read_at = 5000.0, 0.0, 0.0, time.monotonic()
+refs3 = {"11": 0.05, "12": 0.87, "13": 0.08, "21": 0.55, "22": 0.45}
+b3.tilt_exposure = sum(q * (refs3[e] - (1 / 3 if e in ("11", "12", "13") else 0.5)) for e, q in inv3.items())
+check("3-leg setup: Ohio has 3 legs, total tilt exposure > 0", b3.legs(b3.ex["11"]) == 3 and b3.tilt_exposure > 0,
+      (b3.legs(b3.ex["11"]), b3.tilt_exposure))
+b3.tilt_exit_takes(refs3, set(refs3), {e: float(q) for e, q in inv3.items()}, {}, time.monotonic())
+s3 = sent(api3)
+check("3-leg: 11 and 13 (longshots) each sell their 1000 set NO; 12 (the favourite) keeps its 1000",
+      ("11", "no", "sell", 1000, 0.915) in s3 and ("13", "no", "sell", 1000, 0.89) in s3
+      and not [x for x in s3 if x[0] == "12"] and api3.inv["12"] == -1000, (s3, api3.inv))
+check("3-leg: the two splits come first, then 21", [x[0] for x in s3][:2] in (["11", "13"], ["13", "11"])
+      and [x[0] for x in s3][2:] == ["21"], s3)
+
+print("--- F2b: full cycle, status.json tilt_exit_takes.splits")
+a, bb = cycle_bot(True)
+a.inv.clear()
+a.inv.update(SET)
+bb.cfg.tilt_exit_take_split_sets = True
+bb.cfg.cash_gate_enabled = True
+bb.cycle()
+spl = (bb.health.get("tilt_exit_takes") or {}).get("splits")
+check("cycle, split flag on: status tilt_exit_takes.splits {count 1, shares 500 (max_leg_frac 0.5), cash_freed}",
+      spl is not None and spl["count"] == 1 and spl["shares"] == 500 and abs(spl["cash_freed"] - 447.5) < 0.01, spl)
+a, bb = cycle_bot(True)
+bb.cycle()
+check("cycle, split flag off: no splits key", "splits" not in (bb.health.get("tilt_exit_takes") or {}),
+      bb.health.get("tilt_exit_takes"))
+
 print("--- flag off identical to the branch head (git show %s:mm_bot.py) on a grid" % BASE_REF)
 base = None
 try:

@@ -26,5 +26,6 @@
   "take_tilted_ref": true,
   "take_edge": 0.08,
   "tilt_exit_take": true,
-  "tilt_exit_take_max_cost": 0.02
+  "tilt_exit_take_max_cost": 0.02,
+  "tilt_exit_take_split_sets": true
 }

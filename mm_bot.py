@@ -1035,6 +1035,20 @@ class Config:
     tilt_exit_take_per_hour: float = 15000.0
     tilt_exit_take_max_per_cycle: int = 3
     tilt_exit_take_max_leg_frac: float = 0.5
+    # F2b tilt_exit_take_split_sets True (analysis/p9/ideas_C.md C-9 "set split"; DRYRUN.md: the taker exits free only
+    # ~8k a day, the 16.8k NO+NO sets lock 21.9k): the F2 exit of a short LONGSHOT (raw Polymarket below
+    # tilt_exit_split_max_ref, never the race's highest-priced leg) may also sell the SET part of its NO (the NO+NO
+    # set's longshot leg), as one covered "sell NO" (lone part first, then the set part) at the best other ask, inside
+    # the same tilted-fv cost cap, depth, max_leg_frac and hourly $ caps. The set part is sized to what the cash gate
+    # funds at its conservative need for a set-breaking sale (cash_tiers: 1.0 a share; the exchange refused such sales
+    # at 0 cash on 3 Oct), charged to the gate and given back on refusal; it needs the cash gate on (live) and
+    # reduce_no_as_sell (else only the lone part goes, as F2). The favourite-NO leg stays (it is long the tilt, the
+    # basket's bet for free; ordinary inventory, not a basket leg, and no tilt exit while tilt_exposure > 0). Splits
+    # go FIRST in F2's order (each frees cash and buys the tilt). An exchange refusal stops split attempts in that race
+    # for take_cooldown_seconds x 10 (logged once per race an hour). status.json tilt_exit_takes.splits {count, shares,
+    # cash_freed}; journal "TILT EXIT SPLIT <label> sells NO <qty> @ <1-p> (set part; frees ~$X)". False = F2.
+    tilt_exit_take_split_sets: bool = False
+    tilt_exit_split_max_ref: float = 0.10
     # F5 arb_cash_rule True (live 3 Oct: at 0 cash the race arbitrage left one-legged sets, some legs refused for
     # cash): an ARBITRAGE (kind "arb", sell side: bids sum >= 1 + arb_min_profit; buy side: asks sum <= 1 -
     # arb_min_profit_buy; pair unwinds are not changed) is planned on other traders' levels only, a level at a price
@@ -1288,6 +1302,8 @@ OVERRIDABLE = {
     "tilt_exit_take_per_hour": (0.0, 200000.0),
     "tilt_exit_take_max_per_cycle": (1, 20),
     "tilt_exit_take_max_leg_frac": (0.0, 1.0),
+    "tilt_exit_take_split_sets": (False, True),
+    "tilt_exit_split_max_ref": (0.01, 0.5),
     "arb_cash_rule": (False, True),
     "arb_cash_mult": (1.0, 3.0),
     "arb_cash_reserve": (0.0, 20000.0),
@@ -3697,6 +3713,9 @@ class Bot:
         self.tet_hour = deque()           # Package 9 F2 tilt_exit_take: (now_m, $ traded) in the last hour
         self.tet_until = {}               # ...eid -> now_m until which no tilt exit is taken there (after a take)
         self.tet_stats = {"count": 0, "shares": 0, "usd": 0.0, "cost": 0.0}   # ...since start (status.json)
+        self.tet_splits = {"count": 0, "shares": 0, "cash_freed": 0.0}      # F2b set splits since start (status.json)
+        self.tet_split_block = {}         # F2b: race -> now_m until which no split is tried there (after a refusal)
+        self.tet_split_logged = {}        # F2b: race -> now_m of its last "split refused" log (once an hour)
         self.arb_cash_blocked = 0         # Package 9 F5 arb_cash_rule: arbitrages refused by the cash rule
         self.ops_last = {}                # ops fields of the latest status write (ops_fields): recorder, summary
         self.ops_cache = {}               # ops_fields: fills.csv-derived numbers, recomputed when the file changes
@@ -4212,6 +4231,9 @@ class Bot:
         if cfg.tilt_exit_take or self.tet_stats["count"]:   # Package 9 F2 (absent while never used)
             self.health["tilt_exit_takes"] = {k: (round(v, 2) if isinstance(v, float) else v)
                                               for k, v in self.tet_stats.items()}
+            if cfg.tilt_exit_take_split_sets or self.tet_splits["count"]:   # F2b (absent while never used)
+                self.health["tilt_exit_takes"]["splits"] = {k: (round(v, 2) if isinstance(v, float) else v)
+                                                            for k, v in self.tet_splits.items()}
         if cfg.arb_cash_rule:                             # Package 9 F5 (absent while off)
             self.health["arb_cash_blocked"] = self.arb_cash_blocked
         self.health["fast_unload_windows"] = sum(1 for e in list(self.unloads)
@@ -8170,20 +8192,47 @@ class Bot:
         cost = (fv - price) if sell else (price - fv)
         if cost > cfg.tilt_exit_take_max_cost + 1e-9:
             return None
-        held = pos if sell else -pos - self.tet_set_part(ex.eid, inv)
+        set_part = 0.0 if sell else self.tet_set_part(ex.eid, inv)
+        split = set_part >= 1 and self.tet_split_ok(ex, r, now_m)     # F2b: the set part may go too
+        lone = 0.0 if sell else max(0.0, -pos - set_part)
+        held = pos if sell else (-pos if split else lone)
         frac = cfg.tilt_exit_take_max_leg_frac
         cap = max(1, int(frac * abs(pos) + 1e-9)) if frac > 0 else 0
         qty = int(min(held, depth, cap) + 1e-9)
+        if split and qty > lone:                  # F2b: the set part at the cash gate's need for it (1.0 a share)
+            need = self.cash_tiers({"yes": 0.0, "lone": 0.0, "set": 1.0}, True, price, True)[1][1]
+            fund = int(self.cash_left() / need + 1e-9) if need > 0 else qty
+            qty = int(min(qty, lone + fund) + 1e-9)
         if qty < 1:
             return None
         return {"sell": sell, "price": price, "qty": qty, "fv": fv, "cost": cost,
-                "unit": price if sell else 1.0 - price}
+                "unit": price if sell else 1.0 - price,
+                "split": max(0, int(qty - lone + 1e-9)) if split else 0, "lone": int(lone + 1e-9)}
+
+    def tet_split_ok(self, ex, r, now_m):
+        """F2b: may this short's F2 exit also sell the SET part of its NO (tilt_exit_take_split_sets)? Only on a
+        longshot (raw Polymarket < tilt_exit_split_max_ref) strictly below the race's highest-priced leg (the
+        favourite's set part is never sold; a race leg without a price = no split), with the cash gate on (live: the
+        set part is sized to its cash) and reduce_no_as_sell in effect, and not within a refusal cooldown there."""
+        cfg = self.cfg
+        if (not cfg.tilt_exit_take_split_sets or r is None or r >= cfg.tilt_exit_split_max_ref
+                or not self.reduce_no_on() or not self.cash_gate_on()
+                or now_m < self.tet_split_block.get(ex.group, 0.0)):
+            return False
+        refs = getattr(self, "tet_refs", None) or {}
+        others = [refs.get(m) for m in self.groups.get(ex.group, ()) if m != ex.eid]
+        if not others or any(x is None for x in others):
+            return False
+        return r < max(others) - 1e-12
 
     def tet_order_key(self, ex, r, pos, plan):
         """F2 take order: longshot NO (short, Polymarket < 0.10) first, then favourite YES (long, Polymarket > 0.90),
         then the rest; within a group the positions the exchange marks BELOW what the exit gets first (pos_marks: a
-        long's bid above its mark, a short's ask below it; no mark = after those), then the larger tilt contribution."""
+        long's bid above its mark, a short's ask below it; no mark = after those), then the larger tilt contribution.
+        F2b: set splits (a plan selling set part) before all of these."""
         g = 0 if (pos < 0 and r < self.TET_LONGSHOT) else 1 if (pos > 0 and r > self.TET_FAVOURITE) else 2
+        if plan.get("split"):
+            g = -1
         mark = self.pos_marks.get(ex.eid)
         below = 0 if mark is not None and ((plan["sell"] and plan["price"] > mark + 1e-9)
                                            or (not plan["sell"] and plan["price"] < mark - 1e-9)) else 1
@@ -8200,6 +8249,7 @@ class Bot:
         taken = set()
         if not cfg.tilt_exit_take or not self.running:
             return taken
+        self.tet_refs = refs                      # F2b: the race's prices (tet_split_ok: never the favourite leg)
         cands = []
         for eid, ex in self.ex.items():
             pos, r = float(inv.get(eid, 0.0)), refs.get(eid)
@@ -8240,7 +8290,11 @@ class Bot:
             sell = plan["sell"]
             order = {"exchangeId": eid, "side": "yes", "action": "sell" if sell else "buy", "quantity": qty,
                      "price": plan["price"], "tournamentId": self.tid}
-            if not sell:                          # buying back a short: a covered "sell NO" of the NO held
+            split = plan.get("split", 0) >= 1 and qty > plan.get("lone", 0)
+            if split:                             # F2b: lone part + set part as ONE covered "sell NO" (sized above)
+                order["quantity"] = int(min(qty, -pos))
+                order["_no_sell"] = True
+            elif not sell:                        # buying back a short: a covered "sell NO" of the NO held
                 order = self.no_sell_order(order, pos)
                 if order is None or order["quantity"] < 1:
                     continue
@@ -8250,9 +8304,16 @@ class Bot:
                 continue
             self.tet_until[eid] = now_m + cfg.take_cooldown_seconds
             qty = int(order["quantity"])
-            log.warning("%sTILT EXIT TAKE %s %s %d @ %.3f (tilted fv %.4f, cost %.4f)%s",
-                        "" if self.api.live else "[dry] ", ex.label, "sell" if sell else "buy", qty, plan["price"],
-                        plan["fv"], plan["cost"], " (sell NO)" if order.get("_no_sell") else "")
+            set_qty = max(0, qty - plan.get("lone", 0)) if split else 0
+            if split:
+                log.warning("%sTILT EXIT SPLIT %s sells NO %d @ %.3f (set part; frees ~$%.0f) (tilted fv %.4f, "
+                            "cost %.4f; lone part %d first)", "" if self.api.live else "[dry] ", ex.label, qty,
+                            1.0 - plan["price"], set_qty * plan["unit"], plan["fv"], plan["cost"],
+                            min(qty, plan.get("lone", 0)))
+            else:
+                log.warning("%sTILT EXIT TAKE %s %s %d @ %.3f (tilted fv %.4f, cost %.4f)%s",
+                            "" if self.api.live else "[dry] ", ex.label, "sell" if sell else "buy", qty,
+                            plan["price"], plan["fv"], plan["cost"], " (sell NO)" if order.get("_no_sell") else "")
             sent += 1
             taken.add(eid)
             if not self.api.live:
@@ -8270,6 +8331,8 @@ class Bot:
                     log.warning("tilt exit take on %s not sent: write budget busy", ex.label)
                     continue
                 ex.pending_until = now_m + cfg.pending_seconds
+                if split:                         # F2b: no split retried there in a loop either
+                    self.tet_split_block[ex.group] = now_m + 10.0 * cfg.take_cooldown_seconds
                 alert(f"tilt exit take on {ex.label} failed ({e}) - check positions")
                 if e.code in FATAL_API_CODES:
                     fatal(f"orders rejected with {e.code}")
@@ -8296,6 +8359,19 @@ class Bot:
                 st["shares"] += int(round(traded))
                 st["usd"] += usd
                 st["cost"] += traded * plan["cost"]
+            if split and not res.get("ok"):       # F2b: refused (e.g. "Insufficient available funds"): never loop
+                self.tet_split_block[ex.group] = now_m + 10.0 * cfg.take_cooldown_seconds
+                if now_m - self.tet_split_logged.get(ex.group, -1e18) >= 3600.0:
+                    self.tet_split_logged[ex.group] = now_m
+                    err = (data.get("error") or {}).get("message") if isinstance(data.get("error"), dict) else None
+                    log.warning("tilt exit split on %s refused (%s): no split in %s for %.0f s", ex.label,
+                                err or res.get("status"), ex.group, 10.0 * cfg.take_cooldown_seconds)
+            elif split and traded > plan.get("lone", 0):
+                done = traded - plan.get("lone", 0)       # the lone part fills first, the rest broke sets
+                sp = self.tet_splits
+                sp["count"] += 1
+                sp["shares"] += int(round(done))
+                sp["cash_freed"] += done * plan["unit"]
             log.info("tilt exit take on %s: traded %.0f of %d", ex.label, traded, qty)
         return taken
 
