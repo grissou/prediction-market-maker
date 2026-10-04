@@ -213,6 +213,18 @@ check("cannot complete: 12's 80 bought back in the same follow-up as a covered '
       sent(api)[n:] == [("12", "no", "sell", 80, 0.12)], sent(api)[n:])
 check("flat again, owed cleared (no one-legged set left after one cycle)", api.inv.get("11", 0) == 0
       and api.inv.get("12", 0) == 0 and not b.pair_owed, (api.inv, b.pair_owed))
+# the reversal never flips: a position moved in between (12 bought back 30 elsewhere) caps it at what is left
+api, b = bot(cash=1e6)
+api.cash = 50.0
+arb(api, b)
+api.cash = None
+api.books["11"]["bids"] = [lvl(0.15, 1000)]
+api.books["12"]["asks"] = [lvl(0.88, 1000)]
+api.inv["12"] = -50
+n = len(api.wire)
+b.pair_followup_step(FVS, time.monotonic(), {}, inv=invd(api, b))
+check("reversal capped at the position (50 short left, not the 80 owed): never flips",
+      sent(api)[n:] == [("12", "yes", "buy", 50, 0.88)] and api.inv["12"] == 0, (sent(api)[n:], api.inv))
 # reversal also out of reach: kept, tried again, alerted and dropped after the tries
 api, b = bot(cash=1e6, pair_unwind_followup_tries=2)
 api.cash = 50.0

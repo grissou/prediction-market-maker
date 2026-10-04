@@ -147,6 +147,13 @@ run(api, b, now=t0 + 120)
 check("2 min later: the hour's cap is used up, nothing sent", len(api.wire) == n, sent(api)[n:])
 run(api, b, now=t0 + 3601)
 check("an hour later: takes again", len(api.wire) > n, sent(api)[n:])
+api, b = bot(A, tilt_exit_take_per_hour=600.0)
+real_place = api.place_batch
+api.place_batch = lambda orders: [{**r, "data": {k_: v for k_, v in (r.get("data") or {}).items()
+                                                 if k_ != "quantityTraded"}} for r in real_place(orders)]
+run(api, b, now=t0)
+check("fills not reported in the answer: the hour is charged the whole order (11 $447.5, 12 cut to 170)",
+      [(x[0], x[3]) for x in sent(api)] == [("11", 500), ("12", 170)] and b.tet_stats["count"] == 0, sent(api))
 api, b = bot(A)
 run(api, b, now=t0)
 n = len(api.wire)

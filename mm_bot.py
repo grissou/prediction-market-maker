@@ -7696,6 +7696,12 @@ class Bot:
         orders = []
         for e, n in want.items():
             ex = self.ex[e]
+            if not complete:                      # undoing never flips: at most the position the arbitrage made
+                n = int(min(n, max(0.0, -ex.inv) if buy else max(0.0, ex.inv)) + 1e-9)
+                if n < 1:
+                    log.warning("arbitrage follow-up on %s: nothing to reverse on %s (position %+.0f)", race,
+                                ex.label, ex.inv)
+                    continue
             try:
                 ex.book = strip_own(self.api.book(e, self.tid), (mine_real or {}).get(e, []))
                 ex.book_time = ex.verified = time.monotonic()
@@ -8250,6 +8256,9 @@ class Bot:
                 self.remember_order(order, data, now_m)   # a leftover whose cancel fails is still known about
             self.cancel(eid, [], whole_exchange=True, quiet=True)   # immediate-or-cancel: the leftover goes
             traded = float(data.get("quantityTraded") or 0) if res.get("ok") else 0.0
+            if res.get("ok"):                     # the hour's $ cap: what traded (all of it if not reported)
+                self.tet_hour.append((now_m, (traded if data.get("quantityTraded") is not None else qty)
+                                      * plan["unit"]))
             if data.get("orderId") is not None:
                 self.order_meta[data["orderId"]] = {"our_side": "ask" if sell else "bid", "price": plan["price"],
                                                     "take": True, "tilt_exit": True, "fv": plan["fv"],
@@ -8258,7 +8267,6 @@ class Bot:
                 self.notes_dirty = True
             if traded > 0:
                 usd = traded * plan["unit"]
-                self.tet_hour.append((now_m, usd))
                 st = self.tet_stats
                 st["count"] += 1
                 st["shares"] += int(round(traded))
