@@ -24,6 +24,12 @@ the probabilities, a party / region factor: a Dem or Rep wave moves many races t
 4. The mark path to 4 Nov: the tilt grows (0.11 -> 0.14 overnight; ~350 per point on our exposure). Interim marks do not matter for the
    payout, but the bot must never panic-sell +EV positions into them: audit every reduce-only / backstop / kill / unload path.
 5. Markets close 4 Nov 00:00 UTC (3 Nov 19:00 EST, before results): confirm nothing can be valued at marks; if it could, how to hedge.
+7. (owner 07:40) Rank and the +50% question: model the final leaderboard under outcome settlement. If the top accounts hold long-tilt
+   books (longshot YES / favourite NO, marked up 4-6x), what is their payout at the outcome, and what final account gets us into the
+   top 10 / top 50? Then odds for three plans: (a) the max-EV reallocation held to the outcome; (b) (a) plus recycling on convergence
+   (sell positions marked to within 2c of Polymarket and redeploy), with the tilt path's uncertainty; (c) a correlated party-bloc bet in
+   competitive races, sized to reach P(final >= 150k) of 20 / 30 / 40%, with the matching P(final <= 70k / 85k). One table, then a
+   recommendation.
 6. Market making continues: in value mode it is value accumulation at the bid (favourite bids, longshot asks in the tails; two-way in the
    middle where flow is two-way), limited by cash -> the allocator keeps a market-making cash reserve (F: ~1.0-1.4k/day on 15-25k of
    rotating cash, and the inventory it acquires is itself +EV at the outcome).
