@@ -36,10 +36,11 @@ Numbers below are from the dry run on the 3 Oct 22:47 live state (analysis/p10/D
   - Stage 3 resolves this with `take_respect_reserve` (REDTEAM.md C-1); until then the takes buy value with the freed cash.
   - Watch: `alloc.state`, `alloc.blocked_by` (cash / writes / depth / bloc / risk), `alloc.set_unwinds_registered`, and the
     journal's "ALLOC sold / unwound / bought" lines. No allocator order or set unwind should ever touch a pinned label.
-- **stage3_value_mm**: + `value_quote_hurdle` 0.08, `capital_ceiling_adding_size_factor` 0.5 (the owner's call) and `take_respect_reserve`
+- **stage3_value_mm**: + `value_quote_hurdle` 0.05 (was 0.08 in the first draft: the literature sweep, MM-6, showed 0.08 puts favourite
+  bids ~2.5c behind the book so they would not fill; 0.04-0.05 = the allocator's marginal edge), `capital_ceiling_adding_size_factor` 0.5 (the owner's call) and `take_respect_reserve`
   (a stale-quote take is skipped when its cash would leave less than `alloc_mm_reserve` free: the answer to C-1 below, so the reserve
   the allocator builds is kept for the market maker; the takes still buy value with cash above it).
-  - Rule: in the tails (p < 15c or > 85c) an adding bid is <= p / 1.08 and an adding ask >= 1 - (1 - p) / 1.08, so only
+  - Rule: in the tails (p < 15c or > 85c) an adding bid is <= p / 1.05 and an adding ask >= 1 - (1 - p) / 1.05, so only
     favourite bids and longshot asks reach the top of the book. The middle is two-way at the normal min_edge, capped at
     2 x the quote size.
   - Expect: decide computes ~210 adding sides in ~125 markets (~64 at the top; 62 middle markets two-way). That needs ~18k
