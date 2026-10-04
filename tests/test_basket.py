@@ -910,6 +910,16 @@ b.basket_legs = {"32": 10000.0}
 o = b.basket_orders(time.time(), low, fv, {"32": 10000}, 600.0, 70000.0, 1e6, True, 10 ** 6, b.basket_schedule())
 check("RT-4: held valued at the higher of fair value / book price: 10000 x ~0.07 >= a 600 $ target, no more bought",
       o and not [x for x in o if x["add"]], o)
+b.basket_legs = {"32": 10000.0}
+b.pos_marks.update({"32": 0.08, "22": 0.5})
+for e_ in ("32", "22"):
+    b.ex[e_].book = {"bids": [], "asks": [lvl(0.09, 100)]}
+    b.ex[e_].verified = time.monotonic()
+liq = b.basket_liquidation({"32": 10000, "22": 1000}, 100000.0, fv)
+check("RT-6: a basket leg whose fresh book lost its bids counts as sold at 0 in the kill's liquidation value (not "
+      "at its mark); an ordinary position keeps its mark (as ops_fields)", abs(liq - (100000.0 - 800.0)) < 1e-6, liq)
+b.ex["32"].verified = time.monotonic() - 10 * b.cfg.book_stale
+check("RT-6: ...a stale book proves nothing: the mark kept", b.basket_liquidation({"32": 10000}, 1e5, fv) == 1e5)
 b.cfg.basket_mult, b.cfg.basket_mult_after_fail = 2.0, 8.0
 b.basket_test = "failed"
 check("RT-5: a failed test never RAISES the multiplier (mult_after_fail 8 > mult 2 -> 2)",

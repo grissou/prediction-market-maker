@@ -8665,10 +8665,12 @@ class Bot:
     def basket_liquidation(self, inv, equity, book_fvs):
         """Account value less the haircut of selling every position to OTHER traders now (longs at the best bid,
         shorts at the best ask, against the exchange's mark, else the book's price), as ops_fields. None without an
-        account value."""
+        account value. P9 red team: a BASKET leg whose fresh book has no level on its exit side counts as sold at 0
+        (a long) / bought back at 1 (a short) - not at its mark: thin longshot bids vanishing is the crash the kill is
+        for, and the exchange's lagged mark would hide it (ops_fields keeps the mark: a report, not a kill switch)."""
         if equity is None:
             return None
-        haircut = 0.0
+        haircut, now_m = 0.0, time.monotonic()
         for e, q in (inv or {}).items():
             ex = self.ex.get(e)
             if ex is None or abs(q) < 1:
@@ -8676,6 +8678,9 @@ class Bot:
             m = self.pos_marks.get(e)
             m = m if m is not None else (book_fvs or {}).get(e)
             lv = (ex.book or {}).get("bids" if q > 0 else "asks")
+            if (m is not None and not lv and e in self.basket_legs and ex.book is not None
+                    and now_m - ex.verified < self.cfg.book_stale):
+                lv = [{"price": 0.0 if q > 0 else 1.0}]
             if m is None or not lv:
                 continue
             haircut += abs(q) * ((m - lv[0]["price"]) if q > 0 else (lv[0]["price"] - m))
