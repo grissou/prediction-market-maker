@@ -6123,9 +6123,11 @@ class Bot:
         hv_s = (getattr(self, "hv_sides", None) or {}).get(ex.eid)
         el_s = (getattr(self, "el_sides", None) or {}).get(ex.eid)
         if hv_s == "bid" or el_s:
-            bid_cap = max(0, int(-ex.inv)) if bid_cap is None else min(bid_cap, max(0, int(-ex.inv)))
+            red = max(0, int(-ex.inv - self.hv_side_qty(ex.eid, True)))   # (P13 RT-2: less what our harvest
+            bid_cap = red if bid_cap is None else min(bid_cap, red)        #  levels there already take back)
         if hv_s == "ask" or el_s:
-            ask_cap = max(0, int(ex.inv)) if ask_cap is None else min(ask_cap, max(0, int(ex.inv)))
+            red = max(0, int(ex.inv - self.hv_side_qty(ex.eid, False)))
+            ask_cap = red if ask_cap is None else min(ask_cap, red)
 
         reduce_only = global_reduce or hrs <= self.close_window("flatten_hours_before_close", cfg)
         # From flatten_per_market_hours: flatten each market on its own, i.e. judge (and skew) by this
@@ -6668,9 +6670,9 @@ class Bot:
         hv_s = (getattr(self, "hv_sides", None) or {}).get(ex.eid)   # Package 13 B: the harvest ladder's side / a
         el_s = (getattr(self, "el_sides", None) or {}).get(ex.eid)   # called race: only what shrinks the position
         if hv_s == "bid" or el_s:
-            extra[True].append(max(0.0, -inv))
+            extra[True].append(max(0.0, -inv - self.hv_side_qty(ex.eid, True)))   # (P13 RT-2)
         if hv_s == "ask" or el_s:
-            extra[False].append(max(0.0, inv))
+            extra[False].append(max(0.0, inv - self.hv_side_qty(ex.eid, False)))
         sign = 0 if aggr else PARTY_SIGN.get(ex.party, 0)
         if sign and getattr(cfg, "bloc_delta_enabled", False):   # Package 10 A2: room in bloc delta / sensitivity
             d, cap = self.party_measure(self.lad_party_delta)
@@ -12310,6 +12312,13 @@ class Bot:
         return [o for o in list(self.my_orders.values()) if (eid is None or o.eid == eid)
                 and (meta.get(o.order_id) or {}).get("harvest")]
 
+    def hv_side_qty(self, eid, is_bid):
+        """Shares our resting harvest levels on eid offer on one side (0 without any: the flag off, a market not
+        laddered). P13 RT-2: the quote's reduce-only cap on a laddered market leaves those to the ladder."""
+        if not getattr(self, "hv_sides", None):
+            return 0.0
+        return sum(o.qty for o in self.hv_orders(eid) if o.is_bid == is_bid)
+
     def hv_on(self):
         """Cycle step 6g runs: the flag, a plan / state left, or levels of ours resting (pulled once the flag is
         off)."""
@@ -12533,6 +12542,14 @@ class Bot:
                     break
                 for e in {c[0] for c in chunk}:
                     self.ex[e].pending_until = now_m + cfg.pending_seconds
+                if err.status in (0, 409, 502, 503, 504):   # (P13 RT-1: outcome unknown - levels may rest: re-read
+                    self.orders_stale = True                 #  the list and adopt them as harvest levels, as
+                    if cfg.recover_unconfirmed:              #  apply_batch does; never a second ladder on top)
+                        for e, k, edge, plan, o in chunk:
+                            self.unconfirmed.setdefault(e, []).append((o, {
+                                "our_side": "ask" if plan["side"] == "ask" else "bid", "price": o["price"],
+                                "harvest": k + 1, "p": round(plan["p"], 4), "edge": round(edge, 4), "t": time.time(),
+                                **({"no_sell": True} if o.get("_no_sell") else {})}, now_m))
                 alert(f"harvest ladder orders failed ({err}) - check positions")
                 if err.code in FATAL_API_CODES:
                     fatal(f"orders rejected with {err.code}")

@@ -49,6 +49,12 @@ class FakeApi(Api):
         # of cash, refused at 0 cash. Sells of NO on every NO-holding leg in ONE batch close whole sets (min over those
         # legs) and need none.
         self.set_collateral = False
+        # Red-team hooks (Package 13 RT; None = off, as before): cancel_error raised by every cancel; batch_error_after
+        # raised AFTER a batch was placed (a timeout whose orders did reach the book); take_cap = most shares any one
+        # order trades on arrival (a partial fill against a deeper book: the rest rests, as the engine would).
+        self.cancel_error = None
+        self.batch_error_after = None
+        self.take_cap = None
 
     def race_legs(self, eid):
         """The exchanges of eid's race, from the market titles ("Will the X Party win the RACE?")."""
@@ -155,6 +161,8 @@ class FakeApi(Api):
 
     def cancel_all(self, tid, eid=None):
         self.log("cancel_all", eid)
+        if getattr(self, "cancel_error", None):
+            raise self.cancel_error
         if self.live:
             for k in [k for k, o in self.orders.items() if eid is None or o["exchangeId"] == eid]:
                 del self.orders[k]
@@ -162,6 +170,8 @@ class FakeApi(Api):
 
     def cancel_order(self, oid):
         self.log("cancel_order", oid)
+        if getattr(self, "cancel_error", None):
+            raise self.cancel_error
         if self.live:
             self.orders.pop(oid, None)
         return True
@@ -211,8 +221,9 @@ class FakeApi(Api):
             # Trade immediately against other traders' orders at our price or better (taker).
             side = self.books[eid]["asks" if is_buy else "bids"]
             traded = 0
-            while qty > 0 and side and (side[0]["price"] <= yp + 1e-9 if is_buy else side[0]["price"] >= yp - 1e-9):
-                take = min(qty, side[0]["quantity"])
+            cap = getattr(self, "take_cap", None)
+            while qty > 0 and (cap is None or traded < cap) and side and (side[0]["price"] <= yp + 1e-9 if is_buy else side[0]["price"] >= yp - 1e-9):
+                take = min(qty, side[0]["quantity"], cap - traded if cap is not None else qty)
                 side[0]["quantity"] -= take
                 p = side[0]["price"]
                 if side[0]["quantity"] <= 0:
@@ -230,6 +241,8 @@ class FakeApi(Api):
                 self.orders[oid] = {"id": oid, "exchangeId": eid, "quantity": qty, "open": True,
                                     "expirationDate": o["expirationDate"], **api_o}
             res.append({"index": k, "ok": True, "status": 200, "data": {"orderId": oid, "quantityTraded": traded}})
+        if getattr(self, "batch_error_after", None):
+            raise self.batch_error_after
         return res
 
     def fill(self, eid, is_bid, qty):
