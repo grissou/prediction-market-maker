@@ -99,6 +99,9 @@ def mk(cash=50000.0, equity=100000.0, inv=None, tweak=None):
     api.cash, api.equity = cash, equity
     api.pnl = lambda: (api.log("pnl"), {"totalAccountValue": api.equity, "cashBalance": api.cash})[1]
     raw = json.load(open(STAGED))
+    # (Package 13 C: the staged file arms the sleeve - momentum_auto - and the fake has no tilt history, so the trigger
+    #  never fires here; the red team's battery exercises the sleeve's BUYS, so it forces it on as before)
+    raw["momentum_force"] = True
     raw.update(tweak or {})
     with open(cfg.overrides_file, "w") as f:
         json.dump(raw, f)
@@ -503,9 +506,12 @@ check("flips: the exit sold the sleeve; no buy re-opened it before the latch res
 
 def kill_sleeve(i, api, b):
     refill(i, api, b)
-    if i >= 4:
-        for e in list(b.mom_legs):
-            api.books[e] = {"bids": [lvl(0.01, 3000)], "asks": [lvl(0.03, 3000)]}
+    if i >= 4:                                    # (Package 13 C: every leg AGAINST the sleeve - a short leg's book
+        for e in list(b.mom_legs):                #  up, not down: with rule 5 the sleeve no longer averages down into
+            if b.mom_legs[e]["q"] > 0:            #  the race the ladder bids in, which alone made the old move a loss)
+                api.books[e] = {"bids": [lvl(0.01, 3000)], "asks": [lvl(0.03, 3000)]}
+            else:
+                api.books[e] = {"bids": [lvl(0.97, 3000)], "asks": [lvl(0.99, 3000)]}
 
 
 api, b, _, _ = scenario("the sleeve's kill (-30% at the mark), restarts", 30, kill_sleeve, restart_every=11)

@@ -98,6 +98,9 @@ def mk_bot(inv=None, books=None, refs=None, cash=50000.0, live=True, races=None,
     c.cash_gate_reserve = 0.0
     c.reserved_cash_mode = "ignore"
     c.alloc_mm_reserve = 1000.0
+    # (Package 13 C: momentum_enabled alone no longer buys - these tests exercise the sleeve's buys, so they force
+    #  it on, which is exactly the old momentum_enabled behaviour)
+    c.momentum_force = bool(cfg.get("momentum_enabled", False))
     for k, v in cfg.items():
         setattr(c, k, v)
     api.inv.update(inv or {})
