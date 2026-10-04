@@ -45,6 +45,9 @@ Senate/House/control edge is +5.5k at Polymarket but +1.1k at Decision Desk's; N
   hourly (queue position), pulled at once when the race stops being a set, the favourite is no longer rich, its p is unknown or every
   level is not <= p + margin (RT12-1), pinned, pre-close, or off; a refused race waits 900 s (RT12-3); the longshot-NO leg is never sold;
   warning when `tilt_exit_take_split_sets` is also on (RT12-5). status `alloc.set_ladder` {races, shares_resting, filled}.
+  Data check (snap03, 14.1k sets with a reference; Alaska Governor's 3,000 have none): selling the rich leg at the favourite's best bid is
+  +424 of outcome EV (Montana Senate +199 at 7c/share, MN Governor +84, IL Governor +63; two races negative and skipped by the edge test);
+  the -2c / -4c levels add to that only in a late spike.
 - L2 `alloc_prefer_short`: when the race's best bids sum > 1 (own quotes excluded, 2-leg races) the allocator sells the longshot YES
   instead of buying the favourite YES (same exposure, better price, less cash) if the short passes edge / caps; `blocked_by.prefer_short`.
 - L3 `pair_no_unwind_asks_le1`: no NO+NO pair unwind at a cost while the race's bids sum > 1 (the set is worth more leg by leg) or a ladder
