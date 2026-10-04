@@ -1,5 +1,5 @@
 <!-- STATUS (Finisher 2b, updated on every push) -->
-**STATUS 10:05 UTC 4 Oct (branch claude/finisher-package9):** phase = Package 11 literature sweep (owner: "5 hours reading papers and online resources for ideas"; to ~15:00). READY: Package 10 (2abf782 + f17f63e, PR #11, VALUE MODE), 9 (superseded), 8 (LIVE in value mode), 7, 6, 5.
+**STATUS 11:20 UTC 4 Oct (branch claude/finisher-package9):** phase = Package 11 literature sweep (owner: "5 hours reading papers and online resources for ideas"; to ~16:15). READY: Package 10 (2abf782 + f17f63e, PR #11, VALUE MODE), 9 (superseded), 8 (LIVE in value mode), 7, 6, 5.
 Package 11 = four opus readers on (1) prediction-market pricing anomalies and the favourite-longshot bias, (2) market making / inventory / thin-book microstructure, (3) portfolio theory for correlated binary outcomes and rank / contest objectives, (4) US midterm forecasting, polling error, Polymarket calibration, settlement rules; each >= 15 sources, >= 10 ideas in analysis/p11/lit_<theme>.md; the executor synthesises analysis/p11/LIT_REVIEW.md (ranked, with build cost and a test on our data).
 Numbers: none yet.
 Deploy: nothing new; Package 10 files stand (deploy/package10/).

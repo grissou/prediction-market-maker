@@ -1,4 +1,4 @@
-# Package 11 literature sweep (owner, 4 Oct ~10:00 UTC: "spend 5 hours reading as many different papers and online resources as
+# Package 11 literature sweep (owner, 4 Oct ~11:15 UTC: "spend 5 hours reading as many different papers and online resources as
 # possible for any ideas"). Readers write `analysis/p11/lit_<theme>.md`; the executor synthesises `analysis/p11/LIT_REVIEW.md`.
 
 ## Our situation, in one paragraph (so every idea is judged against it)
@@ -32,4 +32,4 @@ Value: <E[final] / P(>= 150k) / P(<= 85k) direction and a rough size, with the r
 Check: <how to test it on our data (snap03) or simulator before building; or "untestable offline">
 Fair play: <ok / where the line is>
 ```
-End with your TOP 5 for our situation and a list of sources you could not access. Finish by 13:00 UTC. Do not run live_sim or test suites.
+End with your TOP 5 for our situation and a list of sources you could not access. Finish by 14:15 UTC (it is ~11:20 now). Do not run live_sim or test suites.
