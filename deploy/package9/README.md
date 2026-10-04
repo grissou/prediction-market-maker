@@ -15,9 +15,9 @@ them instead, leave the basket on and set `basket_exit_utc` to now + 1 h, then s
   tilt for free; a refusal pauses splits in that race 10 x take_cooldown_seconds; "TILT EXIT SPLIT" lines, status
   `tilt_exit_takes.splits`; dry run: +6.1k of cash from splits in hour 1, ~8.8k over 3 h, sets 16.8k -> 9.7k; roll back to F2 alone by
   setting it false; every later stage file carries it).
-  Expect: "TILT EXIT TAKE" lines, `tilt_exposure` falling by ~15-20k in
-  the first hours, `cash_gate_left` rising, `worst_case_loss` falling from ~79k. Go to stage 3 when `worst_case_loss` < ~40k and
-  `cash_gate_left` > ~20k (the basket refuses to buy while the stressed worst case is above the backstop fraction of the account).
+  Expect (dry run on the live books): "TILT EXIT SPLIT" then "TILT EXIT TAKE" lines, cash 0 -> ~15k in the first hour (the 15k$/h cap binds)
+  and ~21k after 3 h, `tilt_exposure` 35.9k -> ~27k, `worst_case_loss` 79k -> ~67k, NO+NO sets 16.8k -> ~9.7k. Go to stage 3 as soon as
+  `cash_gate_left` > ~15k (1-3 h): the basket refuses to buy by itself while the stressed worst case is above 0.9 x the account.
 - stage3_basket: + `basket_enabled` with m 5, cap 80k, floor max(86k, 0.85 x peak liquidation value), kill at -15% from the peak or
   below the floor (latched), exit from 18 Oct 12:00 UTC over 24 h, 36-h test (tilt_s >= 0.15 and rising, else m 1.5), stress risk model
   0.4, `worst_case_backstop_frac` 0.9 as the last resort. stage3b = m 6, cap 90k. stage3c = floor 80k / peak frac 0.80 / kill -20%, m 6, cap 60k: the best achievable odds (~15-20% for 150k)

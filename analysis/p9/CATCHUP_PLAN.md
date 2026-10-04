@@ -1,4 +1,4 @@
-# The catch-up plan (Package 9, executor, 4 Oct ~01:30 UTC) — one page for the owner
+# The catch-up plan (Package 9, executor, 4 Oct 03:10 UTC, after the dry run) — one page for the owner
 
 **Target:** P(account >= 150k by 4 Nov) first, P(>= 200k) second, P(<= 85k) < 10%, max drawdown < 20%. **Account 101.0k, rank 174/1039.**
 
@@ -9,14 +9,17 @@ it (-356 per point; +15k of it from the stale-quote takes). Market making earns 
 **Switch on, in this order (files in `deploy/package9/`; the odds assume the switch-on at ~09:00 UTC 4 Oct; stage 1 keeps
 `pair_no_unwind_max_cost` 0.02 so the sets keep draining into cash; stage 2 allows 2c vs tilted fv):**
 1. **Flatten the short-tilt book** (`stage1_hygiene` then `stage2_flatten`, now): takes measured from the tilted reference, `ref_tilt_max`
-   0.20; `tilt_exit_take` sells the toward-Polymarket positions at the book within 1c of
-   tilted fair value, 15k$/h, longshot NO first. Frees cash and cuts the worst case (~79k -> < 40k). Cost ~0.7k. No ruin.
-2. **The long-tilt basket** (`stage3_basket`, as soon as `worst_case_loss` < ~40k and `cash_gate_left` > ~20k; the earlier the better):
+   0.20; `tilt_exit_take` (2c vs tilted fair value, 15k$/h) with the set split: the longshot-NO legs of the NO+NO sets go first (frees
+   ~0.9 a share, leaves the favourite-NO legs = long tilt for free), then lone longshot NO, then favourite YES. Dry run on the live books:
+   cash ~15k in hour 1, ~21k in 3 h; tilt exposure 35.9k -> ~27k; worst case 79k -> ~67k. Cost ~1-2k (the spread). No ruin.
+2. **The long-tilt basket** (`stage3_basket` / `stage3c`, as soon as `cash_gate_left` > ~15k, 1-3 h after stage 2; the earlier the better):
    longshot YES / favourite NO on ~20+ non-headline races (cheapest route per race, laggards first, no independents), basket $ =
-   5 x (liquidation value - floor), floor = max(86k, 0.85 x peak), cap 80k, built over ~4 h as an IOC taker (<= 75% of visible asks at
-   first, then <= 25%/h), exit to cash from **18 Oct 12:00 UTC** over 24 h (never held past T-72 h), **kill-switch**: liquidation value
-   below the floor or 15% under its peak for 2 min -> the basket is sold down over 2 h and the feature latches off; 36-h test: tilt_s < 0.15
-   or falling -> m 1.5. Risk model: basket legs at 40% stress loss; backstop 0.9 as the last resort.
+   m x (liquidation value - floor), as an IOC taker (<= 75% of visible asks at first, then <= 25%/h), exit to cash from **18 Oct 12:00
+   UTC** over 24 h (never held past T-72 h), **kill-switch**: liquidation value below the floor or kill_dd under its peak for 2 min -> the
+   basket is sold down over 2 h and the feature latches off; 36-h test: tilt_s < 0.15 or falling -> m 1.5. Risk model: basket legs at
+   40% stress loss; backstop 0.9 as the last resort. **Recommended file: `stage3c_basket_floor80k`** = floor 80k / 0.80 x peak, m 6,
+   cap 60k, kill -20% (the best odds in the table below); `stage3` (floor 86k, m 5, cap 80k) and `stage3b` (m 6 / 90k) are the safer
+   files but settle near 40-45k and give ~0-9%.
 3. **Carry** (`stage4_carry`, after the basket is built): arbitrage back on under the cash rule + YES-set sell-back (~300/day); market-making
    adds stay at factor 0 (the cash belongs to the basket).
 
@@ -24,7 +27,8 @@ it (-356 per point; +15k of it from the stale-quote takes). Market making earns 
 The end-to-end dry run of the staged files on the fake exchange seeded with the live books found two things the first Monte Carlo
 (`PLAN_MC.txt`, 01:10) did not model: (1) **funding is slow**: the taker exits only reach ~3-8k of cash within 1c of tilted fair value on
 today's books (~8-9k in the first hours; the whole toward book is sellable only through all three levels at any price, ~114k); the NO+NO
-sets are the cheapest cash (21.9k at 2c a set, `pair_no_unwind_max_cost` 0.02, already live); (2) **the basket is spread-bound**: each $
+sets are the cheapest cash (21.9k; F2b `tilt_exit_take_split_sets` sells their longshot-NO legs first, which frees ~0.9 a share and leaves the
+favourite-NO legs = long tilt for free; with it and a 2c cap the dry run frees ~15k in the first hour and ~21k in 3 h); (2) **the basket is spread-bound**: each $
 bought at the ask is valued at the bid and moves the tilt, cutting the cushion ~15c, so m 5 settles near **40k** and m 6 / 90k near **45k**,
 not 72-90k. With those in the model (basket built over 24 h, switched on ~09:00 UTC):
 | Plan | P(>= 150k) mixed / D prior | P(>= 200k) | P(<= 85k) | P(DD > 20%) | median |
@@ -40,7 +44,7 @@ not 72-90k. With those in the model (basket built over 24 h, switched on ~09:00 
 | any basket built over 48 h instead of 24 h | ~0-2% | 0% | - | - | - |
 **Plain answer:** no legitimate strategy available to us gets P(>= 150k) to ~40%. The best achievable inside the limits is **~15-20%**
 (stage3c: floor 80k, m 6, cap 60k, with carry; P(<= 85k) ~0.4-1.5%, P(DD > 20%) ~4%), and only if ~60k of cash is raised within ~24 h
-(set unwinds ~21k at 2c + taker exits at up to 2c vs tilted fv + selling favourites deeper); built over 48 h the odds fall to ~0-2%
+(the dry run with set splits and 2c taker exits frees ~21k in 3 h on today's books; the rest needs the books to refill); built over 48 h the odds fall to ~0-2%
 because the modelled tilt move is front-loaded (the logistic fit) and the 10-h deployment delay already costs. Pushing the floor to
 75k and m to 8 buys ~23% at P(<= 85k) 2.7% (7.7% if the tilt is a greater-fool plateau) and P(DD > 20%) 7%: at the owner's limit.
 P(>= 200k) is ~0% in every fundable variant. The first table (29-40%) assumed an 80-90k basket bought in 4 h; it is NOT achievable.

@@ -1,8 +1,8 @@
 <!-- STATUS (Finisher 2b, updated on every push) -->
-**STATUS 01:20 UTC 4 Oct (branch claude/finisher-package9):** phase = Package 9 READY ("READY: Package 9", PR #11). READY: Package 8 (7b298a4, PR #10, LIVE since 22:42), 7 (PR #9), 6 (PR #8), 5 (PR #7).
+**STATUS 03:05 UTC 4 Oct (branch claude/finisher-package9):** phase = Package 9 READY ("READY: Package 9", PR #11). READY: Package 8 (7b298a4, PR #10, LIVE since 22:42), 7 (PR #9), 6 (PR #8), 5 (PR #7).
 Package 9 = the catch-up package: F1 `basket_*` long-tilt basket (CPPI on the cushion above max(86k, 0.85 x peak), m 5 / cap 80k, kill at -15% or the floor, exit 18 Oct, T-72h backstop, 36-h test, stress risk model), F2 `tilt_exit_take` (taker exits for the short-tilt book within 1c of tilted fv), F5 `arb_cash_rule` / `arb_sellback`; config hygiene (`take_tilted_ref`, `ref_tilt_max` 0.20).
 Numbers, CORRECTED by the dry run on the live books (analysis/p9/DRYRUN.md, PLAN_MC2.txt): funding is slow (taker exits free ~8k/day within 2c; sets 21k at 2c) and the basket is spread-bound (m 5 settles ~40k, m 6 ~45k): P150 0.3-2% as staged, ~9% with carry; best achievable stage3c (floor 80k, m 6, cap 60k) ~15-20% at P<=85k ~0.5-1.5%, DD>20% ~4%; the 29-40% of 01:20 assumed an 80-90k basket in 4 h and is NOT achievable. P200 ~0%. Red team 2 high / 5 medium / 3 low + dry run 1 medium fixed; 36 suites + STRESS_LADDER green.
-Deploy: deploy/package9 stage0 -> stage1_hygiene -> stage2_flatten -> stage3_basket (when worst_case_loss < 40k, cash_gate_left > 20k) -> stage4_carry; plan: analysis/p9/CATCHUP_PLAN.md.
+Deploy: deploy/package9 stage0 -> stage1_hygiene -> stage2_flatten (2c taker exits + set splits: ~21k cash in 3 h on the live books) -> stage3c (cash_gate_left > 15k) -> stage4_carry; plan: analysis/p9/CATCHUP_PLAN.md.
 Next: owner decides whether ~15-20% for 150k at ~1% ruin is worth the switch (stage3c) this morning; the executor stays subscribed to PRs #7-#10 and #11.
 
 # START HERE (Team run, branch `claude/run-c-tournament-improvements-pycdet`)
@@ -40,7 +40,9 @@ hold the long side of the tilt, sized on the cushion above a floor, exited befor
   `worst_case_backstop_frac` x account (the last resort). Legs valued at max(fair value, book) for sizing (no over-buying). A crash in the
   planner never stops the market maker. status.json "basket" {state, peak, floor, cushion, target, held, legs, impact, test, ...} and the
   2-hourly " | basket $X (N legs, state)".
-- F2 `tilt_exit_take` (+ `_max_cost` 0.01, `_per_hour` 15000, `_max_per_cycle` 3, `_max_leg_frac` 0.5; tests/test_tilt_exit_take.py 50): the
+- F2 `tilt_exit_take` (+ `_max_cost` 0.01, `_per_hour` 15000, `_max_per_cycle` 3, `_max_leg_frac` 0.5; F2b `tilt_exit_take_split_sets` +
+  `tilt_exit_split_max_ref` 0.10: the longshot-NO leg of a NO+NO set is sold too, first, as a covered sale sized to the cash gate's 1.0 a
+  share, leaving the favourite-NO leg = long tilt; a refusal pauses that race 10 x take_cooldown; tests/test_tilt_exit_take.py 87): the
   tilt exits (sides shrinking a position that adds to |tilt_exposure|) are TAKEN at the best other level when within 1c of the TILTED fair
   value (never raw Polymarket); longshot NO first, favourite YES next, lines marked below their exit price first; never flips, never beyond
   depth, never during a jump guard, never set legs beyond the lone part, never basket legs; IOC, cash-gated, covered sales for NO.
@@ -48,7 +50,7 @@ hold the long side of the tilt, sized on the cushion above a floor, exited befor
   tests/test_arb_cash.py 53): arbitrage sets only when `cash_left` >= 1.25 x need + 2k (shrunk to what fits), own quotes excluded from
   bid-sums and depth, size <= 0.8 x the thinnest leg, unequal legs owed and completed or reversed the same cycle (never flips, never a
   one-legged set); YES+YES sets sold back at bids >= 1.00. status `arb_cash_blocked`, `tilt_exit_takes`.
-**Simulation evidence:** the Monte Carlo `analysis/p9/B_mc.py` / `D_mc.py` / `P9_plan_mc.py` (output `PLAN_MC.txt`) IS the screen for the
+**Simulation evidence:** live_sim screens of the config hygiene and `tilt_exit_take` in the live world are flat to the digit (tests/live_sim_round9_hygiene.txt: the sim has no takes and its estimate equals the world tilt, so neither `take_tilted_ref` nor `ref_tilt_max` 0.20 nor the taker exits are mirrored there); the Monte Carlo `analysis/p9/B_mc.py` / `D_mc.py` / `P9_plan_mc.py` (output `PLAN_MC.txt`) IS the screen for the
 basket: live_sim's 3-h world cannot hold a 30-day position and has no cash or set collateral (items F1/F5 are unit-test evidence as
 Packages 7-8). The tilt model is a logistic with judgement priors (K median 0.30 base / 0.18 bear / 0.45 bull; 12% crash hazard; 35%
 chance of an endgame unwind; D's greater-fool world at 20% in the "D prior"); own impact 0.010 of tilt per 80k bought, 10% extra
@@ -79,13 +81,13 @@ set part, no own order, <= 3/cycle); cash 256 -> 9.0k, exposure 35.9k -> 31.6k, 
 held, settles ~40k (m 5) / 45k (m 6). Kill: latched after 120 s, sold 56% / 7% / 1% left at 1 / 2 / 3 h (fixed: richest-first starved the
 other legs; now furthest-behind-schedule first); two thin favourite-NO legs remain (exit depth is not checked at purchase: caveat). Exit:
 no adds from 11 Oct, sold ~1 h after the 24-h window. Stage 4: arbitrage only under the cash rule (60 blocks at 0 cash).
-**Suites:** 36 files green (test_basket 150, test_p9_dryrun 65, test_tilt_exit_take 50, test_arb_cash 53, test_mm_bot 600, test_cash_gate 83, test_tilt_exit 62,
-test_nono_sets 103, test_pair_followup 42, test_pair_sizing 29, test_live_sim_marks 115, the rest as Package 8) + STRESS_LADDER=1 20/20 (0 duplicates);
+**Suites:** 36 files green (test_basket 150, test_p9_dryrun 69, test_tilt_exit_take 87, test_arb_cash 53, test_mm_bot 600, test_cash_gate 83, test_tilt_exit 62,
+test_nono_sets 103, test_live_sim_marks 115, the rest as Package 8) + STRESS_LADDER=1 20/20;
 py_compile under Python 3.10.
 **Deploy (owner; `deploy/package9/README.md`):** code by handover restart (stage0) -> stage1_hygiene (config only: `take_tilted_ref`,
-`take_edge` 0.08, `ref_tilt_max` 0.20; the sets keep draining at 0.02) -> stage2_flatten (`tilt_exit_take`, 2c) -> when `worst_case_loss` < ~40k and
-`cash_gate_left` > ~20k: stage3_basket (or stage3b m 6 / 90k; also `worst_case_backstop_frac` 0.9) -> stage4_carry after the basket is at
-target. **Watch, stage 2 first hour:** "TILT EXIT TAKE" lines at <= 1c cost vs tilted fv, `tilt_exposure` falling, `cash_gate_left` rising,
+`take_edge` 0.08, `ref_tilt_max` 0.20; the sets keep draining at 0.02) -> stage2_flatten (`tilt_exit_take` at 2c + `tilt_exit_take_split_sets`: the
+longshot-NO legs of the NO+NO sets sold first; dry run: cash ~15k in hour 1, ~21k in 3 h) -> when `cash_gate_left` > ~15k: stage3c_basket_floor80k
+(the best odds; or stage3 / 3b at floor 86k; all with `worst_case_backstop_frac` 0.9) -> stage4_carry after the basket is at target. **Watch, stage 2 first hour:** "TILT EXIT TAKE" lines at <= 1c cost vs tilted fv, `tilt_exposure` falling, `cash_gate_left` rising,
 `worst_case_loss` falling; no take against our own order. **Stage 3 first 4 h:** `basket.state` building -> tracking, `basket.held` rising to
 the target in 2-4 h (if it stalls: `cash_gate_left` 0 or the stressed worst case above the backstop: wait for stage 2 to free more), legs
 >= 20, each <= 5%, prices <= 25c, no basket order on a market we quote, writes <= 28, `basket.impact` ~1-5k; liquidation value within ~3%
