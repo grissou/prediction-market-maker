@@ -1227,6 +1227,25 @@ class Config:
     # registration keeps its own cost) AND the best bids (other traders' levels only, arb_levels) do NOT sum above 1:
     # then the set is worth more sold leg by leg (L1) than bought back at the asks. False = unchanged.
     pair_no_unwind_asks_le1: bool = False
+    # --- Package 12 M (analysis/p11/SPEC_P12.md Part M; LIT_REVIEW F1 part 1 and B1) ---
+    # M1 close_override_utc (LIT_REVIEW F1, lit_electionnight.md): load_markets sets each market's close to
+    # min(settlementDate, the tournament's endDate) = 4 Nov 00:00 UTC, so stop_minutes_before_close 15 stops the bot
+    # at 23:45 UTC on 3 Nov whatever SIG allows. An ISO UTC time here ("2026-11-04T17:00:00Z" = 12:00 pm ET on 4 Nov,
+    # live range 2026-11-01 .. 2026-11-07) makes every market's EFFECTIVE close max(API close, this time): it can only
+    # EXTEND a close, never shorten one (a market with no API close stays "never closes"). Bot.hours_to_close uses it,
+    # so the stop, the pre-close windows (close_window: exit / flatten / per-market flatten, the take / arbitrage /
+    # allocator "closing" checks, the phase line) and carry_ramp all follow. Nothing else changes (no election-night
+    # taking; the basket keeps its own schedule from the API close). "" = off (the API close, as before). An invalid
+    # time (unparseable, no time zone, outside the range) is ignored (the API close) with one alert.
+    close_override_utc: str = ""
+    # M2 skew_target_inventory True (LIT_REVIEW B1; lit_marketmaking.md MM-1 / MM-2): the "informed market maker"
+    # skew of Bergault-Guéant (2021) / Fodra-Labadie (2012): the inventory skew in compute_quote is measured from the
+    # distance to a TARGET holding, not from flat. target = Bot.alloc_target_for(eid): the allocator's latest plan's
+    # intended holding for the market (alloc_enabled), else the current holding when its edge-held > 0 in value_mode
+    # (a +EV position we hold to the outcome), else 0 (as before). The race netting is the same as eff_inv's, applied
+    # to (inv - target). With value_mode on, age_skew is 0 for a holding with edge-held > 0. The quote still never
+    # crosses (step 4 of compute_quote) and the reducing side still keeps the value_mode floor (value_floor_quote).
+    skew_target_inventory: bool = False
 
 
 CFG = Config()
@@ -1499,11 +1518,16 @@ OVERRIDABLE = {
     "alloc_set_ladder": (-0.2, 0.0),     # a list of 1..LADDER_MAX_LEVELS offsets, each in -0.2..0
     "alloc_prefer_short": (False, True),
     "pair_no_unwind_asks_le1": (False, True),
+    # --- Package 12 M ---
+    "close_override_utc": ("2026-11-01T00:00:00Z", "2026-11-07T00:00:00Z"),   # ISO UTC time (DATE_SETTINGS), "" = off
+    "stop_minutes_before_close": (0.0, 120.0),
+    "skew_target_inventory": (False, True),
 }
 MAX_ORDER_TTL = 7200.0    # no order of ours lives longer than this (dead-man's switch), whatever the TTL settings
 LADDER_MAX_LEVELS = 8
 ONE_OF_SETTINGS = {"ref_tilt_estimator"}   # string settings that take exactly one of their OVERRIDABLE names
-DATE_SETTINGS = {"basket_exit_utc"}        # string settings that take one ISO UTC time within their OVERRIDABLE range
+DATE_SETTINGS = {"basket_exit_utc", "close_override_utc"}   # string settings: one ISO UTC time within their range
+DATE_EMPTY_OK = {"close_override_utc"}     # ...that also take "" (= off)
 FREE_TEXT_SETTINGS = {"alloc_pin"}         # string settings that take any text of (min, max) characters
 
 
@@ -1533,6 +1557,9 @@ def validate_overrides(raw, cfg):
             continue
         cur = getattr(cfg, k)
         if k in DATE_SETTINGS:                             # one ISO UTC time in its range (basket_exit_utc)
+            if k in DATE_EMPTY_OK and isinstance(v, str) and not v.strip():
+                good[k] = ""                               # (close_override_utc "": off)
+                continue
             dt, lo_s, hi_s = parse_utc_setting(v), *OVERRIDABLE[k]
             if dt is None or not parse_utc_setting(lo_s) <= dt <= parse_utc_setting(hi_s):
                 bad.append(f"{k}: must be an ISO UTC time like \"2026-10-18T12:00:00Z\" in {lo_s}..{hi_s}")
@@ -2847,7 +2874,7 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
                   position_limit=None, min_edge=None, reduce_size=None, net_inv=None, age_hours=0.0,
                   adding_factor=1.0, bias_side=None, bias_edge=0.0, bias_size=1.0, unload_side=None,
                   unload_edge=0.0, unload_size=None, adding_limit_factor=1.0, frag_limit=None, behind_best=True,
-                  reduce_fv=None, why=None, adding_per_market=False, value_p=None):
+                  reduce_fv=None, why=None, adding_per_market=False, value_p=None, skew_inv=None, age_off=False):
     """
     fv         fair YES probability
     inv        our net YES shares on THIS exchange (negative = net NO); drives the hard position limit
@@ -2900,6 +2927,10 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
                        p -+ value_sell_margin (value_side_prices); with cfg.value_quote_hurdle > 0 the adding side
                        follows the hurdle / middle-band rule (A4). None = neither (and value_mode alone still runs
                        the max_skew_through clamp in reduce-only)
+    skew_inv           Package 12 M2 (skew_target_inventory): the inventory the skew is measured from, i.e. the
+                       race-netted (inv - target) (Bot.skew_target_inputs); None = eff_inv (as before). Only the
+                       reservation-price skew changes: limits, reduce-only and reduce_join_best still use inv / eff_inv
+    age_off            Package 12 M2: no age skew (a +EV holding in value_mode); False = age_skew as before
     """
     bankroll = bankroll or DEFAULT_BANKROLL
     max_order_cash = cfg.max_order_cash_frac * bankroll
@@ -2915,12 +2946,15 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
         frag_limit = mid_limit if frag_limit is None else min(frag_limit, mid_limit)
     # 1. Reservation price = fair value shifted against our inventory. Long -> lower r -> we bid
     #    less eagerly and offer more eagerly, which pushes the position back toward flat.
+    #    Package 12 M2: from the distance to a target holding instead (skew_inv), the informed market maker.
+    s_inv = eff_inv if skew_inv is None else skew_inv
     if cfg.skew_mode == "quote" and order_size > 0:
-        skew = cfg.skew_per_quote * eff_inv / order_size
+        skew = cfg.skew_per_quote * s_inv / order_size
     else:
-        skew = cfg.skew_per_share * eff_inv
+        skew = cfg.skew_per_share * s_inv
     skew = max(-cfg.skew_max, min(cfg.skew_max, skew))
-    skew += age_skew(age_hours, eff_inv, cfg)              # capped on its own, so skew_max stays the inventory cap
+    if not age_off:
+        skew += age_skew(age_hours, eff_inv, cfg)          # capped on its own, so skew_max stays the inventory cap
     r = fv - skew - shift
     # 1a. reduce_from_book (A): the reducing side's own reservation price, from the book when that is closer to it.
     r_bid = r_ask = r
@@ -4193,7 +4227,36 @@ class Bot:
         log.info("Tracking %d exchanges in %d races", len(self.ex), len(self.groups))
 
     def hours_to_close(self, ex):
-        return (ex.close - utcnow()).total_seconds() / 3600 if ex.close else float("inf")
+        close = self.effective_close(ex)
+        return (close - utcnow()).total_seconds() / 3600 if close else float("inf")
+
+    def close_override(self):
+        """Package 12 M1: close_override_utc as an aware datetime, or None (off, or invalid: unparseable, no time
+        zone, outside its OVERRIDABLE range - ignored, with one alert per bad value)."""
+        v = getattr(self.cfg, "close_override_utc", "")
+        if not isinstance(v, str) or not v.strip():
+            return None
+        cache = getattr(self, "_close_ovr", None)
+        if cache is not None and cache[0] == v:
+            return cache[1]
+        dt, (lo_s, hi_s) = parse_utc_setting(v), OVERRIDABLE["close_override_utc"]
+        if dt is not None and not parse_utc_setting(lo_s) <= dt <= parse_utc_setting(hi_s):
+            dt = None
+        if dt is None:
+            msg = (f"close_override_utc {v!r} is not an ISO UTC time in {lo_s}..{hi_s}: IGNORED (every market keeps "
+                   f"its API close)")
+            log.warning(msg)
+            alert(msg)
+        self._close_ovr = (v, dt)
+        return dt
+
+    def effective_close(self, ex):
+        """Package 12 M1: the close every pre-close rule uses = max(the API close, close_override_utc): an override
+        only ever EXTENDS a close. No API close -> None (never closes), whatever the override."""
+        if not ex.close:
+            return ex.close
+        ovr = self.close_override()
+        return max(ex.close, ovr) if ovr is not None else ex.close
 
     # ------------------------------------------------------------------------------ one cycle
     def cycle(self):
@@ -5721,6 +5784,11 @@ class Bot:
                                          and flow < cfg.reduce_from_book_max_turnover)):
                 reduce_fv = None
         why = {}
+        skew_inv, age_off = None, False
+        if getattr(cfg, "skew_target_inventory", False):   # Package 12 M2: skew from the target holding
+            skew_inv, age_off = self.skew_target_inputs(ex, inv, inv_for_quote,
+                                                        hrs <= self.close_window("flatten_per_market_hours", cfg),
+                                                        cfg, now_m)
         q = compute_quote(fv, ex.inv, inv_for_quote, best_bid, best_ask, cfg, reduce_only, no_bid, no_ask,
                              bid_cap, ask_cap, kelly_p=kelly_p, bankroll=self.bankroll(),
                              shift=self.party_shift(ex, party_delta), order_size=planned, position_limit=headline_limit,
@@ -5730,7 +5798,7 @@ class Bot:
                              adding_limit_factor=adding_limit, frag_limit=frag_limit,
                              behind_best=ex.eid not in self.ref_only, reduce_fv=reduce_fv, why=why,
                              adding_per_market=bool(getattr(cfg, "adding_factor_per_market", False)),
-                             value_p=vp)
+                             value_p=vp, skew_inv=skew_inv, age_off=age_off)
         ex.ro_clip = why.get("ro_clip", "")
         ex.bb_tag = " bb" if q.behind else ""
         ex.lad_ctx = (adding, adding_limit, frag_limit)   # (R3 ladder: the same factors and limits)
@@ -9856,6 +9924,7 @@ class Bot:
         self.alloc_ages = {}
         self.alloc_ladder = {}                    # Package 12 L1: race -> the resting rich-leg ladder's state
         self.alloc_ladder_info = {}               # its status (alloc.set_ladder), absent while never used
+        self.alloc_targets = {}                   # Package 12 M2: the latest plan's intended holdings {eid: shares}
 
     def alloc_persist_needed(self):
         return bool(self.alloc_info) or bool(self.alloc_pairs) or self.alloc_last_run_wall is not None
@@ -9943,6 +10012,78 @@ class Bot:
                 if (bid - p_o) / max(1 - bid, TICK) >= cfg.alloc_min_edge_buy - 1e-9 and room >= self.ALLOC_MIN_USD:
                     out[a.eid] = o.eid
         return out
+
+    @staticmethod
+    def alloc_plan_targets(inv, pairs):
+        """Package 12 M2: {eid: the holding the plan intends} for every market a planned pair sells or buys (a long
+        sale lowers it, a short's buy-back / a set unwind raises it, a buy raises it, a short sale lowers it)."""
+        out = {}
+        for pr in pairs:
+            s, b = pr.get("sell"), pr.get("buy")
+            moves = []
+            if s is not None and s.get("kind") in ("long", "short"):
+                moves.append((s["eid"], -s["qty"] if s["kind"] == "long" else s["qty"]))
+            if s is not None and s.get("kind") == "set":
+                moves += [(m, s["qty"]) for m in s.get("members") or ()]
+            if b is not None:
+                moves.append((b["eid"], -b["qty"] if b["short"] else b["qty"]))
+            for e, d in moves:
+                out[e] = out.get(e, float(inv.get(e, 0.0))) + d
+        return out
+
+    def alloc_edge_held(self, ex, q, now_m=None):
+        """Package 12 M2: the edge-held of a holding of q shares here, alloc_plan's own measure - a long (p - bid) /
+        bid at the best bid, a short (ask - p) / (1 - ask) at the best ask (p = alloc_p, the book fresh, our own
+        orders stripped) - or None (no position, no liquid p, no fresh book or no level on that side)."""
+        now_m = time.monotonic() if now_m is None else now_m
+        if abs(q) < 1:
+            return None
+        p, book = self.alloc_p(ex, now_m), self.alloc_fresh_book(ex, now_m)
+        if p is None or book is None:
+            return None
+        if q > 0:
+            lv = (book.get("bids") or [None])[0]
+            return None if lv is None or lv["price"] <= 0 else (p - lv["price"]) / lv["price"]
+        lv = (book.get("asks") or [None])[0]
+        return None if lv is None else (lv["price"] - p) / max(1 - lv["price"], TICK)
+
+    def alloc_target_for(self, eid, inv=None, now_m=None):
+        """Package 12 M2: the holding (signed YES shares) the bot WANTS in this market, for the target-inventory
+        skew: the allocator's latest plan's intended holding (alloc_enabled and the plan touched the market), else
+        the current holding when its edge-held > 0 in value_mode (a +EV position held to the outcome), else 0.
+        None = no such market. inv = the positions dict (None: the market's last known ex.inv); a basket leg's
+        shares never count (as effective_inventory)."""
+        ex = self.ex.get(eid)
+        if ex is None:
+            return None
+        cfg = self.cfg
+        if cfg.alloc_enabled and eid in (getattr(self, "alloc_targets", None) or {}):
+            return float(self.alloc_targets[eid])
+        q = float(inv.get(eid, 0.0)) if inv is not None else float(getattr(ex, "inv", 0.0) or 0.0)
+        q -= float((getattr(self, "basket_legs", None) or {}).get(eid, 0.0))
+        if getattr(cfg, "value_mode", False) and abs(q) >= 1:
+            edge = self.alloc_edge_held(ex, q, now_m)
+            if edge is not None and edge > 0:
+                return q
+        return 0.0
+
+    def skew_target_inputs(self, ex, inv, inv_for_quote, per_market, cfg=None, now_m=None):
+        """Package 12 M2 (skew_target_inventory): compute_quote's (skew_inv, age_off). skew_inv = the quoted
+        inventory less the target netted the same way: per market (flatten_per_market window) inv - target, else
+        eff_inv - (target - mean of the race's other targets), i.e. effective_inventory of (inv - target). age_off =
+        value_mode on and this holding's edge-held > 0 (no age skew on a +EV holding)."""
+        cfg = cfg or self.cfg
+        t = self.alloc_target_for(ex.eid, inv, now_m) or 0.0
+        if not per_market:
+            others = [self.alloc_target_for(o, inv, now_m) or 0.0 for o in self.groups.get(ex.group, ())
+                      if o != ex.eid]
+            t = t - (sum(others) / len(others) if others else 0.0)
+        age_off = False
+        if getattr(cfg, "value_mode", False):
+            q = float(inv.get(ex.eid, 0.0)) - float((getattr(self, "basket_legs", None) or {}).get(ex.eid, 0.0))
+            edge = self.alloc_edge_held(ex, q, now_m)
+            age_off = edge is not None and edge > 0
+        return inv_for_quote - t, age_off
 
     def alloc_plan(self, inv, now_m, cash, skip=(), turnover_left=None):
         """THE PURE PLANNER (no request, no state change but the once-only bloc log): ([pair], {"blocked_by",
@@ -10167,6 +10308,7 @@ class Bot:
                 log.warning("ALLOC off: %d pair(s) dropped, %d set unwind registration(s) withdrawn (nothing forced; "
                             "the cash stays)", len(self.alloc_pairs), len(self.alloc_set_races))
             self.alloc_pairs, self.alloc_set_races, self.alloc_state = [], {}, "off"
+            self.alloc_targets = {}
             if self.alloc_info:
                 self.alloc_info["state"] = "off"
             return touched
@@ -10186,6 +10328,7 @@ class Bot:
                 pairs, info = self.alloc_plan(inv, now_m, cfg.alloc_mm_reserve, skip,
                                               cfg.alloc_max_turnover_per_hour - turnover)
                 self.alloc_last_run_wall = now_w
+                self.alloc_targets = self.alloc_plan_targets(inv, pairs)   # Package 12 M2
                 for pr in pairs:
                     log.info("[dry] %s", self.alloc_journal(pr))
                 self.alloc_state = "dry run"
@@ -10206,6 +10349,7 @@ class Bot:
             self.alloc_last_run_wall = now_w
             self.alloc_totals["runs_total"] += 1
             self.alloc_pairs, self.alloc_sells_stopped = pairs, False
+            self.alloc_targets = self.alloc_plan_targets(inv, pairs)       # Package 12 M2
             for pr in pairs:
                 pr["planned_at"] = now_m
             self.alloc_run = {"blocked_by": dict(info["blocked_by"]), "pairs_planned": len(pairs), "sold": 0.0,
