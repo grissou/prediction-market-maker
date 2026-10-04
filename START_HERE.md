@@ -1,9 +1,9 @@
 <!-- STATUS (Finisher 2b, updated on every push) -->
-**STATUS 09:45 UTC 4 Oct (branch claude/finisher-package9):** phase = Package 10 READY ("READY: Package 10", PR #11 updated). READY: Package 10 (VALUE MODE), 9 (024d5a1, superseded: do not deploy the basket), 8 (PR #10, LIVE in value mode), 7, 6, 5.
-Package 10 = SIG pays at the OUTCOME: `value_mode` (no reducing quote below Polymarket -/+ 0.5c, incl. reduce-only; the pre-close dump disabled and overridable), `bloc_delta_enabled` (national-factor cap replaces the share party cap), `alloc_*` (hourly capital allocator by edge per $ to the outcome, market-making reserve from the lowest-edge holdings and NO+NO sets), `value_quote_hurdle` (value market making: favourite bids / longshot asks in the tails, two-way middle), `take_respect_reserve`.
-Numbers (analysis/p10/VALUE_PLAN.md): hold E 109.0k / P150 0% / P85 0.6%; max-EV reallocation 112.9k; + recycling 114.9k (+1.6k, not +10-20%); Rep Senate $20k sleeve P150 17% (24% seat-count) at P85 4%, cliff past $22k; funded value MM at 0.67 / 1.0k/day P150 6% / 29% at P85 0.1% (carry unmeasured live). live_sim at the Polymarket mark: ref_weight 1.0 + skews off +381 +- 73 per 3 h. Red team 7 fixed; dry run on the live state 44 checks; 40 suites + STRESS_LADDER green.
-Deploy: deploy/package10 stage0 -> stage1_value_guard -> stage2_allocator -> stage3_value_mm; config-only today on Package 8: ref_weight 1.0, skew_max 0, skew_age_enabled false.
-Next: owner deploys stage 1 (stops the reduce-only value selling, leaves reduce-only); the executor stays subscribed to PRs #7-#11.
+**STATUS 10:05 UTC 4 Oct (branch claude/finisher-package9):** phase = Package 11 literature sweep (owner: "5 hours reading papers and online resources for ideas"; to ~15:00). READY: Package 10 (2abf782 + f17f63e, PR #11, VALUE MODE), 9 (superseded), 8 (LIVE in value mode), 7, 6, 5.
+Package 11 = four opus readers on (1) prediction-market pricing anomalies and the favourite-longshot bias, (2) market making / inventory / thin-book microstructure, (3) portfolio theory for correlated binary outcomes and rank / contest objectives, (4) US midterm forecasting, polling error, Polymarket calibration, settlement rules; each >= 15 sources, >= 10 ideas in analysis/p11/lit_<theme>.md; the executor synthesises analysis/p11/LIT_REVIEW.md (ranked, with build cost and a test on our data).
+Numbers: none yet.
+Deploy: nothing new; Package 10 files stand (deploy/package10/).
+Next: LIT_REVIEW.md -> the owner picks what to build.
 
 # START HERE (Team run, branch `claude/run-c-tournament-improvements-pycdet`)
 
