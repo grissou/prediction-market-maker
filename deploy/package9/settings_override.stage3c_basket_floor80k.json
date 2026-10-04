@@ -1,6 +1,6 @@
 {
   "arb_two_sided": false,
-  "worst_case_backstop_frac": 0.8,
+  "worst_case_backstop_frac": 0.9,
   "capital_ceiling_adding_size_factor": 0.0,
   "writes_per_minute": 28,
   "writes_per_minute_max": 28,
@@ -26,5 +26,12 @@
   "take_tilted_ref": true,
   "take_edge": 0.08,
   "tilt_exit_take": true,
+  "basket_enabled": true,
+  "basket_mult": 6.0,
+  "basket_cap": 60000.0,
+  "basket_floor": 80000.0,
+  "basket_floor_peak_frac": 0.8,
+  "basket_kill_dd": 0.2,
+  "basket_exit_utc": "2026-10-18T12:00:00Z",
   "tilt_exit_take_max_cost": 0.02
 }

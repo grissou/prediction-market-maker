@@ -11,7 +11,7 @@
   "reduce_no_as_sell": true,
   "no_set_aware_bids": true,
   "pair_unwind_followup": true,
-  "pair_no_unwind_max_cost": 0.0,
+  "pair_no_unwind_max_cost": 0.02,
   "arb_enabled": false,
   "cash_gate_enabled": true,
   "adding_factor_per_market": true,
