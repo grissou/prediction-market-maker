@@ -121,6 +121,11 @@ class Config:
                                           #   +-249). "correlated" = national swing shock + risk_z x sd of the rest:
     risk_swing_shock: float = 0.15        #   every Republican price up 15c and Democratic down 15c (or the reverse)...
     risk_z: float = 3.0                   #   ...plus 3 standard deviations of the independent race outcomes
+    risk_unheld_legs: str = "half"       # P12 ops (LIVE_0404 / TEXAS_AND_1PCT): the probability used for a race leg we do NOT hold
+                                          #   and that has no fair value this cycle. "half" = 0.5 (as before: on 4 Oct 106 such legs
+                                          #   inflated settlement_risk by ~7.9k of 34.7k); "ref" = its raw Polymarket reference
+                                          #   when there is one, else the race's residual probability (1 - the other legs' values,
+                                          #   shared among the unpriced legs), else 0.5. Only unheld legs change: held legs keep risk_fv.
     worst_case_backstop_frac: float = 0.69  # with "correlated": the old sum-of-maxima still forces reduce-only above
                                             #   69% of account value (~70k on 2026-10-02, the owner's choice; a
                                             #   backstop that no longer binds at 30%)
@@ -1296,6 +1301,7 @@ OVERRIDABLE = {
     "ref_only_enabled": (False, True), "ref_only_max_gap": (0.005, 0.2), "ref_only_min_edge": (0.0, 0.1),
     "ref_only_size_frac": (0.0, 0.02), "ref_only_reduce_full": (False, True),
     "risk_swing_shock": (0.05, 0.5), "risk_z": (1.0, 6.0), "worst_case_backstop_frac": (0.3, 1.5),   # (P10 A3: 1.5 ~ off)
+    "risk_unheld_legs": ("half", "ref"),
     "order_ttl": (300.0, 7200.0), "refresh_before_expiry": (30.0, 900.0), "batch_size": (1, 50),
     "kelly_no_edge_frac": (0.0, 0.01), "take_ref_max_age_seconds": (0.0, 300.0),
     "arb_two_sided": (False, True),
@@ -1533,7 +1539,7 @@ OVERRIDABLE = {
 }
 MAX_ORDER_TTL = 7200.0    # no order of ours lives longer than this (dead-man's switch), whatever the TTL settings
 LADDER_MAX_LEVELS = 8
-ONE_OF_SETTINGS = {"ref_tilt_estimator"}   # string settings that take exactly one of their OVERRIDABLE names
+ONE_OF_SETTINGS = {"ref_tilt_estimator", "risk_unheld_legs"}   # string settings that take exactly one of their OVERRIDABLE names
 DATE_SETTINGS = {"basket_exit_utc", "close_override_utc"}   # string settings: one ISO UTC time within their range
 DATE_EMPTY_OK = {"close_override_utc"}     # ...that also take "" (= off)
 FREE_TEXT_SETTINGS = {"alloc_pin"}         # string settings that take any text of (min, max) characters
@@ -5569,6 +5575,33 @@ class Bot:
                         self.ex[e].inv)
         return p
 
+    def risk_legs(self, inv, fvs, members):
+        """[(net YES shares, probability)] for one race's risk measures: held legs at risk_fv (as before); unheld legs at
+        their fair value / last fair value, else (risk_unheld_legs "half") 0.5 or ("ref") the raw Polymarket reference,
+        else the race's residual probability shared among the unpriced legs, else 0.5."""
+        mode = getattr(self.cfg, "risk_unheld_legs", "half")
+        out, missing = [], []
+        for e in members:
+            q = inv.get(e, 0.0)
+            if q:
+                out.append((q, self.risk_fv(e, fvs, members)))
+                continue
+            p = fvs.get(e) or self.ex[e].last_fv
+            if p is None and mode == "ref":
+                r = (self.cur_refs or {}).get(e) if getattr(self, "cur_refs", None) else None
+                p = float(r) if r is not None else None
+            if p is None:
+                missing.append(len(out))
+                out.append((0.0, 0.5))
+            else:
+                out.append((0.0, p))
+        if missing and mode == "ref" and len(out) > 1:
+            known = sum(p for i, (_, p) in enumerate(out) if i not in missing)
+            share = max(0.0, 1.0 - known) / len(missing)
+            for i in missing:
+                out[i] = (0.0, share)
+        return out
+
     def settlement_risk(self, inv, fvs, party_delta):
         """R7: national swing shock (risk_swing_shock x |net Rep-minus-Dem YES shares|) plus risk_z standard
         deviations of the settlement value of every race, races independent once the swing is taken out.
@@ -5578,8 +5611,7 @@ class Bot:
             inv, party_delta, stress = self.basket_risk_split(inv, fvs, party_delta)
         var = 0.0
         for members in self.groups.values():
-            legs = [(inv.get(e, 0.0), self.risk_fv(e, fvs, members) if inv.get(e) else (fvs.get(e) or self.ex[e].last_fv or 0.5))
-                    for e in members]
+            legs = self.risk_legs(inv, fvs, members)
             if any(x for x, _ in legs):
                 var += race_variance(legs)
         return self.cfg.risk_swing_shock * abs(party_delta) + self.cfg.risk_z * math.sqrt(var) + stress
@@ -5590,8 +5622,7 @@ class Bot:
         if self.basket_risk_on():                 # Package 9 F1 (C-10): basket shares out, at a stress loss instead
             inv, _, total = self.basket_risk_split(inv, fvs, 0.0)
         for members in self.groups.values():
-            legs = [(inv.get(e, 0.0), self.risk_fv(e, fvs, members) if inv.get(e) else (fvs.get(e) or self.ex[e].last_fv or 0.5))
-                    for e in members]
+            legs = self.risk_legs(inv, fvs, members)
             if any(x for x, _ in legs):
                 total += worst_case_loss(legs)
         return total

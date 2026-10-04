@@ -271,7 +271,8 @@ if base is not None:
             kn = json.load(f)
         with open(bb_.cfg.status_file) as f:
             kb = json.load(f)
-        if set(kn) != set(kb) or set(kn.get("alloc") or {}) != set(kb.get("alloc") or {}) \
+        ev_ign = set(getattr(M.Bot, "EV_KEYS", ())) | {"ev_outcome_history"}   # later read-only ev / carry report keys
+        if set(kn) - ev_ign != set(kb) - ev_ign or set(kn.get("alloc") or {}) != set(kb.get("alloc") or {}) \
                 or set(bn.health) != set(bb_.health):
             ok_s = False
             diffs.append(("status", set(kn) ^ set(kb)))

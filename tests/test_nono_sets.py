@@ -602,7 +602,7 @@ st = json.load(open(M.bot_path(bt.cfg.status_file)))
 check("status.json: nono_sets and pairno_state", st.get("nono_sets") == {"races": 1, "sets": 817, "capital": 817.0}
       and "pairno_state" in st, {k: st.get(k) for k in ("nono_sets", "pairno_state")})
 line = bt.summary_ops_line(101000.0)
-check("summary: ' | NO+NO sets 1 (cap 0.8k)'", line is not None and line.endswith(" | NO+NO sets 1 (cap 0.8k)"), line)
+check("summary: ' | NO+NO sets 1 (cap 0.8k)'", line is not None and " | NO+NO sets 1 (cap 0.8k)" in line, line)   # (the EV / carry part follows)
 api, bt = bot({"21": -817, "22": 975})
 line = bt.summary_ops_line(101000.0)
 check("summary: no NO+NO race -> no part", line is None or "NO+NO" not in line, line)
