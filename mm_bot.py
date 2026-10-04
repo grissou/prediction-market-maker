@@ -3099,6 +3099,15 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
     if hold_ask and adding_factor > 0:
         ask_size = max(1, ask_size)
     bid_max, ask_max = max(bid_size, int(bid_max)), max(ask_size, int(ask_max))
+    if (hurdle > 0 and not v_mid) or (vmode and value_p is not None):
+        # Package 10 (red team RT-7): the part of a REDUCING quote beyond this exchange's position opens the other
+        # side, i.e. it adds: never at a price the adding rule refuses (A4: the hurdle price in the tails; A1: p, so
+        # the flip never sells below / buys above value). Such a quote stops at the position.
+        tail = hurdle > 0 and not v_mid
+        if inv <= -1 and bid > (value_p / (1 + hurdle) if tail else value_p) + 1e-9:
+            bid_size, bid_max = min(bid_size, int(-inv)), min(bid_max, int(-inv))
+        if inv >= 1 and ask < (1 - (1 - value_p) / (1 + hurdle) if tail else value_p) - 1e-9:
+            ask_size, ask_max = min(ask_size, int(inv)), min(ask_max, int(inv))
 
     if bid >= ask:
         return NO_QUOTE
@@ -5730,11 +5739,17 @@ class Bot:
 
     def bloc_refresh(self, inv):
         """Package 10 A2 (cycle step 6, flag on): this cycle's per-share sensitivities (liquid race-scaled
-        Polymarket) and the bloc delta of inv. Returns the bloc delta."""
+        Polymarket) and the bloc delta of inv. Returns the bloc delta. A contract with no liquid price this cycle
+        keeps its last sensitivity (a Polymarket outage must not zero the bloc delta and open the party cap, which
+        the share count it replaces never needed Polymarket for; P10 red team RT-4)."""
         races = defaultdict(list)
         for eid, ex in self.ex.items():
             races[ex.group].append((eid, ex.label, self.scaled_ref(ex), eid in (self.cur_liquid or ())))
-        self.bloc_sens, self.bloc_inv = bloc_sensitivities(races, self.cfg), dict(inv)
+        sens = bloc_sensitivities(races, self.cfg)
+        for e, v in (self.bloc_sens or {}).items():
+            if e in self.ex:
+                sens.setdefault(e, v)
+        self.bloc_sens, self.bloc_inv = sens, dict(inv)
         self.bloc_delta = self.bloc_delta_now(inv)
         return self.bloc_delta
 
@@ -5774,9 +5789,13 @@ class Bot:
 
     def close_window(self, name, cfg=None):
         """Package 10 A1 (ii): the pre-close window setting `name` (exit_hours_before_close, flatten_hours_before_close,
-        flatten_per_market_hours) as the code should apply it: the setting, or -inf (no window, ever) in value_mode."""
+        flatten_per_market_hours) as the code should apply it: the setting, or no window in value_mode - but never
+        less than the stop window (stop_minutes_before_close): there "nothing at all" holds for every check keyed on
+        a pre-close window too (stale-quote / hold takes, arbitrage's "closing", the allocator), in value_mode or
+        with the windows set to 0 (P10 red team RT-3; the defaults 2 / 12 / 6 h are above it: unchanged)."""
         cfg = cfg or self.cfg
-        return float("-inf") if getattr(cfg, "value_mode", False) else getattr(cfg, name)
+        w = float("-inf") if getattr(cfg, "value_mode", False) else getattr(cfg, name)
+        return max(w, cfg.stop_minutes_before_close / 60.0)
 
     def party_blocks(self, ex, party_delta):
         """National-swing cap -> (no_bid, no_ask). Buying YES on a Republican market pushes the net
@@ -7426,6 +7445,7 @@ class Bot:
                 edge = total - 1 if sign > 0 else 1 - total
                 floor = cfg.pair_unwind_min_profit
                 nono = sign < 0 and self.pair_no_unwind_on()
+                alloc_cost = None
                 if nono:
                     # Package 7: a NO+NO set is unwound as a pair even at a small cost (asks <= 1 + max_cost): the
                     # only way to free it without cash (selling one leg breaks the set's collateral)
@@ -7445,6 +7465,9 @@ class Bot:
                     caps = [max_sets]
                 else:
                     caps = [cfg.pair_unwind_max_frac * bank / max(p, TICK) for p, _ in levels.values()]
+                if (alloc_cost is not None and edge < -cfg.pair_no_unwind_max_cost - 1e-9
+                        and edge < cfg.pair_unwind_min_profit - 1e-9):
+                    caps.append(alloc_cost.get("sets", float("inf")))   # (P10 B3: only the sets the allocator needs)
                 qty = int(min([sets] + [size for _, size in levels.values()] + caps))
                 slack_kw = {"set_slack": True} if nono and getattr(cfg, "pair_unwind_race_order", False) else {}
                 if qty >= 1 and self.unwind_is_safe(inv, fvs, members, -sign * qty, **slack_kw):
@@ -9757,9 +9780,11 @@ class Bot:
 
     def alloc_market_ok(self, ex, skip=()):
         """A market the allocator may trade at all: not a basket leg, not headline (unless alloc_headline), not one
-        another feature traded this cycle (skip: exchanges and races)."""
+        another feature traded this cycle (skip: exchanges and races), not inside the pre-close window that stops
+        takes and arbitrage (close_window: at least the stop window, P10 red team RT-3)."""
         return not (ex.eid in self.basket_legs or ex.eid in skip or ex.group in skip
-                    or (ex.group in self.cfg.headline_races and not self.cfg.alloc_headline))
+                    or (ex.group in self.cfg.headline_races and not self.cfg.alloc_headline)
+                    or self.hours_to_close(ex) <= self.close_window("flatten_hours_before_close"))
 
     def alloc_fresh_book(self, ex, now_m):
         """The cached book (our own orders already stripped) if confirmed within book_stale, else None."""
@@ -9854,6 +9879,9 @@ class Bot:
                         levels.append({"eid": e, "label": ex.label, "short": True, "px": px, "edge": edge,
                                        "unit": 1 - px, "avail": lv["quantity"] * (1 - px)})
         levels.sort(key=lambda o: (-o["edge"], o["eid"], o["px"]))
+        if getattr(self, "global_reduce", False) and levels:   # (red team RT-2: no buy while in reduce-only;
+            blocked["risk"] += 1                                #  reserve refills, which only reduce, still run)
+            levels = []
         left = float("inf") if turnover_left is None else max(0.0, turnover_left)
         pairs, gain = [], 0.0
         hyp = {e: float(q) for e, q in inv.items()}
@@ -9882,18 +9910,27 @@ class Bot:
                     inv_[m] = inv_.get(m, 0.0) + sign * s["qty"]
             if b is not None:
                 inv_[b["eid"]] = inv_.get(b["eid"], 0.0) + sign * (-b["qty"] if b["short"] else b["qty"])
-        # B2: refill the reserve first (sales with no buy)
+        # B2: refill the reserve first (sales with no buy; the bloc check as the pairs', red team RT-5)
         deficit = cfg.alloc_mm_reserve - cash
         hi = 0
+        bloc = bloc_fn(hyp) if bloc_fn is not None else 0.0
         while deficit >= self.ALLOC_MIN_USD and hi < len(held) and left >= self.ALLOC_MIN_USD:
             h = held[hi]
             s = sell_leg(h, min(h["avail"], deficit, left)) if h["kind"] != "cash" else None
             if s is None:
                 hi += 1
                 continue
+            apply(hyp, s, None)
+            if bloc_fn is not None:
+                new = bloc_fn(hyp)
+                if abs(new) > cap + 1e-9 and abs(new) > abs(bloc) + 1e-9:
+                    apply(hyp, s, None, sign=-1)
+                    blocked["bloc"] += 1
+                    hi += 1                       # this sale would push the bloc delta past the cap: the next holding
+                    continue
+                bloc = new
             pairs.append({"sell": s, "buy": None, "usd": s["usd"], "status": "pending", "proceeds": 0.0,
                           "sold_at": None})
-            apply(hyp, s, None)
             h["avail"] -= s["usd"]
             deficit -= s["usd"]
             left -= s["usd"]
@@ -10100,6 +10137,9 @@ class Bot:
         sent. The level gone -> the pair ends, its cash stays, no more sales this run."""
         cfg, b = self.cfg, pr["buy"]
         ex = self.ex.get(b["eid"])
+        if getattr(self, "global_reduce", False):     # (red team RT-2: no buy in reduce-only; the pair waits, then
+            self.alloc_block("risk")                  #  expires after ALLOC_BUY_WAIT with its cash kept)
+            return False
         if ex is None or not self.alloc_market_ok(ex, skip) or busy(ex, now_m):
             return False                          # (traded by another feature / a write in flight: next cycle)
         q = float(inv.get(b["eid"], 0.0))
@@ -10185,6 +10225,9 @@ class Bot:
             self.alloc_block("writes")
             return False
         bedge = None
+        if b is not None and getattr(self, "global_reduce", False):   # (red team RT-2: its buy could not follow)
+            self.alloc_block("risk")
+            return False
         if b is not None:                         # the paired level first: no sale without it on a fresh book
             bx = self.ex.get(b["eid"])
             if bx is None or not self.alloc_market_ok(bx, skip):
@@ -10203,8 +10246,14 @@ class Bot:
             if sets < 1:
                 pr["status"] = "dropped"
                 return False
-            self.alloc_set_races[s["race"]] = {"cost": s["px"] - 1 + 1e-9, "until": now_m + self.ALLOC_SET_WAIT,
-                                               "sets_before": sets, "free": len(s["members"]) - s["px"]}
+            # "sets": what the plan needs - take_arbitrage unwinds no more at the allocator's cost (red team RT-1;
+            # several pairs of one race add up)
+            reg = self.alloc_set_races.get(s["race"]) or {}
+            self.alloc_set_races[s["race"]] = {"cost": max(s["px"] - 1 + 1e-9, reg.get("cost", -1.0)),
+                                               "until": now_m + self.ALLOC_SET_WAIT,
+                                               "sets_before": reg.get("sets_before", sets),
+                                               "free": len(s["members"]) - s["px"],
+                                               "sets": reg.get("sets", 0) + s["qty"]}
             pr["status"] = "set_wait"
             log.warning("ALLOC %s: registered for the short-set unwind at asks sum <= %.3f (%.0f sets held)",
                         s["label"], s["px"], sets)
@@ -10995,7 +11044,12 @@ class Bot:
             log.warning("alloc_enabled is on without cash_gate_enabled: the allocator does nothing without the gate's "
                         "fresh cash read - turn cash_gate_enabled on")
         self.warned_alloc_cash = bad
-        on = ()                                 # Package 10 A1 (iv): mark-driven selling paths left on in value mode
+        unknown = tuple(sorted(self.alloc_pins() - {x.label for x in self.ex.values()})) if self.ex else ()
+        if unknown and unknown != getattr(self, "warned_alloc_pin", ()):   # (P10 red team RT-6: a typo pins nothing)
+            log.warning("alloc_pin names no market: %s - those labels pin nothing (labels are matched exactly, e.g. "
+                        "'Rep Ohio Senate')", ", ".join(unknown))
+        self.warned_alloc_pin = unknown
+        on = ()                               # Package 10 A1 (iv): mark-driven selling paths left on in value mode
         if getattr(self.cfg, "value_mode", False):
             c = self.cfg
             on = tuple(n for n, hit in (

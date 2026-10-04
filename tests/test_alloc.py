@@ -745,6 +745,74 @@ sells = [i for i, w_ in enumerate(api.wire) if w_["exchangeId"] == "A1" and w_["
 buys = [i for i, w_ in enumerate(api.wire) if w_["exchangeId"] == "B1" and w_["action"] == "buy" and w_["price"] == 0.60]
 check("...the sale came first", sells and buys and sells[0] < buys[0], (sells, buys))
 
+# ============================================================================================ red team (REDTEAM.md)
+print("--- red team")
+# RT-1: a registered NO+NO set race was unwound by take_arbitrage up to pair_no_unwind_max_sets (1,000) a batch at the
+# allocator's cost, however few sets the plan needed (a $50 refill could unwind 1,000 sets at up to 6% per $).
+api, b = alloc_bot(inv={"A1": -1000, "A2": -1000}, books=SB, cash=950.0, pair_no_unwind_max_cost=0.0,
+                   alloc_set_cost_per_usd=0.05, alloc_min_edge_buy=0.5, pair_no_unwind_max_sets=1000)
+warm(b)
+tick(b)
+want = sum(p_["sell"]["qty"] for p_ in b.alloc_pairs if p_["sell"]["kind"] == "set")
+pl = b.arb_plan(b.groups["Alpha Senate"], dict(api.inv), fv, False)
+check("RT-1 a $50 refill plans ~51 sets; the registered unwind is capped at them (not 1,000)",
+      0 < want <= 60 and pl is not None and pl[3] <= want, (want, pl and pl[3]))
+b.cfg.pair_no_unwind_max_cost = 0.03                # the race's own threshold admits it: the normal (uncapped) unwind
+pl = b.arb_plan(b.groups["Alpha Senate"], dict(api.inv), fv, False)
+check("RT-1 ...a set the normal short-set threshold already admits keeps its normal size",
+      pl is not None and pl[3] == 1000, pl and pl[3])
+# RT-2: the allocator bought (spare cash, and the buy half of pairs) while the bot was in global reduce-only (worst
+# case / settlement risk over its cap), the one state where every other adding path stands still.
+api, b = alloc_bot()
+warm(b)
+b.global_reduce = True
+pairs, info = plan(b, cash=1000.0)
+check("RT-2 global reduce-only: no pair with a buy planned (refills only), blocked_by risk",
+      not any(p_["buy"] for p_ in pairs) and info["blocked_by"].get("risk", 0) >= 1, (pairs, info))
+b.global_reduce = False
+pairs, _ = plan(b, cash=1000.0)
+check("RT-2 ...out of reduce-only the same book plans the pair", any(p_["buy"] for p_ in pairs))
+tick(b)                                             # sold; reduce-only before the buy -> the buy waits (cash stays)
+api.cash += 1000
+read(b)
+b.global_reduce = True
+n1 = len(api.wire)
+tick(b)
+check("RT-2 a sold pair's buy is held while in reduce-only (nothing sent, the pair waits)",
+      len(api.wire) == n1 and any(p_["status"] == "sold" for p_ in b.alloc_pairs), b.alloc_pairs)
+b.global_reduce = False
+# RT-3: inside the stop window the allocator traded on (value_mode zeroes the pre-close windows; it had no close check).
+api, b = alloc_bot(value_mode=True)
+warm(b)
+for x in b.ex.values():
+    x.close = M.utcnow() + timedelta(minutes=10)
+pairs, _ = plan(b, cash=1000.0)
+check("RT-3 10 min to close (stop window 15): the allocator plans nothing", not pairs, pairs)
+# RT-5: reserve refill sales had no bloc check (only pairs did): a refill could push |bloc delta| past the cap.
+api, b = alloc_bot(inv={"A1": 1000}, cash=0.0, alloc_min_edge_buy=0.5,
+                   books={**books_default(), "B2": bk(0.29, 0.42)})   # (Dem Beta held at edge 3.4%: not sold)
+warm(b)
+b.cfg.bloc_delta_enabled = True
+b.bloc_refresh({"A1": 1000, "B2": 5000})            # (sensitivities; the bloc delta of the book below)
+api.inv["B2"] = 5000                                # Dem Beta long 5,000 (p 0.30): the book is Dem-leaning
+b.cfg.max_bloc_delta_frac = abs(b.bloc_delta_now(dict(api.inv))) / b.bankroll() + 1e-6   # at the cap
+pairs, info = plan(b, cash=0.0)
+check("RT-5 a refill selling Rep Alpha would push the Dem-leaning book past the bloc cap: skipped, blocked_by bloc",
+      not any(p_["sell"].get("eid") == "A1" for p_ in pairs) and info["blocked_by"].get("bloc", 0) >= 1, (pairs, info))
+b.cfg.max_bloc_delta_frac = 0.5
+pairs, info = plan(b, cash=0.0)
+check("RT-5 ...with room under the cap the refill goes ahead", any(p_["sell"].get("eid") == "A1" for p_ in pairs))
+# RT-6: a pin label that matches no market (typo, other spelling) pinned nothing, silently.
+recs.clear()
+logging.getLogger().addHandler(hd)
+logging.getLogger().setLevel(logging.INFO)
+api, b = alloc_bot(alloc_pin="Rep Alpha Senate, Rep Atlantis Senate")
+b.warn_settings()
+logging.getLogger().removeHandler(hd)
+logging.getLogger().setLevel(log_level)
+check("RT-6 alloc_pin naming no market: a warning names it", any("alloc_pin" in r and "Rep Atlantis Senate" in r
+                                                                  and "Rep Alpha Senate" not in r for r in recs), recs[-3:])
+
 # ============================================================================================ py_compile 3.10
 print("--- py_compile under Python 3.10")
 py310 = shutil.which("python3.10")

@@ -270,8 +270,8 @@ a, b = plain_bot({}, close_h=1.0)
 check("close_window: the setting when off, -inf in value_mode",
       b.close_window("exit_hours_before_close") == 2.0 and b.close_window("flatten_per_market_hours") == 6.0)
 b.cfg.value_mode = True
-check("close_window in value_mode: -inf for all three",
-      all(b.close_window(n) == float("-inf") for n in ("exit_hours_before_close", "flatten_hours_before_close",
+check("close_window in value_mode: no window for all three but the 15-min stop window (red team RT-3)",
+      all(b.close_window(n) == 0.25 for n in ("exit_hours_before_close", "flatten_hours_before_close",
                                                          "flatten_per_market_hours")))
 b.cfg.value_mode = False
 quiet_cycle(b)
@@ -588,6 +588,62 @@ if base is not None:
     check("every market's quote (and keep limits) identical, incl. exit / flatten windows", ok_q, diffs[:1])
     check("party_blocks / party_shift identical (share cap)", ok_p)
     check("status.json / health keys and the status line identical", ok_s, diffs[:1])
+
+# ============================================================================================ red team (REDTEAM.md)
+print("--- red team: the stop window still closes everything in value mode (RT-3)")
+# value_mode made every pre-close window -inf, so the checks keyed on flatten_hours_before_close (stale-quote takes,
+# hold takes, arbitrage's 'closing', no-chase, the 'critical' flag) never saw ANY window: takes and arbitrage went on
+# inside stop_minutes_before_close (whose rule is "nothing at all"), up to the close. The stage-1 file (windows 0)
+# had the same gap with value_mode off. Now every window is at least the stop window.
+a, b = plain_bot({"21": 600}, close_h=1.0 / 6, value_mode=True)          # closes in 10 minutes
+ex21 = b.ex["21"]
+check("RT-3 value_mode, 10 min to close: takes / arbitrage / hold see a closing window (stop window)",
+      b.hours_to_close(ex21) <= b.close_window("flatten_hours_before_close"), b.close_window("flatten_hours_before_close"))
+a, b = plain_bot({"21": 600}, close_h=1.0 / 6, flatten_hours_before_close=0.0, exit_hours_before_close=0.0,
+                 flatten_per_market_hours=0.0)
+check("RT-3 value_mode off with the windows zeroed (stage-1 file style): 10 min to close is still closing",
+      b.hours_to_close(b.ex["21"]) <= b.close_window("flatten_hours_before_close"))
+a, b = plain_bot({"21": 600}, close_h=1.0, value_mode=True)
+check("RT-3 value_mode, 1 h to close (outside the 15-min stop window): no window (inert, as A1 ii)",
+      b.hours_to_close(b.ex["21"]) > b.close_window("flatten_hours_before_close")
+      and b.hours_to_close(b.ex["21"]) > b.close_window("exit_hours_before_close"))
+a, b = plain_bot({})
+check("RT-3 flags off: the settings unchanged (2 / 12 / 6 h, all above the stop window)",
+      (b.close_window("exit_hours_before_close"), b.close_window("flatten_hours_before_close"),
+       b.close_window("flatten_per_market_hours")) == (2.0, 12.0, 6.0))
+
+print("--- red team: a reducing quote never flips the position at a price the adding rule refuses (RT-7)")
+# Found by the dry run (tests/test_p10_dryrun.py, stage 3): a short of 41 Rep Nebraska Governor (p 0.91) bid 120 @ 0.89:
+# 41 buy back the short, the other 79 open a long at 2% edge, under the 8% hurdle (and, with value_mode alone, a long's
+# ask floored at p - 0.5c sold the shares beyond the position short below p).
+for mod_, tag in ((M, "now"),):
+    q = cq(-41, 0.91, 0.88, 0.92, p=0.9095, value_mode=True, value_quote_hurdle=0.08)
+    check(f"RT-7 tails, short 41, bid {q.bid} > p/1.08: bid size stops at the position (41), keep size too",
+          q.bid is not None and q.bid_size <= 41 and (q.bid_max or q.bid_size) <= 41, q)
+    q = cq(30, 0.45, 0.44, 0.47, p=0.50, value_mode=True)
+    check(f"RT-7 value_mode, long 30, ask {q.ask} below p 0.50: ask size stops at the position (30)",
+          q.ask is not None and q.ask < 0.50 and q.ask_size <= 30 and (q.ask_max or q.ask_size) <= 30, q)
+    q = cq(30, 0.55, 0.54, 0.57, p=0.50, value_mode=True)
+    check("RT-7 ...an ask above p may still sell past the position (that add is at a value price)",
+          q.ask is not None and q.ask > 0.50 and q.ask_size > 30, q)
+
+print("--- red team: the bloc delta survives a Polymarket outage (RT-4)")
+# bloc_refresh rebuilt the sensitivities from this cycle's LIQUID prices only: when Polymarket went illiquid / missing
+# (feed outage, a market's mapping lost) the contract's sensitivity vanished, the bloc delta fell toward 0 and the
+# party cap stopped binding, while the share count it replaced works without Polymarket. Now the last sensitivity is
+# kept for a contract with no liquid price this cycle.
+a, b = plain_bot({"12": 3000}, bloc_delta_enabled=True)
+quiet_cycle(b)
+d0 = b.bloc_delta
+b.refs.new_reading({"Utah Senate|Republican": 0.55, "Utah Senate|Democratic": 0.45}, {})   # Ohio's prices gone
+quiet_cycle(b)
+check("RT-4 Ohio's Polymarket price gone: the bloc delta keeps Ohio's last sensitivity (-403/sd, not 0)",
+      d0 < -400 and abs(b.bloc_delta - d0) < 1e-6, (d0, b.bloc_delta))
+b.refs.new_reading({"Ohio Senate|Republican": 0.15, "Ohio Senate|Democratic": 0.85,
+                    "Utah Senate|Republican": 0.55, "Utah Senate|Democratic": 0.45}, {})
+quiet_cycle(b)
+check("RT-4 ...and a fresh liquid price replaces it (Ohio Dem at 0.85: 3000 x -0.155 = -464/sd)",
+      abs(b.bloc_delta - 3000 * -math.sqrt(0.45) * M.bloc_slope(0.85, 1.0)) < 0.5, b.bloc_delta)
 
 print()
 print(f"{sum(RESULTS)}/{len(RESULTS)} passed")
