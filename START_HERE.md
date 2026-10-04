@@ -60,6 +60,10 @@ Senate/House/control edge is +5.5k at Polymarket but +1.1k at Decision Desk's; N
   holding (`alloc_target_for`) or, in value mode, the current holding when its edge-held > 0; `age_skew` 0 on +EV holdings; the ADDING side
   keeps its skew-from-flat so the target cannot ratchet (RT12-7); no target skew in reduce-only (RT12-4); race-netted like `eff_inv`; the
   reduce side keeps the value_mode floor; never crosses (Bergault-Guéant / Fodra-Labadie "informed market maker").
+**Simulation evidence (live_sim at the Polymarket mark `pnl`, tests/live_sim_round12_skew.txt, 8 x 3 h, value world with 20% cash and adding
+factor 0.5):** `value_mode` +116 +- 67; + `skew_target_inventory` +125 +- 53 (neutral in the sim: without the allocator only the fallback target
+applies; the mechanism matters live where the allocator sets targets); `value_mode` + `skew_max` 0 + age skew off +205 +- 46 (the config-only
+hygiene stands). Items L1-L3 and M1 need cash / sets / a close: unit tests only.
 **Red team (`analysis/p11/REDTEAM_P12.md`): 1 high, 4 medium, 2 low, all fixed or warned** (tests/test_p12_redteam.py 21). Caveats: at
 ~0 cash the ladder sells little (lone parts only) until the reserve builds; a take on the favourite cancels the ladder until the hourly
 re-quote; `alloc_prefer_short` does not check the short leg's depth (a missed buy at worst); `close_override_utc` extends every market;
