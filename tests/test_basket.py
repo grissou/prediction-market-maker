@@ -934,6 +934,12 @@ tick(b7)
 tick(b7)
 check("RT-7: a kill sale the cash gate blocks (a short bought back as a YES purchase at 0 cash) is ALERTED once",
       len(api7.wire) == n0 and sum("cannot go out" in a for a in ALERTS) == 1 and b7.basket_legs, ALERTS)
+b7.basket_hours = {("32", "asks"): [time.time() - 600, 12000.0, 9000.0], ("42", "asks"): [time.time() - 7200, 1.0, 1.0]}
+st7 = json.loads(json.dumps(b7.basket_status()))
+b7.basket_init(st7)
+check("RT-8: the rolling-hour ask-share windows survive a restart (a restart never re-opens the hour's share)",
+      b7.basket_hours.get(("32", "asks"), [0, 0, 0])[1:] == [12000.0, 9000.0] and ("42", "asks") not in b7.basket_hours,
+      b7.basket_hours)
 b.cfg.basket_mult, b.cfg.basket_mult_after_fail = 2.0, 8.0
 b.basket_test = "failed"
 check("RT-5: a failed test never RAISES the multiplier (mult_after_fail 8 > mult 2 -> 2)",

@@ -8566,6 +8566,10 @@ class Bot:
         self.basket_orders_total = int(num(d.get("orders_total"), 0))
         self.basket_last_action = str(d.get("last_action") or "")
         self.basket_hours = {}                # (eid, "asks"/"bids") -> [hour start wall, top-3 depth then, shares done]
+        for x in (d.get("hours") if isinstance(d.get("hours"), list) else ()):   # (P9 red team: restart-safe, or a
+            if (isinstance(x, list) and len(x) == 5 and isinstance(x[0], str) and x[1] in ("asks", "bids")   # restart
+                    and all(num(v) is not None for v in x[2:])):          # re-opens the hour's ask share at once)
+                self.basket_hours[(x[0], x[1])] = [num(x[2]), num(x[3]), num(x[4])]
         self.basket_breach_since = None       # wall time the current kill breach started
         self.basket_liq_hist = deque()        # (wall, liquidation value) of the last ticks (the confirmed peak)
         self.basket_off_explicit = False      # the overrides file said basket_enabled false (clears the kill latch)
@@ -8605,7 +8609,8 @@ class Bot:
                 "kill_start": dict(self.basket_kill_start), "exit_start": dict(self.basket_exit_start),
                 "flows": [list(x) for x in self.basket_flows], "s_hist": [list(x) for x in self.basket_s_hist],
                 "released": self.basket_released, "orders_total": self.basket_orders_total,
-                "last_action": self.basket_last_action}
+                "last_action": self.basket_last_action,
+                "hours": [[e, k, *w] for (e, k), w in self.basket_hours.items() if time.time() - w[0] < 3600]}
 
     def basket_summary(self):
         """" | basket $X (N legs, state)" for the 2-hourly summary, "" with nothing to report."""
