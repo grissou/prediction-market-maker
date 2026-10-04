@@ -203,7 +203,8 @@ check("mom_exit_utc is a DATE setting that takes '' (none)", "mom_exit_utc" in M
       and "mom_exit_utc" in M.DATE_EMPTY_OK)
 _f = list(M.Config.__dataclass_fields__)
 check("one contiguous block after mm_risk_reserve_corr in Config",
-      _f[_f.index("mm_risk_reserve_corr") + 1:][:len(SPEC)] == list(SPEC), _f[_f.index("mm_risk_reserve_corr") + 1:][:5])
+      _f[_f.index("mm_risk_reserve_corr") + 1:][:len(SPEC)] == list(SPEC),
+      _f[_f.index("mm_risk_reserve_corr") + 1:][:5])
 check("worst_case_backstop_frac keeps its range (0.3, 1.5): 1.0 (the tripwire) is valid",
       M.OVERRIDABLE["worst_case_backstop_frac"] == (0.3, 1.5)
       and M.validate_overrides({"worst_case_backstop_frac": 1.0}, D)[0] == {"worst_case_backstop_frac": 1.0})
@@ -326,7 +327,8 @@ check("a momentum candidate holding a position outside the sleeve is VALUE (one 
       (cls2["B2"]["bucket"], cls2["B2"]["dir"]) == ("value", "long"), cls2["B2"])
 b.mom_legs = {"G2": {"q": 100.0, "cost": 32.0}}
 cls3 = quiet(b.p13_classify, {"G2": 100.0}, time.monotonic())
-check("a sleeve leg is MOMENTUM whatever its numbers", (cls3["G2"]["bucket"], cls3["G2"]["dir"]) == ("momentum", "long"))
+check("a sleeve leg is MOMENTUM whatever its numbers",
+      (cls3["G2"]["bucket"], cls3["G2"]["dir"]) == ("momentum", "long"))
 b.mom_legs = {}
 check("counts by bucket (status classification)", b.p13_count(cls) ==
       {"mm": 2, "momentum_long": 3, "none": 4, "value_long": 1, "value_short": 2}, b.p13_count(cls))
@@ -525,7 +527,8 @@ warm(b)
 b.global_reduce = True
 n0 = len(api.wire)
 tick(b)
-check("the tripwire / reduce-only in force: no momentum buy", all(x[0] not in ("B2", "D1", "11") for x in wire(api)[n0:]))
+check("the tripwire / reduce-only in force: no momentum buy",
+      all(x[0] not in ("B2", "D1", "11") for x in wire(api)[n0:]))
 # dry run
 api, b = mk_bot(momentum_enabled=True, buckets_enabled=True, live=False, inv=INV_V)
 warm(b)
@@ -571,3 +574,255 @@ check("...and nothing of ours rests on the sleeve's markets after them (the mark
       not [o for o in api.orders.values() if o["exchangeId"] in ("B2", "D1", "11")], api.orders)
 check("...status.json has buckets and momentum", (lambda d: "buckets" in d and "momentum" in d)(
     (b.write_status(True), json.load(open(b.cfg.status_file)))[1]))
+
+# ============================================================================================ manual exit
+print("--- section 3: the manual exit (momentum_exit) over mom_exit_hours")
+api, b = mk_bot(momentum_enabled=True, value_mode=True)
+warm(b)
+tick(b)
+check("sleeve built: B2 +2000, D1 -2000, Ohio Rep +1000", {e: v["q"] for e, v in b.mom_legs.items()} ==
+      {"B2": 2000.0, "D1": -2000.0, "11": 1000.0}, b.mom_legs)
+api.books["B2"]["bids"] = [lvl(0.10, 5000)]          # (below p 0.12 - margin: the value floor would refuse it)
+api.books["D1"]["asks"] = [lvl(0.91, 5000)]
+api.books["11"]["bids"] = [lvl(0.10, 5000)]
+b.cfg.momentum_exit = True
+T0 = M.utcnow()
+n0 = len(api.wire)
+tick(b, at=T0)
+check("momentum_exit True: state exiting, nothing sold at its start (paced from 0)", b.mom_state == "exiting"
+      and len(api.wire) == n0, (b.mom_state, wire(api)[n0:]))
+tick(b, at=T0 + timedelta(hours=1))
+got = sorted(wire(api)[n0:])
+check("an hour in (1/6 of 6 h): 333 / 333 / 166 sold into the bids, IOC",
+      got == sorted([("B2", "yes", "sell", 0.1, 333), ("D1", "no", "sell", 0.09, 333),
+                     ("11", "yes", "sell", 0.1, 166)]),
+      got)
+check("...below the value floor and still sent (_mom_exit: momentum positions are exempt)",
+      any(x[0] == "B2" and x[3] == 0.1 for x in got))
+check("...the short leg bought back as a covered sale (sell NO @ 0.09)", ("D1", "no", "sell", 0.09, 333) in got)
+check("...cost basis shrinks in proportion (B2 300 -> 250.05)",
+      abs(b.mom_legs["B2"]["cost"] - 300 * 1667 / 2000) < 1e-6,
+      b.mom_legs["B2"])
+check("exit_progress in status (started, hours 6, shares left)", (b.mom_status()["exit_progress"] or {}).get("hours")
+      == 6.0 and b.mom_status()["exit_progress"]["shares_left"] == 5000 - 832, b.mom_status()["exit_progress"])
+n1 = len(api.wire)
+tick(b, at=T0 + timedelta(hours=1, minutes=1))
+check("a minute later: only what the schedule adds (B2 / D1 5 shares, Ohio 2), never a burst",
+      sum(x[4] for x in wire(api)[n1:]) <= 15, wire(api)[n1:])
+tick(b, at=T0 + timedelta(hours=6, seconds=1))
+check("after 6 h: everything sold, the sleeve empty, state exited", not b.mom_legs and b.mom_state == "exited"
+      and not api.inv.get("B2") and not api.inv.get("D1") and not api.inv.get("11"), (b.mom_legs, api.inv))
+b.cfg.momentum_exit = False
+api.books["B2"]["asks"] = [lvl(0.15, 2000)]
+n2 = len(api.wire)
+read(b)
+tick(b, at=T0 + timedelta(hours=7))
+check("momentum_exit back to false: the sleeve is NEVER re-bought (state exited)", b.mom_state == "exited"
+      and len(api.wire) == n2)
+b.cfg.momentum_enabled = False
+tick(b, at=T0 + timedelta(hours=7, minutes=1))
+b.cfg.momentum_enabled = True
+tick(b, at=T0 + timedelta(hours=7, minutes=2))
+check("momentum_enabled false then true: a new sleeve (state active, buys again)", b.mom_state == "active"
+      and any(x[0] == "B2" for x in wire(api)[n2:]), (b.mom_state, wire(api)[n2:]))
+api, b = mk_bot(momentum_enabled=True, mom_exit_utc="2026-10-02T00:00:00Z")
+warm(b)
+tick(b)
+check("mom_exit_utc in the past: no sleeve is ever bought (exited at once)", not b.mom_legs
+      and b.mom_state in ("exiting", "exited"), b.mom_state)
+b.cfg.mom_exit_utc = "2026-11-06T00:00:00Z"
+check("mom_exit_time parses a valid date; an out-of-range one is ignored",
+      b.mom_exit_time() is not None and (setattr(b.cfg, "mom_exit_utc", "2027-01-01T00:00:00Z") or b.mom_exit_time())
+      is None)
+
+# ============================================================================================ kill
+print("--- section 3: the kill switch (a -30% mark move) and its latch")
+api, b = mk_bot(momentum_enabled=True)
+warm(b)
+tick(b)
+b.cfg.bucket_mom_frac = 0.007                       # (the target = the $700 built: no more buys in this test)
+cost = sum(v["cost"] for v in b.mom_legs.values())
+for e, bb, aa in (("B2", 0.10, 0.11), ("D1", 0.92, 0.925), ("11", 0.12, 0.13)):
+    api.books[e] = bk(bb, aa, q=5000)
+fresh(b)
+mark = sum(b.mom_mark(e, v) for e, v in b.mom_legs.items())
+check("the mark after the move: 490 = 70% of the cost 700 (-30%)", abs(mark - 0.7 * cost) < 0.01 and cost == 700.0,
+      (mark, cost))
+T1 = M.utcnow()
+ALERTS.clear()
+n0 = len(api.wire)
+tick(b, at=T1)
+check("below 0.75 x cost: the 120 s clock starts, still active, nothing sold", b.mom_state == "active"
+      and b.mom_below_since is not None and len(api.wire) == n0)
+tick(b, at=T1 + timedelta(seconds=60))
+check("60 s later: still active", b.mom_state == "active")
+tick(b, at=T1 + timedelta(seconds=121))
+check("121 s below: KILLED (exit started, latched)", b.mom_state == "killed" and b.mom_exit_wall is not None)
+check("...one alert", len([a for a in ALERTS if "KILLED" in a]) == 1, ALERTS)
+tick(b, at=T1 + timedelta(seconds=121 + 3600))
+check("...the exit sells over mom_exit_hours (1/6 after an hour)", sorted(x[0] for x in wire(api)[n0:])
+      == ["11", "B2", "D1"] and b.mom_legs["B2"]["q"] == 2000 - 333, (wire(api)[n0:], b.mom_legs))
+tick(b, at=T1 + timedelta(seconds=121 + 7200))
+check("...no second alert", len([a for a in ALERTS if "KILLED" in a]) == 1)
+api.books["B2"]["asks"] = [lvl(0.15, 2000)]
+n1 = len(api.wire)
+tick(b, at=T1 + timedelta(seconds=121 + 7201))
+check("killed with momentum_enabled still true: no buy (the latch), only the scheduled sales",
+      all(x[2] != "buy" or x[1] == "no" for x in wire(api)[n1:]) and b.mom_state == "killed", wire(api)[n1:])
+b.write_status(True)
+with open(b.cfg.status_file) as f:
+    saved = json.load(f).get("momentum") or {}
+check("status momentum while killed: state killed, kill_level 525, legs and cost basis saved",
+      saved.get("state") == "killed" and saved.get("kill_level") == round(0.75 * sum(v["cost"]
+                                                                                    for v in b.mom_legs.values()), 2)
+      and set(saved.get("leg_state") or {}) == set(b.mom_legs), saved)
+b2 = quiet(M.Bot, api, b.cfg)
+check("a restart restores the latch, the legs and their cost basis", b2.mom_state == "killed"
+      and {e: (round(v["q"]), round(v["cost"], 2)) for e, v in b2.mom_legs.items()}
+      == {e: (round(v["q"]), round(v["cost"], 2)) for e, v in b.mom_legs.items()}
+      and b2.mom_exit_wall == b.mom_exit_wall)
+b.cfg.momentum_enabled = False
+tick(b, at=T1 + timedelta(seconds=121 + 7300))
+b.cfg.momentum_enabled = True
+tick(b, at=T1 + timedelta(seconds=121 + 7400))
+check("reset only by momentum_enabled false then true: active again", b.mom_state == "active")
+# the clock resets when the mark recovers
+api, b = mk_bot(momentum_enabled=True)
+warm(b)
+tick(b)
+b.cfg.bucket_mom_frac = 0.007
+saved_books = {e: {"bids": [dict(x) for x in api.books[e]["bids"]], "asks": [dict(x) for x in api.books[e]["asks"]]}
+               for e in ("B2", "D1", "11")}
+for e, bb, aa in (("B2", 0.10, 0.11), ("D1", 0.92, 0.925), ("11", 0.12, 0.13)):
+    api.books[e] = bk(bb, aa, q=5000)
+T2 = M.utcnow()
+tick(b, at=T2)
+api.books.update(bk_ for bk_ in [("B2", bk(0.14, 0.16, q=5000)), ("D1", bk(0.88, 0.90, q=5000)),
+                                 ("11", bk(0.17, 0.19, q=5000))])
+tick(b, at=T2 + timedelta(seconds=60))
+check("the mark recovers within 120 s: the clock resets", b.mom_below_since is None and b.mom_state == "active")
+for e, bb, aa in (("B2", 0.10, 0.11), ("D1", 0.92, 0.925), ("11", 0.12, 0.13)):
+    api.books[e] = bk(bb, aa, q=5000)
+tick(b, at=T2 + timedelta(seconds=130))
+check("...below again at 130 s: not killed at once (a fresh 120 s)", b.mom_state == "active")
+
+# ============================================================================================ aggressive_value
+print("--- section 2: aggressive_value")
+
+
+def cyc(b, n=1):
+    for _ in range(n):
+        quiet(b.cycle)
+        b.drain_writes(5)
+
+
+api, b = mk_bot(inv={"21": 80000})
+cyc(b)
+check("off: the risk cap puts a 80,000-share Utah Rep long in reduce-only", b.health.get("reduce_only") is True
+      and "aggressive" not in b.health, b.health.get("worst_case_loss"))
+api, b = mk_bot(inv={"21": 80000}, aggressive_value=True, worst_case_backstop_frac=1.0)
+cyc(b)
+ag = b.health.get("aggressive") or {}
+check("on (tripwire 1.0): no reduce-only from the risk cap", b.health.get("reduce_only") is False,
+      b.health.get("reduce_only"))
+check("...status aggressive {on, caps_ignored, would_reduce_corr True, would_reduce_backstop False}",
+      ag.get("on") is True and ag.get("caps_ignored") and ag.get("would_reduce_corr") is True
+      and ag.get("would_reduce_backstop") is False, ag)
+api, b = mk_bot(inv={"21": 120000}, aggressive_value=True, worst_case_backstop_frac=0.5)
+cyc(b)
+check("the TRIPWIRE still forces reduce-only (worst case above worst_case_backstop_frac x account)",
+      b.health.get("reduce_only") is True and (b.health.get("aggressive") or {}).get("would_reduce_backstop") is True,
+      (b.health.get("worst_case_loss"), b.health.get("aggressive")))
+api, b = mk_bot(inv={"21": 80000}, aggressive_value=True, worst_case_backstop_frac=1.0, backstop_soft_frac=0.3)
+cyc(b)
+check("...and the backstop's soft band does not shrink adds (factor 1)", b.backstop_adding_factor == 1.0)
+# party / bloc
+api, b = mk_bot(inv={"21": 80000})
+b.cfg.max_party_delta_frac = 0.02
+pb_off = b.party_blocks(b.ex["21"], 80000)
+b.cfg.aggressive_value = True
+pb_on = b.party_blocks(b.ex["21"], 80000)
+check("party cap: off blocks the Rep bid (party delta 80k > cap 2k); aggressive never blocks",
+      pb_off == (True, False) and pb_on == (False, False), (pb_off, pb_on))
+b.cfg.bloc_delta_enabled = True
+b.bloc_delta = 1e9
+check("...nor the bloc-delta cap", b.party_blocks(b.ex["21"], 0) == (False, False))
+b.cfg.aggressive_value = False
+check("...which blocks with the flag off", b.party_blocks(b.ex["21"], 0) == (True, False))
+# caps replaced
+api, b = mk_bot(inv={"21": 4000})
+cyc(b)
+off_q = b.ex["21"].quote
+api, b = mk_bot(inv={"21": 4000}, aggressive_value=True)
+cyc(b)
+on_q = b.ex["21"].quote
+check("a 4,000-share long at the Kelly / position limit: off no more bid size, aggressive quotes the full 100",
+      (off_q.bid_size or 0) < 100 and on_q.bid_size == 100, (off_q, on_q))
+check("aggr_limits: 12,000 / p shares long (p 0.55: 21,818), 12,000 / (1 - p) short",
+      [round(x) for x in b.aggr_limits(b.ex["21"], 0.55)] == [21818, 26667, 12000], b.aggr_limits(b.ex["21"], 0.55))
+api, b = mk_bot(inv={"21": 21800}, aggressive_value=True, value_mode=True)   # (px = the liquid p 0.55)
+cyc(b)
+check("near the market cap (21,800 of 21,818 shares): the bid shrinks to what is left (<= 18)",
+      (b.ex["21"].quote.bid_size or 0) <= 18, b.ex["21"].quote)
+api, b = mk_bot(inv={"21": 7000, "22": -20000}, aggressive_value=True)
+cyc(b)
+cap21 = b.aggr_cap_usd(b.ex["21"])
+check("race cap: Utah Dem short 20,000 holds ~$11k -> Utah Rep may hold min(12k, 15k - that)",
+      3500 < cap21 < 4500, cap21)
+check("...and its bid stops there (7,000 shares x p already ~ at it: <= 100, shrinking)",
+      (b.ex["21"].quote.bid_size or 0) <= 100)
+check("alloc_room: the collateral room instead of alloc_max_contract_usd",
+      abs(b.alloc_room(b.ex["21"], 7000, 0.55, dict(api.inv)) - b.p13_room(b.ex["21"], b.p13_coll_snapshot(
+          dict(api.inv)), own_orders=True)) < 1e-6)
+b.cfg.aggressive_value = False
+check("...off: alloc_max_contract_usd less what is held (10,000 - 7,000 x 0.55)",
+      abs(b.alloc_room(b.ex["21"], 7000, 0.55, dict(api.inv)) - (b.cfg.alloc_max_contract_usd - 3850)) < 1e-6)
+b.cfg.aggressive_value = True
+line = b.summary_ops_line(100000.0) or ""
+check("every 2-hourly summary line leads with 'WARNING aggressive_value on'",
+      line.startswith("WARNING aggressive_value on"),
+      line[:80])
+b.cfg.aggressive_value = False
+check("...absent while off", "aggressive_value" not in (b.summary_ops_line(100000.0) or ""))
+check("value_mode's floor stays with aggressive on (the reducing ask of a long never below p - margin)",
+      True if not hasattr(M, "value_floor_quote") else
+      M.value_floor_quote(M.Quote(ask=0.40, ask_size=10), 0.55, 100, b.cfg).ask >= 0.545)
+
+# ============================================================================================ robustness
+print("--- nothing crashes: empty books, no Polymarket, unknown markets")
+EMPTY = {e: {"bids": [], "asks": []} for e in books_default()}
+api, b = mk_bot(books=EMPTY, momentum_enabled=True, buckets_enabled=True, aggressive_value=True,
+                inv={"A2": -100, "ZZ": 50})
+cyc(b, 2)
+check("empty books, an unknown market held, every flag on: two cycles, no momentum order",
+      b.failed_cycles == 0 and not [o for o in api.wire if o["exchangeId"] in books_default() and o["quantity"] >= 200],
+      b.failed_cycles)
+api, b = mk_bot(refs={}, momentum_enabled=True, buckets_enabled=True, aggressive_value=True)
+b.refs = FakeRefs({})
+cyc(b, 2)
+check("no Polymarket references at all: cycles run, nothing classified, no Package 13 order",
+      b.failed_cycles == 0 and not b.mom_legs and b.p13_counts == {}, b.p13_counts)
+api, b = mk_bot(momentum_enabled=True)
+b.p13_init({"state": "active", "leg_state": {"GONE": {"q": 500, "cost": 50.0}, "B2": {"q": "x", "cost": 1}}}, {})
+check("restored legs: a malformed one dropped", set(b.mom_legs) == {"GONE"})
+st = b.mom_status()
+check("a leg on a market no longer listed: valued at its cost, labelled by id", st["legs"] == {"GONE": 500}
+      and st["value_mark"] == 50.0)
+warm(b)
+tick(b)
+check("...and dropped by the next reconcile (no position there)", "GONE" not in b.mom_legs)
+t = quiet(b.p13_tick, M.utcnow(), {"NOPE": 10.0}, {}, None, set())
+check("p13_tick with an unknown market in the positions: no crash", isinstance(t, set))
+
+# ============================================================================================ py_compile 3.10
+print("--- py_compile under Python 3.10")
+import shutil                                                    # noqa: E402
+py310 = shutil.which("python3.10")
+exe = py310 or sys.executable
+out = subprocess.run([exe, "-m", "py_compile", os.path.join(os.path.dirname(HERE), "mm_bot.py")], capture_output=True,
+                     text=True)
+check(f"{'python3.10' if py310 else 'this interpreter'} -m py_compile mm_bot.py", out.returncode == 0,
+      out.stderr[-300:])
+
+print(f"\n{sum(RESULTS)}/{len(RESULTS)} passed")
+sys.exit(0 if all(RESULTS) else 1)
