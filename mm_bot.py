@@ -11427,6 +11427,7 @@ class Bot:
         self.mom_enabled_seen = en if isinstance(en, bool) else None
         self.mom_kill_alerted = bool(mom.get("kill_alerted", False))
         self.mom_below_since = None               # wall time the mark first fell below the kill level (this run)
+        self.mom_last_trade = {}                  # eid -> wall time the sleeve last traded there (this run; P13 RT-3)
         self.mom_totals = {k: num(mom.get(k), 0.0) for k in ("bought_usd", "sold_usd", "buys", "sells")}
         self.mom_info = {}                        # the latest figures (status.json "momentum")
         self.mom_target_usd = None                # this cycle's sleeve target ($ at cost)
@@ -11897,8 +11898,13 @@ class Bot:
 
     def mom_reconcile(self, inv):
         """A leg follows the position: gone (flat / flipped) -> dropped; smaller -> its shares and cost shrink in
-        proportion (a fill elsewhere, a settlement); a bigger position keeps the leg (the rest is not the sleeve's)."""
+        proportion (a fill elsewhere, a settlement); a bigger position keeps the leg (the rest is not the sleeve's).
+        P13 RT-3: a leg the sleeve traded within BASKET_TRADE_GRACE is left alone (the positions read may lag the
+        trade, or be the last good read on a 409: dropping the leg there re-bought it as a new one)."""
+        now_w = time.time()
         for e in list(self.mom_legs):
+            if now_w - self.mom_last_trade.get(e, -1e18) < self.BASKET_TRADE_GRACE:
+                continue
             leg, q = self.mom_legs[e], float(inv.get(e, 0.0))
             if abs(q) < 1 or (q > 0) != (leg["q"] > 0):
                 log.warning("MOMENTUM leg %s gone (position %+.0f, leg %+.0f)", self.ex[e].label if e in self.ex else e,
@@ -12032,6 +12038,7 @@ class Bot:
                 leg = self.mom_legs.setdefault(ex.eid, {"q": 0.0, "cost": 0.0})
                 leg["q"] += done if c["buy"] else -done
                 leg["cost"] += usd
+                self.mom_last_trade[ex.eid] = now_w
                 inv[ex.eid] = float(inv.get(ex.eid, 0.0)) + (done if c["buy"] else -done)
                 snap[ex.eid][0] += usd
                 left -= usd
@@ -12093,6 +12100,7 @@ class Bot:
                 share = min(1.0, done / abs(leg["q"]))
                 leg["cost"] -= leg["cost"] * share
                 leg["q"] += -done if long_ else done
+                self.mom_last_trade[e] = now_w
                 inv[e] = q + (-done if long_ else done)
                 self.mom_totals["sold_usd"] += usd
                 self.mom_totals["sells"] += 1
@@ -12793,7 +12801,8 @@ class Bot:
         for c in cands:
             e, ex = c["eid"], self.ex[c["eid"]]
             q, px, val = float(inv.get(e, 0.0)), c["px"], self.p13_px(ex, now_m)
-            free = self.cash_free(e)
+            ex.inv = q                            # (P13 RT-4: cash_free reads ex.inv, last cycle's before decide - and
+            free = self.cash_free(e)              #  never refreshed on a market traded since: a sold loser "covered" again)
             covered = False
             if c["buy"] and q <= -1:
                 n = int(min(c["depth"], self.cover_no_qty(e, q), free["lone"] + free["set"]) + 1e-9)
