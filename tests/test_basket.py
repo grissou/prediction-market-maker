@@ -940,6 +940,11 @@ b7.basket_init(st7)
 check("RT-8: the rolling-hour ask-share windows survive a restart (a restart never re-opens the hour's share)",
       b7.basket_hours.get(("32", "asks"), [0, 0, 0])[1:] == [12000.0, 9000.0] and ("42", "asks") not in b7.basket_hours,
       b7.basket_hours)
+good, bad = M.validate_overrides({"basket_slip": 0.05, "basket_stress_frac": 0.0}, M.Config())
+check("RT-9: live ranges: basket_slip <= 0.02, basket_stress_frac >= 0.2 (0.05 / 0 refused)", not good and len(bad) == 2,
+      bad)
+good, bad = M.validate_overrides({"basket_slip": 0.02, "basket_stress_frac": 0.2}, M.Config())
+check("RT-9: ...the new bounds themselves accepted", len(good) == 2 and not bad, bad)
 b.cfg.basket_mult, b.cfg.basket_mult_after_fail = 2.0, 8.0
 b.basket_test = "failed"
 check("RT-5: a failed test never RAISES the multiplier (mult_after_fail 8 > mult 2 -> 2)",

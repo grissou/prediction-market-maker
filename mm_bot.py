@@ -1280,8 +1280,8 @@ OVERRIDABLE = {
     "basket_kill_hours": (0.25, 24.0),
     "basket_writes_frac": (0.0, 1.0),
     "basket_max_orders_per_cycle": (1, 20),
-    "basket_slip": (0.0, 0.05),
-    "basket_stress_frac": (0.0, 1.0),
+    "basket_slip": (0.0, 0.02),      # (P9 red team: 5c over a 5-25c longshot's ask = up to +100% paid through the book)
+    "basket_stress_frac": (0.2, 1.0),   # (P9 red team: 0 = the basket invisible to reduce-only and the backstop)
     # --- Package 9 F2/F5 ---
     "tilt_exit_take": (False, True),
     "tilt_exit_take_max_cost": (0.0, 0.05),
