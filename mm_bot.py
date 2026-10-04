@@ -1349,9 +1349,9 @@ class Config:
     mom_exit_utc: str = ""                # optional ISO UTC time from which the exit runs ("" = none)
     mom_kill_frac: float = 0.75           # kill when the sleeve at the mark < this x its cost (120 s)
     # --- Package 13 B (analysis/p12/SPEC_P13_AGGRESSIVE.md sections 4-5; everything OFF by default). The same limits
-    # stay: the cash gate, the value floor, the backstop tripwire (global_reduce), the kill switch, aggr_max_market_usd /
-    # aggr_max_race_usd of collateral (every bucket and resting order combined); never an order to move a mark, no wash
-    # trade, never across our own orders.
+    # stay: the cash gate, the value floor, the backstop tripwire (global_reduce), the kill switch,
+    # aggr_max_market_usd / aggr_max_race_usd of collateral (every bucket and resting order combined); never an order
+    # to move a mark, no wash trade, never across our own orders.
     # 4. tilt_harvest_ladder True: sell the tilt as a MAKER (Bot.hv_tick, cycle step 6g). Every market with a fresh
     # liquid race-scaled p (alloc_p) that is not a momentum-sleeve leg, a basket leg or a P12 set-ladder market: a
     # LONGSHOT (p <= 0.10) gets resting YES ASKS at its best other ask + each harvest_offsets, a FAVOURITE (p >= 0.90)
@@ -1385,11 +1385,12 @@ class Config:
     # 1.0 / 0.0 (resolved; today's feed never shows that: ref_prices drops closed markets and keeps prices strictly
     # inside (0, 1)); a liquid price back inside the band un-calls it. On called races only (Bot.el_takes): the stale
     # tournament quotes are TAKEN - YES bought at asks below election_take_max_price on a winner (a covered "sell NO"
-    # where we hold NO), YES sold into bids above 1 - it on a loser (YES held first, else a short) - immediate-or-cancel,
-    # batched (batch_size orders a write), through the cash gate, within the collateral caps and the holdback (the
-    # takes' budget), not blocked by the pre-close windows while close_override_utc keeps the market open (only the
-    # stop window stops them); the market maker is reduce-only there. Journal "ELECTION take ...", fill class
-    # "election", status.json "election". False = unchanged.
+    # where we hold NO), YES sold into bids above 1 - it on a loser (YES held first, else a short) - immediate-or-
+    # cancel, batched (batch_size orders a write), through the cash gate, within the collateral caps and the holdback
+    # (the takes' budget), not blocked by the pre-close windows while close_override_utc keeps the market open (only
+    # the stop window stops them); the market maker is reduce-only there. Journal "ELECTION take ...", fill class
+    # "election", status.json "election". Sleeve / basket legs are left alone (as by every other taker). The calls
+    # use the RAW Polymarket price of the leg (not race-scaled). False = unchanged.
     election_night: bool = False
     election_holdback_usd: float = 20000.0   # cash kept for the election takes, $ (their budget)
     election_holdback_from_utc: str = "2026-11-03T12:00:00Z"   # the holdback is reserved from this time
@@ -12228,7 +12229,7 @@ class Bot:
     P13B_KEYS = ("harvest", "election")   # status.json keys Package 13 B adds (absent while unused)
     HV_LONGSHOT, HV_FAVOURITE = 0.10, 0.90   # the harvest ladder's bands: asks where p <= / bids where p >= these
     HV_TOL = 0.01                 # a level more than this off its target, or p moved more since the re-quote: at once
-    HV_KEEP_MARGIN = 60.0         # at a re-quote an order exactly at its target stays if it outlives the next one by this
+    HV_KEEP_MARGIN = 60.0         # at a re-quote an order exactly at its target stays if it outlives the next by this
     HV_REFUSED_WAIT = 900.0       # the exchange refused a market's levels: not re-sent there before this (s)
     EL_TAKE_COOLDOWN = 5.0        # after an election take on a market, no new one there for this long (s)
 
@@ -12282,7 +12283,8 @@ class Bot:
         it is reserved (el_holdback_on); 0 before / without it."""
         if not self.el_holdback_on(now):
             return 0.0
-        return max(0.0, self.cfg.election_holdback_usd - (getattr(self, "el_totals", None) or {}).get("cash_spent", 0.0))
+        spent = (getattr(self, "el_totals", None) or {}).get("cash_spent", 0.0)
+        return max(0.0, self.cfg.election_holdback_usd - spent)
 
     def cash_reserve(self):
         """The cash the allocator (its buys and spare cash), the momentum buys and the stale takes'
@@ -12309,7 +12311,8 @@ class Bot:
                 and (meta.get(o.order_id) or {}).get("harvest")]
 
     def hv_on(self):
-        """Cycle step 6g runs: the flag, a plan / state left, or levels of ours resting (pulled once the flag is off)."""
+        """Cycle step 6g runs: the flag, a plan / state left, or levels of ours resting (pulled once the flag is
+        off)."""
         return bool(getattr(self.cfg, "tilt_harvest_ladder", False) or getattr(self, "hv_state", None)
                     or getattr(self, "hv_plans", None) or getattr(self, "hv_sides", None)
                     or (self.api.live and self.hv_orders()))
@@ -12422,11 +12425,12 @@ class Bot:
 
     def hv_tick(self, now, inv, mine_real, now_m=None, skip=()):
         """Package 13 B section 4, cycle step 6g: plan (hv_plan); pull a market's levels when it has no plan (unless
-        only "soft") or a level that no longer exists; re-quote a market when a level is > HV_TOL off its target, p moved
-        > HV_TOL or harvest_requote_s passed (an order exactly at its target with life left keeps its queue spot);
-        re-place a missing level at once. Placements and re-quotes within harvest_writes_frac of the writes left
-        (pulls always), batched batch_size orders a write, through the cash gate less the election holdback. Returns
-        the exchanges where orders were placed or cancelled (not quoted this cycle)."""
+        only "soft") or an order that no longer clears (hv_order_ok); re-quote a market when an order is > HV_TOL off
+        its nearest target, p moved > HV_TOL or harvest_requote_s passed (an order exactly at a target with life
+        left keeps its queue spot); place a missing level (filled / gone) at once. Placements and re-quotes within
+        harvest_writes_frac of the writes left (pulls always), batched batch_size orders a write, through the cash
+        gate less the election holdback. Returns the exchanges where orders were placed or cancelled (not quoted
+        this cycle)."""
         cfg = self.cfg
         now_m = time.monotonic() if now_m is None else now_m
         self.alloc_ages = self.refs.ages() if self.refs is not None and hasattr(self.refs, "ages") else {}
@@ -12628,6 +12632,26 @@ class Bot:
                         "to the outcome", ex.label if ex else e, "bought" if bid else "sold", qty, px, m.get("harvest"),
                         f"{p:.3f}" if p is not None else "?", edge)
 
+    def p13b_summary(self):
+        """" | harvest N mkts, L levels, $Xk resting, F filled 24h ($E edge)" and " | election: N called, T takes, $Xk
+        spent (holdback $Yk left)" for the 2-hourly summary while in use; "" otherwise. Never raises."""
+        try:
+            parts = []
+            h = getattr(self, "hv_info", None) or {}
+            if h:
+                parts.append(f"harvest {h.get('markets', 0)} mkts, {h.get('levels_resting', 0)} levels, "
+                             f"${h.get('collateral_resting', 0) / 1000:.1f}k resting, {h.get('filled_24h', 0)} filled "
+                             f"24h (${h.get('edge_filled_24h', 0):.0f} edge)")
+            e = getattr(self, "el_info", None) or {}
+            if e:
+                parts.append(f"election{' ACTIVE' if e.get('active') else ''}: {len(e.get('called_races') or {})} "
+                             f"called, {e.get('takes', 0)} takes, ${e.get('cash_spent', 0) / 1000:.1f}k spent "
+                             f"(holdback ${e.get('holdback_left', 0) / 1000:.1f}k left)")
+            return " | ".join(parts)
+        except (TypeError, ValueError, AttributeError) as e:
+            log.warning("summary Package 13 B part failed: %s", e)
+            return ""
+
     # --- section 5: election night ---
     def el_on(self):
         return bool(getattr(self.cfg, "election_night", False) or getattr(self, "el_calls", None)
@@ -12790,8 +12814,9 @@ class Bot:
         plan = self.el_take_plan(inv, now_m, skip)
         if not plan:
             return traded
-        if not self.api.live:
+        if not self.api.live:                     # (each market logged once a minute at most)
             for c, o in plan:
+                self.el_until[o["exchangeId"]] = now_m + 60.0
                 log.info("[dry] ELECTION take %s: %s %d YES @ %.3f (%s)", self.ex[o["exchangeId"]].label, o["action"],
                          o["quantity"], o["price"], "winner" if c["buy"] else "loser")
             return traded
@@ -13279,6 +13304,9 @@ class Bot:
         if part:
             line = f"{line} | {part}" if line else part
         part = self.p13_summary()                     # Package 13 A: " | buckets ... | momentum ..."
+        if part:
+            line = f"{line} | {part}" if line else part
+        part = self.p13b_summary()                    # Package 13 B: " | harvest ... | election ..."
         if part:
             line = f"{line} | {part}" if line else part
         if getattr(self.cfg, "aggressive_value", False):   # Package 13 A2: leads every summary while on

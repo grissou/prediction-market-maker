@@ -1,11 +1,11 @@
 """
 Offline tests for Package 13 part B (analysis/p12/SPEC_P13_AGGRESSIVE.md sections 4-5):
 4 tilt_harvest_ladder: resting YES asks on longshots (p <= 0.10) at the best ask + harvest_offsets, YES bids on
-  favourites (p >= 0.90) at the best bid - offsets, only where the edge per $ clears harvest_min_edge; harvest_level_usd of
-  collateral a level; the per-market / per-race collateral caps (every bucket); the cash gate (and the election
-  holdback); never through the book or our own orders; re-quoted on a 1c move of a level or of p, else every
-  harvest_requote_s; pulled on every trigger; the market maker leaves the ladder's side alone; fills are value positions,
-  journal "HARVEST fill", fill class "harvest".
+  favourites (p >= 0.90) at the best bid - offsets, only where the edge per $ clears harvest_min_edge;
+  harvest_level_usd of collateral a level; the per-market / per-race collateral caps (every bucket); the cash gate (and
+  the election holdback); never through the book or our own orders; re-quoted on a 1c move of a level or of p, else
+  every harvest_requote_s; pulled on every trigger; the market maker leaves the ladder's side alone; fills are value
+  positions, journal "HARVEST fill", fill class "harvest".
 5 election_night: the holdback (reserved only from election_holdback_from_utc), calls (10-minute persistence, resolved,
   un-call), takes on called races only (both sides, immediate-or-cancel, caps, holdback, cash gate, batched), not
   blocked by the pre-close windows while close_override_utc keeps the market open, the quoter reduce-only on called
@@ -247,8 +247,8 @@ for k, (dflt, rng) in SPEC.items():
     check(f"{k}: default {dflt!r}, range {rng}, validates in range / refuses outside", ok_d and ok_r and ok_v,
           (getattr(D, k), M.OVERRIDABLE.get(k)))
 _f = list(M.Config.__dataclass_fields__)
-check("one contiguous block after mom_kill_frac in Config", _f[_f.index("mom_kill_frac") + 1:][:len(SPEC)] == list(SPEC),
-      _f[_f.index("mom_kill_frac") + 1:][:4])
+check("one contiguous block after mom_kill_frac in Config",
+      _f[_f.index("mom_kill_frac") + 1:][:len(SPEC)] == list(SPEC), _f[_f.index("mom_kill_frac") + 1:][:4])
 check("Bot.P13B_KEYS names the status keys Package 13 B adds", tuple(M.Bot.P13B_KEYS) == ("harvest", "election"))
 
 # ============================================================================================ flags off = base
@@ -482,7 +482,8 @@ warm(b)
 hv(b)
 n_b, n_c = len(api.sent("batch")), len(api.sent("cancel_order"))
 hv(b)
-check("next cycle, nothing moved: no write at all", len(api.sent("batch")) == n_b and len(api.sent("cancel_order")) == n_c)
+check("next cycle, nothing moved: no write at all",
+      len(api.sent("batch")) == n_b and len(api.sent("cancel_order")) == n_c)
 api.books["A2"]["asks"] = [lvl(0.085, 2000)]
 hv(b)
 check("the best ask 0.5c higher (targets 0.105 / 0.125 / 0.145, within 1c): not re-quoted (queue position)",
@@ -604,7 +605,8 @@ check("...the other side is still quoted (A2 bid / A1 ask)", qa.bid is not None 
       and qf.ask is not None and qf.ask_size > 0, (qa, qf))
 b.ex["A2"].inv = 300.0
 inv1 = {**inv0, "A2": 300.0}
-qa2 = quiet(b.decide, b.ex["A2"], 0.07, inv1, b.effective_inventory(inv1), False, 0.0, time.monotonic(), 0.02, 0.07, True)
+qa2 = quiet(b.decide, b.ex["A2"], 0.07, inv1, b.effective_inventory(inv1), False, 0.0, time.monotonic(), 0.02, 0.07,
+            True)
 check("...on the ladder's side only what reduces a position (a 300 long: ask <= 300)", (qa2.ask_size or 0) <= 300,
       qa2)
 b.ex["A2"].inv = 0.0
@@ -892,7 +894,8 @@ check("...on the winner with a 300 long: no bid, the ask only reduces (<= 300)",
 api, b = el_bot()
 b.cfg.election_night = False
 el(b)
-check("election_night off: calls cleared, the quoter back to normal (no called sides)", not b.el_sides and not b.el_calls)
+check("election_night off: calls cleared, the quoter back to normal (no called sides)",
+      not b.el_sides and not b.el_calls)
 # full cycles: no duplicates
 api, b = mk_bot(election_night=True, election_start_utc=PAST, refs={**refs_default(), **CALLED_REFS},
                 books={**books_default(), "A1": bk(0.92, 0.93), "A2": bk(0.06, 0.08)})
@@ -906,6 +909,29 @@ n_take = sum(1 for o in api.wire if o["exchangeId"] == "A1" and o["price"] == 0.
 check("three full cycles (live): the winner's 0.93 ask taken exactly once", n_take == 1, wire(api, "A1"))
 check("...status.json has election, not harvest", (lambda d: "election" in d and "harvest" not in d)(
     (b.write_status(True), json.load(open(b.cfg.status_file)))[1]))
+
+# summary, dry run
+api, b = el_bot()
+el(b)
+line = b.summary_ops_line(100000.0) or ""
+check("the 2-hourly summary shows ' | election ACTIVE: 1 called, 2 takes, $3.7k spent (holdback ...)'",
+      "election ACTIVE: 1 called, 2 takes, $3.7k spent" in line, line[-160:])
+api, b = laddered()
+line = b.summary_ops_line(100000.0) or ""
+check("...and ' | harvest 2 mkts, 6 levels, $Xk resting, 0 filled 24h ($0 edge)'", "harvest 2 mkts, 6 levels" in line,
+      line[-160:])
+api0, b0 = mk_bot()
+line = b0.summary_ops_line(100000.0) or ""
+check("...absent while off", "harvest" not in line and "election" not in line)
+api, b = mk_bot(election_night=True, election_start_utc=PAST, live=False, refs={**refs_default(), **CALLED_REFS})
+warm(b)
+b.cur_refs.update({"A1": 0.985, "A2": 0.015})
+b.cur_liquid |= {"A1", "A2"}
+call(b, "A1", "win", time.time() - 3600)
+n0 = len(api.wire)
+el(b)
+check("dry run: the election takes are logged, nothing sent, nothing counted", len(api.wire) == n0
+      and b.el_totals["takes"] == 0)
 
 # ============================================================================================ robustness
 print("--- nothing crashes: empty books, no Polymarket, unknown markets")
@@ -929,7 +955,8 @@ check("no Polymarket references at all: cycles run, no ladder, no calls", b.fail
       and not b.el_calls)
 t1 = quiet(b.hv_tick, M.utcnow(), {"NOPE": 10.0}, {}, None, set())
 t2 = quiet(b.el_tick, M.utcnow(), {"NOPE": 10.0}, {}, None, set())
-check("hv_tick / el_tick with an unknown market in the positions: no crash", isinstance(t1, set) and isinstance(t2, set))
+check("hv_tick / el_tick with an unknown market in the positions: no crash",
+      isinstance(t1, set) and isinstance(t2, set))
 b.p13b_init({"calls": {"X": {"side": "maybe", "since": 1}, "A1": {"side": "win", "since": "x"}}, "totals": "bad"})
 check("a malformed saved election state is dropped (no crash)", b.el_calls == {} and b.el_totals["cash_spent"] == 0.0)
 
