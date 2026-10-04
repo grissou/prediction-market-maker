@@ -37,6 +37,6 @@
   "alloc_set_cost_per_usd": 0.06,
   "alloc_pin": "Rep U.S. Senate,Dem U.S. Senate",
   "alloc_mm_reserve": 15000.0,
-  "value_quote_hurdle": 0.08,
+  "value_quote_hurdle": 0.05,
   "take_respect_reserve": true
 }

@@ -1,9 +1,9 @@
 <!-- STATUS (Finisher 2b, updated on every push) -->
-**STATUS 11:20 UTC 4 Oct (branch claude/finisher-package9):** phase = Package 11 literature sweep (owner: "5 hours reading papers and online resources for ideas"; to ~16:15). READY: Package 10 (2abf782 + f17f63e, PR #11, VALUE MODE), 9 (superseded), 8 (LIVE in value mode), 7, 6, 5.
-Package 11 = four opus readers on (1) prediction-market pricing anomalies and the favourite-longshot bias, (2) market making / inventory / thin-book microstructure, (3) portfolio theory for correlated binary outcomes and rank / contest objectives, (4) US midterm forecasting, polling error, Polymarket calibration, settlement rules; each >= 15 sources, >= 10 ideas in analysis/p11/lit_<theme>.md; the executor synthesises analysis/p11/LIT_REVIEW.md (ranked, with build cost and a test on our data).
-Numbers: none yet.
-Deploy: nothing new; Package 10 files stand (deploy/package10/).
-Next: LIT_REVIEW.md -> the owner picks what to build.
+**STATUS 12:50 UTC 4 Oct (branch claude/finisher-package9):** phase = Package 11 literature sweep DONE (analysis/p11/LIT_REVIEW.md; 4 readers, ~150 sources, 56 ideas). READY: Package 10 (2abf782 + f17f63e, PR #11, VALUE MODE), 9 (superseded), 8 (LIVE in value mode), 7, 6, 5.
+Package 11 findings that change the plan: the Rep Senate sleeve is roughly FAIR (the seat-count edge was Ohio at 0.40 vs the market's 0.6); a rank bet, if any, is ONE digital = Texas Rep <= $20k (P150 ~30% vs 16%, P85 6.5%); assume NO tilt reversion before the close (keep 10-15k back for the last days); the NO+NO sets are stock: sell the rich favourite-NO leg, keep the longshot-NO (+0.5-0.9k vs unwinding at cost; the P9 set split does the opposite and stays off); stage-3 hurdle 0.08 -> 0.05 (bids would not fill); the rules accept trades until 12:00 pm ET on 4 Nov vs the API's 00:00 UTC settlementDate: ask SIG - if open, election-night taking is the biggest P150 lever (+10-40k).
+Numbers: VALUE_PLAN.md corrected; stage3 file hurdle 0.05.
+Deploy: Package 10 files (deploy/package10/) stand; stage3 hurdle now 0.05.
+Next: owner asks SIG about the trading close and the control rule; Package 12 candidates: rich-leg set sale ladder, skew toward target inventory, writes by expected value per write, consensus-band buy filter, TX/KS shade.
 
 # START HERE (Team run, branch `claude/run-c-tournament-improvements-pycdet`)
 
