@@ -1,9 +1,9 @@
 <!-- STATUS (Finisher 2b, updated on every push) -->
-**STATUS 21:45 UTC 3 Oct (branch claude/finisher-package8):** phase = Package 8 READY. READY: Package 8 ("READY: Package 8", PR PR_NUM), Package 7 (2ef6d12, PR #9, LIVE since 19:15), Package 6 (f4214f1, PR #8), Package 5 (c14c92b, PR #7).
-Package 8 = item 1 `cash_gate_enabled` + `adding_factor_per_market` (every 400 refusal traced to the race-netted "adding" side; no order needing cash the exchange does not have is sent), item 2 pair sizing in sets / cheapest race first / owed-record age (verdict: keep 0.02, per-cycle 1), item 3 tilt exits (`tilt_exit_priority`, `tilt_exit_full_size`, `ref_guard_tilted`, `ref_guard_exits`): +206 ± 55 exchange-style / +275 ± 91 liquidation, tilt exposure -2,340 ± 920 (-30%) in 3 h, live-pinned world; adding factor: keep 0 for 3 h of stage 3, then 0.95 resume if exposure fell.
-Numbers: SIM_NOTES "Round 8" (8 x 3 h paired); items 1-2 unit-test evidence (live_sim has no cash / set collateral); flags off pinned identical to 2ef6d12 on the live config; red team 1 high / 4 medium, all fixed; 33 suites green + STRESS_LADDER 20/20.
-Deploy: code -> deploy/package8 stage1_cash_gate -> stage2_pair_sizing -> stage3_tilt_exits -> (b) by hand after 3 h; watch list in the Package 8 section.
-Next: owner deploys stage 1 and reads `cash_gated` / refusals; the executor stays subscribed to PRs #7/#8/#9/PR_NUM.
+**STATUS 09:45 UTC 4 Oct (branch claude/finisher-package9):** phase = Package 10 READY ("READY: Package 10", PR #11 updated). READY: Package 10 (VALUE MODE), 9 (024d5a1, superseded: do not deploy the basket), 8 (PR #10, LIVE in value mode), 7, 6, 5.
+Package 10 = SIG pays at the OUTCOME: `value_mode` (no reducing quote below Polymarket -/+ 0.5c, incl. reduce-only; the pre-close dump disabled and overridable), `bloc_delta_enabled` (national-factor cap replaces the share party cap), `alloc_*` (hourly capital allocator by edge per $ to the outcome, market-making reserve from the lowest-edge holdings and NO+NO sets), `value_quote_hurdle` (value market making: favourite bids / longshot asks in the tails, two-way middle), `take_respect_reserve`.
+Numbers (analysis/p10/VALUE_PLAN.md): hold E 109.0k / P150 0% / P85 0.6%; max-EV reallocation 112.9k; + recycling 114.9k (+1.6k, not +10-20%); Rep Senate $20k sleeve P150 17% (24% seat-count) at P85 4%, cliff past $22k; funded value MM at 0.67 / 1.0k/day P150 6% / 29% at P85 0.1% (carry unmeasured live). live_sim at the Polymarket mark: ref_weight 1.0 + skews off +381 +- 73 per 3 h. Red team 7 fixed; dry run on the live state 44 checks; 40 suites + STRESS_LADDER green.
+Deploy: deploy/package10 stage0 -> stage1_value_guard -> stage2_allocator -> stage3_value_mm; config-only today on Package 8: ref_weight 1.0, skew_max 0, skew_age_enabled false.
+Next: owner deploys stage 1 (stops the reduce-only value selling, leaves reduce-only); the executor stays subscribed to PRs #7-#11.
 
 # START HERE (Team run, branch `claude/run-c-tournament-improvements-pycdet`)
 
@@ -12,7 +12,173 @@ The Builder's previous START_HERE is kept as `START_HERE_BUILDER.md`; Run A's no
 Plan: `PLAN.md`. Packages appear below as they become READY (commit messages start "READY: Package N").
 Deploy only commits whose message starts "READY"; the branch is cumulative.
 
-## Package 8 (READY, Finisher 2b, 3 Oct ~21:45 UTC; branch `claude/finisher-package8` from Package 7 2ef6d12; draft PR PR_NUM): the cash gate (ends the 400 refusals), pair-unwind sizing in sets, and the tilt exits (all OFF; staged files in `deploy/package8/`)
+## Package 10 (READY, Finisher 2b, 4 Oct ~09:45 UTC; branch `claude/finisher-package9` on top of Package 9; draft PR #11 updated): VALUE MODE — SIG pays at the outcome: the no-value-selling guard, bloc-correlated settlement risk, the capital allocator with a market-making reserve, value market making (all OFF; staged files in `deploy/package10/`; the plan in `analysis/p10/VALUE_PLAN.md`)
+**The owner's strategy change (07:30):** SIG settles positions at the OUTCOME. Package 9's long-tilt basket is negative-EV there (the
+leader's +600% is mark-to-market: tilt-long books settle at a median ~28k); our toward-Polymarket book is +EV (marks 99.9k, E[final]
+109.0k by the outcome model). Live = Package 8 in value mode (`ref_tilt_enabled`, tilt exits, `ref_guard_*`, `take_tilted_ref` off,
+`pair_no_unwind_max_cost` 0.003). Package 9 stays READY but is NOT to be deployed; its code is on the branch with every flag off.
+**Research (`analysis/p10/`: ideas_F 17, ideas_H 15, ideas_I 17; scripts F_*, H_*, I_*):** F: exchange flow ~3-5M shares/day; our capture
+0.45c/share at 1 h; best day 313k shares (+1.0-1.3k); market making alone 0.9-2.0k/day and needs 15-25k of rotating cash; cash binds, not
+speed (5,188 quotes refused for funds vs 4,139 accepted on 3 Oct). H: the outcome model (Polymarket probabilities race-scaled, one
+national factor rho 0.45 / 0.85 for control, 20k outcomes): hold 109.0k / P120 2.7% / P150 0% / P85 0.6%; max-EV reallocation (a) 112.9k /
+29% / 0% / 1.9%; + recycling (b) 114.9k; the ONE +EV correlated bet is Rep U.S. Senate YES at 0.35 (the 34 races imply P(Dem control)
+0.49-0.59 vs the market's 0.645): $20k sleeve P150 17% (24% under the seat count) at P85 4%, a CLIFF to 25-65% past $22-27k; competitive-
+race party blocs lose EV at the ask (P85 33-47%). Leaderboard at the outcome: top 50 ~133k (124-167k), top 10 ~197k; 582 never-traded
+accounts sit at 100k, so any sleeve that loses ranks ~790. I: 82 paired rotations rotate $35k for +3.4k of EV net of spread (top 30: +1.95k);
+the NO+NO sets cost 2.5-5.5c each at the touch (a 2c rule unwinds none) and free 21.2k for $668 of EV; recycling adds +1.6k (+1.4%), not
++10-20%; valued at the outcome, 3 Oct maker fills: favourite bids + longshot asks +1,948, favourite asks + longshot bids -1,920, takes +1,862;
+AUDIT: reduce-only quotes skip the skew clamp and sell up to ~4.5c below Polymarket (`ref_weight` 0.7 + skews), and the pre-close windows
+(`exit_hours_before_close` 2, `flatten_*` 12/6, not overridable) would dump the book and any sleeve before the results.
+**Built (each OFF, in OVERRIDABLE; flags off pinned byte-identical on a grid; `mm_bot.py` +~700 lines):**
+- A1 `value_mode` (+ `value_sell_margin` 0.005): the reducing side is never priced below p - margin (long) / above p + margin (short), p = the
+  race-scaled raw Polymarket reference when liquid, in normal AND reduce-only quoting (the clamp now runs there too); `exit_quote` floored;
+  keep limits floored; a reducing quote never flips the position past its size at a price the adding rule refuses (RT-7); the pre-close
+  windows are inert (never below the 15-min `stop_minutes_before_close`, which still stops everything: RT-3) and the three window settings
+  are OVERRIDABLE (0-48 / 0-48 / 0-12 h); WARNINGS at start-up / override for any value-selling flag still on. tests/test_value_mode.py 101.
+- A2 `bloc_delta_enabled` (+ `bloc_rho` 0.45, `bloc_rho_control` 0.85, `max_bloc_delta_frac` 0.05): the closed-form national-factor
+  sensitivity sqrt(rho) phi(Phi^-1(p_dem)) per YES share (sign + = Rep-leaning, as `party_delta`), p_dem scaled for independents; the cap
+  |bloc_delta| <= 5% of the account per sd replaces the share-count party cap in `party_blocks` / `party_shift` / the ladder; a contract
+  keeps its last sensitivity through a Polymarket outage (RT-4); status `bloc_delta`, `bloc_delta_frac`; summary " | bloc delta X/sd".
+  `Bot.bloc_delta_now()` / `bloc_cap()` for the allocator. Ranges: `worst_case_backstop_frac` to 1.5; `max_worst_case_frac` 0.35 allowed.
+- A4 `value_quote_hurdle` (0 = off; + `value_mid_low` 0.15, `value_mid_high` 0.85, `value_mid_inventory_quotes` 2): the ADDING side must
+  clear a per-$ hurdle to the outcome (a YES bid <= p/(1+h), an adding ask >= 1 - (1-p)/(1+h)), so in the tails only favourite bids and
+  longshot asks reach the book; the middle is two-way at `min_edge`, capped at 2 quote sizes (the cash rotates).
+- B `alloc_enabled` (+ `alloc_interval_s` 3600, `alloc_min_improvement` 0.03, `alloc_min_edge_buy` 0.05, `alloc_max_edge_sell` 0.02,
+  `alloc_pin` "" (labels never sold), `alloc_headline` False, `alloc_max_turnover_per_hour` 15000, `alloc_max_orders_per_cycle` 4,
+  `alloc_writes_frac` 0.3, `alloc_max_contract_usd` 10000, `alloc_mm_reserve` 15000, `alloc_set_cost_per_usd` 0 (off)): hourly, ranks every
+  holding by edge-held ((p - bid)/bid; shorts (ask - p)/(1 - ask)) and every book level (own quotes stripped, p <= 30 s old) by edge per $
+  of collateral; reserve refills first (lowest edge-held, no buy) when cash < reserve, then pairs: SELL as an IOC taker at the touch only
+  if a fresh book still shows the paired level within 0.5c, READ the cash, THEN BUY (expires after 900 s; the cash stays); never flips,
+  shorts bought back only as covered NO sales, never a pinned label, never a market we quote (our quotes cancelled first), never in
+  global reduce-only except refills (RT-2), bloc check on pairs and refills (RT-5), NO+NO sets unwound through the short-set registration
+  at <= `alloc_set_cost_per_usd` of EV per $ freed, capped at the planned sets (RT-1); a pin matching nothing warns (RT-6). status.json
+  "alloc" {state, last_run, pairs_planned, sold, bought, cash_before/after, ev_gain_est, blocked_by, reserve, ...}; "ALLOC ..." lines.
+  tests/test_alloc.py 123.
+- `take_respect_reserve` (False): a stale-quote take is skipped when its cash need would leave less than `alloc_mm_reserve` free (red team
+  C-1: the takes spent 12.7k of the 11.0k the sets freed in 4 h). tests/test_take_reserve.py 15.
+**Dry run on the 3 Oct live state (`analysis/p10/DRYRUN.md`, tests/test_p10_dryrun.py 44):** stage 0 identical to the live value-mode file
+(reduce-only: worst case 81.9k vs 80.8k; 4 of 6 resting reducing quotes below Polymarket - 0.5c); stage 1 leaves reduce-only (worst case
+84.5k vs 131k; settlement risk 20.1k vs 35.4k), 40 reducing quotes rest, none below the floor, none crossing, bloc delta +2,516/sd (2.5% of
+the account); stage 2: first plan 2 sales + 11 set unwinds, all reserve refills (cash ~0); over 4 h $11.3k freed ($11.0k from sets for ~$347
+of EV), nothing pinned sold, no flips, every short bought back covered; the takes then spent 12.7k (hence `take_respect_reserve`; with
+takes off the reserve is reached in ~5-6 h); stage 3 (with `take_respect_reserve`): 220 adding sides computed, 69 at the top, 62 middle markets two-way, ~$18.9k of cash if all filled,
+~1.4k/day on F's model; with +20k of cash 201 adding sides REST (67 at the top, 48 middle markets two-way) and the takes spend 5.0k of it
+(19.3k without the flag); tilt rise (+3c): no value sold; convergence (books to p +- 1c): the allocator frees ~20k into
+the reserve and buys nothing (no level with >= 5% edge).
+**Simulation evidence:** live_sim judged on the Polymarket mark `pnl` (= settlement EV; tests/live_sim_round10_value.txt, 8 x 3 h, live
+world with tilt 0.14): `ref_weight` 1.0 +212 +- 66; + `skew_max` 0 + age skew off +381 +- 73; + adding factor 0.5 with 20% cash +497 +- 82
+(worst case rises as value is held: hence the backstop at 1.3). The outcome model is the judge for everything else (no 30-day sim).
+**Red team (`analysis/p10/REDTEAM.md`): 7 fixed** (RT-7 reducing quote flipping past the position; RT-1 set unwind of 1,000 sets for a $50
+refill; RT-2 allocator trading in global reduce-only; RT-3 pre-close inertness disabling the 15-min stop; RT-4 outage zeroing the bloc
+delta; RT-5/6). **Caveats:** C-2 in practice the allocator refills the reserve and plans no pairs until cash >= 15k (ev_gain_est 0 in
+the dry run); C-3 the middle-band cap in headline markets is 2 x the headline size (~24k shares); C-4 ranges allow a 100k reserve +
+0.5 max_edge_sell (keep 15k / 0.02); C-5 the floor uses a stale Polymarket price if the feed stops; C-6 live the allocator gets ~2 orders a
+cycle, not 4; kill switch `max_drawdown_pct` 0.30 is on MARKS (not overridable; 0.40 or settlement-based is a code default change).
+**Suites:** 40 files green (test_value_mode 101, test_alloc 123, test_p10_dryrun 44, test_take_reserve 15, test_basket 150, test_p9_dryrun 69,
+test_mm_bot 600, test_cash_gate 83, the rest as Package 9) + STRESS_LADDER=1 20/20; py_compile under Python 3.10.
+**Deploy (owner; `deploy/package10/README.md`; base = your live value-mode file; nothing resets `arb_enabled` / `ref_tilt_headline`; only
+stage 3 moves `capital_ceiling_adding_size_factor` 0 -> 0.5, your call):** stage0 (code, handover) -> stage1_value_guard (`value_mode`,
+`ref_weight` 1.0, `skew_max` 0, `skew_age_enabled` false, the three pre-close windows 0, `bloc_delta_enabled`, `worst_case_backstop_frac`
+1.3, `max_worst_case_frac` 0.35) -> stage2_allocator (`alloc_enabled`, `alloc_set_cost_per_usd` 0.06, `alloc_mm_reserve` 15000, your
+`alloc_pin`) -> stage3_value_mm (`value_quote_hurdle` 0.08, adding factor 0.5, `take_respect_reserve`). **Config only, today, on Package 8:**
+`ref_weight` 1.0, `skew_max` 0, `skew_age_enabled` false (the live_sim +381; stops the reduce-only value selling). **Watch, stage 1 first
+hour:** the bot leaves reduce-only; `bloc_delta_frac` ~0.025; no reducing quote below Polymarket - 0.5c (recorder our_ask >= reference -
+0.005 on longs); the WARNING line lists nothing. **Stage 2 first 4 h:** "ALLOC" refill lines (sets first), `alloc.blocked_by` cash, NO+NO
+sets falling, `cash_gate_left` rising toward 15k (with takes still spending some of it until stage 3). **Stage 3 first day:** adding bids on
+favourites / asks on longshots at the top of the book, middle markets two-way; fills' edge at Polymarket >= 5% in the tails; maker P&L at
+the Polymarket mark >= 0.6k/day before relying on the reserve. **Rollback triggers:** any reducing order below Polymarket - 1c (bug: stage 0);
+an allocator sale of a pinned label; a buy before its sale's cash; account below start - 2k at the exchange mark within 3 h of a toggle
+is NOT a trigger in value mode (marks lag the tilt) unless `liquidation_value` at Polymarket (the EV) falls; 429s; a refused override.
+**Untested:** value-mode quoting against the real exchange (fills, write budget); the allocator's IOC pairs live; the outcome model's rho
+and Polymarket calibration (judgement); SIG's exact settlement rules (ties, independents, vacancies) for the Senate sleeve.
+
+## Package 9 (READY, Finisher 2b, 4 Oct ~01:30 UTC; branch `claude/finisher-package9` from Package 8 7b298a4; draft PR #11): the catch-up package — the long-tilt basket with kill-switches, taker exits for the short-tilt book, arbitrage with a cash rule (all OFF; staged files in `deploy/package9/`; the plan in `analysis/p9/CATCHUP_PLAN.md`)
+**Objective (owner, 3 Oct 22:50-23:00):** P(account >= 150k by 4 Nov) first, P(>= 200k) second, P(<= 85k) < ~10%, max drawdown < ~20%;
+rank strategies by those numbers, not by mean P&L; the smallest risk that gets P(>= 150k) above ~40%, or say plainly that none can.
+**Research (78 ideas, `analysis/p9/ideas_A-D.md`; synthesis `analysis/p9/SYNTHESIS.md`; data = `ops-snapshot-2026-10-03`, to 22:47 UTC):**
+the leader's +600% is the favourite-longshot tilt: longshot YES / favourite NO bought on 28 Sep went x3.89 (top 10 x5.74, best x11.5:
+Dem Montana Senate 0.010 -> 0.115) as s rose 1.7% -> 12.6% in 54 h (longshot mids 3.6c -> 9.4c with Polymarket flat at 2.5c); it fits a
+logistic (K 0.35 +- 0.18; K < 0.20 rejected, 0.25-2 equally likely; the equal-weight series bends at ~0.18); its fuel is new entrants
+(~6/h) and bid-heavy cheap-side books whose depth halved in 30 h. Our +35.9k toward-Polymarket book is the OTHER side (-356/point); the
+stale-quote takes, measured from RAW Polymarket, added +15.0k of it (276 fills, 100% toward Polymarket, -406 at the mid). Rivals' stale
+quotes are the tilt (nothing to take after removing it: -0.6 to +0.3 c/share); riskless sets return ~3.4%/month held, a set carousel
+0.3-0.5k/day; market making 1-2k/day with capital, +149/day at 0 cash. **Nothing we run reaches 150k (P 0%).** The one plan that does:
+hold the long side of the tilt, sized on the cushion above a floor, exited before the close.
+**Built (each OFF, own setting, in OVERRIDABLE; flags off pinned byte-identical to Package 8 on a grid; `mm_bot.py` +1,476 lines):**
+- F1 `basket_*` (28 settings; tests/test_basket.py 149): basket $ = `basket_mult` 5 x (liquidation value - floor), floor = max(`basket_floor`
+  86k, `basket_floor_peak_frac` 0.85 x confirmed peak), cushion net of our own last-24 h buying x `basket_impact_frac` 0.06, cap min(80k,
+  0.85 x account); legs = longshot YES (Polymarket < `basket_max_ref` 0.10) or favourite NO (short YES, only with covered NO sales and no
+  NO+NO set), cheapest route per race, laggards first, no headline races, no independents, <= 25c a share, >= 20 legs at <= 5% each;
+  built over `basket_build_hours` 4 as an IOC taker at ask + 0.5c (first build <= 75% of visible asks, then <= 25%/h per market), <= 4
+  orders and 50% of the write budget per cycle, cash-gated (needs `cash_gate_enabled` and a cash read < 5 min old), never on a market or
+  race another feature traded this cycle, never where we rest an order (the market maker does not quote basket legs; takes, pair unwinds
+  and tilt exits skip them; skew and `tilt_exposure` exclude them: status `basket.tilt_exposure`). **Kill:** liquidation value < floor or
+  < 85% of peak for 120 s -> sold down over `basket_kill_hours` 2, latched off across restarts (reset only by an explicit false then true).
+  **Exit:** from `basket_exit_utc` 2026-10-18T12:00:00Z over 24 h, no adds from 7 days before, never past T-72 h (hard-coded, per market
+  too). **36-h test:** tilt_s < 0.15 or 12-h slope <= 0 -> m `basket_mult_after_fail` 1.5 (can only cut). **Risk model:** basket legs counted
+  at `basket_stress_frac` 0.4 x value in both measures; exempt from reduce-only; buys refused while the stressed worst case exceeds
+  `worst_case_backstop_frac` x account (the last resort). Legs valued at max(fair value, book) for sizing (no over-buying). A crash in the
+  planner never stops the market maker. status.json "basket" {state, peak, floor, cushion, target, held, legs, impact, test, ...} and the
+  2-hourly " | basket $X (N legs, state)".
+- F2 `tilt_exit_take` (+ `_max_cost` 0.01, `_per_hour` 15000, `_max_per_cycle` 3, `_max_leg_frac` 0.5; F2b `tilt_exit_take_split_sets` +
+  `tilt_exit_split_max_ref` 0.10: the longshot-NO leg of a NO+NO set is sold too, first, as a covered sale sized to the cash gate's 1.0 a
+  share, leaving the favourite-NO leg = long tilt; a refusal pauses that race 10 x take_cooldown; tests/test_tilt_exit_take.py 87): the
+  tilt exits (sides shrinking a position that adds to |tilt_exposure|) are TAKEN at the best other level when within 1c of the TILTED fair
+  value (never raw Polymarket); longshot NO first, favourite YES next, lines marked below their exit price first; never flips, never beyond
+  depth, never during a jump guard, never set legs beyond the lone part, never basket legs; IOC, cash-gated, covered sales for NO.
+- F5 `arb_cash_rule` (+ `arb_cash_mult` 1.25, `arb_cash_reserve` 2000, `arb_leg_depth_frac` 0.8), `arb_sellback` (+ `_min_sum` 1.00;
+  tests/test_arb_cash.py 53): arbitrage sets only when `cash_left` >= 1.25 x need + 2k (shrunk to what fits), own quotes excluded from
+  bid-sums and depth, size <= 0.8 x the thinnest leg, unequal legs owed and completed or reversed the same cycle (never flips, never a
+  one-legged set); YES+YES sets sold back at bids >= 1.00. status `arb_cash_blocked`, `tilt_exit_takes`.
+**Simulation evidence:** live_sim screens of the config hygiene and `tilt_exit_take` in the live world are flat to the digit (tests/live_sim_round9_hygiene.txt: the sim has no takes and its estimate equals the world tilt, so neither `take_tilted_ref` nor `ref_tilt_max` 0.20 nor the taker exits are mirrored there); the Monte Carlo `analysis/p9/B_mc.py` / `D_mc.py` / `P9_plan_mc.py` (output `PLAN_MC.txt`) IS the screen for the
+basket: live_sim's 3-h world cannot hold a 30-day position and has no cash or set collateral (items F1/F5 are unit-test evidence as
+Packages 7-8). The tilt model is a logistic with judgement priors (K median 0.30 base / 0.18 bear / 0.45 bull; 12% crash hazard; 35%
+chance of an endgame unwind; D's greater-fool world at 20% in the "D prior"); own impact 0.010 of tilt per 80k bought, 10% extra
+slippage after a crash, stops on liquidation value. **Odds (switch-on ~09:00 UTC 4 Oct):** hold the book 0% / 0% / 6% / 10%; m 5 cap 80k
+built in 4 h **29%** (D prior 22%) / 1% / 1.2% / 4.2%; + carry 300/day 36% / 4% / 0.5% / 4.2%; **m 6 cap 90k + carry 40% (29%) / 11% /
+0.7% / 4.5%** (P150 / P200 / P<=85k / P(DD>20%)); built over 12 h 26%; half size 3%; 20 h later 20%, 34 h later 7.5%; 5% exit failure under
+the settled rule 28%. **CORRECTED (02:30, after the dry run below; `PLAN_MC2.txt`):** those odds assumed an 80-90k basket bought in 4 h. On the live books the
+taker exits free ~8k/day within 2c of tilted fv (the whole toward book only through all three levels at any price), the sets are the
+cheapest cash (21.9k at 2c), and each $ bought at the ask is valued at the bid and moves the tilt (-15c of cushion per $), so m 5 settles
+near 40k and m 6 near 45k. With the basket built over 24 h: stage3 0.3%, stage3b 1.8%, + carry 9%; **stage3c (floor 80k, m 6, cap 60k)
++ carry ~20% (D prior 15%), P(<= 85k) 0.4-1.5%, P(DD > 20%) ~4%**; floor 75k / m 8 / cap 80k 23% at P(<= 85k) 2.7% (7.7% greater-fool).
+Built over 48 h: ~0-2%. Plain answer: **no legitimate strategy gets to ~40%; the best achievable is ~15-20% (stage3c) if ~60k of cash is
+raised within ~24 h; P(>= 200k) ~0%.**
+**Red team (opus, `analysis/p9/REDTEAM.md`): 2 high** (the basket's shares flipped the sign of `tilt_exposure`, turning the tilt exits
+against it: excluded; same-cycle buy on a market another feature just sold: refused), **5 medium** (ordinary shares on a basket leg
+unmanaged: adopted; sizing at fair value could over-buy 2-2.7x: valued at max(fv, book); a leg with no bids kept its lagged mark so the
+kill could miss a crash: counts at 0/1; kill/exit sales blocked by the cash gate or a set only logged: alert; the backstop no longer
+bounded the basket: buys refused above it), **3 low** (mult_after_fail could raise m; ask-share windows lost on restart; two ranges too
+wide: `basket_slip` <= 0.02, `basket_stress_frac` >= 0.2): all fixed. Documented, not fixed: `basket_enabled` false during a kill releases
+the legs (use the exit date to sell instead); no kill check while the account value is missing; a positions read lagging > 120 s can
+leave part of a leg unmanaged; `basket_floor` 50k / `basket_kill_dd` 0.5 are allowed by the ranges (keep >= 86k / <= 0.15 live).
+**Dry run (`analysis/p9/DRYRUN.md`, tests/test_p9_dryrun.py 65):** the staged files applied in order through `check_overrides` on the fake
+exchange seeded with all 237 live books, references, positions, marks and lots, full cycles on a simulated clock. Stage 0: no new orders,
+reduce-only as live (worst case 79.2k). Stage 1: out of reduce-only the raw rule would send 113 takes in 10 min, 112 without a 0.08 edge vs
+the tilted reference; stage 1 sends 2. Stage 2: 158 TILT EXIT TAKEs in 3 h, all legal (shrinking, <= cap vs tilted fv, longshot NO first, no
+set part, no own order, <= 3/cycle); cash 256 -> 9.0k, exposure 35.9k -> 31.6k, worst case -> 70k. Stage 3 at 0 cash: nothing, status
+"refused: no free cash (cash gate)" (fixed: was silent); on 9k: 26 legs, 11.3k, then cash-bound; with 91k cash: 64-67 legs, every leg rule
+held, settles ~40k (m 5) / 45k (m 6). Kill: latched after 120 s, sold 56% / 7% / 1% left at 1 / 2 / 3 h (fixed: richest-first starved the
+other legs; now furthest-behind-schedule first); two thin favourite-NO legs remain (exit depth is not checked at purchase: caveat). Exit:
+no adds from 11 Oct, sold ~1 h after the 24-h window. Stage 4: arbitrage only under the cash rule (60 blocks at 0 cash).
+**Suites:** 36 files green (test_basket 150, test_p9_dryrun 69, test_tilt_exit_take 87, test_arb_cash 53, test_mm_bot 600, test_cash_gate 83, test_tilt_exit 62,
+test_nono_sets 103, test_live_sim_marks 115, the rest as Package 8) + STRESS_LADDER=1 20/20;
+py_compile under Python 3.10.
+**Deploy (owner; `deploy/package9/README.md`):** code by handover restart (stage0) -> stage1_hygiene (config only: `take_tilted_ref`,
+`take_edge` 0.08, `ref_tilt_max` 0.20; the sets keep draining at 0.02) -> stage2_flatten (`tilt_exit_take` at 2c + `tilt_exit_take_split_sets`: the
+longshot-NO legs of the NO+NO sets sold first; dry run: cash ~15k in hour 1, ~21k in 3 h) -> when `cash_gate_left` > ~15k: stage3c_basket_floor80k
+(the best odds; or stage3 / 3b at floor 86k; all with `worst_case_backstop_frac` 0.9) -> stage4_carry after the basket is at target. **Watch, stage 2 first hour:** "TILT EXIT TAKE" lines at <= 1c cost vs tilted fv, `tilt_exposure` falling, `cash_gate_left` rising,
+`worst_case_loss` falling; no take against our own order. **Stage 3 first 4 h:** `basket.state` building -> tracking, `basket.held` rising to
+the target in 2-4 h (if it stalls: `cash_gate_left` 0 or the stressed worst case above the backstop: wait for stage 2 to free more), legs
+>= 20, each <= 5%, prices <= 25c, no basket order on a market we quote, writes <= 28, `basket.impact` ~1-5k; liquidation value within ~3%
+of the account (the mark lags); `tilt_s` rising. **Days 1-2:** the 36-h test result in `basket.test`; peak and floor ratcheting.
+**Rollback triggers:** the kill fires (it is the rollback: then `rollback_basket_off`); a basket order on a market with our own resting
+order (bug: off at once); `basket.held` above target + 10%; 429s; a refused override. Code rollback = handover to 7b298a4.
+**Untested:** the basket against the real exchange (IOC fills as `quantityTraded`, partial fills between placement and the leftover cancel
+are not booked to the basket and stay ordinary inventory); `tilt_exit_take`'s hourly cap and the owed-arbitrage state are not saved across
+restarts; nothing here ran in live_sim; the tilt model's ceiling K is a judgement prior (the whole bet).
+
+## Package 8 (READY, Finisher 2b, 3 Oct ~21:45 UTC; branch `claude/finisher-package8` from Package 7 2ef6d12; draft PR #10): the cash gate (ends the 400 refusals), pair-unwind sizing in sets, and the tilt exits (all OFF; staged files in `deploy/package8/`)
 Live at the time of writing: Package 7 since 19:15 UTC with tilt on at `ref_tilt_max` 0.11 (`tilt_s` 0.110, +0.0036/h), headline on,
 `reduce_no_as_sell`, `no_set_aware_bids`, `pair_unwind_followup`, `pair_no_unwind_max_cost` 0.02, `capital_ceiling_adding_size_factor` 0;
 capital 100%, free cash ~0, tilt_exposure +34.3k (~356 marked per point), reduce-only most cycles, ~132 of 150 changes deferred per cycle.

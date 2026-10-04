@@ -64,6 +64,7 @@ import random
 import re
 import signal
 import sqlite3
+import statistics
 import sys
 import threading
 import time
@@ -935,6 +936,255 @@ class Config:
     # the exit as before) while Polymarket just moved (urgent_ref_move or ref_jump_threshold within
     # ref_jump_cooldown_seconds) or when the gap (tilted with ref_guard_tilted) exceeds 2 x ref_guard_gap.
     ref_guard_exits: bool = False
+    # --- Package 9 F1: the long-tilt basket (analysis/p9/SPEC_F1_BASKET.md; everything OFF by default) ---
+    # The tournament prices longshots at ~c + (1 - s)(Polymarket - c) (c = 1/legs) with a tilt s that has risen from
+    # 0.02 (1 Oct) to ~0.12 (3 Oct): a long-tilt position = long YES on a longshot (Polymarket, scaled to the race,
+    # below basket_max_ref) OR short YES (= NO held) on the favourite of the same race, whichever is cheaper per unit
+    # of tilt (B-4). basket_enabled True: Bot.basket_tick, once a cycle after the takes and before quoting, holds a
+    # basket of such legs sized on a CUSHION above a FLOOR (CPPI), bought and sold ONLY as immediate-or-cancel taker
+    # orders (our quotes on the leg cancelled first, leftovers cancelled at once), never quoted by the market maker
+    # (decide skips basket legs), never touched by takes / arbitrage / pair unwinds / tilt exits. States: off ->
+    # building -> tracking -> (cut) -> exiting -> done, or killed. status.json "basket"; restart-safe (peak,
+    # switch-on, test result, kill latch, legs). Needs cash_gate_enabled (the basket refuses to buy on a stale or
+    # missing cash read). Turning basket_enabled OFF while a basket is held RELEASES its legs to the ordinary book (no
+    # forced sale): state "off (N legs released)".
+    # The basket is EXEMPT from reduce-only (that is the point: the risk model below counts it at a stress loss);
+    # the CPPI floor, the kill, the exit date and the T-72h backstop are the real controls.
+    basket_enabled: bool = False
+    basket_mult: float = 5.0              # target basket $ = mult x cushion
+    # floor = max(basket_floor, basket_floor_peak_frac x peak); peak = the highest LIQUIDATION value (account value
+    # less the haircut of selling every position to other traders now, as ops_fields) seen since the switch-on.
+    # The cushion is measured on liquidation value (fixed, never the exchange's lagged mark - B-10):
+    # cushion = liquidation value - floor - basket_impact_frac x our own net $ bought in the last basket_impact_hours
+    # (D-18: our own buying raises the measured tilt and so the value the cushion is measured on).
+    basket_floor: float = 86000.0
+    basket_floor_peak_frac: float = 0.85
+    basket_cap: float = 80000.0           # basket $ never above this, nor above basket_cap_frac x account value
+    basket_cap_frac: float = 0.85
+    basket_impact_frac: float = 0.06
+    basket_impact_hours: float = 24.0
+    # The target is approached linearly over basket_build_hours from the switch-on (ramp), then re-computed hourly
+    # (held within 5% of it: no trading for less). Per market, buys in any rolling hour <= basket_max_ask_share of
+    # the visible ask depth (top 3 levels, measured when that market's hour starts); basket_first_build_ask_share
+    # during the first build. Tracking sales (target fell) use the same share of the bid depth.
+    basket_build_hours: float = 4.0
+    basket_max_ask_share: float = 0.25
+    basket_first_build_ask_share: float = 0.75
+    # Selection: per non-headline race (basket_exclude_headline) with Polymarket on every leg, the legs whose
+    # Polymarket probability scaled to the race is below basket_max_ref (and liquid); route = YES on the longshot at
+    # its ask or NO on the race's favourite at its bid, the cheaper per unit of tilt; never pay more than
+    # basket_max_price a YES share (never short a favourite below 1 - basket_max_price). Independents (label "Ind
+    # ...") are never bought (hard rule, D-11), nor a leg where we hold the OPPOSITE position (flattening that is
+    # the tilt exits' job). Laggards first (D-8): lowest own s_i = (Polymarket - mid) / (Polymarket - c).
+    basket_max_ref: float = 0.10
+    basket_max_price: float = 0.25
+    # $ per contract <= target x min(basket_max_leg_frac, 1 / basket_min_legs): the full target needs at least
+    # basket_min_legs contracts (fewer eligible legs = a smaller basket, never a concentrated one).
+    basket_min_legs: int = 20
+    basket_max_leg_frac: float = 0.08
+    basket_exclude_headline: bool = True
+    # Exit: from basket_exit_utc the basket is sold down to 0 linearly over basket_exit_hours (richest legs first);
+    # no buys from basket_no_add_days before it. HARD BACKSTOP (no setting changes it): sold down to 0 by 72 h before
+    # the close (the sale starts basket_exit_hours before that at the latest); from then on nothing is held or
+    # bought. basket_exit_utc is an ISO UTC time ("2026-10-18T12:00:00Z", live range 2026-10-01 .. 2026-11-04); an
+    # invalid one = no buys at all (alert once; held legs still follow the backstop and the kill).
+    basket_exit_utc: str = "2026-10-18T12:00:00Z"
+    basket_exit_hours: float = 24.0
+    basket_no_add_days: float = 7.0
+    # 36-h momentum test (D-22): at switch-on + basket_test_hours, tilt_s < basket_test_min_s OR its 12-h change <= 0
+    # (no 12-h history = fail) -> mult cut to basket_mult_after_fail for the rest of this basket (latched, persisted;
+    # log + alert once; state "cut": the basket is sold down to the cut target).
+    basket_test_hours: float = 36.0
+    basket_test_min_s: float = 0.15
+    basket_mult_after_fail: float = 1.5
+    # KILL: liquidation value < (1 - basket_kill_dd) x peak, or < floor, for BASKET_KILL_CONFIRM_SECONDS in a row ->
+    # the whole basket is sold over basket_kill_hours as a taker and the feature latches OFF ("killed"; persisted;
+    # survives restarts; cleared only when the overrides file says basket_enabled false and later true again).
+    basket_kill_dd: float = 0.15
+    basket_kill_hours: float = 2.0
+    # Writes: per cycle at most basket_writes_frac of the writes left (3 per order: cancel ours, the order, the
+    # leftover cancel) and basket_max_orders_per_cycle orders (exits / kill: at least one order a cycle whatever
+    # these say). IOC limit = best ask + basket_slip (sale: best bid - slip), alive take_order_ttl seconds.
+    basket_writes_frac: float = 0.5
+    basket_max_orders_per_cycle: int = 4
+    basket_slip: float = 0.005
+    # RISK MODEL (C-10), only while basket_enabled: in settlement_risk and total_worst_case (so also the sum-of-maxima
+    # backstop) the basket's shares are taken out of the races and counted at basket_stress_frac x their $ value
+    # instead of their settlement loss. Without this both risk measures count a longshot basket at its full cost and
+    # max_worst_case_frac caps it at ~25k: this is what makes the bet possible at all. The CPPI floor + kill are the
+    # real control.
+    basket_stress_frac: float = 0.4
+    # --- Package 9 F2/F5 (analysis/p9/SPEC_F2_F5.md; everything OFF by default) ---
+    # F2 tilt_exit_take True: the Package 8 tilt exits (the side shrinking a position that ADDS to |tilt_exposure|,
+    # tilt_exit_side) are TAKEN, not only rested: once a cycle (after the stale-quote takes, before the basket and the
+    # quotes) up to tilt_exit_take_max_per_cycle immediate-or-cancel orders (alive take_order_ttl, leftovers
+    # cancelled at once) sell a long at the best other bid / buy back a short at the best other ask (a covered
+    # "sell NO" with reduce_no_as_sell), only when that price gives up at most tilt_exit_take_max_cost a share vs
+    # the market's TILTED fair value tilted_ref_for(Polymarket) (the r' the quotes use; never raw Polymarket).
+    # Order: longshot NO first (shorts where Polymarket < 0.10), then favourite YES (longs where Polymarket > 0.90),
+    # then the rest; in each group the positions the exchange marks BELOW what the exit gets (pos_marks) first.
+    # Size <= the position (never flips; a short's NO in a NO+NO set is never sold), <= the best level's depth,
+    # <= tilt_exit_take_max_leg_frac x the position (1 share at least), and the $ traded (a sale: shares x bid; a
+    # buy-back: shares x (1 - ask), the NO sold) <= tilt_exit_take_per_hour in any rolling hour, bot-wide. Skipped:
+    # no liquid Polymarket, a Polymarket move within ref_jump_cooldown_seconds (urgent_ref_move / ref_jump_threshold,
+    # as ref_guard_exits), basket legs, a market just acted on, write budget short of 3 writes (cancel ours, the
+    # order, the leftover cancel), the cash gate refusing it (pre-checked before our quotes are pulled). One market
+    # rests take_cooldown_seconds after a take. status.json tilt_exit_takes {count, shares, usd, cost}; journal
+    # "TILT EXIT TAKE <label> <side> <qty> @ <px> (tilted fv <fv>, cost <c>)". False = unchanged.
+    tilt_exit_take: bool = False
+    tilt_exit_take_max_cost: float = 0.01
+    tilt_exit_take_per_hour: float = 15000.0
+    tilt_exit_take_max_per_cycle: int = 3
+    tilt_exit_take_max_leg_frac: float = 0.5
+    # F2b tilt_exit_take_split_sets True (analysis/p9/ideas_C.md C-9 "set split"; DRYRUN.md: the taker exits free only
+    # ~8k a day, the 16.8k NO+NO sets lock 21.9k): the F2 exit of a short LONGSHOT (raw Polymarket below
+    # tilt_exit_split_max_ref, never the race's highest-priced leg) may also sell the SET part of its NO (the NO+NO
+    # set's longshot leg), as one covered "sell NO" (lone part first, then the set part) at the best other ask, inside
+    # the same tilted-fv cost cap, depth, max_leg_frac and hourly $ caps. The set part is sized to what the cash gate
+    # funds at its conservative need for a set-breaking sale (cash_tiers: 1.0 a share; the exchange refused such sales
+    # at 0 cash on 3 Oct), charged to the gate and given back on refusal; it needs the cash gate on (live) and
+    # reduce_no_as_sell (else only the lone part goes, as F2). The favourite-NO leg stays (it is long the tilt, the
+    # basket's bet for free; ordinary inventory, not a basket leg, and no tilt exit while tilt_exposure > 0). Splits
+    # go FIRST in F2's order (each frees cash and buys the tilt). An exchange refusal stops split attempts in that race
+    # for take_cooldown_seconds x 10 (logged once per race an hour). status.json tilt_exit_takes.splits {count, shares,
+    # cash_freed}; journal "TILT EXIT SPLIT <label> sells NO <qty> @ <1-p> (set part; frees ~$X)". False = F2.
+    tilt_exit_take_split_sets: bool = False
+    tilt_exit_split_max_ref: float = 0.10
+    # F5 arb_cash_rule True (live 3 Oct: at 0 cash the race arbitrage left one-legged sets, some legs refused for
+    # cash): an ARBITRAGE (kind "arb", sell side: bids sum >= 1 + arb_min_profit; buy side: asks sum <= 1 -
+    # arb_min_profit_buy; pair unwinds are not changed) is planned on other traders' levels only, a level at a price
+    # where we have an order of our own (resting, just sent or unconfirmed) being skipped whole, sized <=
+    # arb_leg_depth_frac x the thinnest leg's depth there, and sent only for the sets whose whole cash need (the cash
+    # gate's own per-order rule, all legs together) fits: cash_left() >= arb_cash_mult x need + arb_cash_reserve
+    # (fewer sets when that is what fits, none below 1; no cash figure = none: it needs cash_gate_enabled). If the
+    # batch fills its legs unequally, the lagging legs are OWED (pair_owe) and the next cycle's follow-up completes
+    # them within pair_unwind_followup_max_cost of the planned price; when nothing can complete them then (same
+    # cycle), and from the second try on, the extra legs are bought / sold BACK instead (within arb_min_profit (_buy)
+    # + pair_unwind_followup_max_cost), so no one-legged set is kept (tries / max age: pair_unwind_followup_*). status.json arb_cash_blocked; journal "ARB skipped: cash rule (need X, left Y)". False = unchanged.
+    arb_cash_rule: bool = False
+    arb_cash_mult: float = 1.25
+    arb_cash_reserve: float = 2000.0
+    arb_leg_depth_frac: float = 0.8
+    # F5 arb_sellback True (C-4, the mirror of pair_no_unwind_max_cost for long sets; needs pair_unwind_enabled): a
+    # held YES+YES set (long every leg of a race) is sold back as one immediate-or-cancel pair-unwind batch once
+    # other traders' bids add up to >= arb_sellback_min_sum (instead of 1 + pair_unwind_min_profit; below 1.00 =
+    # at a cost, to free the capital), a level at a price of ours skipped whole, sized to the smallest leg held and
+    # the depth (and pair_unwind_max_frac per order, as every pair unwind). A sale only the lower threshold allows
+    # counts against pair_no_unwind_max_per_cycle like a short-set unwind at a cost. False = unchanged.
+    arb_sellback: bool = False
+    arb_sellback_min_sum: float = 1.00
+    # --- Package 10 A (analysis/p10/SPEC_P10.md Part A; everything OFF by default) ---
+    # SIG pays positions out at the OUTCOME: a contract is worth its Polymarket probability p, not its mark. Below,
+    # "p" = the raw Polymarket price scaled to sum to 1 over the race (when every leg has one; else the raw price),
+    # used only where it is LIQUID (Bot.value_p); no liquid p -> nothing below changes that market.
+    # A1 value_mode True, the no-panic-sell guard (analysis/p10/ideas_I.md I-5, the audit table):
+    #  (i) compute_quote never prices the side REDUCING this exchange's position below value: a long's ask >=
+    #      p - value_sell_margin, a short's bid <= p + value_sell_margin, in normal AND reduce-only quoting, after
+    #      every skew (inventory, age), reduce_join_best, fast unload, reduce_from_book; it only moves that price AWAY
+    #      from the other side, so it never crosses another trader (step 4 still runs after it) and never changes a
+    #      size (never flips a position). The same floor is applied once more to decide's final quote (after
+    #      hold_quote). The max_skew_through clamp (skew never pays through fair value) also runs in reduce-only.
+    #  (ii) the pre-close windows do nothing: no exit_hours_before_close taker exit (decide, ladder, status), no
+    #      flatten_hours_before_close reduce-only, no flatten_per_market_hours per-market flatten, and every other
+    #      check keyed on those windows (cancel urgency, no-chase, takes, arbitrage, hold takes) sees no window
+    #      (Bot.close_window). stop_minutes_before_close still stops quoting before the close. The three settings are
+    #      live-overridable too (0 = off) for a deploy that keeps value_mode off.
+    #  (iii) exit_quote takes the same floor (value_floor) when given one, should the exit ever run again.
+    #  (iv) warn_settings logs a WARNING (start-up and override time) for each mark-driven selling path left on with
+    #      it: reduce_from_book, fast_unload_enabled, hold_target_hours > 0, tilt_exit_priority / tilt_exit_full_size
+    #      / tilt_exit_take, ref_tilt_enabled, take_tilted_ref, ref_guard_exits. Not forced off: the owner decides
+    #      (the floor (i) still holds for every resting quote they price).
+    #  (v) Part B's allocator sells go through their own immediate-or-cancel path, never compute_quote: exempt.
+    # False = unchanged.
+    value_mode: bool = False
+    value_sell_margin: float = 0.005     # how far below p a reducing ask may rest (above p a reducing bid)
+    # A2 bloc_delta_enabled True (analysis/p10/ideas_H.md H-2): the national-swing cap measures the book's outcome
+    # sensitivity to the party factor F (Gaussian copula) instead of counting YES shares. Per partisan contract (label
+    # "Dem ..." / "Rep ...", independents 0) with a liquid p: $ per sd of F per YES share = sqrt(rho) x
+    # phi(Phi^-1(p_dem)) x (1 - p_ind), p_dem = the Dem leg's p / (1 - p_ind) (p_ind = the race's other legs; a lone
+    # market: its own p), rho = bloc_rho (bloc_rho_control in the headline control markets); sign + on Rep YES, - on
+    # Dem YES, so bloc_delta = sum position x sensitivity is + when Republican-leaning, like party_delta. A race with
+    # one partisan leg and an independent (no Dem-vs-Rep pair) counts 0, as H's model. One 50c share weighs 0.40, a
+    # 0.5c longshot 0.014 (the share count weighs them the same). With the flag party_blocks / party_shift (and the
+    # ladder's party room) use |bloc_delta| <= max_bloc_delta_frac x account instead of max_party_delta_frac x
+    # account in shares; status.json bloc_delta, bloc_delta_frac (signed, / account); summary " | bloc delta X/sd".
+    # Values from H-10: 0.05 (+-5k per sd at 100k) keeps P(final <= 85k) < 2% for the value core. False = unchanged.
+    bloc_delta_enabled: bool = False
+    bloc_rho: float = 0.45               # race-to-national-factor correlation (H: 0.25-0.65 moves Senate odds +-0.02)
+    bloc_rho_control: float = 0.85       # the party-control markets (headline_races) follow the factor more closely
+    max_bloc_delta_frac: float = 0.05    # |bloc_delta| cap, $ per sd of the national factor, x account value
+    # A4 value_quote_hurdle > 0 (analysis/p10/ideas_I.md I-4), with a liquid p, for the side ADDING to this
+    # exchange's position (a bid unless short, an ask unless long): outside the middle band (p below value_mid_low or
+    # above value_mid_high) a YES bid never above p / (1 + h) and a YES ask never below 1 - (1 - p) / (1 + h), h =
+    # this hurdle per $ of collateral held to the outcome (a fill there must beat what the capital earns elsewhere);
+    # a hurdle price off the grid (bid < 0.5c, ask > 99.5c) -> that side is not quoted. CONSEQUENCE: in the tails only
+    # favourite bids and longshot asks can rest near the book (the tournament prices favourites low and longshots
+    # high: the other side's hurdle price sits far beyond the book, so it rests out of reach). In the middle band the
+    # normal min_edge quoting applies instead, and the position here is capped at value_mid_inventory_quotes x the
+    # quote size on the side that grows it (beyond it only the reducing side rests), so the cash rotates. The reducing
+    # side is A1's (value_mode). 0 = off.
+    value_quote_hurdle: float = 0.0
+    value_mid_low: float = 0.15
+    value_mid_high: float = 0.85
+    value_mid_inventory_quotes: float = 2.0
+    # A3 (ranges only, no new setting): worst_case_backstop_frac may be overridden up to 1.5. For a fully
+    # collateralised outcome book the sum of per-race maxima is a gross-capital cap that protects only against every
+    # race failing at once (P ~ 0 at the outcome; H-10: Monte Carlo q0.1% loss 22k vs the 79-112k it measures); 1.3-1.5
+    # = effectively off, leaving max_worst_case_frac (R7, 0.35 for the value core) and the bloc-delta cap as the real
+    # limits. max_drawdown_pct (the kill switch) stays out of OVERRIDABLE (house rule); 0.40 (H-10, kill at 60k marks)
+    # is a code / deploy default change.
+    # --- Package 10 B (analysis/p10/SPEC_P10.md Part B; everything OFF by default) ---
+    # B1 alloc_enabled True, the capital allocator (analysis/p10/ideas_I.md I-1, I_alloc.py): capital goes where it
+    # earns the most per $ held to the OUTCOME. Edge per $ with p = the liquid, race-scaled Polymarket price (read
+    # within ALLOC_REF_MAX_AGE seconds): a held long (p - bid) / bid, a held short (ask - p) / (1 - ask) (what we
+    # keep by NOT closing at the touch); a book level (top 3, our own orders stripped) bought (p - ask) / ask, sold
+    # short (bid - p) / (1 - bid). Once per alloc_interval_s, on a cycle with a fresh cash read (< 5 min, the cash
+    # gate's) and fresh books, Bot.alloc_plan pairs the lowest-edge holdings (edge-held <= alloc_max_edge_sell; never a
+    # label in alloc_pin, a basket leg, a headline market unless alloc_headline, a market another feature traded this
+    # cycle) with the highest-edge levels (edge >= alloc_min_edge_buy) while the gain is >= alloc_min_improvement per
+    # $; cash above the reserve (B2) is a holding of edge 0 (bought with directly). Per market the new $ (with what
+    # is held there, at p) <= alloc_max_contract_usd. Rotated $ (sales, plus buys paid from spare cash) <=
+    # alloc_max_turnover_per_hour in any rolling hour. With bloc_delta_enabled (Part A) a pair is skipped if it would
+    # leave |bloc_delta| above bloc_cap() and larger than before (off: no bloc check, logged once).
+    # Sequence (Bot.alloc_tick, cycle step 6d, after the basket, before quoting; a run spans cycles): each SALE is an
+    # immediate-or-cancel taker order at the touch (our orders there cancelled first; leftover cancelled at once;
+    # a short is bought back only as a covered "sell NO", its NO+NO set part never), sent only while a fresh book of
+    # its PAIRED buy market still shows that level within ALLOC_LEVEL_TOL and the edges still pass; then nothing is
+    # bought until a cash read taken AFTER the sale (the next P&L read) shows the money above the reserve; then the
+    # BUY goes as an immediate-or-cancel taker at the touch, only if a fresh book shows the level within
+    # ALLOC_LEVEL_TOL at an edge >= alloc_min_edge_buy. A level gone -> that cash stays (in the reserve) and no more
+    # sales this run. A position is never flipped (sales <= the position; no buy against a short or short against a
+    # long); every order passes the cash gate. At most alloc_max_orders_per_cycle orders a cycle and alloc_writes_frac
+    # of the writes left (3 per order). Allocator orders never go through compute_quote, so Part A's value floor
+    # does not apply to them (marked "_alloc_paired", never sent). Dry run: the plan is logged, nothing sent.
+    alloc_enabled: bool = False
+    alloc_interval_s: float = 3600.0
+    alloc_min_improvement: float = 0.03   # edge gained per $ rotated (both legs at the touch: net of the spread)
+    alloc_min_edge_buy: float = 0.05
+    alloc_max_edge_sell: float = 0.02
+    alloc_pin: str = ""                   # comma-separated market labels ("Rep Ohio Senate, Dem ...") never sold
+    alloc_headline: bool = False          # False = never the headline_races (party control) markets
+    alloc_max_turnover_per_hour: float = 15000.0
+    alloc_max_orders_per_cycle: int = 4
+    alloc_writes_frac: float = 0.3
+    alloc_max_contract_usd: float = 10000.0
+    # B2 alloc_mm_reserve: cash ($) the allocator leaves free for market making: it buys only with cash above it;
+    # cash below it -> it first sells the lowest-edge holdings (edge-held <= alloc_max_edge_sell) to refill it, with
+    # no buy (inside the same turnover cap).
+    alloc_mm_reserve: float = 15000.0
+    # B3 alloc_set_cost_per_usd > 0 (I-3): a race held NO on every leg (a NO+NO set; needs the Package 7 short-set
+    # unwind in effect: pair_unwind_enabled, pair_no_unwind_max_cost >= 0, reduce_no_as_sell) is a holding of edge =
+    # its unwind cost per $ freed = (asks sum - 1) / (legs - asks sum), ranked like any other when <= this. Chosen
+    # (for the reserve or a paired buy), its race is REGISTERED with take_arbitrage's short-set unwind at that cost
+    # (asks sum <= 1 + cost, instead of pair_no_unwind_max_cost) for ALLOC_SET_WAIT seconds: the existing plumbing
+    # (covered NO sales on every leg, one batch, pair_no_unwind_max_per_cycle / _max_sets, follow-ups) does the
+    # unwind; the paired buy waits for the sets to fall and a cash read after it. 0 = off (sets never ranked).
+    alloc_set_cost_per_usd: float = 0.0
+    # take_respect_reserve True: a stale-quote take (execute_take) is skipped when the cash it needs would leave less
+    # than alloc_mm_reserve of cash free (cash_left - need < reserve), so the market-making reserve the allocator builds is
+    # not spent by the takes first (P10 red team C-1: on the 3 Oct state the takes spent 12.7k of the 11.0k the sets freed in
+    # 4 h; a take earns ~7.7% per $ once at the outcome, the reserve is meant to turn over). False = takes unchanged.
+    take_respect_reserve: bool = False
 
 
 CFG = Config()
@@ -976,7 +1226,7 @@ OVERRIDABLE = {
     "improve_ticks": (0, 3), "undercut_step_back": (0.0, 0.05),
     "ref_only_enabled": (False, True), "ref_only_max_gap": (0.005, 0.2), "ref_only_min_edge": (0.0, 0.1),
     "ref_only_size_frac": (0.0, 0.02), "ref_only_reduce_full": (False, True),
-    "risk_swing_shock": (0.05, 0.5), "risk_z": (1.0, 6.0), "worst_case_backstop_frac": (0.3, 0.9),
+    "risk_swing_shock": (0.05, 0.5), "risk_z": (1.0, 6.0), "worst_case_backstop_frac": (0.3, 1.5),   # (P10 A3: 1.5 ~ off)
     "order_ttl": (300.0, 7200.0), "refresh_before_expiry": (30.0, 900.0), "batch_size": (1, 50),
     "kelly_no_edge_frac": (0.0, 0.01), "take_ref_max_age_seconds": (0.0, 300.0),
     "arb_two_sided": (False, True),
@@ -1130,10 +1380,98 @@ OVERRIDABLE = {
     "capital_ceiling_adding_size_factor_resume": (0.0, 1.0),
     "ref_guard_tilted": (False, True),
     "ref_guard_exits": (False, True),
+    # --- Package 9 F1: the long-tilt basket ---
+    "basket_enabled": (False, True),
+    "basket_mult": (0.5, 8.0),
+    "basket_floor": (50000.0, 200000.0),
+    "basket_floor_peak_frac": (0.5, 0.99),
+    "basket_cap": (0.0, 200000.0),
+    "basket_cap_frac": (0.0, 1.0),
+    "basket_impact_frac": (0.0, 0.3),
+    "basket_impact_hours": (0.0, 72.0),
+    "basket_build_hours": (0.5, 48.0),
+    "basket_max_ask_share": (0.05, 1.0),
+    "basket_first_build_ask_share": (0.1, 1.0),
+    "basket_max_ref": (0.01, 0.5),
+    "basket_max_price": (0.02, 0.6),
+    "basket_min_legs": (1, 200),
+    "basket_max_leg_frac": (0.01, 1.0),
+    "basket_exclude_headline": (False, True),
+    "basket_exit_utc": ("2026-10-01T00:00:00Z", "2026-11-04T00:00:00Z"),   # an ISO UTC time in this range (DATE_SETTINGS)
+    "basket_exit_hours": (1.0, 168.0),
+    "basket_no_add_days": (0.0, 30.0),
+    "basket_test_hours": (6.0, 168.0),
+    "basket_test_min_s": (0.0, 0.5),
+    "basket_mult_after_fail": (0.0, 8.0),
+    "basket_kill_dd": (0.02, 0.5),
+    "basket_kill_hours": (0.25, 24.0),
+    "basket_writes_frac": (0.0, 1.0),
+    "basket_max_orders_per_cycle": (1, 20),
+    "basket_slip": (0.0, 0.02),      # (P9 red team: 5c over a 5-25c longshot's ask = up to +100% paid through the book)
+    "basket_stress_frac": (0.2, 1.0),   # (P9 red team: 0 = the basket invisible to reduce-only and the backstop)
+    # --- Package 9 F2/F5 ---
+    "tilt_exit_take": (False, True),
+    "tilt_exit_take_max_cost": (0.0, 0.05),
+    "tilt_exit_take_per_hour": (0.0, 200000.0),
+    "tilt_exit_take_max_per_cycle": (1, 20),
+    "tilt_exit_take_max_leg_frac": (0.0, 1.0),
+    "tilt_exit_take_split_sets": (False, True),
+    "tilt_exit_split_max_ref": (0.01, 0.5),
+    "arb_cash_rule": (False, True),
+    "arb_cash_mult": (1.0, 3.0),
+    "arb_cash_reserve": (0.0, 20000.0),
+    "arb_leg_depth_frac": (0.1, 1.0),
+    "arb_sellback": (False, True),
+    "arb_sellback_min_sum": (0.95, 1.1),
+    # --- Package 10 A ---
+    "value_mode": (False, True),
+    "value_sell_margin": (0.0, 0.05),
+    "exit_hours_before_close": (0.0, 48.0),      # (0 = no election-night taker exit)
+    "flatten_hours_before_close": (0.0, 48.0),   # (0 = no flatten reduce-only window)
+    "flatten_per_market_hours": (0.0, 12.0),
+    "bloc_delta_enabled": (False, True),
+    "bloc_rho": (0.1, 0.9),
+    "bloc_rho_control": (0.1, 0.95),
+    "max_bloc_delta_frac": (0.01, 0.5),
+    "value_quote_hurdle": (0.0, 0.5),
+    "value_mid_low": (0.0, 0.5),
+    "value_mid_high": (0.5, 1.0),
+    "value_mid_inventory_quotes": (0.0, 20.0),
+    # --- Package 10 B ---
+    "alloc_enabled": (False, True),
+    "alloc_interval_s": (300.0, 86400.0),
+    "alloc_min_improvement": (0.005, 0.5),
+    "alloc_min_edge_buy": (0.0, 0.5),
+    "alloc_max_edge_sell": (0.0, 0.5),
+    "alloc_pin": (0, 4000),          # free text: comma-separated labels, at most 4000 characters (FREE_TEXT_SETTINGS)
+    "alloc_headline": (False, True),
+    "alloc_max_turnover_per_hour": (0.0, 200000.0),
+    "alloc_max_orders_per_cycle": (1, 20),
+    "alloc_writes_frac": (0.0, 1.0),
+    "alloc_max_contract_usd": (0.0, 100000.0),
+    "alloc_mm_reserve": (0.0, 100000.0),
+    "alloc_set_cost_per_usd": (0.0, 0.2),
+    "take_respect_reserve": (False, True),
 }
 MAX_ORDER_TTL = 7200.0    # no order of ours lives longer than this (dead-man's switch), whatever the TTL settings
 LADDER_MAX_LEVELS = 8
 ONE_OF_SETTINGS = {"ref_tilt_estimator"}   # string settings that take exactly one of their OVERRIDABLE names
+DATE_SETTINGS = {"basket_exit_utc"}        # string settings that take one ISO UTC time within their OVERRIDABLE range
+FREE_TEXT_SETTINGS = {"alloc_pin"}         # string settings that take any text of (min, max) characters
+
+
+def parse_utc_setting(v):
+    """An ISO UTC time setting ("2026-10-18T12:00:00Z") -> aware datetime, or None if it is not one (no time zone
+    counts as invalid: the exit date must never be read in the server's local time)."""
+    if not isinstance(v, str) or not v.strip():
+        return None
+    try:
+        dt = datetime.fromisoformat(v.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return None
+    return dt.astimezone(timezone.utc)
 
 
 def validate_overrides(raw, cfg):
@@ -1147,7 +1485,21 @@ def validate_overrides(raw, cfg):
             bad.append(f"{k}: not a live setting")
             continue
         cur = getattr(cfg, k)
-        if isinstance(cur, str):                           # a comma list of allowed names (ladder_markets)
+        if k in DATE_SETTINGS:                             # one ISO UTC time in its range (basket_exit_utc)
+            dt, lo_s, hi_s = parse_utc_setting(v), *OVERRIDABLE[k]
+            if dt is None or not parse_utc_setting(lo_s) <= dt <= parse_utc_setting(hi_s):
+                bad.append(f"{k}: must be an ISO UTC time like \"2026-10-18T12:00:00Z\" in {lo_s}..{hi_s}")
+                continue
+            good[k] = v.strip()
+            continue
+        if k in FREE_TEXT_SETTINGS:                        # any text of bounded length (alloc_pin: market labels)
+            lo_n, hi_n = OVERRIDABLE[k]
+            if not isinstance(v, str) or not lo_n <= len(v) <= hi_n:
+                bad.append(f"{k}: must be a text of at most {hi_n} characters")
+                continue
+            good[k] = v
+            continue
+        if isinstance(cur, str):                         # a comma list of allowed names (ladder_markets)
             names = [x.strip() for x in v.split(",")] if isinstance(v, str) else None
             if k in ONE_OF_SETTINGS:                       # exactly one allowed name (ref_tilt_estimator)
                 if names is None or len(names) != 1 or names[0] not in OVERRIDABLE[k]:
@@ -1949,9 +2301,10 @@ def wire_order(o):
     price) -> the request body actually sent. Only an order marked "_no_sell" (a bid that buys back NO we hold, see
     Bot.cover_no_qty) changes: "buy YES @ p" goes out as the covered sale "sell NO @ 1-p", which needs no cash. It
     reads back through parse_order as our bid at p, so everything after the send keeps working in YES terms."""
-    if "_no_sell" not in o and "_cash_need" not in o:
+    if "_no_sell" not in o and "_cash_need" not in o and "_alloc_paired" not in o:
         return o
-    w = {k: v for k, v in o.items() if k not in ("_no_sell", "_cash_need")}   # _cash_need: Package 8 gate's note
+    w = {k: v for k, v in o.items()                  # _cash_need: Package 8 gate's note; _alloc_paired: Package 10 B
+         if k not in ("_no_sell", "_cash_need", "_alloc_paired")}
     if o.get("_no_sell"):
         w.update(side="no", action="sell", price=round(1 - o["price"], 3))
     return w
@@ -2164,6 +2517,49 @@ def normalise(fvs):
         return fvs
     total = sum(fvs.values())
     return {k: v / total for k, v in fvs.items()} if total > 0 else fvs
+
+
+_STD_NORMAL = statistics.NormalDist()
+
+
+def bloc_slope(p_dem, rho, p_ind=0.0):
+    """Package 10 A2 (ideas_H.md H-2): d E[payout of one Dem-win share] / d F is -sqrt(rho) x phi(Phi^-1(p_dem)) x
+    (1 - p_ind) under the Gaussian copula (F = the national factor, + = Republican; p_dem conditional on no
+    independent winning). Returns the magnitude sqrt(rho) x phi(Phi^-1(p_dem)) x (1 - p_ind)."""
+    x = min(max(p_dem, 1e-5), 1 - 1e-5)
+    return math.sqrt(rho) * _STD_NORMAL.pdf(_STD_NORMAL.inv_cdf(x)) * (1 - p_ind)
+
+
+def bloc_sensitivities(races, cfg=CFG):
+    """Package 10 A2: {eid: $ per sd of the national factor per YES share} (+ Rep YES, - Dem YES, so a Republican-
+    leaning book is +, like party_delta). races = {race: [(eid, label, p or None, liquid), ...]}, p race-scaled.
+    A race needs a "Dem " and a "Rep " leg (labels), or is one partisan market alone; p_ind = the other legs' p;
+    p_dem = the Dem leg's p (else 1 - Rep p - p_ind) / (1 - p_ind). Only contracts with a liquid p get one; the
+    headline (control) races use bloc_rho_control."""
+    out = {}
+    for race, legs in races.items():
+        kind = {e: ("D" if (lab or "").startswith("Dem ") else "R" if (lab or "").startswith("Rep ") else "I")
+                for e, lab, _, _ in legs}
+        ps = {e: p for e, _, p, _ in legs}
+        dem = [e for e in kind if kind[e] == "D"]
+        rep = [e for e in kind if kind[e] == "R"]
+        if not ((dem and rep) or (len(legs) == 1 and (dem or rep))):
+            continue
+        p_ind = sum(ps[e] or 0.0 for e in kind if kind[e] == "I")
+        if dem and ps[dem[0]] is not None:
+            pd = ps[dem[0]]
+        elif rep and ps[rep[0]] is not None:
+            pd = 1 - ps[rep[0]] - p_ind
+        else:
+            continue
+        if p_ind >= 1 - 1e-9:
+            continue
+        rho = cfg.bloc_rho_control if race in cfg.headline_races else cfg.bloc_rho
+        slope = bloc_slope(pd / (1 - p_ind), rho, p_ind)
+        for e, _, p, liquid in legs:
+            if liquid and p is not None and kind[e] != "I":
+                out[e] = slope if kind[e] == "R" else -slope
+    return out
 
 
 def race_variance(legs):
@@ -2404,7 +2800,7 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
                   position_limit=None, min_edge=None, reduce_size=None, net_inv=None, age_hours=0.0,
                   adding_factor=1.0, bias_side=None, bias_edge=0.0, bias_size=1.0, unload_side=None,
                   unload_edge=0.0, unload_size=None, adding_limit_factor=1.0, frag_limit=None, behind_best=True,
-                  reduce_fv=None, why=None, adding_per_market=False):
+                  reduce_fv=None, why=None, adding_per_market=False, value_p=None):
     """
     fv         fair YES probability
     inv        our net YES shares on THIS exchange (negative = net NO); drives the hard position limit
@@ -2452,6 +2848,11 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
     adding_per_market  Package 8 (adding_factor_per_market): adding_factor and adding_limit_factor pick the adding side
                        by THIS exchange's position inv (the side growing |inv|; of a side that shrinks it, the part
                        beyond the position is adding too), not by net_inv. False = race-netted, as before
+    value_p            Package 10 A: this market's liquid, race-scaled Polymarket probability (Bot.value_p), or None.
+                       With cfg.value_mode the side reducing THIS exchange's position never rests beyond
+                       p -+ value_sell_margin (value_side_prices); with cfg.value_quote_hurdle > 0 the adding side
+                       follows the hurdle / middle-band rule (A4). None = neither (and value_mode alone still runs
+                       the max_skew_through clamp in reduce-only)
     """
     bankroll = bankroll or DEFAULT_BANKROLL
     max_order_cash = cfg.max_order_cash_frac * bankroll
@@ -2459,6 +2860,12 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
         order_size = cfg.order_size_frac * bankroll
     else:
         max_order_cash = max(max_order_cash, order_size)   # a planned size has already been capital-checked
+    vmode = bool(getattr(cfg, "value_mode", False))         # Package 10 A1
+    hurdle = getattr(cfg, "value_quote_hurdle", 0.0) if value_p is not None else 0.0   # Package 10 A4
+    v_mid = hurdle > 0 and cfg.value_mid_low <= value_p <= cfg.value_mid_high
+    if v_mid:                                 # A4 middle band: the side growing |inv| stops at N quote sizes
+        mid_limit = max(0.0, cfg.value_mid_inventory_quotes) * order_size
+        frag_limit = mid_limit if frag_limit is None else min(frag_limit, mid_limit)
     # 1. Reservation price = fair value shifted against our inventory. Long -> lower r -> we bid
     #    less eagerly and offer more eagerly, which pushes the position back toward flat.
     if cfg.skew_mode == "quote" and order_size > 0:
@@ -2504,7 +2911,7 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
             ask = ceil_tick(r_ask + max(ask_edge, cfg.undercut_step_back))
     bid = min(max(bid, bid_lo), bid_hi)
     ask = max(min(ask, ask_hi), ask_lo)
-    if not reduce_only and cfg.max_skew_through < 1.0:
+    if (not reduce_only or vmode) and cfg.max_skew_through < 1.0:   # (P10 A1: in reduce-only too)
         # Skew sheds inventory by quoting less greedily, never by paying through our own fair value
         # (day one: fills at <= -1c edge lost -804 at the 60-min mid; rival bots pick those quotes off).
         bid_hi = min(bid_hi, floor_tick(fv_bid + cfg.max_skew_through))   # (fv_bid / fv_ask = fv unless A)
@@ -2559,6 +2966,35 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
             no_ask = True
         else:
             ask, ask_lo = max(ask, ceil_tick(cap)), max(ask_lo, ceil_tick(cap))
+    # 4d. Package 10: A4 the adding side's hurdle price (tails), A1 the reducing side's value floor. Each only moves a
+    #     price AWAY from the other side (and the keep limits with it); step 4 runs again after them.
+    if hurdle > 0 and not v_mid:
+        if inv > -1:                              # the bid adds (not buying back a short)
+            cap = value_p / (1 + hurdle)
+            if cap < PMIN - 1e-9:
+                no_bid = True
+            else:
+                bid, bid_hi = min(bid, floor_tick(cap)), min(bid_hi, floor_tick(cap))
+        if inv < 1:                               # the ask adds (not selling down a long)
+            flo = 1 - (1 - value_p) / (1 + hurdle)
+            if flo > PMAX + 1e-9:
+                no_ask = True
+            else:
+                ask, ask_lo = max(ask, ceil_tick(flo)), max(ask_lo, ceil_tick(flo))
+    if vmode and value_p is not None:
+        fb, fa = value_side_prices(value_p, inv, cfg)
+        if fa is not None:
+            ask, ask_lo = max(ask, fa), max(ask_lo, fa)
+        if fb is not None:
+            if fb < PMIN - 1e-9:
+                no_bid = True
+            else:
+                bid, bid_hi = min(bid, fb), min(bid_hi, fb)
+    if (hurdle > 0 and not v_mid) or (vmode and value_p is not None):   # (step 4 again: never cross another trader)
+        if best_ask is not None:
+            bid = min(bid, floor_tick(best_ask - TICK))
+        if best_bid is not None:
+            ask = max(ask, ceil_tick(best_bid + TICK))
 
     # 5. Size: shrink toward the position limit on each side, and cap the cash tied up per order.
     #    Limits: Kelly sizing when we have a liquid Polymarket price, else max_position_frac of the account.
@@ -2669,6 +3105,15 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
     if hold_ask and adding_factor > 0:
         ask_size = max(1, ask_size)
     bid_max, ask_max = max(bid_size, int(bid_max)), max(ask_size, int(ask_max))
+    if (hurdle > 0 and not v_mid) or (vmode and value_p is not None):
+        # Package 10 (red team RT-7): the part of a REDUCING quote beyond this exchange's position opens the other
+        # side, i.e. it adds: never at a price the adding rule refuses (A4: the hurdle price in the tails; A1: p, so
+        # the flip never sells below / buys above value). Such a quote stops at the position.
+        tail = hurdle > 0 and not v_mid
+        if inv <= -1 and bid > (value_p / (1 + hurdle) if tail else value_p) + 1e-9:
+            bid_size, bid_max = min(bid_size, int(-inv)), min(bid_max, int(-inv))
+        if inv >= 1 and ask < (1 - (1 - value_p) / (1 + hurdle) if tail else value_p) - 1e-9:
+            ask_size, ask_max = min(ask_size, int(inv)), min(ask_max, int(inv))
 
     if bid >= ask:
         return NO_QUOTE
@@ -2685,22 +3130,61 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
                  bid_max if bid_max != bid_size else None, ask_max if ask_max != ask_size else None, behind)
 
 
-def exit_quote(fv, inv, best_bid, best_ask, cfg=CFG, bankroll=None, max_size=None):
+def value_side_prices(p, inv, cfg=CFG):
+    """Package 10 A1: (highest bid, lowest ask) the side REDUCING this exchange's position inv may rest at, given the
+    market's liquid race-scaled Polymarket p: long (inv >= 1) -> (None, ceil_tick(p - value_sell_margin)); short
+    (inv <= -1) -> (p + margin without the grid clamp, floored to the tick (< PMIN = no bid), None); flat -> (None,
+    None). Selling below p (buying back above p) gives value away at the outcome."""
+    m = cfg.value_sell_margin
+    if inv >= 1:
+        return None, ceil_tick(p - m)
+    if inv <= -1:
+        x = math.floor(round((p + m) / TICK, 6)) * TICK
+        return (round(min(x, PMAX), 3) if x >= PMIN - 1e-9 else 0.0), None
+    return None, None
+
+
+def value_floor_quote(q, p, inv, cfg=CFG):
+    """Package 10 A1 on a finished Quote (decide, after hold_quote): the reducing side moved back to the value floor
+    (value_side_prices) if anything priced it beyond; its keep limit too. Only moves away from the other side; sizes
+    unchanged. A bid that would have to go below the grid is dropped."""
+    if p is None or q is NO_QUOTE:
+        return q
+    fb, fa = value_side_prices(p, inv, cfg)
+    if fa is not None and q.ask is not None and q.ask < fa - 1e-9:
+        q = replace(q, ask=fa, ask_limit=max(q.ask_limit, fa) if q.ask_limit is not None else None)
+    if fb is not None and q.bid is not None and q.bid > fb + 1e-9:
+        if fb < PMIN - 1e-9:
+            q = replace(q, bid=None, bid_size=0, bid_limit=None, bid_max=None)
+        else:
+            q = replace(q, bid=fb, bid_limit=min(q.bid_limit, fb) if q.bid_limit is not None else None)
+    return q
+
+
+def exit_quote(fv, inv, best_bid, best_ask, cfg=CFG, bankroll=None, max_size=None, value_floor=None):
     """Election-night exit: get this market flat, trading against other orders if needed.
 
     Long -> sell at the best other bid (an immediate trade), but never below fv - exit_max_slippage;
     if the best bid is worse than that, the order rests at that floor instead. Short -> the mirror
     image. Only the side that reduces the position is quoted. Sized to the whole position, capped at
     max_order_cash_frac of the account per order (the rest goes on later cycles).
+    value_floor (Package 10 A1 iii): a liquid Polymarket p -> never sell below p - value_sell_margin (buy back above
+    p + margin) either; None = unchanged.
     """
     bankroll = bankroll or DEFAULT_BANKROLL
     if inv >= 1:
         price = max(best_bid if best_bid is not None else 0.0, fv - cfg.exit_max_slippage)
+        if value_floor is not None:
+            price = max(price, value_floor - cfg.value_sell_margin)
         price = ceil_tick(price)
         size = int(min(inv, max(cfg.max_order_cash_frac * bankroll / max(1 - price, TICK), max_size or 0)))
         return Quote(ask=price, ask_size=size) if size >= 1 else NO_QUOTE
     if inv <= -1:
         price = min(best_ask if best_ask is not None else 1.0, fv + cfg.exit_max_slippage)
+        if value_floor is not None:
+            price = min(price, value_floor + cfg.value_sell_margin)
+            if price < PMIN - 1e-9:
+                return NO_QUOTE                   # (no grid price at or below the value floor)
         price = floor_tick(price)
         size = int(min(-inv, max(cfg.max_order_cash_frac * bankroll / max(price, TICK), max_size or 0)))
         return Quote(bid=price, bid_size=size) if size >= 1 else NO_QUOTE
@@ -3425,7 +3909,9 @@ class Bot:
         self.tilt_headline_on_at = None   # the headline gate's own ramp-in clock (ref_tilt_headline switched on later)
         self.tilt_s_applied_headline = 0.0   # the s applied in headline markets (status.json)
         self.restore_rampin(_tilt_saved)
-        self.pos_marks = {}               # {eid: the exchange's own valuation price of the position (currentPrice)}
+        self.basket_init(self.load_basket())   # Package 9 F1: the long-tilt basket (restored from status.json)
+        self.alloc_init(self.load_status_key("alloc"))   # Package 10 B: the allocator (last run, turnover)
+        self.pos_marks = {}             # {eid: the exchange's own valuation price of the position (currentPrice)}
         self.fv_fallback_logged = {}      # {eid: source} - which fallback risk_fv used for a held position (logged once)
         self.mark_sd = {}                 # eid -> sd of the 10-min mid change (mark_frag_*; from the recorder)
         self.mark_sd_time = -1e9          # monotonic time of the last estimate (refreshed every MARK_SD_REFRESH_SECONDS)
@@ -3472,6 +3958,8 @@ class Bot:
         self.lad_cash_left = 0.0          # R3 ladder: cash the ladder may still lock this cycle (see ladder_setup)
         self.lad_keep = {}                # ...this exchange's levels a resting ladder order may keep (ladder_targets)
         self.lad_placed = {}              # ...ladder orderId -> monotonic time placed (churn control)
+        self.bloc_sens, self.bloc_delta, self.bloc_inv = {}, 0.0, {}   # Package 10 A2 (bloc_refresh)
+        self.warned_value = ()                    # Package 10 A1 (iv): the value_mode warnings last logged
         self.lad_liquid, self.lad_party_delta = set(), 0.0   # ...this cycle's liquid Polymarket eids, party delta
         # Threads for sending several HTTP requests at once (downloads mostly wait on the network).
         self.pool = ThreadPoolExecutor(max_workers=max(1, cfg.parallel_requests), thread_name_prefix="http")
@@ -3507,6 +3995,13 @@ class Bot:
         self.hold_takes = deque()         # C hold target: (now_m, notional) of takes in the last hour (take_aged)
         self.hold_open_at = None          # ...now_m from which takes may start (first enabled call + 1 h: restart-safe)
         self.hold_takes_total = 0         # ...takes sent since start
+        self.tet_hour = deque()           # Package 9 F2 tilt_exit_take: (now_m, $ traded) in the last hour
+        self.tet_until = {}               # ...eid -> now_m until which no tilt exit is taken there (after a take)
+        self.tet_stats = {"count": 0, "shares": 0, "usd": 0.0, "cost": 0.0}   # ...since start (status.json)
+        self.tet_splits = {"count": 0, "shares": 0, "cash_freed": 0.0}      # F2b set splits since start (status.json)
+        self.tet_split_block = {}         # F2b: race -> now_m until which no split is tried there (after a refusal)
+        self.tet_split_logged = {}        # F2b: race -> now_m of its last "split refused" log (once an hour)
+        self.arb_cash_blocked = 0         # Package 9 F5 arb_cash_rule: arbitrages refused by the cash rule
         self.ops_last = {}                # ops fields of the latest status write (ops_fields): recorder, summary
         self.ops_cache = {}               # ops_fields: fills.csv-derived numbers, recomputed when the file changes
         self.ops_warned = False           # ops_fields failed once (logged once)
@@ -3828,6 +4323,7 @@ class Bot:
                 book_fvs.update(normalise({e: book_fvs[e] for e in members}))
         refs, liquid = self.reference_prices(book_fvs)
         self.cur_refs, self.cur_liquid = refs, liquid
+        self.cur_book_fvs = book_fvs              # (Package 9: the basket's stress value, see basket_leg_value)
         self.mark_ref_moves()
         self.reference_jump_guard(now_m)
         fvs = dict(book_fvs)
@@ -3874,7 +4370,8 @@ class Bot:
 
         # 5. Guaranteed arbitrage inside races (takes liquidity; our quotes there are pulled first) --
         # Package 7 pair_unwind_followup: legs an earlier pair unwind left unequal are evened up first
-        owed_races = self.pair_followup_step(fvs, now_m, mine_real) if getattr(self, "pair_owed", None) else set()
+        owed_races = (self.pair_followup_step(fvs, now_m, mine_real, inv=inv) if getattr(self, "pair_owed", None)
+                      else set())
         arb_races = self.take_arbitrage(inv, fvs, mine_real, now_m) if self.running else set()
         arb_races |= owed_races
         if cfg.pair_unwind_passive or self.pp:    # T2.5: a passive slice filled -> the other leg is taken now
@@ -3884,6 +4381,8 @@ class Bot:
         eff = self.effective_inventory(inv)
         worst = self.total_worst_case(inv, fvs)
         party_delta = sum(PARTY_SIGN.get(ex.party, 0) * inv.get(eid, 0.0) for eid, ex in self.ex.items())
+        if cfg.bloc_delta_enabled:                # Package 10 A2: the bloc delta the party cap uses this cycle
+            self.bloc_refresh(inv)
         # Hysteresis: once in reduce-only, both caps are reduce_only_hysteresis lower until it has been left.
         hyst = min(cfg.reduce_only_hysteresis, cfg.max_worst_case_frac / 2) if self.global_reduce else 0.0
         if cfg.risk_model == "correlated":
@@ -3950,6 +4449,11 @@ class Bot:
                        "positions": {self.ex[e].label: q for e, q in inv.items() if q and e in self.ex}}
 
         self.health.update(books_loaded=self.books_loaded(), markets_priced_from_tops=len(self.ref_tops))
+        if getattr(cfg, "take_respect_reserve", False) or getattr(self, "take_reserve_blocked", 0):   # P10 (absent while off)
+            self.health["take_reserve_blocked"] = getattr(self, "take_reserve_blocked", 0)
+        if cfg.bloc_delta_enabled:                # Package 10 A2 (absent while off)
+            self.health["bloc_delta"] = round(self.bloc_delta, 2)
+            self.health["bloc_delta_frac"] = round(self.bloc_delta / equity, 4) if equity else None
 
         # 6b. Take tournament quotes that Polymarket says are clearly stale (confirmed over 2 readings) ---
         taken = (self.take_stale_quotes(refs, liquid, fvs, inv, mine_real, global_reduce, party_delta, now_m)
@@ -3958,6 +4462,29 @@ class Bot:
             self.hold_open_at = None                        #   restarts the 1-hour hold-off
         if cfg.hold_target_hours > 0 and self.running:      # C hold target: aged lots taken within the hourly budget
             taken |= self.take_aged(inv, book_fvs, mine_real, now_m)
+        # 6b'. Package 9 F2: tilt exits taken inside a cost cap from the tilted fair value (immediate-or-cancel)
+        if cfg.tilt_exit_take and self.running:
+            taken |= self.tilt_exit_takes(refs, liquid, inv, mine_real, now_m, skip=taken | arb_races)
+        # 6c. Package 9 F1: the long-tilt basket (immediate-or-cancel takes; exempt from reduce-only, see Config)
+        if self.running and (cfg.basket_enabled or self.basket_legs or self.basket_state != "off" or self.basket_killed):
+            try:
+                taken |= self.basket_tick(now, inv, fvs, book_fvs, equity, mine_real, now_m, skip=taken | arb_races)
+            except ApiError:
+                raise                                 # (as the takes: the cycle's own error handling)
+            except Exception:                         # a basket bug must never stop the market maker
+                self.orders_stale = True
+                log.exception("basket tick failed - skipped this cycle")
+                self.basket_alert_once("crash", "BASKET tick crashed (see the log) - the basket is skipped while it "
+                                       "fails; the market maker goes on")
+        # 6d. Package 10 B: the capital allocator (sell -> cash read -> buy, immediate-or-cancel; see Config)
+        if self.running and (cfg.alloc_enabled or self.alloc_pairs or self.alloc_set_races):
+            try:
+                taken |= self.alloc_tick(now, inv, mine_real, now_m, skip=taken | arb_races)
+            except ApiError:
+                raise                                 # (as the takes: the cycle's own error handling)
+            except Exception:                         # an allocator bug must never stop the market maker
+                self.orders_stale = True
+                log.exception("allocator tick failed - skipped this cycle")
 
         self.phase_mark("fills_risk_takes")
         # 7. Decide + reconcile each exchange. One write at a time (parallel_writes = 1): cancels happen now,
@@ -4002,6 +4529,14 @@ class Bot:
             self.health["cash_gate_left"] = round(self.cash_left(), 2) if getattr(self, "cg_cash", None) is not None else None
             age = self.cash_read_age()
             self.health["cash_gate_read_age"] = round(age, 1) if age is not None else None   # s since a good read
+        if cfg.tilt_exit_take or self.tet_stats["count"]:   # Package 9 F2 (absent while never used)
+            self.health["tilt_exit_takes"] = {k: (round(v, 2) if isinstance(v, float) else v)
+                                              for k, v in self.tet_stats.items()}
+            if cfg.tilt_exit_take_split_sets or self.tet_splits["count"]:   # F2b (absent while never used)
+                self.health["tilt_exit_takes"]["splits"] = {k: (round(v, 2) if isinstance(v, float) else v)
+                                                            for k, v in self.tet_splits.items()}
+        if cfg.arb_cash_rule:                             # Package 9 F5 (absent while off)
+            self.health["arb_cash_blocked"] = self.arb_cash_blocked
         self.health["fast_unload_windows"] = sum(1 for e in list(self.unloads)
                                                  if e in self.ex and self.unload_side(self.ex[e], now_m))
         self.health["fl_bias_markets"] = {k: sum(1 for x in self.ex.values() if x.fl_tag.startswith(f" fl:{k}"))
@@ -4264,7 +4799,8 @@ class Bot:
     def update_tilt(self, book_fvs, refs, liquid, inv, now_m):
         """T2.1, every cycle and whatever ref_tilt_enabled says: feed the tilt estimator from the markets that are
         liquid, not R5 (ref_only), not headline, with a book price and Polymarket, and not under a jump guard; and
-        tilt_exposure = sum over held markets of position x (raw Polymarket - c), c = 1/legs."""
+        tilt_exposure = sum over held markets of position x (raw Polymarket - c), c = 1/legs (Package 9: less the
+        basket's shares, counted apart in tilt_exposure_basket)."""
         cfg, samples = self.cfg, []
         for eid, r in refs.items():
             ex = self.ex.get(eid)
@@ -4273,12 +4809,19 @@ class Bot:
                 continue
             samples.append((r, book_fvs[eid], self.legs(ex)))
         self.tilt_s = self.tilt.update(samples, now_m)
-        exposure = 0.0
+        exposure = basket = 0.0
+        legs = getattr(self, "basket_legs", None) or {}
         for eid, q in (inv or {}).items():
             ex, r = self.ex.get(eid), refs.get(eid)
             if q and ex is not None and r is not None:
-                exposure += q * (r - tilted_ref(r, 1.0, self.legs(ex)))    # tilted_ref(r, 1, legs) = c
+                # P9 red team: the basket's shares are its own deliberate bet, outside tilt_exposure (as for the skew,
+                # effective_inventory): counted in, a long-tilt basket flips the total's sign and the Package 8 tilt
+                # exits (and F2's takes, and the T2.4 cap) would turn on the market maker's long-tilt positions
+                qb = legs.get(eid, 0.0)
+                exposure += (q - qb) * (r - tilted_ref(r, 1.0, self.legs(ex)))    # tilted_ref(r, 1, legs) = c
+                basket += qb * (r - tilted_ref(r, 1.0, self.legs(ex)))
         self.tilt_exposure = exposure
+        self.tilt_exposure_basket = basket          # (status.json basket.tilt_exposure)
 
     def reference_jump_guard(self, now_m):
         """After each new Polymarket reading, pull quotes on any market whose Polymarket price moved
@@ -4602,6 +5145,8 @@ class Bot:
         to buy Democrat YES, which is the hedge. After buying 500 Democrat YES, both are 0.
         """
         eff = {}
+        if getattr(self, "basket_legs", None):    # Package 9 F1: skew / netting never counts the basket's shares
+            inv = {e: inv.get(e, 0.0) - self.basket_legs.get(e, 0.0) for e in set(inv) | set(self.basket_legs)}
         for members in self.groups.values():
             for e in members:
                 others = [inv.get(o, 0.0) for o in members if o != e]
@@ -4873,23 +5418,36 @@ class Bot:
         """R7: national swing shock (risk_swing_shock x |net Rep-minus-Dem YES shares|) plus risk_z standard
         deviations of the settlement value of every race, races independent once the swing is taken out.
         The cycle uses min(this, sum of per-race maxima)."""
+        stress = 0.0
+        if self.basket_risk_on():                 # Package 9 F1 (C-10): basket shares out, at a stress loss instead
+            inv, party_delta, stress = self.basket_risk_split(inv, fvs, party_delta)
         var = 0.0
         for members in self.groups.values():
             legs = [(inv.get(e, 0.0), self.risk_fv(e, fvs, members) if inv.get(e) else (fvs.get(e) or self.ex[e].last_fv or 0.5))
                     for e in members]
             if any(x for x, _ in legs):
                 var += race_variance(legs)
-        return self.cfg.risk_swing_shock * abs(party_delta) + self.cfg.risk_z * math.sqrt(var)
+        return self.cfg.risk_swing_shock * abs(party_delta) + self.cfg.risk_z * math.sqrt(var) + stress
 
     def total_worst_case(self, inv, fvs):
         """Sum over races of the worst-case settlement loss (see worst_case_loss)."""
         total = 0.0
+        if self.basket_risk_on():                 # Package 9 F1 (C-10): basket shares out, at a stress loss instead
+            inv, _, total = self.basket_risk_split(inv, fvs, 0.0)
         for members in self.groups.values():
             legs = [(inv.get(e, 0.0), self.risk_fv(e, fvs, members) if inv.get(e) else (fvs.get(e) or self.ex[e].last_fv or 0.5))
                     for e in members]
             if any(x for x, _ in legs):
                 total += worst_case_loss(legs)
         return total
+
+    def basket_risk_split(self, inv, fvs, party_delta):
+        """Package 9 F1 risk model (only while basket_enabled, see basket_risk_on): (positions less the basket's shares,
+        party delta less theirs, basket_stress_frac x the basket's $ value). Both risk measures then count the basket
+        at that stress loss instead of its settlement loss (Config basket_stress_frac)."""
+        rest = {e: inv.get(e, 0.0) - self.basket_legs.get(e, 0.0) for e in set(inv) | set(self.basket_legs)}
+        pd = party_delta - sum(PARTY_SIGN.get(self.ex[e].party, 0) * q for e, q in self.basket_legs.items() if e in self.ex)
+        return rest, pd, self.cfg.basket_stress_frac * self.basket_value(fvs, getattr(self, "cur_book_fvs", None))
 
     # ------------------------------------------------------------------ turnover control
     def seed_turnover(self):
@@ -4975,6 +5533,8 @@ class Bot:
         ex.fl_tag, ex.turnover_tag, ex.turnover_dead, ex.bb_tag = "", "", False, ""
         ex.ro_clip = ""
         ex.inv, ex.eff, ex.ref = inv.get(ex.eid, 0.0), eff.get(ex.eid, 0.0), ref
+        if ex.eid in self.basket_legs:            # Package 9 F1: the basket's legs are never quoted (its own takes only)
+            return NO_QUOTE
         hrs = self.hours_to_close(ex)
         if hrs * 60 <= cfg.stop_minutes_before_close:
             return NO_QUOTE                                   # too close to settlement
@@ -4988,12 +5548,16 @@ class Bot:
         # This comes before every other guard on purpose: getting out must never be blocked. If the book
         # has gone too thin for a fair value (likely on election night), exit around our last known fair
         # value, or failing that Polymarket's price, instead of holding the position into settlement.
-        if hrs <= cfg.exit_hours_before_close:
+        # Package 10 A1: the value-mode p (liquid, race-scaled Polymarket) and no pre-close windows (close_window)
+        vp = (self.value_p(ex, ref, ref_liquid)
+              if getattr(cfg, "value_mode", False) or getattr(cfg, "value_quote_hurdle", 0.0) > 0 else None)
+        if hrs <= self.close_window("exit_hours_before_close", cfg):
             anchor = next((x for x in (fv, ex.last_fv, ref) if x is not None), None)
             if fv is not None:
                 ex.last_fv = fv
             planned = self.size_plan.get(ex.eid) if cfg.size_by_activity else None   # big positions leave in big pieces
-            return (exit_quote(anchor, ex.inv, best_bid, best_ask, cfg, self.bankroll(), max_size=planned)
+            return (exit_quote(anchor, ex.inv, best_bid, best_ask, cfg, self.bankroll(), max_size=planned,
+                               value_floor=vp if getattr(cfg, "value_mode", False) else None)
                     if anchor is not None else NO_QUOTE)
         if fv is None:
             return NO_QUOTE                                   # no trustworthy price
@@ -5043,10 +5607,10 @@ class Bot:
         if exempt_bid:
             bid_cap = int(-ex.inv) if bid_cap is None else min(bid_cap, int(-ex.inv))
 
-        reduce_only = global_reduce or hrs <= cfg.flatten_hours_before_close
+        reduce_only = global_reduce or hrs <= self.close_window("flatten_hours_before_close", cfg)
         # From flatten_per_market_hours: flatten each market on its own, i.e. judge (and skew) by this
         # market's own position rather than the race-netted one.
-        inv_for_quote = ex.inv if hrs <= cfg.flatten_per_market_hours else ex.eff
+        inv_for_quote = ex.inv if hrs <= self.close_window("flatten_per_market_hours", cfg) else ex.eff
         # Kelly position limits, only with a liquid Polymarket price and a known account value.
         kelly_p = ref if (ref is not None and ref_liquid) else None
         # Size: this market's share of the capital plan; the party-control markets get a flat position limit.
@@ -5117,13 +5681,16 @@ class Bot:
                              unload_side=u_side, unload_edge=cfg.fast_unload_edge, unload_size=u_size,
                              adding_limit_factor=adding_limit, frag_limit=frag_limit,
                              behind_best=ex.eid not in self.ref_only, reduce_fv=reduce_fv, why=why,
-                             adding_per_market=bool(getattr(cfg, "adding_factor_per_market", False)))
+                             adding_per_market=bool(getattr(cfg, "adding_factor_per_market", False)),
+                             value_p=vp)
         ex.ro_clip = why.get("ro_clip", "")
         ex.bb_tag = " bb" if q.behind else ""
         ex.lad_ctx = (adding, adding_limit, frag_limit)   # (R3 ladder: the same factors and limits)
         if cfg.hold_target_hours > 0 and (not reduce_only or cfg.exit_quotes_in_reduce_only):   # C hold target:
             # aged lots' reducing side joins the best (Package 6: also in reduce-only, behind its flag)
             q = self.hold_quote(ex, q, best_bid, best_ask, book_fv if book_fv is not None else fv, cfg, ref, now_m)
+        if getattr(cfg, "value_mode", False) and vp is not None:   # Package 10 A1: the final quote, value floor
+            q = value_floor_quote(q, vp, ex.inv, cfg)
         return q
 
     def update_size_plan(self, now_m, fvs):
@@ -5165,17 +5732,85 @@ class Bot:
         Democratic ones up, so fills bring the net exposure back. Grows linearly to party_skew_at_cap at
         the hard cap (where party_blocks takes over). Zero for markets that aren't Rep/Dem."""
         sign = PARTY_SIGN.get(ex.party, 0)
-        cap = self.cfg.max_party_delta_frac * self.bankroll()
+        party_delta, cap = self.party_measure(party_delta)
         if not sign or cap <= 0:
             return 0.0
         return self.cfg.party_skew_at_cap * sign * max(-1.0, min(1.0, party_delta / cap))
+
+    def party_measure(self, party_delta):
+        """(net exposure, cap) for the national-swing cap: the share-count party_delta and max_party_delta_frac x
+        account; Package 10 A2 bloc_delta_enabled: the bloc delta ($ per sd, + = Republican) and max_bloc_delta_frac
+        x account instead."""
+        if getattr(self.cfg, "bloc_delta_enabled", False):
+            return self.bloc_delta, self.cfg.max_bloc_delta_frac * self.bankroll()
+        return party_delta, self.cfg.max_party_delta_frac * self.bankroll()
+
+    def bloc_refresh(self, inv):
+        """Package 10 A2 (cycle step 6, flag on): this cycle's per-share sensitivities (liquid race-scaled
+        Polymarket) and the bloc delta of inv. Returns the bloc delta. A contract with no liquid price this cycle
+        keeps its last sensitivity (a Polymarket outage must not zero the bloc delta and open the party cap, which
+        the share count it replaces never needed Polymarket for; P10 red team RT-4)."""
+        races = defaultdict(list)
+        for eid, ex in self.ex.items():
+            races[ex.group].append((eid, ex.label, self.scaled_ref(ex), eid in (self.cur_liquid or ())))
+        sens = bloc_sensitivities(races, self.cfg)
+        for e, v in (self.bloc_sens or {}).items():
+            if e in self.ex:
+                sens.setdefault(e, v)
+        self.bloc_sens, self.bloc_inv = sens, dict(inv)
+        self.bloc_delta = self.bloc_delta_now(inv)
+        return self.bloc_delta
+
+    def bloc_delta_now(self, inv=None):
+        """Package 10 A2: sum position x sensitivity ($ per sd of the national factor; + = Republican-leaning) for a
+        position map {eid: YES shares} (None = the last positions read), with this cycle's sensitivities. Part B's
+        allocator calls it on a hypothetical book to check a pair against the cap (bloc_cap)."""
+        inv = self.bloc_inv if inv is None else inv
+        return sum(q * self.bloc_sens.get(e, 0.0) for e, q in (inv or {}).items())
+
+    def bloc_cap(self):
+        """Package 10 A2: the |bloc_delta| cap in $ per sd (max_bloc_delta_frac x account)."""
+        return self.cfg.max_bloc_delta_frac * self.bankroll()
+
+    def scaled_ref(self, ex):
+        """Package 10: this cycle's raw Polymarket price for ex scaled to sum to 1 over its race when every leg has
+        one (else the raw price; None without one). Liquidity is the caller's check."""
+        refs = self.cur_refs or {}
+        r = refs.get(ex.eid)
+        if r is None:
+            return None
+        members = self.groups.get(ex.group) or [ex.eid]
+        if len(members) > 1 and all(refs.get(e) is not None for e in members):
+            tot = sum(refs[e] for e in members)
+            if tot > 0:
+                return r / tot
+        return r
+
+    def value_p(self, ex, ref, ref_liquid):
+        """Package 10 A1 / A4: the outcome value of one YES share here = the race-scaled Polymarket price, only when
+        liquid (ref_liquid); None otherwise (the value rules then leave this market alone)."""
+        if ref is None or not ref_liquid:
+            return None
+        if (self.cur_refs or {}).get(ex.eid) is None:     # (decide called outside a cycle: the raw price given)
+            return ref
+        return self.scaled_ref(ex)
+
+    def close_window(self, name, cfg=None):
+        """Package 10 A1 (ii): the pre-close window setting `name` (exit_hours_before_close, flatten_hours_before_close,
+        flatten_per_market_hours) as the code should apply it: the setting, or no window in value_mode - but never
+        less than the stop window (stop_minutes_before_close): there "nothing at all" holds for every check keyed on
+        a pre-close window too (stale-quote / hold takes, arbitrage's "closing", the allocator), in value_mode or
+        with the windows set to 0 (P10 red team RT-3; the defaults 2 / 12 / 6 h are above it: unchanged)."""
+        cfg = cfg or self.cfg
+        w = float("-inf") if getattr(cfg, "value_mode", False) else getattr(cfg, name)
+        return max(w, cfg.stop_minutes_before_close / 60.0)
 
     def party_blocks(self, ex, party_delta):
         """National-swing cap -> (no_bid, no_ask). Buying YES on a Republican market pushes the net
         Republican-minus-Democrat delta up, on a Democratic market down; selling does the opposite.
         Beyond the cap, block whichever side would make it worse."""
         sign = PARTY_SIGN.get(ex.party, 0)
-        party_cap = self.cfg.max_party_delta_frac * self.bankroll()
+        party_delta, party_cap = self.party_measure(party_delta)   # (Package 10 A2: the bloc delta with the flag)
         too_red, too_blue = party_delta > party_cap, party_delta < -party_cap
         return (sign > 0 and too_red) or (sign < 0 and too_blue), (sign > 0 and too_blue) or (sign < 0 and too_red)
 
@@ -5251,7 +5886,7 @@ class Bot:
                 fix_ask = False
         # Reduce-only, flatten and exit windows: always do exactly what the risk logic asks (no holding, no
         # burst-mode skipping), or a position could be left to grow or never be exited.
-        critical = self.global_reduce or self.hours_to_close(ex) <= self.cfg.flatten_hours_before_close
+        critical = self.global_reduce or self.hours_to_close(ex) <= self.close_window("flatten_hours_before_close")
         # Refill cooldown: no new order on a side that was just hit repeatedly; what rests there stays while safe.
         cool_bid = not critical and self.refill_cooling(ex, True, now_m)
         cool_ask = not critical and self.refill_cooling(ex, False, now_m)
@@ -5360,12 +5995,14 @@ class Bot:
                 1 if reprice else 0,
                 -self.size_plan.get(ex.eid, 0))
 
-    def tilt_exit_side(self, ex):
+    def tilt_exit_side(self, ex, r=None, pos=None):
         """Package 8: "bid" / "ask" = the side shrinking this market's own position when that position adds to
         |tilt_exposure| (its contribution pos x (raw Polymarket - c), c = 1/legs, has the sign of the total, or is
-        positive while the total is 0); None otherwise. Reads ex.inv / ex.ref as decide() set them this cycle."""
-        r, pos = getattr(ex, "ref", None), ex.inv
-        if r is None or not pos:
+        positive while the total is 0); None otherwise. Reads ex.inv / ex.ref as decide() set them this cycle
+        (Package 9 F2: r / pos given = this cycle's, before decide)."""
+        r = getattr(ex, "ref", None) if r is None else r
+        pos = ex.inv if pos is None else pos
+        if r is None or not pos or ex.eid in getattr(self, "basket_legs", ()):   # (Package 9: never a basket leg)
             return None
         contrib = pos * (r - tilted_ref(r, 1.0, self.legs(ex)))     # tilted_ref(r, 1, legs) = c
         total = getattr(self, "tilt_exposure", 0.0) or 0.0
@@ -5443,7 +6080,7 @@ class Bot:
         factor never makes a resting order unsafe, like Quote.bid_max for level 0)."""
         cfg, bank = self.cfg, self.bankroll()
         hrs = self.hours_to_close(ex)
-        if hrs <= cfg.exit_hours_before_close:
+        if hrs <= self.close_window("exit_hours_before_close"):
             return {True: lambda px: 0, False: lambda px: 0}
         inv, net = ex.inv, ex.eff
         headline = cfg.size_by_activity and ex.group in cfg.headline_races
@@ -5456,8 +6093,8 @@ class Bot:
                 return kelly_position(kelly_p, px, bank, cfg, yes=yes)
             return cfg.max_position_frac * bank
         extra = {True: [], False: []}
-        if self.global_reduce or hrs <= cfg.flatten_hours_before_close:
-            pos = inv if hrs <= cfg.flatten_per_market_hours else net
+        if self.global_reduce or hrs <= self.close_window("flatten_hours_before_close"):
+            pos = inv if hrs <= self.close_window("flatten_per_market_hours") else net
             extra[True].append(-pos)                       # only buy back a short...
             extra[False].append(pos)                       # ...or sell down a long
         if quote > 0 and abs(net) > cfg.ladder_max_inv_quotes * quote:
@@ -5483,7 +6120,12 @@ class Bot:
         if fv > cfg.tail_high:
             extra[True].append(max(0.0, -inv))
         sign = PARTY_SIGN.get(ex.party, 0)
-        if sign:                                           # buying YES moves the party delta by sign a share
+        if sign and getattr(cfg, "bloc_delta_enabled", False):   # Package 10 A2: room in bloc delta / sensitivity
+            d, cap = self.party_measure(self.lad_party_delta)
+            w = abs(self.bloc_sens.get(ex.eid, 0.0))
+            for is_bid, room in ((True, cap - sign * d), (False, cap + sign * d)):
+                extra[is_bid].append(room / w if w > 0 else (0.0 if room < 0 else float("inf")))
+        elif sign:                                         # buying YES moves the party delta by sign a share
             cap, d = cfg.max_party_delta_frac * bank, self.lad_party_delta
             extra[True].append(cap - sign * d)
             extra[False].append(cap + sign * d)
@@ -6306,6 +6948,26 @@ class Bot:
             return True
         return False
 
+    def take_blocked_by_reserve(self, order):
+        """P10 take_respect_reserve: True if this take order (YES terms, possibly marked _no_sell) would leave less than
+        alloc_mm_reserve of cash free: cash_left() - its gate need < reserve. False with the flag off, the gate off, or
+        no reserve. A covered sale / a cash-free order (need 0) is never blocked."""
+        cfg = self.cfg
+        reserve = float(getattr(cfg, "alloc_mm_reserve", 0.0) or 0.0)
+        if not getattr(cfg, "take_respect_reserve", False) or reserve <= 0 or not self.cash_gate_on():
+            return False
+        eid = order["exchangeId"]
+        free = self.cash_free(eid, skip=lambda o: o.eid == eid)      # our quotes there are cancelled before the take
+        is_bid = order["action"] == "buy"
+        need = self.tier_need(self.cash_tiers(free, is_bid, order["price"], bool(order.get("_no_sell"))),
+                              float(order["quantity"]))
+        if need <= 1e-9:
+            return False
+        if self.cash_left() - need < reserve - 1e-9:
+            self.take_reserve_blocked = getattr(self, "take_reserve_blocked", 0) + 1
+            return True
+        return False
+
     def cash_gate_quote(self, ex, q, resting):
         """Plan-time cap (plan_exchange): each side's wanted size at most what the cash allows (the resting level-0
         order on that side counts as available: it is kept or replaced), so a capped quote is planned as such
@@ -6401,7 +7063,7 @@ class Bot:
         meta = (self.order_meta.get(resting[0].order_id) or {}) if len(resting) == 1 else {}
         if cfg.no_chase_enabled and meta:
             now_m = time.monotonic() if now_m is None else now_m
-            if (self.global_reduce or self.hours_to_close(ex) <= cfg.flatten_hours_before_close
+            if (self.global_reduce or self.hours_to_close(ex) <= self.close_window("flatten_hours_before_close")
                     or ex.eid in self.ref_moved or now_m - ex.ref_moved_at < 15
                     or self.unload_urgent(ex, now_m) == ("bid" if is_bid else "ask")):
                 meta = {}                         # (unknown placement notes -> the normal rules)
@@ -6690,16 +7352,25 @@ class Bot:
             return done
         b_left = int(getattr(cfg, "pair_no_unwind_max_per_cycle", 2))   # Package 7: B-only short-set unwinds
         b_waiting = 0
+        cash_rule = bool(getattr(cfg, "arb_cash_rule", False))          # Package 9 F5
         for race, members in self.arb_race_order(inv):
             if (len(members) < 2 or not self.running or now_m < self.arb_cooldown.get(race, 0)
                     or race in getattr(self, "pair_owed", ())  # Package 7: its owed legs are evened up first
-                    or any(busy(self.ex[e], now_m) for e in members)):
+                    or any(busy(self.ex[e], now_m) for e in members)
+                    or any(e in self.basket_legs for e in members)):   # Package 9 F1: never a basket leg's race
                 continue
             # pre-close window: arbitrage would open positions the per-market flatten then pays to unwind;
             # unwinding a held set only reduces them, so it still runs
-            closing = any(self.hours_to_close(self.ex[e]) <= cfg.flatten_hours_before_close for e in members)
-            if self.arb_plan(members, inv, fvs, closing) is None:     # quick check on the cached books
+            closing = any(self.hours_to_close(self.ex[e]) <= self.close_window("flatten_hours_before_close")
+                          for e in members)
+            plan = self.arb_plan(members, inv, fvs, closing)      # quick check on the cached books
+            if plan is None:
                 continue
+            if cash_rule and plan[0] == "arb":   # Package 9 F5: no set it cannot fully fund (no book download)
+                fit, need, left = self.arb_cash_fit(plan[2], plan[3], plan[1])
+                if fit < 1 and plan[3] >= 1:
+                    self.arb_cash_refused(race, need, left)
+                    continue
             if getattr(self, "arb_plan_b", False) and b_left < 1:     # Package 7: B's per-cycle cap: waits
                 b_waiting += 1
                 continue
@@ -6717,6 +7388,15 @@ class Bot:
             plan = self.arb_plan(members, inv, fvs, closing)
             if plan is None:
                 continue
+            if cash_rule and plan[0] == "arb" and plan[3] >= 1:   # Package 9 F5: the cash rule on the fresh books
+                fit, need, left = self.arb_cash_fit(plan[2], plan[3], plan[1])
+                if fit < 1:
+                    self.arb_cash_refused(race, need, left)
+                    continue
+                if fit < plan[3]:
+                    log.info("arbitrage on %s: %d -> %d sets (cash rule: left %.2f, %s x need + %.0f)", race,
+                             plan[3], fit, left, cfg.arb_cash_mult, cfg.arb_cash_reserve)
+                plan = plan[:3] + (fit,)
             if getattr(self, "arb_plan_b", False):
                 if b_left < 1:
                     b_waiting += 1
@@ -6785,16 +7465,25 @@ class Bot:
             held = [inv.get(e, 0.0) for e in members]
             for sign, levels, action in ((+1, bids, "sell"), (-1, asks, "buy")):
                 sets = min(sign * h for h in held)
+                if sign > 0 and sets >= 1 and getattr(cfg, "arb_sellback", False):
+                    levels = self.arb_levels(members, "bids")   # Package 9 F5: never a level at a price of ours
                 if sets < 1 or not levels:
                     continue
                 total = sum(p for p, _ in levels.values())
                 edge = total - 1 if sign > 0 else 1 - total
                 floor = cfg.pair_unwind_min_profit
                 nono = sign < 0 and self.pair_no_unwind_on()
+                alloc_cost = None
                 if nono:
                     # Package 7: a NO+NO set is unwound as a pair even at a small cost (asks <= 1 + max_cost): the
                     # only way to free it without cash (selling one leg breaks the set's collateral)
                     floor = min(floor, -cfg.pair_no_unwind_max_cost)
+                    alloc_cost = (getattr(self, "alloc_set_races", None) or {}).get(self.ex[members[0]].group)
+                    if alloc_cost is not None:    # Package 10 B3: a set race the allocator registered, at its cost
+                        floor = min(floor, -alloc_cost["cost"])
+                if sign > 0 and getattr(cfg, "arb_sellback", False):
+                    # Package 9 F5 (C-4): a held YES+YES set is sold back once the bids add up to arb_sellback_min_sum
+                    floor = min(floor, cfg.arb_sellback_min_sum - 1)
                 if edge < floor - 1e-9:   # (buying back a short set below 0.90 only cuts risk)
                     continue
                 max_sets = int(getattr(cfg, "pair_no_unwind_max_sets", 0) or 0)
@@ -6804,6 +7493,9 @@ class Bot:
                     caps = [max_sets]
                 else:
                     caps = [cfg.pair_unwind_max_frac * bank / max(p, TICK) for p, _ in levels.values()]
+                if (alloc_cost is not None and edge < -cfg.pair_no_unwind_max_cost - 1e-9
+                        and edge < cfg.pair_unwind_min_profit - 1e-9):
+                    caps.append(alloc_cost.get("sets", float("inf")))   # (P10 B3: only the sets the allocator needs)
                 qty = int(min([sets] + [size for _, size in levels.values()] + caps))
                 slack_kw = {"set_slack": True} if nono and getattr(cfg, "pair_unwind_race_order", False) else {}
                 if qty >= 1 and self.unwind_is_safe(inv, fvs, members, -sign * qty, **slack_kw):
@@ -6811,11 +7503,15 @@ class Bot:
                     return "unwind", action, levels, qty
         if not cfg.arb_enabled or closing:
             return None
+        rule = bool(getattr(cfg, "arb_cash_rule", False))
+        if rule:                          # Package 9 F5: other traders' levels only, never one at a price of ours
+            bids, asks = self.arb_levels(members, "bids"), self.arb_levels(members, "asks")
         if bids and sum(p for p, _ in bids.values()) >= 1 + cfg.arb_min_profit - 1e-9:
             qty = int(min([cfg.arb_max_frac * bank] +
                           [size for _, size in bids.values()] +                            # only what's bid at that price
                           [cfg.max_position_frac * bank + inv.get(e, 0.0) for e in members] +   # selling lowers position
-                          [cfg.max_order_cash_frac * bank / max(1 - p, TICK) for p, _ in bids.values()]))  # cash per order
+                          [cfg.max_order_cash_frac * bank / max(1 - p, TICK) for p, _ in bids.values()] +  # cash per order
+                          ([cfg.arb_leg_depth_frac * min(size for _, size in bids.values())] if rule else [])))
             return "arb", "sell", bids, qty
         # The set pays 1 only if a LISTED party wins. Book fair values are normalised to sum to 1, so they cannot
         # see an unlisted outsider: every leg needs a LIQUID Polymarket price and those RAW prices must add up to
@@ -6827,9 +7523,91 @@ class Bot:
             qty = int(min([cfg.arb_max_frac * bank] +
                           [size for _, size in asks.values()] +                            # only what's offered there
                           [cfg.max_position_frac * bank - inv.get(e, 0.0) for e in members] +   # buying raises position
-                          [cfg.max_order_cash_frac * bank / max(p, TICK) for p, _ in asks.values()]))  # cash per order
+                          [cfg.max_order_cash_frac * bank / max(p, TICK) for p, _ in asks.values()] +  # cash per order
+                          ([cfg.arb_leg_depth_frac * min(size for _, size in asks.values())] if rule else [])))
             return "arb", "buy", asks, qty
         return None
+
+    # --- Package 9 F5: the arbitrage cash rule (arb_cash_rule) ---
+    def own_prices(self, eid):
+        """{(is_bid, YES price)} of every order of ours on eid we know of: resting (our record), just placed (not yet
+        listed) and sent with no answer yet (unconfirmed)."""
+        out = {(o.is_bid, rnd(o.price)) for o in list(self.my_orders.values()) if o.eid == eid}
+        out |= {(o.is_bid, rnd(o.price)) for o, _t in list(self.recent_orders.values()) if o.eid == eid}
+        out |= {(c[0].get("action") == "buy", rnd(float(c[0].get("price", 0.0))))
+                for c in (self.unconfirmed.get(eid) or []) if isinstance(c[0], dict)}
+        return out
+
+    def arb_levels(self, members, key):
+        """F5: top_levels on other traders only, a level at a price where we have (or just sent) an order on that side
+        skipped WHOLE (live 3 Oct: own quotes in 29% of the race-cycles at bids >= 1.04 - strip_own only takes off
+        the size our record knows of). {eid: (price, size)} or None if a leg has no such level."""
+        out = {}
+        for e in members:
+            b = self.ex[e].book
+            mine = self.own_prices(e)
+            bid = key == "bids"
+            lv = [x for x in ((b or {}).get(key) or []) if (bid, rnd(x["price"])) not in mine]
+            if not lv:
+                return None
+            out[e] = (lv[0]["price"], lv[0]["quantity"])
+        return out
+
+    def arb_orders(self, levels, qty, action):
+        """The legs execute_arbitrage sends for qty sets (a leg buying back a short: a covered "sell NO" if all fits)."""
+        orders = [{"exchangeId": e, "side": "yes", "action": action, "quantity": int(qty), "price": p,
+                   "tournamentId": self.tid} for e, (p, _) in levels.items()]
+        for o in orders:
+            self.no_sell_order(o, self.ex[o["exchangeId"]].inv, whole=True)
+        return orders
+
+    def arb_cash_need(self, levels, qty, action):
+        """F5: the cash the legs of qty sets need together, by the cash gate's own per-order rule (cash_tiers: a sale
+        beyond the YES held buys NO at 1 - price, a purchase price a share, a covered "sell NO" its lone part free,
+        closing sets free when every leg is one); our resting orders there are cancelled first (ignored)."""
+        orders = self.arb_orders(levels, qty, action)
+        free = {o["exchangeId"]: self.cash_free(o["exchangeId"], skip=lambda r: True) for o in orders}
+        closed = all(o.get("_no_sell") for o in orders)
+        need = 0.0
+        for o in orders:
+            b, ns = o["action"] == "buy", bool(o.get("_no_sell"))
+            need += self.tier_need(self.cash_tiers(free[o["exchangeId"]], b, o["price"], ns, closed), qty)
+            self.tier_consume(free[o["exchangeId"]], b, ns, qty)
+        return need
+
+    def arb_cash_fit(self, levels, qty, action):
+        """F5: (sets, need of the planned sets, cash left): the most sets <= qty with cash_left() >= arb_cash_mult x
+        their need + arb_cash_reserve (0 without a good cash figure: the rule needs cash_gate_enabled)."""
+        cfg = self.cfg
+        qty = int(qty)
+        if not self.cash_gate_on() or getattr(self, "cg_cash", None) is None:
+            return 0, (self.arb_cash_need(levels, qty, action) if qty >= 1 else 0.0), None
+        left = self.cash_left()
+        need_q = self.arb_cash_need(levels, qty, action) if qty >= 1 else 0.0
+
+        def fits(n):
+            return left + 1e-9 >= cfg.arb_cash_mult * self.arb_cash_need(levels, n, action) + cfg.arb_cash_reserve
+        if qty < 1 or not fits(1):
+            return 0, need_q, left
+        lo, hi = 1, qty
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if fits(mid):
+                lo = mid
+            else:
+                hi = mid - 1
+        return lo, need_q, left
+
+    def arb_cash_refused(self, race, need, left):
+        """F5: one refusal by the cash rule: counted (status.json arb_cash_blocked) and journaled (once a minute a
+        race)."""
+        self.arb_cash_blocked += 1
+        now_m, seen = time.monotonic(), self.__dict__.setdefault("arb_cash_logged", {})
+        if now_m - seen.get(race, -1e18) >= 60.0:
+            seen[race] = now_m
+            log.warning("ARB skipped: cash rule (need %.2f, left %s) on %s - %s x need + %.0f required", need,
+                        "no cash figure" if left is None else f"{left:.2f}", race, self.cfg.arb_cash_mult,
+                        self.cfg.arb_cash_reserve)
 
     def unwind_is_safe(self, inv, fvs, members, delta, set_slack=False):
         """Would adding `delta` YES shares on every leg of a race leave the party delta within its cap (or no
@@ -6946,6 +7724,8 @@ class Bot:
             st = self.pp.get(race)
             if off and st is None:
                 continue
+            if st is None and any(e in self.basket_legs for e in members):   # Package 9 F1: no new slice there
+                continue
             if st is not None:
                 x, y, s = st["leg"], st["other"], st["sign"]
                 sold_x = max(0.0, s * (st["base_x"] - inv.get(x, 0.0)))
@@ -6975,7 +7755,7 @@ class Bot:
                 del self.pp[race]
             else:
                 prefer = None
-            closing = any(self.hours_to_close(self.ex[e]) <= cfg.flatten_hours_before_close
+            closing = any(self.hours_to_close(self.ex[e]) <= self.close_window("flatten_hours_before_close")
                           for e in members if e in self.ex)
             plan = None if closing else self.pair_passive_plan(members, inv, fvs, prefer)
             if plan is not None:
@@ -7205,6 +7985,8 @@ class Bot:
                 self.notes_dirty = True
         if len(set(traded)) > 1 and followup:     # Package 7: the lagging leg(s) owe the difference
             self.pair_owe(race, orders, traded, action, now_m)
+        elif len(set(traded)) > 1 and kind == "arb" and getattr(cfg, "arb_cash_rule", False):
+            self.arb_owe(race, orders, traded, action, now_m)   # Package 9 F5: never a one-legged set left
         elif len(set(traded)) > 1:
             alert(f"arbitrage on {race} only partly filled {traded}: the difference is now ordinary "
                   f"inventory, which the quoting will work off")
@@ -7271,18 +8053,208 @@ class Bot:
                     ", ".join(f"{self.ex[e].label} {q}" for e, q in legs.items()),
                     self.cfg.pair_unwind_followup_tries, self.cfg.pair_unwind_followup_max_cost)
 
+    # --- Package 9 F5: an arbitrage whose legs filled unequally (arb_cash_rule) ---
+    @staticmethod
+    def arb_owed_legs(st):
+        """F5: st["legs"] = {eid: shares behind the most-filled leg} (status.json pair_owed, take_arbitrage's skip)."""
+        top = max(st["filled"].values())
+        st["legs"] = {e: int(round(top - f)) for e, f in st["filled"].items() if top - f >= 1 - 1e-9}
+
+    def arb_owe(self, race, orders, traded, action, now_m):
+        """F5: an arbitrage batch filled its legs unequally (a leg refused for cash, or its level gone): the race is
+        owed (self.pair_owed, kind "arb"; in memory only) and arb_followup evens it from the next cycle on."""
+        st = {"kind": "arb", "action": action, "filled": {o["exchangeId"]: float(f) for o, f in zip(orders, traded)},
+              "t": now_m, "tries": 0, "price": {o["exchangeId"]: o["price"] for o in orders}}
+        self.arb_owed_legs(st)
+        self.pair_owed[race] = st
+        log.warning("ARBITRAGE on %s filled %s unequally: %s owed - completed next cycle (within %.3f of the planned "
+                    "price), then the extra legs %s back", race, traded,
+                    ", ".join(f"{self.ex[e].label} {q}" for e, q in st["legs"].items()),
+                    self.cfg.pair_unwind_followup_max_cost, "bought" if action == "sell" else "sold")
+
+    def arb_followup(self, race, st, fvs, now_m, mine_real=None, inv=None):
+        """F5, once a cycle per owed arbitrage: try 1 COMPLETES the set (the arbitrage's own action on each lagging
+        leg, at most pair_unwind_followup_max_cost past its planned price); when nothing can complete it then, and
+        from try 2 on, it REVERSES the extra (the
+        opposite action on each leg filled beyond the least-filled one, at most arb_min_profit (_buy) +
+        pair_unwind_followup_max_cost past the planned price: the arbitrage's edge given back, never more). Each:
+        immediate-or-cancel orders on fresh books, at most the shares needed (never past the position the arbitrage
+        made: no flip), cash-gated, our orders there cancelled first and the leftovers after. Dropped once even
+        (logged), or alerted and dropped after pair_unwind_followup_tries tries / pair_unwind_followup_max_age.
+        Returns {race} when writes went out (the race is not quoted this cycle)."""
+        cfg = self.cfg
+        gone = [e for e in st["filled"] if e not in self.ex]
+        if gone:
+            alert(f"arbitrage on {race}: a leg is no longer listed - owed state dropped ({st['legs']})")
+            del self.pair_owed[race]
+            return set()
+        filled = st["filled"]
+        if max(filled.values()) - min(filled.values()) < 1 - 1e-9:
+            log.warning("arbitrage on %s: legs even (%s) - owed state cleared", race, filled)
+            del self.pair_owed[race]
+            return set()
+        max_age = float(getattr(cfg, "pair_unwind_followup_max_age", 0.0) or 0.0)
+        if max_age > 0 and now_m - st.get("t", now_m) >= max_age:
+            alert(f"arbitrage on {race}: legs not evened within {max_age:.0f} s ({st['tries']} tries; filled "
+                  f"{filled}): owed state cleared, now ordinary inventory")
+            del self.pair_owed[race]
+            return set()
+        if not self.running or not self.api.live:
+            return set()
+        complete = st["tries"] < 1
+        if not self.writes_ready(2 * len(filled) + 1):   # our quotes + the orders + leftover cancels, every leg at most
+            self.arbs_skipped_budget += 1
+            log.info("arbitrage follow-up on %s deferred: write budget busy (next cycle)", race)
+            return set()
+        st["tries"] += 1
+        if inv is not None:                       # this cycle's positions (ex.inv is last cycle's before decide)
+            for e in filled:
+                self.ex[e].inv = float(inv.get(e, 0.0))
+        orders = self.arb_followup_orders(race, st, complete, mine_real)
+        if complete and not orders:               # nothing completes the set now: reverse the extra at once
+            complete = False
+            orders = self.arb_followup_orders(race, st, complete, mine_real)
+        acted = set()
+        if orders:
+            got = self.arb_followup_send(race, orders, complete, fvs, now_m)
+            if got is None:                       # never sent (write budget): not a try
+                st["tries"] -= 1
+                return set()
+            acted.add(race)
+            for e, g in got.items():
+                filled[e] += g if complete else -g
+            self.arb_owed_legs(st)
+        if max(filled.values()) - min(filled.values()) < 1 - 1e-9:
+            log.warning("arbitrage on %s: follow-up evened the legs after %d %s (%s)", race, st["tries"],
+                        "try" if st["tries"] == 1 else "tries", "completed" if complete else "reversed")
+            del self.pair_owed[race]
+        elif st["tries"] >= cfg.pair_unwind_followup_tries:
+            alert(f"arbitrage on {race} still unequal after {st['tries']} tries (filled {filled}): now ordinary "
+                  f"inventory, which the quoting will work off")
+            del self.pair_owed[race]
+        return acted
+
+    def arb_followup_orders(self, race, st, complete, mine_real=None):
+        """F5: the follow-up's orders on fresh books: complete = the arbitrage's action on each lagging leg for what it
+        is behind (limit pair_unwind_followup_max_cost past the planned price); else the opposite action on each leg
+        for what it is ahead of the least-filled one (limit arb_min_profit (_buy) + that past it). Sized to the
+        book's depth within the limit (walked to the worst level needed); a buy that buys back a short goes as a
+        covered "sell NO" when all of it fits; cash-gated per order (a leg that does not fit waits)."""
+        cfg, filled = self.cfg, st["filled"]
+        top, low = max(filled.values()), min(filled.values())
+        want = ({e: int(round(top - f)) for e, f in filled.items() if top - f >= 1 - 1e-9} if complete
+                else {e: int(round(f - low)) for e, f in filled.items() if f - low >= 1 - 1e-9})
+        buy = (st["action"] == "buy") == complete     # completing repeats the arbitrage's action, reversing undoes it
+        key = "asks" if buy else "bids"
+        edge = cfg.arb_min_profit if st["action"] == "sell" else cfg.arb_min_profit_buy
+        slack = cfg.pair_unwind_followup_max_cost + (0.0 if complete else edge)
+        orders = []
+        for e, n in want.items():
+            ex = self.ex[e]
+            if not complete:                      # undoing never flips: at most the position the arbitrage made
+                n = int(min(n, max(0.0, -ex.inv) if buy else max(0.0, ex.inv)) + 1e-9)
+                if n < 1:
+                    log.warning("arbitrage follow-up on %s: nothing to reverse on %s (position %+.0f)", race,
+                                ex.label, ex.inv)
+                    continue
+            try:
+                ex.book = strip_own(self.api.book(e, self.tid), (mine_real or {}).get(e, []))
+                ex.book_time = ex.verified = time.monotonic()
+            except ApiError as err:
+                log.warning("arbitrage follow-up on %s: book download failed (%s) - cached book", race, err)
+            planned = st["price"][e]
+            limit = floor_tick(planned + slack) if buy else ceil_tick(planned - slack)
+            price, depth = None, 0.0
+            for lv in (ex.book or {}).get(key) or []:
+                if (lv["price"] > limit + 1e-9) if buy else (lv["price"] < limit - 1e-9):
+                    break
+                if depth >= n:
+                    break
+                price, depth = lv["price"], depth + lv["quantity"]
+            qty = int(min(n, depth) + 1e-9)
+            if qty < 1 or price is None:
+                log.warning("arbitrage follow-up on %s (%s): nothing on %s within %.3f (planned %.3f), try %d of %d",
+                            race, "complete" if complete else "reverse", ex.label, limit, planned, st["tries"],
+                            cfg.pair_unwind_followup_tries)
+                continue
+            order = {"exchangeId": e, "side": "yes", "action": "buy" if buy else "sell", "quantity": qty,
+                     "price": price, "tournamentId": self.tid}
+            if buy:
+                self.no_sell_order(order, ex.inv, whole=True)   # a covered "sell NO" when all of it fits
+            orders.append(order)
+        if orders and self.cash_gate_on():
+            fits = [o for o in orders if not self.cash_gate_blocks([o])]
+            for o in orders:
+                if o not in fits:
+                    self.cash_gate_log(o["exchangeId"], "arbitrage follow-up on %s: %s not sent - not enough "
+                                       "available cash (cash gate)", race, self.ex[o["exchangeId"]].label)
+            orders = fits
+        return orders
+
+    def arb_followup_send(self, race, orders, complete, fvs, now_m):
+        """F5: the follow-up batch: our orders on those legs cancelled, the orders (alive arb_order_ttl), the leftovers
+        cancelled. {eid: shares filled}, or None if never sent (write budget)."""
+        cfg = self.cfg
+        if not all([self.cancel(o["exchangeId"], [], whole_exchange=True) for o in orders]):
+            log.warning("arbitrage follow-up on %s: could not clear our own quotes - next cycle", race)
+            return {}
+        exp = iso(utcnow() + timedelta(seconds=cfg.arb_order_ttl))
+        for o in orders:
+            o["expirationDate"] = exp
+        log.warning("ARBITRAGE follow-up %s (%s): %s", race, "complete" if complete else "reverse", ", ".join(
+            f"{'buying' if o['action'] == 'buy' else 'selling'} {o['quantity']} YES on {self.ex[o['exchangeId']].label}"
+            f" at {o['price']:.3f}{' (sell NO)' if o.get('_no_sell') else ''}" for o in orders))
+        self.orders_stale = True
+        try:
+            results = self.place_orders(orders)
+        except ApiError as err:
+            if err.code == "WRITE_BUDGET_WAIT":
+                self.arbs_skipped_budget += 1
+                return None
+            for o in orders:
+                self.ex[o["exchangeId"]].pending_until = now_m + cfg.pending_seconds
+            alert(f"arbitrage follow-up on {race}: placement failed ({err}) - check positions")
+            if err.code in FATAL_API_CODES:
+                fatal(f"orders rejected with {err.code}")
+            return {}
+        by_index = {r.get("index", k): r for k, r in enumerate(results)}
+        for k, o in enumerate(orders):
+            if (by_index.get(k) or {}).get("ok"):
+                self.remember_order(o, (by_index.get(k) or {}).get("data") or {}, now_m)
+        for o in orders:
+            self.cancel(o["exchangeId"], [], whole_exchange=True, quiet=True)
+        got = {}
+        for k, o in enumerate(orders):
+            res = by_index.get(k) or {}
+            data = res.get("data") or {}
+            if not res.get("ok"):
+                log.warning("arbitrage follow-up on %s: %s refused (%s)", race, self.ex[o["exchangeId"]].label,
+                            (data.get("error") or {}).get("message") or data.get("error"))
+            got[o["exchangeId"]] = float(data.get("quantityTraded") or 0) if res.get("ok") else 0.0
+            if data.get("orderId") is not None:
+                self.order_meta[data["orderId"]] = {"our_side": "bid" if o["action"] == "buy" else "ask",
+                                                    "price": o["price"], "arb": True, "fv": fvs.get(o["exchangeId"]),
+                                                    "t": time.time(), "eid": o["exchangeId"],
+                                                    **({"no_sell": True} if o.get("_no_sell") else {})}
+                self.notes_dirty = True
+        return got
+
     def pair_owed_status(self):
         """status.json pair_owed: {race: shares still owed (summed over its lagging legs)}."""
         return {r: int(sum(st["legs"].values())) for r, st in getattr(self, "pair_owed", {}).items()}
 
-    def pair_followup_step(self, fvs, now_m, mine_real=None):
+    def pair_followup_step(self, fvs, now_m, mine_real=None, inv=None):
         """Once a cycle, before take_arbitrage: per race with owed legs, one immediate-or-cancel order on each lagging
         leg (pair_followup_take). The owed shares shrink by what fills; the state is dropped once even, or after
         pair_unwind_followup_tries cycles that sent (or tried to send) the follow-up, with one alert of what is left.
-        A cycle the write budget defers is not a try. Returns the races acted on (not quoted this cycle)."""
+        A cycle the write budget defers is not a try. Returns the races acted on (not quoted this cycle).
+        Package 9 F5: an arbitrage's owed record (kind "arb") goes to arb_followup (inv: this cycle's positions)."""
         cfg, acted = self.cfg, set()
         for race in list(self.pair_owed):
             st = self.pair_owed[race]
+            if st.get("kind") == "arb":
+                acted |= self.arb_followup(race, st, fvs, now_m, mine_real, inv)
+                continue
             for e in [e for e in st["legs"] if e not in self.ex]:   # a leg gone from the market list: dropped
                 log.warning("pair unwind follow-up on %s: %s owed on a market no longer listed - dropped", race,
                             st["legs"].pop(e))
@@ -7468,10 +8440,12 @@ class Bot:
                 ex.take_since = now_m                     # new direction (or none): the clock starts again
             ex.take_dir = direction
         for eid, ex in self.ex.items():
+            if eid in self.basket_legs:               # Package 9 F1: takes never touch a basket leg
+                continue
             if (not self.running or not ex.take_dir or now_m - ex.take_since < cfg.take_confirm_seconds
                     or now_m < ex.take_until
                     or busy(ex, now_m) or global_reduce
-                    or self.hours_to_close(ex) <= cfg.flatten_hours_before_close):
+                    or self.hours_to_close(ex) <= self.close_window("flatten_hours_before_close")):
                 continue
             if not self.writes_ready(3):          # cancel + take + leftover cancel, on the main thread
                 continue                          # (the direction stays confirmed: taken once the budget frees)
@@ -7537,6 +8511,10 @@ class Bot:
             if prov is not None and self.cash_gate_blocks([prov]):
                 self.cash_gate_log(ex.eid, "take on %s skipped: not enough available cash (cash gate)", ex.label)
                 return False
+            if prov is not None and self.take_blocked_by_reserve(prov):
+                self.cash_gate_log(ex.eid, "take on %s skipped: it would spend the market-making reserve (take_respect_reserve)",
+                                   ex.label)
+                return False
         log.warning("%sTAKE %s: Polymarket %.3f vs stale %s %.3f -> %s %d YES at %.3f",
                     "" if self.api.live else "[dry] ", ex.label, p, "ask" if buy else "bid", price,
                     "buying" if buy else "selling", qty, price)
@@ -7580,6 +8558,235 @@ class Bot:
             self.notes_dirty = True
         log.info("take on %s: traded %s of %d", ex.label, data.get("quantityTraded", "?"), order["quantity"])
         return True
+
+    # ------------------------------------------------------------------------------ Package 9 F2: tilt exit takes
+    TET_LONGSHOT, TET_FAVOURITE = 0.10, 0.90   # longshot NO (shorts below) first, then favourite YES (longs above)
+
+    def tet_jump_guard(self, ex, now_m):
+        """F2: Polymarket moved on this market within ref_jump_cooldown_seconds (urgent_ref_move / ref_jump_threshold)
+        or its jump cooldown runs: as ref_guard_exits, no exit is taken there now."""
+        return (now_m < ex.cooldown_until
+                or now_m - max(ex.ref_moved_at, ex.ref_jump_at) < self.cfg.ref_jump_cooldown_seconds)
+
+    def tet_set_part(self, eid, inv):
+        """F2: NO shares of eid locked in NO+NO sets on THIS cycle's positions (inv), the nono_set_part rule: min(NO
+        held, the most NO held on another leg of the race); 0 outside a 2+-leg race or below 1 NO."""
+        ex = self.ex.get(eid)
+        members = self.groups.get(ex.group) if ex is not None else None
+        if not members or len(members) < 2 or any(m not in self.ex for m in members):
+            return 0.0
+        n = -float(inv.get(eid, 0.0))
+        if n < 1:
+            return 0.0
+        others = max(max(0.0, -float(inv.get(m, 0.0))) for m in members if m != eid)
+        return min(n, others) if others >= 1 else 0.0
+
+    def tet_hour_used(self, now_m):
+        """F2: $ traded by tilt exit takes in the last hour (bot-wide)."""
+        while self.tet_hour and now_m - self.tet_hour[0][0] >= 3600.0:
+            self.tet_hour.popleft()
+        return sum(v for _, v in self.tet_hour)
+
+    def tet_market(self, ex, r, pos, inv, now_m):
+        """F2: one market's tilt exit take on its current (other traders') book, or None: {"sell", "price", "qty",
+        "fv", "cost", "unit"}. sell = a long sold at the best bid, else a short bought back at the best ask; fv =
+        tilted_ref_for(r) (never raw Polymarket); cost a share = fv - bid / ask - fv, at most tilt_exit_take_max_cost;
+        qty <= the position (a short: less its NO+NO set part), the best level's depth and max_leg_frac x the
+        position (1 share at least); unit = $ a share (bid, or 1 - ask: the NO sold)."""
+        cfg = self.cfg
+        if r is None or abs(pos) < 1 or self.tilt_exit_side(ex, r, pos) is None:
+            return None
+        sell = pos > 0
+        levels = (ex.book or {}).get("bids" if sell else "asks") or []
+        if not levels:
+            return None
+        price, depth = float(levels[0]["price"]), float(levels[0]["quantity"])
+        fv = self.tilted_ref_for(ex, r, now_m)
+        cost = (fv - price) if sell else (price - fv)
+        if cost > cfg.tilt_exit_take_max_cost + 1e-9:
+            return None
+        set_part = 0.0 if sell else self.tet_set_part(ex.eid, inv)
+        split = set_part >= 1 and self.tet_split_ok(ex, r, now_m)     # F2b: the set part may go too
+        lone = 0.0 if sell else max(0.0, -pos - set_part)
+        held = pos if sell else (-pos if split else lone)
+        frac = cfg.tilt_exit_take_max_leg_frac
+        cap = max(1, int(frac * abs(pos) + 1e-9)) if frac > 0 else 0
+        qty = int(min(held, depth, cap) + 1e-9)
+        if split and qty > lone:                  # F2b: the set part at the cash gate's need for it (1.0 a share)
+            need = self.cash_tiers({"yes": 0.0, "lone": 0.0, "set": 1.0}, True, price, True)[1][1]
+            fund = int(self.cash_left() / need + 1e-9) if need > 0 else qty
+            qty = int(min(qty, lone + fund) + 1e-9)
+        if qty < 1:
+            return None
+        return {"sell": sell, "price": price, "qty": qty, "fv": fv, "cost": cost,
+                "unit": price if sell else 1.0 - price,
+                "split": max(0, int(qty - lone + 1e-9)) if split else 0, "lone": int(lone + 1e-9)}
+
+    def tet_split_ok(self, ex, r, now_m):
+        """F2b: may this short's F2 exit also sell the SET part of its NO (tilt_exit_take_split_sets)? Only on a
+        longshot (raw Polymarket < tilt_exit_split_max_ref) strictly below the race's highest-priced leg (the
+        favourite's set part is never sold; a race leg without a price = no split), with the cash gate on (live: the
+        set part is sized to its cash) and reduce_no_as_sell in effect, and not within a refusal cooldown there."""
+        cfg = self.cfg
+        if (not cfg.tilt_exit_take_split_sets or r is None or r >= cfg.tilt_exit_split_max_ref
+                or not self.reduce_no_on() or not self.cash_gate_on()
+                or now_m < self.tet_split_block.get(ex.group, 0.0)):
+            return False
+        refs = getattr(self, "tet_refs", None) or {}
+        others = [refs.get(m) for m in self.groups.get(ex.group, ()) if m != ex.eid]
+        if not others or any(x is None for x in others):
+            return False
+        return r < max(others) - 1e-12
+
+    def tet_order_key(self, ex, r, pos, plan):
+        """F2 take order: longshot NO (short, Polymarket < 0.10) first, then favourite YES (long, Polymarket > 0.90),
+        then the rest; within a group the positions the exchange marks BELOW what the exit gets first (pos_marks: a
+        long's bid above its mark, a short's ask below it; no mark = after those), then the larger tilt contribution.
+        F2b: set splits (a plan selling set part) before all of these."""
+        g = 0 if (pos < 0 and r < self.TET_LONGSHOT) else 1 if (pos > 0 and r > self.TET_FAVOURITE) else 2
+        if plan.get("split"):
+            g = -1
+        mark = self.pos_marks.get(ex.eid)
+        below = 0 if mark is not None and ((plan["sell"] and plan["price"] > mark + 1e-9)
+                                           or (not plan["sell"] and plan["price"] < mark - 1e-9)) else 1
+        contrib = abs(pos * (r - tilted_ref(r, 1.0, self.legs(ex))))
+        return (g, below, -contrib, ex.label)
+
+    def tilt_exit_takes(self, refs, liquid, inv, mine_real, now_m, skip=()):
+        """Package 9 F2 (tilt_exit_take): take the tilt exits inside the cost cap, in tet_order_key order, at most
+        tilt_exit_take_max_per_cycle orders and tilt_exit_take_per_hour $ an hour. Each: the book re-downloaded and
+        the plan re-checked, the cash gate pre-checked, THEN our orders there cancelled (no self-cross), one
+        immediate-or-cancel order (take_order_ttl), the leftover cancelled. Returns the markets acted on (not quoted
+        this cycle). skip: markets / races already acted on this cycle."""
+        cfg = self.cfg
+        taken = set()
+        if not cfg.tilt_exit_take or not self.running:
+            return taken
+        self.tet_refs = refs                      # F2b: the race's prices (tet_split_ok: never the favourite leg)
+        cands = []
+        for eid, ex in self.ex.items():
+            pos, r = float(inv.get(eid, 0.0)), refs.get(eid)
+            if (abs(pos) < 1 or r is None or eid not in liquid or eid in skip or ex.group in skip
+                    or eid in self.basket_legs or now_m < self.tet_until.get(eid, 0.0)
+                    or busy(ex, now_m) or self.tet_jump_guard(ex, now_m)):
+                continue
+            plan = self.tet_market(ex, r, pos, inv, now_m)
+            if plan is not None:
+                cands.append((self.tet_order_key(ex, r, pos, plan), eid))
+        cands.sort()
+        sent = 0
+        for _, eid in cands:
+            if sent >= cfg.tilt_exit_take_max_per_cycle or not self.running:
+                break
+            ex, pos, r = self.ex[eid], float(inv.get(eid, 0.0)), refs[eid]
+            room = cfg.tilt_exit_take_per_hour - self.tet_hour_used(now_m)
+            if room <= 0:
+                log.info("tilt exit takes: the hourly $ cap (%.0f) is used up - the rest wait",
+                         cfg.tilt_exit_take_per_hour)
+                break
+            if not self.writes_ready(3):          # cancel ours + the take + the leftover cancel
+                self.takes_skipped_budget += 1
+                log.info("tilt exit takes: write budget busy - the rest wait (next cycle)")
+                break
+            try:                                  # the cached book may be old: re-check on a fresh one
+                ex.book = strip_own(self.api.book(eid, self.tid), mine_real.get(eid, []))
+                ex.book_time = ex.verified = time.monotonic()
+            except ApiError as e:
+                log.warning("tilt exit take on %s skipped: book download failed (%s)", ex.label, e)
+                continue
+            plan = self.tet_market(ex, r, pos, inv, now_m)
+            if plan is None:
+                continue
+            qty = int(min(plan["qty"], room / max(plan["unit"], 1e-9)) + 1e-9)
+            if qty < 1:
+                continue
+            sell = plan["sell"]
+            order = {"exchangeId": eid, "side": "yes", "action": "sell" if sell else "buy", "quantity": qty,
+                     "price": plan["price"], "tournamentId": self.tid}
+            split = plan.get("split", 0) >= 1 and qty > plan.get("lone", 0)
+            if split:                             # F2b: lone part + set part as ONE covered "sell NO" (sized above)
+                order["quantity"] = int(min(qty, -pos))
+                order["_no_sell"] = True
+            elif not sell:                        # buying back a short: a covered "sell NO" of the NO held
+                order = self.no_sell_order(order, pos)
+                if order is None or order["quantity"] < 1:
+                    continue
+            if self.cash_gate_blocks([order]):    # before our quotes are pulled: nothing fits the cash -> nothing
+                self.cash_gate_log(eid, "tilt exit take on %s skipped: not enough available cash (cash gate)",
+                                   ex.label)
+                continue
+            self.tet_until[eid] = now_m + cfg.take_cooldown_seconds
+            qty = int(order["quantity"])
+            set_qty = max(0, qty - plan.get("lone", 0)) if split else 0
+            if split:
+                log.warning("%sTILT EXIT SPLIT %s sells NO %d @ %.3f (set part; frees ~$%.0f) (tilted fv %.4f, "
+                            "cost %.4f; lone part %d first)", "" if self.api.live else "[dry] ", ex.label, qty,
+                            1.0 - plan["price"], set_qty * plan["unit"], plan["fv"], plan["cost"],
+                            min(qty, plan.get("lone", 0)))
+            else:
+                log.warning("%sTILT EXIT TAKE %s %s %d @ %.3f (tilted fv %.4f, cost %.4f)%s",
+                            "" if self.api.live else "[dry] ", ex.label, "sell" if sell else "buy", qty,
+                            plan["price"], plan["fv"], plan["cost"], " (sell NO)" if order.get("_no_sell") else "")
+            sent += 1
+            taken.add(eid)
+            if not self.api.live:
+                continue
+            if not self.cancel(eid, [], whole_exchange=True):   # our own orders there first: never a self-cross
+                log.warning("tilt exit take on %s abandoned: could not clear our own orders", ex.label)
+                continue
+            order["expirationDate"] = iso(utcnow() + timedelta(seconds=cfg.take_order_ttl))
+            self.orders_stale = True
+            try:
+                results = self.place_orders([order])
+            except ApiError as e:
+                if e.code == "WRITE_BUDGET_WAIT":         # never sent: nothing traded; quotes back next cycle
+                    self.takes_skipped_budget += 1
+                    log.warning("tilt exit take on %s not sent: write budget busy", ex.label)
+                    continue
+                ex.pending_until = now_m + cfg.pending_seconds
+                if split:                         # F2b: no split retried there in a loop either
+                    self.tet_split_block[ex.group] = now_m + 10.0 * cfg.take_cooldown_seconds
+                alert(f"tilt exit take on {ex.label} failed ({e}) - check positions")
+                if e.code in FATAL_API_CODES:
+                    fatal(f"orders rejected with {e.code}")
+                continue
+            res = results[0] if results else {}
+            data = res.get("data") or {}
+            if res.get("ok"):
+                self.remember_order(order, data, now_m)   # a leftover whose cancel fails is still known about
+            self.cancel(eid, [], whole_exchange=True, quiet=True)   # immediate-or-cancel: the leftover goes
+            traded = float(data.get("quantityTraded") or 0) if res.get("ok") else 0.0
+            if res.get("ok"):                     # the hour's $ cap: what traded (all of it if not reported)
+                self.tet_hour.append((now_m, (traded if data.get("quantityTraded") is not None else qty)
+                                      * plan["unit"]))
+            if data.get("orderId") is not None:
+                self.order_meta[data["orderId"]] = {"our_side": "ask" if sell else "bid", "price": plan["price"],
+                                                    "take": True, "tilt_exit": True, "fv": plan["fv"],
+                                                    "t": time.time(), "eid": eid,
+                                                    **({"no_sell": True} if order.get("_no_sell") else {})}
+                self.notes_dirty = True
+            if traded > 0:
+                usd = traded * plan["unit"]
+                st = self.tet_stats
+                st["count"] += 1
+                st["shares"] += int(round(traded))
+                st["usd"] += usd
+                st["cost"] += traded * plan["cost"]
+            if split and not res.get("ok"):       # F2b: refused (e.g. "Insufficient available funds"): never loop
+                self.tet_split_block[ex.group] = now_m + 10.0 * cfg.take_cooldown_seconds
+                if now_m - self.tet_split_logged.get(ex.group, -1e18) >= 3600.0:
+                    self.tet_split_logged[ex.group] = now_m
+                    err = (data.get("error") or {}).get("message") if isinstance(data.get("error"), dict) else None
+                    log.warning("tilt exit split on %s refused (%s): no split in %s for %.0f s", ex.label,
+                                err or res.get("status"), ex.group, 10.0 * cfg.take_cooldown_seconds)
+            elif split and traded > plan.get("lone", 0):
+                done = traded - plan.get("lone", 0)       # the lone part fills first, the rest broke sets
+                sp = self.tet_splits
+                sp["count"] += 1
+                sp["shares"] += int(round(done))
+                sp["cash_freed"] += done * plan["unit"]
+            log.info("tilt exit take on %s: traded %.0f of %d", ex.label, traded, qty)
+        return taken
 
     # ------------------------------------------------------------------------------ C hold target (Package 5)
     HOLD_FLOOR = 0.01             # never more than 1c through the book's own price on the losing side
@@ -7661,9 +8868,9 @@ class Bot:
         for eid in (self.ex if eids is None else eids):
             ex = self.ex.get(eid)
             pos = inv.get(eid, 0.0)
-            if ex is None or abs(pos) < 1 or not self.hold_gate(ex, cfg) or busy(ex, now_m):
+            if ex is None or abs(pos) < 1 or not self.hold_gate(ex, cfg) or busy(ex, now_m) or eid in self.basket_legs:
                 continue
-            if self.hours_to_close(ex) <= cfg.flatten_hours_before_close:
+            if self.hours_to_close(ex) <= self.close_window("flatten_hours_before_close"):
                 continue                          # the flatten / exit windows have their own rules
             if now_m < ex.cooldown_until or now_m - ex.ref_jump_at < cfg.reduce_from_book_pause_s:
                 continue                          # jump guard / just after a Polymarket jump: not now
@@ -7784,6 +8991,1413 @@ class Bot:
                                                     "eid": eid, **({"no_sell": True} if order.get("_no_sell") else {})}
                 self.notes_dirty = True
         return taken
+
+    # ------------------------------------------------------------------------------ Package 9 F1: long-tilt basket
+    # One method group (Config basket_*; analysis/p9/SPEC_F1_BASKET.md). basket_tick runs once a cycle (after the
+    # takes, before quoting): state transitions, kill, test, exit schedule (basket_tick), then the PURE planner
+    # (basket_orders: no state changed, no request) and the sender (basket_send: immediate-or-cancel takes only, our
+    # quotes on the leg cancelled first, leftovers cancelled at once, refuses when in doubt). Clock: wall seconds.
+    BASKET_KILL_CONFIRM_SECONDS = 120.0   # a kill breach must last this long (one glitchy liquidation read never kills)
+    BASKET_BACKSTOP_HOURS = 72.0          # HARD: nothing held from this long before the close (deliberately no setting)
+    BASKET_TRACK_BAND = 0.05              # held within this share of the target: no trade for the difference
+    BASKET_HIST_STEP = 600.0              # tilt_s history: one sample per this many seconds (the test's 12-h change)
+    BASKET_HIST_KEEP = 48 * 3600.0         # (persisted: <= 288 samples)
+    BASKET_TRADE_GRACE = 120.0            # a leg traded this recently is not cut to a (maybe lagging) positions read
+    BASKET_LIVE = ("building", "tracking", "cut")      # the states that may buy
+    BASKET_STATES = BASKET_LIVE + ("off", "exiting", "done", "killed")
+
+    def load_basket(self):
+        """Package 9 F1: the basket state the previous run left in status.json ("basket"), {} if none."""
+        try:
+            with open(bot_path(self.cfg.status_file)) as f:
+                d = json.load(f).get("basket")
+            return d if isinstance(d, dict) else {}
+        except (OSError, ValueError, TypeError, AttributeError):
+            return {}
+
+    def basket_init(self, d=None):
+        """Package 9 F1 state, restored from status.json "basket" (d): legs, cost, state, switch-on, peak, test result,
+        kill latch, exit / kill starting legs, flows (own-impact) and the tilt history. Anything unreadable = its
+        safe default (a live state without a switch-on time restarts its ramp now)."""
+        d = d if isinstance(d, dict) else {}
+
+        def num(x, default=None):
+            return float(x) if isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) else default
+
+        def shares(m):
+            out = {}
+            for e, q in (m.items() if isinstance(m, dict) else ()):
+                q = num(q)
+                if q is not None and abs(q) >= 1:
+                    out[str(e)] = q
+            return out
+
+        def pairs(xs):
+            out = deque()
+            for x in (xs if isinstance(xs, list) else ()):
+                if isinstance(x, (list, tuple)) and len(x) == 2 and num(x[0]) is not None and num(x[1]) is not None:
+                    out.append((num(x[0]), num(x[1])))
+            return out
+        self.basket_legs = shares(d.get("legs"))          # eid -> signed YES shares the basket holds (- = NO held)
+        self.basket_cost = num(d.get("cost"), 0.0)        # $ paid less $ received
+        state = d.get("state")
+        self.basket_state = state if state in self.BASKET_STATES else "off"
+        self.basket_on_wall = num(d.get("switched_on_wall"))
+        self.basket_peak = num(d.get("peak"))
+        self.basket_test = d.get("test") if d.get("test") in ("passed", "failed") else None
+        self.basket_killed = d.get("killed") is True       # the kill latch
+        self.basket_killed_wall = num(d.get("killed_wall"))
+        self.basket_kill_start = shares(d.get("kill_start"))
+        self.basket_exit_start = shares(d.get("exit_start"))
+        self.basket_flows = pairs(d.get("flows"))          # (wall, signed $: + bought, - sold), last impact window
+        self.basket_s_hist = pairs(d.get("s_hist"))        # (wall, tilt_s) every BASKET_HIST_STEP
+        self.basket_released = int(num(d.get("released"), 0))
+        self.basket_orders_total = int(num(d.get("orders_total"), 0))
+        self.basket_last_action = str(d.get("last_action") or "")
+        self.basket_hours = {}                # (eid, "asks"/"bids") -> [hour start wall, top-3 depth then, shares done]
+        for x in (d.get("hours") if isinstance(d.get("hours"), list) else ()):   # (P9 red team: restart-safe, or a
+            if (isinstance(x, list) and len(x) == 5 and isinstance(x[0], str) and x[1] in ("asks", "bids")   # restart
+                    and all(num(v) is not None for v in x[2:])):          # re-opens the hour's ask share at once)
+                self.basket_hours[(x[0], x[1])] = [num(x[2]), num(x[3]), num(x[4])]
+        self.basket_breach_since = None       # wall time the current kill breach started
+        self.basket_liq_hist = deque()        # (wall, liquidation value) of the last ticks (the confirmed peak)
+        self.basket_off_explicit = False      # the overrides file said basket_enabled false (clears the kill latch)
+        self.basket_target_frozen, self.basket_target_at = None, None   # hourly tracking target, when computed
+        self.basket_last_trade = {}           # eid -> wall time of our last basket trade there
+        self.basket_alerted = set()
+        self.basket_info = {}                 # the latest tick's figures (status.json "basket")
+        if self.basket_killed:
+            self.basket_state = "killed"
+        elif self.basket_state in self.BASKET_LIVE and self.basket_on_wall is None:
+            self.basket_on_wall = time.time()
+        if self.basket_state != "off" or self.basket_legs or self.basket_killed:
+            log.warning("basket restored: %s, %d legs, peak %s, test %s%s", self.basket_state, len(self.basket_legs),
+                        f"{self.basket_peak:.0f}" if self.basket_peak is not None else "-", self.basket_test or "-",
+                        " (KILL LATCHED)" if self.basket_killed else "")
+
+    def basket_alert_once(self, key, msg):
+        if key not in self.basket_alerted:
+            self.basket_alerted.add(key)
+            log.warning(msg)
+            alert(msg)
+
+    def basket_risk_on(self):
+        """The stress risk model (basket_stress_frac) applies: basket_enabled and basket legs held."""
+        return bool(getattr(self.cfg, "basket_enabled", False)) and bool(getattr(self, "basket_legs", None))
+
+    def basket_persist_needed(self):
+        return bool(self.basket_legs) or self.basket_state != "off" or self.basket_killed or bool(self.basket_info)
+
+    def basket_status(self):
+        """status.json "basket": what a restart needs (legs, cost, state, switch-on, peak, test, kill latch, starts,
+        flows, tilt history) plus the latest tick's figures."""
+        return {**self.basket_info, "state": self.basket_state, "legs": {e: q for e, q in self.basket_legs.items()},
+                "legs_count": len(self.basket_legs), "cost": round(self.basket_cost, 2),
+                "switched_on_wall": self.basket_on_wall, "peak": self.basket_peak, "test": self.basket_test,
+                "killed": self.basket_killed, "killed_wall": self.basket_killed_wall,
+                "kill_start": dict(self.basket_kill_start), "exit_start": dict(self.basket_exit_start),
+                "flows": [list(x) for x in self.basket_flows], "s_hist": [list(x) for x in self.basket_s_hist],
+                "released": self.basket_released, "orders_total": self.basket_orders_total,
+                "last_action": self.basket_last_action,
+                "hours": [[e, k, *w] for (e, k), w in self.basket_hours.items() if time.time() - w[0] < 3600]}
+
+    def basket_summary(self):
+        """" | basket $X (N legs, state)" for the 2-hourly summary, "" with nothing to report."""
+        if not self.basket_persist_needed():
+            return ""
+        held = self.basket_info.get("held")
+        return (f"basket ${(held or 0) / 1000:.1f}k ({len(self.basket_legs)} legs, {self.basket_state})")
+
+    def basket_schedule(self):
+        """Wall times {"close", "backstop", "start", "end", "no_add", "valid"}: the exit sale runs linearly from start
+        to end (start = min(basket_exit_utc, backstop - exit_hours), end = min(start + exit_hours, backstop)); no
+        buys from no_add (start - basket_no_add_days). backstop = close - BASKET_BACKSTOP_HOURS, close = the
+        tournament's end (else the earliest market close). valid False (basket_exit_utc unparseable): no buys at all;
+        the backstop still applies. Nothing known (no close, no date): every field None, valid False."""
+        cfg = self.cfg
+        t_end = parse_ts(self.t.get("endDate")) if isinstance(getattr(self, "t", None), dict) else None
+        closes = [x.close for x in self.ex.values() if x.close]
+        close = t_end or (min(closes) if closes else None)
+        close_w = close.timestamp() if close else None
+        backstop = close_w - self.BASKET_BACKSTOP_HOURS * 3600 if close_w is not None else None
+        dt = parse_utc_setting(getattr(cfg, "basket_exit_utc", None))
+        span = max(1.0, float(cfg.basket_exit_hours)) * 3600          # never shorter than an hour, whatever is set
+        starts = [x for x in (dt.timestamp() if dt else None, backstop - span if backstop is not None else None)
+                  if x is not None]
+        start = min(starts) if starts else None
+        end = None if start is None else (min(start + span, backstop) if backstop is not None else start + span)
+        no_add = None if start is None else start - max(0.0, float(cfg.basket_no_add_days)) * 86400
+        return {"close": close_w, "backstop": backstop, "start": start, "end": end, "no_add": no_add,
+                "valid": dt is not None and start is not None}
+
+    def basket_leg_close(self, eid):
+        """(the leg's own backstop, the linear sale's start) wall times: its market's close - 72 h, less exit_hours."""
+        ex = self.ex.get(eid)
+        if ex is None or not ex.close:
+            return None, None
+        b = ex.close.timestamp() - self.BASKET_BACKSTOP_HOURS * 3600
+        return b, b - max(1.0, float(self.cfg.basket_exit_hours)) * 3600
+
+    def basket_hold_frac(self, eid, now_w, sched):
+        """Share of its starting shares a leg may still hold now: 1 normally; in "exiting" the linear schedule
+        (start -> end); "killed" linear over basket_kill_hours from the kill; and always at most its own market's
+        backstop schedule (0 from 72 h before its close). 0..1."""
+        f = 1.0
+        if self.basket_state == "exiting" and sched.get("start") is not None:
+            s, e = sched["start"], sched["end"]
+            f = 0.0 if e <= s else max(0.0, min(1.0, (e - now_w) / (e - s)))
+        if self.basket_state == "killed":
+            kw = self.basket_killed_wall if self.basket_killed_wall is not None else now_w
+            f = min(f, max(0.0, 1.0 - (now_w - kw) / (max(0.25, float(self.cfg.basket_kill_hours)) * 3600)))
+        if sched.get("backstop") is not None and now_w >= sched["backstop"]:
+            f = 0.0
+        b, s = self.basket_leg_close(eid)
+        if b is not None:
+            f = min(f, 0.0 if now_w >= b else max(0.0, min(1.0, (b - now_w) / (b - s))))
+        return f
+
+    def basket_liquidation(self, inv, equity, book_fvs):
+        """Account value less the haircut of selling every position to OTHER traders now (longs at the best bid,
+        shorts at the best ask, against the exchange's mark, else the book's price), as ops_fields. None without an
+        account value. P9 red team: a BASKET leg whose fresh book has no level on its exit side counts as sold at 0
+        (a long) / bought back at 1 (a short) - not at its mark: thin longshot bids vanishing is the crash the kill is
+        for, and the exchange's lagged mark would hide it (ops_fields keeps the mark: a report, not a kill switch)."""
+        if equity is None:
+            return None
+        haircut, now_m = 0.0, time.monotonic()
+        for e, q in (inv or {}).items():
+            ex = self.ex.get(e)
+            if ex is None or abs(q) < 1:
+                continue
+            m = self.pos_marks.get(e)
+            m = m if m is not None else (book_fvs or {}).get(e)
+            lv = (ex.book or {}).get("bids" if q > 0 else "asks")
+            if (m is not None and not lv and e in self.basket_legs and ex.book is not None
+                    and now_m - ex.verified < self.cfg.book_stale):
+                lv = [{"price": 0.0 if q > 0 else 1.0}]
+            if m is None or not lv:
+                continue
+            haircut += abs(q) * ((m - lv[0]["price"]) if q > 0 else (lv[0]["price"] - m))
+        return float(equity) - haircut
+
+    def basket_leg_value(self, eid, q, fvs, book=None):
+        """$ value of q basket shares (YES: q x p, NO: |q| x (1 - p)) at the risk model's price for the market. book
+        (the tournament book's prices, book_fvs) given: the higher of the two values (P9 red team: sizing on a fair value
+        leaned to Polymarket under the price the basket pays - a longshot's - would buy past the target / leg cap)."""
+        if eid not in self.ex or not q:
+            return 0.0
+        p = self.risk_fv(eid, fvs)
+        v = abs(q) * (p if q > 0 else 1 - p)
+        b = (book or {}).get(eid)
+        return v if b is None else max(v, abs(q) * (b if q > 0 else 1 - b))
+
+    def basket_value(self, fvs, book=None):
+        return sum(self.basket_leg_value(e, q, fvs, book) for e, q in self.basket_legs.items())
+
+    def basket_leg_basis(self, eid, yes, inv):
+        """The shares a basket add on eid builds on (signed, YES terms): the basket's own, or the whole position held in
+        the add's direction if larger (P9 red team: an ordinary position there is ADOPTED on the first add - a basket
+        leg is never quoted, so that part would otherwise sit unmanaged past the exit, the kill and the backstop)."""
+        sign = 1.0 if yes else -1.0
+        held = abs(self.basket_legs.get(eid, 0.0))
+        return sign * max(held, max(0.0, sign * float((inv or {}).get(eid, 0.0))))
+
+    def basket_impact(self, now_w):
+        """basket_impact_frac x our own net $ bought in the last basket_impact_hours (>= 0)."""
+        cfg = self.cfg
+        lo = now_w - cfg.basket_impact_hours * 3600
+        net = sum(x for t, x in self.basket_flows if t >= lo)
+        return cfg.basket_impact_frac * max(0.0, net)
+
+    def basket_s_change(self, now_w):
+        """tilt_s now less tilt_s ~12 h ago (the latest sample at least 12 h old), None without one."""
+        old = [s for t, s in self.basket_s_hist if t <= now_w - 12 * 3600]
+        return None if not old else self.tilt_s - old[-1]
+
+    def basket_target(self, now_w, liq, acct):
+        """(floor, cushion, impact, mult, full target, ramped target) in $. floor = max(basket_floor, floor_peak_frac x
+        peak); cushion = liq - floor - impact; full = clip(mult x cushion, 0, min(cap, cap_frac x account)); ramped =
+        full x (time since switch-on / build hours, at most 1). liq or the account unknown -> targets 0."""
+        cfg = self.cfg
+        peak = self.basket_peak
+        floor = max(cfg.basket_floor, cfg.basket_floor_peak_frac * peak) if peak is not None else cfg.basket_floor
+        impact = self.basket_impact(now_w)
+        # (a failed test only ever cuts: basket_mult_after_fail above basket_mult is read as basket_mult - P9 red team)
+        mult = min(cfg.basket_mult_after_fail, cfg.basket_mult) if self.basket_test == "failed" else cfg.basket_mult
+        if liq is None or acct is None:
+            return floor, None, impact, mult, 0.0, 0.0
+        cushion = liq - floor - impact
+        full = max(0.0, min(mult * cushion, cfg.basket_cap, cfg.basket_cap_frac * max(0.0, acct)))
+        on = self.basket_on_wall if self.basket_on_wall is not None else now_w
+        ramp = max(0.0, min(1.0, (now_w - on) / (max(0.5, cfg.basket_build_hours) * 3600)))
+        return floor, cushion, impact, mult, full, full * ramp
+
+    @staticmethod
+    def basket_independent(ex):
+        """Independents (label "Ind ...") are never bought (D-11: hard rule, no setting)."""
+        return (ex.label or "").startswith("Ind") or (ex.party or "").startswith("Ind")
+
+    def basket_candidates(self, inv, book_fvs, now_m=None):
+        """Eligible basket legs, laggards first: [{"eid", "yes" (True: long YES on a longshot, False: short YES = NO on
+        the race's favourite), "price" (best other ask / bid), "tilt" (gain a share per unit of s), "per_dollar",
+        "s_i"}]. Per race (2+ legs, not headline with basket_exclude_headline, Polymarket on every leg, scaled to sum
+        1): each leg with scaled ref < basket_max_ref, liquid, ref < c, not an independent; its route the cheaper of
+        YES on it at its ask (<= max_price) or NO on the favourite at its bid (>= 1 - max_price, favourite liquid, not
+        an independent, ref > c). Never a leg with no fresh book side, where we hold the OPPOSITE position, or where the
+        basket already holds the other direction. Pure."""
+        cfg = self.cfg
+        now_m = time.monotonic() if now_m is None else now_m
+        refs, liquid = self.cur_refs or {}, self.cur_liquid or set()
+        out = {}
+
+        def top(ex, key):
+            if ex.book is None or now_m - ex.verified >= cfg.book_stale:
+                return None
+            lv = (ex.book or {}).get(key)
+            return lv[0]["price"] if lv else None
+
+        def s_i(e, r, c):
+            m = (book_fvs or {}).get(e)
+            return (r - m) / (r - c) if m is not None and abs(r - c) > 1e-9 else 0.0
+
+        def opposite(e, yes):
+            pos, held = (inv or {}).get(e, 0.0), self.basket_legs.get(e, 0.0)
+            return (pos <= -1 or held < 0) if yes else (pos >= 1 or held > 0)
+        for race, members in self.groups.items():
+            if len(members) < 2 or any(m not in self.ex for m in members):
+                continue
+            if cfg.basket_exclude_headline and race in cfg.headline_races:
+                continue
+            rs = {e: refs.get(e) for e in members}
+            if any(r is None for r in rs.values()):
+                continue
+            tot = sum(rs.values())
+            if tot <= 0:
+                continue
+            sc = {e: r / tot for e, r in rs.items()}
+            c = 1.0 / len(members)
+            fav = max(members, key=lambda e: sc[e])
+            fx = self.ex[fav]
+            # the NO route only with covered NO sales in effect (its exit then needs no cash) and no NO held on another
+            # leg of the race (that would make a NO+NO set, whose legs cannot be sold one at a time)
+            fav_ok = (sc[fav] > c and fav in liquid and not self.basket_independent(fx) and not opposite(fav, False)
+                      and self.reduce_no_on() and not any((inv or {}).get(m, 0.0) <= -1 for m in members if m != fav))
+            fbid = top(fx, "bids") if fav_ok else None
+            if fbid is None or fbid < 1 - cfg.basket_max_price - 1e-9:
+                fav_ok = False
+            for e in members:
+                ex, r = self.ex[e], sc[e]
+                if e == fav or r >= cfg.basket_max_ref or r >= c or e not in liquid or self.basket_independent(ex):
+                    continue
+                opts = []
+                ask = top(ex, "asks")
+                if ask is not None and ask <= cfg.basket_max_price + 1e-9 and not opposite(e, True):
+                    opts.append({"eid": e, "yes": True, "price": ask, "tilt": c - r,
+                                 "per_dollar": (c - r) / max(ask, TICK), "s_i": s_i(e, r, c)})
+                if fav_ok:
+                    opts.append({"eid": fav, "yes": False, "price": fbid, "tilt": sc[fav] - c,
+                                 "per_dollar": (sc[fav] - c) / max(1 - fbid, TICK), "s_i": s_i(fav, sc[fav], c)})
+                if not opts:
+                    continue
+                best = max(opts, key=lambda o: (o["per_dollar"], o["yes"]))
+                out.setdefault(best["eid"], best)
+        return sorted(out.values(), key=lambda o: (o["s_i"], o["eid"]))
+
+    def basket_limit(self, yes_buy, price):
+        """IOC limit for a YES buy (at the ask + slip) or sale (at the bid - slip), on the tick grid."""
+        slip = self.cfg.basket_slip
+        return min(PMAX, ceil_tick(price + slip - 1e-9)) if yes_buy else max(PMIN, floor_tick(price - slip + 1e-9))
+
+    def basket_window_left(self, eid, key, share, now_w):
+        """(shares the rolling-hour cap still allows on this book side, the top-3 depth it is measured on). A window
+        older than an hour (or none) counts as a new one measured on the current book. Pure."""
+        ex = self.ex.get(eid)
+        w = self.basket_hours.get((eid, key))
+        if w is None or now_w - w[0] >= 3600:
+            depth = sum(lv["quantity"] for lv in ((ex.book or {}).get(key) or [])[:3]) if ex else 0.0
+            return share * depth, depth
+        return max(0.0, share * w[1] - w[2]), w[1]
+
+    def basket_orders(self, now_w, fvs, book_fvs, inv, target, full, cash, adding_ok, writes_left, sched, now_m=None,
+                      skip=()):
+        """THE PURE PLANNER: [{"eid", "buy" (YES buy), "qty", "limit", "add" (grows |basket leg|), "key" (book side),
+        "s_i"}], at most min(basket_max_orders_per_cycle, basket_writes_frac x writes_left / 3) orders (exiting /
+        killed: at least 1). Forced sales first: legs above their hold fraction (exit schedule, kill, own backstop),
+        furthest behind that schedule first (richest first among equals). Then, in a live state: below target - band -> adds (laggards first, each leg <= full x
+        min(max_leg_frac, 1/min_legs), <= the hour's ask share, <= the cached depth within the limit, <= cash: a long
+        price x qty, a short (1 - price) x qty, all at the limit); above target + band -> sales (richest first, the
+        hour's bid share). No request, no state change. P9 red team: no add on a market / race in skip (another
+        feature traded there this cycle: never the basket buying what a take or a tilt exit just sold) nor in a race
+        with a passive pair unwind or owed legs running (their orders would trade the basket's leg)."""
+        cfg = self.cfg
+        now_m = time.monotonic() if now_m is None else now_m
+        state = self.basket_state
+        n_max = int(min(cfg.basket_max_orders_per_cycle,
+                        math.floor(cfg.basket_writes_frac * max(0, writes_left) / 3 + 1e-9)))
+        if state in ("exiting", "killed") or any(self.basket_hold_frac(e, now_w, sched) < 1 for e in self.basket_legs):
+            n_max = max(1, n_max)                         # the exit can never be switched off by the write share
+        orders = []
+        if n_max < 1:
+            return orders
+        rich = {}
+        for e in self.basket_legs:                        # each leg's own s_i (richest first for every sale)
+            m, r = (book_fvs or {}).get(e), (self.cur_refs or {}).get(e)
+            ex = self.ex.get(e)
+            c = 1.0 / self.legs(ex) if ex else 0.5
+            rich[e] = (r - m) / (r - c) if (m is not None and r is not None and abs(r - c) > 1e-9) else 0.0
+        by_rich = sorted(self.basket_legs, key=lambda e: (-rich[e], e))
+
+        def sale(e, qty, share=None):
+            ex, held = self.ex.get(e), self.basket_legs.get(e, 0.0)
+            if ex is None or ex.book is None or qty < 1:  # (an old cached book is fine: the send downloads a fresh one)
+                return None
+            buy = held < 0                                # a short (NO held) is bought back
+            key = "asks" if buy else "bids"
+            lv = (ex.book or {}).get(key)
+            if not lv:
+                return None
+            limit = self.basket_limit(buy, lv[0]["price"])
+            q = min(qty, abs(held), self.depth_within(ex.book, key, limit))
+            if share is not None:
+                q = min(q, self.basket_window_left(e, key, share, now_w)[0])
+            q = int(q + 1e-9)
+            return {"eid": e, "buy": buy, "qty": q, "limit": limit, "add": False, "key": key,
+                    "s_i": rich.get(e, 0.0)} if q >= 1 else None
+        forced = []                                       # forced: exit schedule / kill / the leg's own backstop
+        for e in by_rich:
+            f = self.basket_hold_frac(e, now_w, sched)
+            if f >= 1:
+                continue
+            start = (self.basket_kill_start if state == "killed" else self.basket_exit_start).get(e)
+            start = start if start is not None else self.basket_legs[e]
+            behind = abs(self.basket_legs[e]) - abs(start) * f
+            forced.append((-behind / max(1.0, abs(start)), e, behind))
+        # P9 dry run: the legs furthest behind their schedule first (richest first among equals). In plain richest-first
+        # order the first basket_max_orders_per_cycle legs took every slot each cycle with their small new increment and
+        # the rest of a 60-leg basket was not sold at all until the kill / exit window had ended
+        forced.sort(key=lambda x: x[0])
+        for _, e, behind in forced:
+            if len(orders) >= n_max:
+                return orders
+            o = sale(e, math.ceil(behind - 1e-9))
+            if o:
+                orders.append(o)
+        if state not in self.BASKET_LIVE or target is None:
+            return orders
+        held = self.basket_value(fvs, book_fvs)
+        band = self.BASKET_TRACK_BAND * max(target, 0.0)
+        gap = target - held
+        if gap > band and adding_ok:
+            share = cfg.basket_first_build_ask_share if state == "building" else cfg.basket_max_ask_share
+            leg_cap = full * min(cfg.basket_max_leg_frac, 1.0 / max(1, cfg.basket_min_legs))
+            need, cash_left = gap, max(0.0, cash)
+            planned = {o["eid"] for o in orders}
+            for cnd in self.basket_candidates(inv, book_fvs, now_m):
+                if len(orders) >= n_max or need <= 0 or cash_left <= 0:
+                    break
+                e = cnd["eid"]
+                g = self.ex[e].group
+                if (e in planned or e in skip or g in skip or g in (getattr(self, "pp", None) or {})
+                        or g in (getattr(self, "pair_owed", None) or {}) or self.basket_hold_frac(e, now_w, sched) < 1):
+                    continue
+                b0, s0 = self.basket_leg_close(e)
+                if s0 is not None and now_w >= s0 - max(0.0, cfg.basket_no_add_days) * 86400:
+                    continue                              # its own market closes too soon to hold it
+                ex = self.ex[e]
+                key = "asks" if cnd["yes"] else "bids"
+                limit = self.basket_limit(cnd["yes"], cnd["price"])
+                if cnd["yes"]:
+                    limit = min(limit, floor_tick(cfg.basket_max_price + 1e-9))
+                    unit = limit
+                else:
+                    limit = max(limit, ceil_tick(1 - cfg.basket_max_price - 1e-9))
+                    unit = 1 - limit
+                if unit <= 0:
+                    continue
+                room = leg_cap - self.basket_leg_value(e, self.basket_leg_basis(e, cnd["yes"], inv), fvs, book_fvs)
+                q = min(room, need, cash_left) / unit
+                q = min(q, self.basket_window_left(e, key, share, now_w)[0], self.depth_within(ex.book, key, limit))
+                q = int(q + 1e-9)
+                if q < 1:
+                    continue
+                orders.append({"eid": e, "buy": cnd["yes"], "qty": q, "limit": limit, "add": True, "key": key,
+                               "s_i": cnd["s_i"]})
+                planned.add(e)
+                need -= q * unit
+                cash_left -= q * unit
+        elif gap < -band:
+            excess = -gap
+            planned = {o["eid"] for o in orders}
+            for e in by_rich:
+                if len(orders) >= n_max or excess <= 0:
+                    break
+                q_h = self.basket_legs[e]
+                v = self.basket_leg_value(e, q_h, fvs, book_fvs) / abs(q_h) if q_h else 0.0
+                if e in planned or v <= 0:
+                    continue
+                o = sale(e, math.ceil(min(excess / v, abs(q_h)) - 1e-9), share=cfg.basket_max_ask_share)
+                if o:
+                    orders.append(o)
+                    excess -= o["qty"] * v
+        return orders
+
+    def basket_reconcile(self, inv, now_w):
+        """A leg's booked shares never exceed the position actually held in that direction (positions are the truth:
+        settled / sold elsewhere); a leg traded within BASKET_TRADE_GRACE is left alone (the read may lag)."""
+        for e in list(self.basket_legs):
+            q = self.basket_legs[e]
+            if now_w - self.basket_last_trade.get(e, -1e18) < self.BASKET_TRADE_GRACE:
+                continue
+            pos = (inv or {}).get(e, 0.0)
+            have = max(0.0, pos) if q > 0 else max(0.0, -pos)
+            if have < abs(q):
+                q = math.copysign(have, q)
+                if abs(q) < 1:
+                    self.basket_legs.pop(e)
+                else:
+                    self.basket_legs[e] = q
+
+    def basket_tick(self, now, inv, fvs, book_fvs, equity, mine_real, now_m=None, skip=()):
+        """Package 9 F1, once a cycle: the state machine (off -> building -> tracking -> (cut) -> exiting -> done, or
+        killed), the kill (liquidation < (1 - kill_dd) x peak or < floor for BASKET_KILL_CONFIRM_SECONDS), the
+        36-h test, the exit schedule, then plan (basket_orders) and send (basket_send). Returns the exchanges traded
+        (not quoted this cycle). skip: markets / races another feature acted on this cycle (no add there now)."""
+        cfg = self.cfg
+        now_w = now.timestamp()
+        now_m = time.monotonic() if now_m is None else now_m
+        if not cfg.basket_enabled:
+            if (getattr(self, "overrides", None) or {}).get("basket_enabled") is False:
+                self.basket_off_explicit = True
+            if self.basket_legs or self.basket_state != "off":
+                n = len(self.basket_legs)
+                log.warning("BASKET off: %d legs released to the ordinary book (no forced sale)%s", n,
+                            " - kill latch kept" if self.basket_killed else "")
+                self.basket_legs, self.basket_exit_start, self.basket_kill_start = {}, {}, {}
+                self.basket_state, self.basket_released = "off", n
+                self.basket_last_action = f"off ({n} legs released)"
+                self.basket_hours.clear()
+                self.basket_target_frozen = self.basket_target_at = self.basket_breach_since = None
+            self.basket_info = {"state_text": self.basket_last_action or "off"} if self.basket_released else {}
+            return set()
+        if self.basket_killed and self.basket_off_explicit:
+            log.warning("BASKET kill latch cleared: basket_enabled was set false, now true again - a fresh basket")
+            self.basket_killed, self.basket_killed_wall, self.basket_kill_start = False, None, {}
+            self.basket_state = "off"
+        self.basket_off_explicit = False
+        if self.basket_killed:
+            self.basket_state = "killed"
+        elif self.basket_state == "off":                  # switched on: a fresh basket
+            self.basket_state, self.basket_on_wall = "building", now_w
+            self.basket_peak, self.basket_test, self.basket_exit_start = None, None, {}
+            self.basket_released, self.basket_hours = 0, {}
+            self.basket_target_frozen = self.basket_target_at = self.basket_breach_since = None
+            self.basket_last_action = "switched on"
+            log.warning("BASKET switched on: building over %.1f h (mult %g, cap %.0f)", cfg.basket_build_hours,
+                        cfg.basket_mult, cfg.basket_cap)
+        self.basket_reconcile(inv, now_w)
+        sched = self.basket_schedule()
+        liq = self.basket_liquidation(inv, equity, book_fvs)
+        # the peak only rises on a value that held for the confirmation time: one glitchy high read must never raise the
+        # floor (it would kill on the next normal read)
+        if liq is not None:
+            self.basket_liq_hist.append((now_w, liq))
+        while self.basket_liq_hist and self.basket_liq_hist[0][0] < now_w - 2 * self.BASKET_KILL_CONFIRM_SECONDS:
+            self.basket_liq_hist.popleft()
+        if liq is not None and self.basket_state not in ("killed", "done"):
+            win = [v for t, v in self.basket_liq_hist if t >= now_w - self.BASKET_KILL_CONFIRM_SECONDS]
+            covered = any(t <= now_w - self.BASKET_KILL_CONFIRM_SECONDS for t, _ in self.basket_liq_hist)
+            if self.basket_peak is None:
+                self.basket_peak = liq                    # (the switch-on value)
+            elif covered:
+                self.basket_peak = max(self.basket_peak, min(win))
+        floor, cushion, impact, mult, full, ramped = self.basket_target(now_w, liq, equity)
+        # kill: on the liquidation value, confirmed over BASKET_KILL_CONFIRM_SECONDS
+        if self.basket_state in self.BASKET_LIVE + ("exiting",) and liq is not None and self.basket_peak is not None:
+            breach = liq < (1 - cfg.basket_kill_dd) * self.basket_peak or liq < floor
+            if not breach:
+                self.basket_breach_since = None
+            elif self.basket_breach_since is None:
+                self.basket_breach_since = now_w
+                log.warning("BASKET kill breach: liquidation %.0f (peak %.0f, floor %.0f) - kill if it lasts %.0f s",
+                            liq, self.basket_peak, floor, self.BASKET_KILL_CONFIRM_SECONDS)
+            elif now_w - self.basket_breach_since >= self.BASKET_KILL_CONFIRM_SECONDS:
+                self.basket_killed, self.basket_killed_wall = True, now_w
+                self.basket_kill_start = dict(self.basket_legs)
+                self.basket_state = "killed"
+                self.basket_last_action = f"KILLED at liquidation {liq:.0f}"
+                self.basket_alert_once("kill", f"BASKET KILLED: liquidation value {liq:.0f} < floor {floor:.0f} or "
+                                       f"{1 - cfg.basket_kill_dd:.2f} x peak {self.basket_peak:.0f} - selling "
+                                       f"{len(self.basket_legs)} legs over {cfg.basket_kill_hours:g} h; latched off")
+        # the tilt history (12-h change) and the 36-h test
+        if not self.basket_s_hist or now_w - self.basket_s_hist[-1][0] >= self.BASKET_HIST_STEP:
+            self.basket_s_hist.append((now_w, float(self.tilt_s)))
+        while self.basket_s_hist and self.basket_s_hist[0][0] < now_w - self.BASKET_HIST_KEEP:
+            self.basket_s_hist.popleft()
+        if (self.basket_state in self.BASKET_LIVE and self.basket_test is None and self.basket_on_wall is not None
+                and now_w >= self.basket_on_wall + cfg.basket_test_hours * 3600):
+            ch = self.basket_s_change(now_w)
+            if self.tilt_s < cfg.basket_test_min_s or ch is None or ch <= 0:
+                self.basket_test, self.basket_state = "failed", "cut"
+                self.basket_target_frozen = None
+                floor, cushion, impact, mult, full, ramped = self.basket_target(now_w, liq, equity)
+                self.basket_last_action = "test failed: mult cut"
+                self.basket_alert_once("test", f"BASKET {cfg.basket_test_hours:g}-h test FAILED (tilt_s "
+                                       f"{self.tilt_s:.3f} vs {cfg.basket_test_min_s:g}, 12-h change "
+                                       f"{'unknown' if ch is None else f'{ch:+.3f}'}) - mult cut to "
+                                       f"{cfg.basket_mult_after_fail:g} for the rest of this basket")
+            else:
+                self.basket_test = "passed"
+                log.warning("BASKET %g-h test passed (tilt_s %.3f, 12-h change %+.3f)", cfg.basket_test_hours,
+                            self.tilt_s, ch)
+        if (self.basket_state == "building" and self.basket_on_wall is not None
+                and now_w >= self.basket_on_wall + cfg.basket_build_hours * 3600):
+            self.basket_state = "tracking"
+        # exit schedule (and the hard backstop)
+        if self.basket_state in self.BASKET_LIVE and sched["start"] is not None and now_w >= sched["start"]:
+            self.basket_state, self.basket_exit_start = "exiting", dict(self.basket_legs)
+            self.basket_last_action = "exit started"
+            log.warning("BASKET exit: selling %d legs down to 0 by %s", len(self.basket_legs),
+                        iso(datetime.fromtimestamp(sched["end"], timezone.utc)))
+        if self.basket_state == "exiting" and not self.basket_legs:
+            self.basket_state, self.basket_last_action = "done", "exit done"
+        # the target: ramped while building, re-computed hourly after it
+        target = None                                     # (no account value: no target at all - never a sale to 0
+        if self.basket_state in self.BASKET_LIVE and liq is not None:   # on missing data; forced sales still run)
+            if self.basket_state == "building" or self.basket_target_frozen is None or (
+                    now_w - (self.basket_target_at or -1e18) >= 3600):
+                self.basket_target_frozen, self.basket_target_at = ramped, now_w
+            target = self.basket_target_frozen
+        refuse = None
+        if not sched["valid"]:
+            refuse = "invalid basket_exit_utc" if parse_utc_setting(cfg.basket_exit_utc) is None else "no close date"
+            if refuse == "invalid basket_exit_utc":
+                self.basket_alert_once("date", f"BASKET refuses to buy: basket_exit_utc {cfg.basket_exit_utc!r} is "
+                                       "not an ISO UTC time (held legs still follow the backstop and the kill)")
+        elif sched["no_add"] is not None and now_w >= sched["no_add"]:
+            refuse = "no adds this close to the exit"
+        elif liq is None:
+            refuse = "no account value"
+        elif (equity and self.total_worst_case(inv, fvs) > cfg.worst_case_backstop_frac * equity):
+            # P9 red team: exempt from reduce-only, but the sum-of-maxima backstop (the basket in it at its stress loss)
+            # stays the LAST RESORT for adds too - else nothing bounds the worst case while the basket buys
+            refuse = "worst-case backstop"
+        elif not (self.cash_gate_on() and getattr(self, "cg_cash", None) is not None):
+            refuse = "no fresh cash read (cash_gate_enabled needed)"
+        cash = self.cash_left() if refuse is None else 0.0
+        if (refuse is None and cash < 1 and target is not None
+                and target - self.basket_value(fvs, book_fvs) > self.BASKET_TRACK_BAND * max(target, 0.0)):
+            # P9 dry run: below target with the cash gate at 0 (stage 3 switched on before stage 2 freed cash) the build
+            # stalled with refused None and no log line - say why (it buys as soon as the gate has cash again)
+            refuse = "no free cash (cash gate)"
+        if refuse != (self.basket_info or {}).get("refused"):
+            log.info("BASKET adds %s", f"refused: {refuse}" if refuse else "allowed again")
+        writes = getattr(self.api, "writes_left", lambda: 10 ** 6)() if self.api.live else 10 ** 6
+        orders = self.basket_orders(now_w, fvs, book_fvs, inv, target, full, cash, refuse is None, writes, sched, now_m,
+                                    skip=skip)
+        traded = self.basket_send(orders, inv, fvs, mine_real, now_w, now_m) if orders and self.running else set()
+        if self.basket_state == "exiting" and not self.basket_legs:
+            self.basket_state, self.basket_last_action = "done", "exit done"
+        self.basket_info = {
+            "held": round(self.basket_value(fvs, book_fvs), 2), "target": None if target is None else round(target, 2),
+            "target_full": round(full, 2), "floor": round(floor, 2), "peak": self.basket_peak,
+            "liquidation": None if liq is None else round(liq, 2),
+            "cushion": None if cushion is None else round(cushion, 2), "impact": round(impact, 2), "mult": mult,
+            "refused": refuse, "orders_planned": len(orders),
+            "tilt_exposure": round(getattr(self, "tilt_exposure_basket", 0.0)),   # (outside the bot's tilt_exposure)
+            "exit_start_utc": iso(datetime.fromtimestamp(sched["start"], timezone.utc)) if sched["start"] else None,
+            "backstop_utc": iso(datetime.fromtimestamp(sched["backstop"], timezone.utc)) if sched["backstop"] else None,
+            "no_add_utc": iso(datetime.fromtimestamp(sched["no_add"], timezone.utc)) if sched["no_add"] else None}
+        return traded
+
+    def basket_exit_blocked(self, ex, why):
+        """P9 red team: a basket SALE (exit, kill, backstop, tracking down) that cannot go out is alerted once a leg -
+        not only an info log: a kill or a backstop that silently never completes is the failure that matters."""
+        self.basket_alert_once(f"exit-blocked {ex.eid}", f"BASKET sale on {ex.label} ({self.basket_state}) cannot go "
+                               f"out: {why} - the leg stays held; free cash / check reduce_no_as_sell")
+
+    def basket_send(self, orders, inv, fvs, mine_real, now_w, now_m):
+        """Send planned basket orders, each an immediate-or-cancel take: write budget for 3 writes first, a fresh book
+        (the plan re-checked on it: the price still there and inside the caps), the cash gate's pre-check, our own
+        orders on that exchange cancelled (refused if that cannot be confirmed: never a price crossing our own
+        order), the order (alive take_order_ttl), its leftover cancelled at once. Booked from quantityTraded.
+        Returns the exchanges traded."""
+        cfg, traded = self.cfg, set()
+        for p in orders:
+            if not self.running:
+                break
+            e, ex = p["eid"], self.ex.get(p["eid"])
+            if ex is None:
+                continue
+            what = f"{'buy' if p['buy'] else 'sell'} {p['qty']} YES @ {p['limit']:.3f}"
+            if busy(ex, now_m):                           # a write of ours still running there / outcome unknown: it
+                log.info("BASKET %s skipped: a write is in flight there (next cycle)", ex.label)   # could land after
+                continue                                  # our cancel and meet the IOC
+            if not self.api.live:
+                log.info("[dry] BASKET %s %s", ex.label, what)
+                continue
+            if not self.writes_ready(3):
+                log.info("BASKET %s skipped: write budget busy (next cycle)", ex.label)
+                break
+            try:
+                ex.book = strip_own(self.api.book(e, self.tid), mine_real.get(e, []))
+                ex.book_time = ex.verified = time.monotonic()
+            except ApiError as err:
+                log.warning("BASKET %s skipped: book download failed (%s)", ex.label, err)
+                continue
+            lv = (ex.book or {}).get(p["key"])
+            if not lv:
+                log.info("BASKET %s skipped: no %s on the fresh book", ex.label, p["key"])
+                continue
+            best = lv[0]["price"]
+            if p["buy"] and best > p["limit"] + 1e-9 or not p["buy"] and best < p["limit"] - 1e-9:
+                log.info("BASKET %s skipped: the price moved (%s %.3f vs limit %.3f)", ex.label, p["key"], best,
+                         p["limit"])
+                continue
+            if p["add"] and ((p["buy"] and best > cfg.basket_max_price + 1e-9)
+                             or (not p["buy"] and best < 1 - cfg.basket_max_price - 1e-9)):
+                continue
+            qty = int(min(p["qty"], self.depth_within(ex.book, p["key"], p["limit"])))
+            if qty < 1:
+                continue
+            order = {"exchangeId": e, "side": "yes", "action": "buy" if p["buy"] else "sell", "quantity": qty,
+                     "price": p["limit"], "tournamentId": self.tid,
+                     "expirationDate": iso(utcnow() + timedelta(seconds=cfg.take_order_ttl))}
+            if p["buy"] and not p["add"]:                 # buying back a short: a covered "sell NO" if in effect
+                order = self.no_sell_order(order, inv.get(e, 0.0))
+                if order is None:
+                    log.info("BASKET %s skipped: its NO is all in a NO+NO set", ex.label)
+                    self.basket_exit_blocked(ex, "its NO is all in a NO+NO set")
+                    continue
+            if p["add"] and not self.cash_gate_on():
+                continue                                  # (planned with a fresh read: the gate went stale since)
+            if self.cash_gate_on() and self.cash_gate_blocks([order]):
+                self.cash_gate_log(e, "BASKET %s skipped: not enough available cash (cash gate)", ex.label)
+                if not p["add"]:
+                    self.basket_exit_blocked(ex, "not enough available cash (a short bought back as a YES purchase: "
+                                                 "covered NO sales not in effect)")
+                continue
+            if not self.cancel(e, [], whole_exchange=True):
+                log.warning("BASKET %s skipped: could not confirm our own orders there are cancelled", ex.label)
+                continue
+            self.orders_stale = True
+            try:
+                results = self.place_orders([order])
+            except ApiError as err:
+                if err.code == "WRITE_BUDGET_WAIT":
+                    log.info("BASKET %s not sent: write budget busy", ex.label)
+                    break
+                ex.pending_until = now_m + cfg.pending_seconds
+                alert(f"basket order on {ex.label} failed ({err}) - check positions")
+                if err.code in FATAL_API_CODES:
+                    fatal(f"orders rejected with {err.code}")
+                traded.add(e)
+                continue
+            res = results[0] if results else {}
+            data = res.get("data") or {}
+            if res.get("ok"):
+                self.remember_order(order, data, now_m)
+            self.cancel(e, [], whole_exchange=True, quiet=True)     # the leftover, at once
+            traded.add(e)
+            self.basket_orders_total += 1
+            if data.get("orderId") is not None:
+                self.order_meta[data["orderId"]] = {"our_side": "bid" if p["buy"] else "ask", "price": p["limit"],
+                                                    "take": True, "basket": True, "fv": fvs.get(e), "t": time.time(),
+                                                    "eid": e, **({"no_sell": True} if order.get("_no_sell") else {})}
+                self.notes_dirty = True
+            done = float(data.get("quantityTraded") or 0) if res.get("ok") else 0.0
+            if done <= 0:
+                log.info("BASKET %s: %s - nothing traded", ex.label, what)
+                continue
+            sign = 1.0 if p["buy"] else -1.0
+            cur = self.basket_legs.get(e, 0.0)
+            base = self.basket_leg_basis(e, p["buy"], inv) if p["add"] else cur   # (an add adopts the position held)
+            if abs(base) >= abs(cur) + 1:
+                log.warning("BASKET %s: the %+.0f shares held there outside the basket adopted into it", ex.label,
+                            base - cur)
+            new = base + sign * done
+            if abs(new) < 1:
+                self.basket_legs.pop(e, None)
+            else:
+                self.basket_legs[e] = new
+            # $ in the leg's own terms (a YES leg at the YES price, a NO leg at 1 - price): + paid, - received
+            dollars = done * (p["limit"] if p["buy"] == p["add"] else 1 - p["limit"])   # (YES leg: buy adds)
+            self.basket_cost += dollars if p["add"] else -dollars
+            self.basket_flows.append((now_w, dollars if p["add"] else -dollars))
+            lo = now_w - max(self.cfg.basket_impact_hours, 24.0) * 3600
+            while self.basket_flows and self.basket_flows[0][0] < lo:
+                self.basket_flows.popleft()
+            w = self.basket_hours.get((e, p["key"]))
+            if w is None or now_w - w[0] >= 3600:
+                _, depth = self.basket_window_left(e, p["key"], 0.0, now_w)   # (ex.book: the fresh book, pre-trade)
+                w = self.basket_hours[(e, p["key"])] = [now_w, depth, 0.0]
+            w[2] += done
+            self.basket_last_trade[e] = now_w
+            self.basket_last_action = f"{ex.label}: {'bought' if p['buy'] else 'sold'} {done:.0f} YES @ <= {p['limit']:.3f}"
+            log.warning("BASKET %s %s: traded %.0f of %d (%s)", ex.label, what, done, qty,
+                        "add" if p["add"] else "reduce")
+        return traded
+
+    # ------------------------------------------------------------------------------ Package 10 B: the allocator
+    ALLOC_REF_MAX_AGE = 30.0      # a Polymarket price downloaded longer ago than this (s) is not ranked
+    ALLOC_LEVEL_TOL = 0.005       # a paired level still counts while the fresh touch is within this of it
+    ALLOC_BUY_WAIT = 900.0        # a sold pair's buy waits at most this long (s) for a cash read showing the money
+    ALLOC_SET_WAIT = 900.0        # a registered NO+NO set unwind waits at most this long (s) for take_arbitrage
+    ALLOC_MIN_USD = 20.0          # no pair or reserve refill below this many $
+    ALLOC_CASH_FRESH = 300.0      # no allocator action without a cash read younger than this (the gate's own limit)
+    ALLOC_DONE = ("bought", "done", "gone", "dropped", "expired", "skipped")
+
+    def load_status_key(self, key):
+        """Package 10 B: status.json[key] the previous run left ({} if none)."""
+        try:
+            with open(bot_path(self.cfg.status_file)) as f:
+                d = json.load(f).get(key)
+            return d if isinstance(d, dict) else {}
+        except (OSError, ValueError, TypeError, AttributeError):
+            return {}
+
+    def alloc_init(self, d=None):
+        """Package 10 B state, restored from status.json "alloc" (d): the last run's wall time (the hourly clock) and
+        the $ rotated in the last hour (turnover cap). Pairs in flight are NOT restored: after a restart their cash
+        simply stays (never a buy without its own fresh sale and cash read)."""
+        d = d if isinstance(d, dict) else {}
+
+        def num(x, default=None):
+            return float(x) if isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) else default
+        self.alloc_last_run_wall = num(d.get("last_run_wall"))
+        self.alloc_flows = deque()                # (wall, $ rotated) of the last hour
+        for x in (d.get("flows") if isinstance(d.get("flows"), list) else ()):
+            if isinstance(x, (list, tuple)) and len(x) == 2 and num(x[0]) is not None and num(x[1]) is not None:
+                self.alloc_flows.append((num(x[0]), num(x[1])))
+        self.alloc_totals = {k: num(d.get(k), 0.0) for k in ("sold_total", "bought_total", "runs_total")}
+        self.alloc_pairs = []                     # this run's pairs (dicts, see alloc_plan), until each is finished
+        self.alloc_set_races = {}                 # race -> {"cost", "until", "sets_before", "free"} (B3; arb_plan)
+        self.alloc_sells_stopped = False          # a sold pair's level was gone: no more sales this run
+        self.alloc_state = "off"
+        self.alloc_info = {}                      # the latest tick's figures (status.json "alloc")
+        self.alloc_run = {}                       # this run's tallies
+        self.alloc_bloc_logged = False
+        self.alloc_ages = {}
+
+    def alloc_persist_needed(self):
+        return bool(self.alloc_info) or bool(self.alloc_pairs) or self.alloc_last_run_wall is not None
+
+    def alloc_status(self):
+        """status.json "alloc": the latest figures plus what a restart restores (last_run_wall, flows)."""
+        now_w = time.time()
+        return {**self.alloc_info, "state": self.alloc_state, "last_run_wall": self.alloc_last_run_wall,
+                "last_run": (iso(datetime.fromtimestamp(self.alloc_last_run_wall, timezone.utc))
+                             if self.alloc_last_run_wall is not None else None),
+                "pending": len(self.alloc_pairs), "turnover_hour": round(self.alloc_turnover(now_w), 2),
+                "flows": [list(x) for x in self.alloc_flows if now_w - x[0] < 3600],
+                **{k: round(v, 2) for k, v in self.alloc_totals.items()}}
+
+    def alloc_turnover(self, now_w):
+        """$ rotated in the last hour (sales, buys from spare cash, NO+NO sets freed)."""
+        while self.alloc_flows and self.alloc_flows[0][0] < now_w - 3600:
+            self.alloc_flows.popleft()
+        return sum(u for _, u in self.alloc_flows)
+
+    def alloc_pins(self):
+        return {x.strip() for x in str(self.cfg.alloc_pin or "").split(",") if x.strip()}
+
+    def alloc_p(self, ex, now_m=None):
+        """The outcome value of one YES share for the allocator: the race-scaled Polymarket price, only when liquid
+        and downloaded within ALLOC_REF_MAX_AGE seconds (refs.ages, where the reference feed reports it); else None."""
+        if ex.eid not in (self.cur_liquid or ()) or (self.cur_refs or {}).get(ex.eid) is None:
+            return None
+        age = (self.alloc_ages or {}).get(f"{ex.group}|{ex.party}")
+        if age is not None and age > self.ALLOC_REF_MAX_AGE:
+            return None
+        return self.scaled_ref(ex)
+
+    def alloc_market_ok(self, ex, skip=()):
+        """A market the allocator may trade at all: not a basket leg, not headline (unless alloc_headline), not one
+        another feature traded this cycle (skip: exchanges and races), not inside the pre-close window that stops
+        takes and arbitrage (close_window: at least the stop window, P10 red team RT-3)."""
+        return not (ex.eid in self.basket_legs or ex.eid in skip or ex.group in skip
+                    or (ex.group in self.cfg.headline_races and not self.cfg.alloc_headline)
+                    or self.hours_to_close(ex) <= self.close_window("flatten_hours_before_close"))
+
+    def alloc_fresh_book(self, ex, now_m):
+        """The cached book (our own orders already stripped) if confirmed within book_stale, else None."""
+        return ex.book if ex.book is not None and now_m - ex.verified < self.cfg.book_stale else None
+
+    @staticmethod
+    def alloc_held_usd(q, p):
+        """$ at p held to the outcome in one market (a long q x p, a short |q| x (1 - p))."""
+        return q * p if q > 0 else -q * (1 - p)
+
+    def alloc_lone_no(self, e, q):
+        """NO shares a short's buy-back may sell as a covered "sell NO": the NO held less its NO+NO set part (always:
+        a set is only ever unwound whole, B3), within cover_no_qty (0 when covered NO sales are not in effect)."""
+        if q > -1:
+            return 0
+        return int(max(0.0, min(-q - self.nono_set_part(e, q), self.cover_no_qty(e, q, sets_ok=True))) + 1e-9)
+
+    def alloc_plan(self, inv, now_m, cash, skip=(), turnover_left=None):
+        """THE PURE PLANNER (no request, no state change but the once-only bloc log): ([pair], {"blocked_by",
+        "ev_gain_est"}). pair = {"sell": {"kind": "long" | "short" | "set" | "cash", "eid" / "race", "label", "qty",
+        "px", "edge", "usd"}, "buy": None | {"eid", "label", "short", "px", "qty", "edge", "usd"}, "usd", "status"}.
+        Reserve refills first (cash below alloc_mm_reserve: sales with no buy, lowest edge first), then pairs: lowest
+        edge-held with highest-edge level while the gain >= alloc_min_improvement, inside alloc_max_contract_usd per
+        market, the turnover left and (bloc_delta_enabled) the bloc cap."""
+        cfg = self.cfg
+        blocked = defaultdict(int)
+        pins = self.alloc_pins()
+        held, levels = [], []
+        for e, q in sorted(inv.items()):
+            ex = self.ex.get(e)
+            if ex is None or abs(q) < 1 or not self.alloc_market_ok(ex, skip) or ex.label in pins:
+                continue
+            p, book = self.alloc_p(ex, now_m), self.alloc_fresh_book(ex, now_m)
+            if p is None or book is None:
+                continue
+            if q > 0 and book.get("bids"):
+                px, depth = book["bids"][0]["price"], book["bids"][0]["quantity"]
+                qty, edge, unit = min(q, depth), (p - px) / px, px
+            elif q < 0 and book.get("asks"):
+                px, depth = book["asks"][0]["price"], book["asks"][0]["quantity"]
+                qty, edge, unit = min(self.alloc_lone_no(e, q), depth), (px - p) / max(1 - px, TICK), 1 - px
+            else:
+                continue
+            qty = int(qty + 1e-9)
+            if qty >= 1 and edge <= cfg.alloc_max_edge_sell + 1e-9 and qty * unit >= self.ALLOC_MIN_USD:
+                held.append({"kind": "long" if q > 0 else "short", "eid": e, "label": ex.label, "px": px, "edge": edge,
+                             "unit": unit, "avail": qty * unit})
+        if cfg.alloc_set_cost_per_usd > 0 and cfg.pair_unwind_enabled and self.pair_no_unwind_on():
+            for race, members in sorted(self.groups.items()):
+                if len(members) < 2 or any(m not in self.ex for m in members):
+                    continue
+                sets = min(-float(inv.get(m, 0.0)) for m in members)
+                exs = [self.ex[m] for m in members]
+                books = [self.alloc_fresh_book(x, now_m) for x in exs]
+                if (sets < 1 or race in skip or any(not self.alloc_market_ok(x, skip) or x.label in pins for x in exs)
+                        or any(b is None or not b.get("asks") for b in books)):
+                    continue
+                asks = [b["asks"][0]["price"] for b in books]
+                free = len(members) - sum(asks)           # cash freed per set (covered NO sales at 1 - ask)
+                if free <= 0:
+                    continue
+                cpu = (sum(asks) - 1) / free             # the set's EV given up per $ freed
+                n = int(min([sets] + [b["asks"][0]["quantity"] for b in books]) + 1e-9)
+                if cpu <= cfg.alloc_set_cost_per_usd + 1e-9 and n * free >= self.ALLOC_MIN_USD:
+                    held.append({"kind": "set", "race": race, "label": f"{race} NO+NO set", "px": sum(asks),
+                                 "edge": max(0.0, cpu), "unit": free, "avail": n * free, "members": list(members)})
+        spare = cash - cfg.alloc_mm_reserve
+        if spare >= self.ALLOC_MIN_USD:
+            held.append({"kind": "cash", "label": "spare cash", "px": 1.0, "edge": 0.0, "unit": 1.0, "avail": spare})
+        held.sort(key=lambda h: (h["edge"], h.get("eid") or h.get("race") or ""))
+        room = {}
+        for e, ex in sorted(self.ex.items()):
+            if not self.alloc_market_ok(ex, skip):
+                continue
+            p, book = self.alloc_p(ex, now_m), self.alloc_fresh_book(ex, now_m)
+            if p is None or book is None:
+                continue
+            q = float(inv.get(e, 0.0))
+            room[e] = max(0.0, cfg.alloc_max_contract_usd - self.alloc_held_usd(q, p))
+            if q >= 0:                            # (buying YES on a short would be a close: the held list's job)
+                for lv in (book.get("asks") or [])[:3]:
+                    px = lv["price"]
+                    edge = (p - px) / px
+                    if edge >= cfg.alloc_min_edge_buy - 1e-9:
+                        levels.append({"eid": e, "label": ex.label, "short": False, "px": px, "edge": edge, "unit": px,
+                                       "avail": lv["quantity"] * px})
+            if q <= 0:
+                for lv in (book.get("bids") or [])[:3]:
+                    px = lv["price"]
+                    edge = (px - p) / max(1 - px, TICK)
+                    if edge >= cfg.alloc_min_edge_buy - 1e-9:
+                        levels.append({"eid": e, "label": ex.label, "short": True, "px": px, "edge": edge,
+                                       "unit": 1 - px, "avail": lv["quantity"] * (1 - px)})
+        levels.sort(key=lambda o: (-o["edge"], o["eid"], o["px"]))
+        if getattr(self, "global_reduce", False) and levels:   # (red team RT-2: no buy while in reduce-only;
+            blocked["risk"] += 1                                #  reserve refills, which only reduce, still run)
+            levels = []
+        left = float("inf") if turnover_left is None else max(0.0, turnover_left)
+        pairs, gain = [], 0.0
+        hyp = {e: float(q) for e, q in inv.items()}
+        bloc_fn = getattr(self, "bloc_delta_now", None) if getattr(cfg, "bloc_delta_enabled", False) else None
+        cap = self.bloc_cap() if bloc_fn is not None else None
+
+        def sell_leg(h, usd):
+            if h["kind"] == "cash":
+                return {"kind": "cash", "label": h["label"], "usd": usd, "edge": 0.0, "qty": 0, "px": 1.0}
+            n = int(usd / h["unit"] + 1e-9)
+            if n < 1:
+                return None
+            leg = {"kind": h["kind"], "label": h["label"], "qty": n, "px": h["px"], "edge": h["edge"],
+                   "usd": n * h["unit"]}
+            if h["kind"] == "set":
+                leg.update(race=h["race"], members=h["members"])
+            else:
+                leg["eid"] = h["eid"]
+            return leg
+
+        def apply(inv_, s, b, sign=1):
+            if s is not None and s["kind"] in ("long", "short"):
+                inv_[s["eid"]] = inv_.get(s["eid"], 0.0) + sign * (-s["qty"] if s["kind"] == "long" else s["qty"])
+            if s is not None and s["kind"] == "set":
+                for m in s["members"]:
+                    inv_[m] = inv_.get(m, 0.0) + sign * s["qty"]
+            if b is not None:
+                inv_[b["eid"]] = inv_.get(b["eid"], 0.0) + sign * (-b["qty"] if b["short"] else b["qty"])
+        # B2: refill the reserve first (sales with no buy; the bloc check as the pairs', red team RT-5)
+        deficit = cfg.alloc_mm_reserve - cash
+        hi = 0
+        bloc = bloc_fn(hyp) if bloc_fn is not None else 0.0
+        while deficit >= self.ALLOC_MIN_USD and hi < len(held) and left >= self.ALLOC_MIN_USD:
+            h = held[hi]
+            s = sell_leg(h, min(h["avail"], deficit, left)) if h["kind"] != "cash" else None
+            if s is None:
+                hi += 1
+                continue
+            apply(hyp, s, None)
+            if bloc_fn is not None:
+                new = bloc_fn(hyp)
+                if abs(new) > cap + 1e-9 and abs(new) > abs(bloc) + 1e-9:
+                    apply(hyp, s, None, sign=-1)
+                    blocked["bloc"] += 1
+                    hi += 1                       # this sale would push the bloc delta past the cap: the next holding
+                    continue
+                bloc = new
+            pairs.append({"sell": s, "buy": None, "usd": s["usd"], "status": "pending", "proceeds": 0.0,
+                          "sold_at": None})
+            h["avail"] -= s["usd"]
+            deficit -= s["usd"]
+            left -= s["usd"]
+            if h["avail"] < self.ALLOC_MIN_USD:
+                hi += 1
+        bloc = bloc_fn(hyp) if bloc_fn is not None else 0.0
+        # B1: pairs (sell lowest edge-held, buy highest edge)
+        sq = [h for h in held if h["avail"] >= self.ALLOC_MIN_USD]
+        si = bi = 0
+        while si < len(sq) and bi < len(levels) and left >= self.ALLOC_MIN_USD and len(pairs) < 200:
+            h, o = sq[si], levels[bi]
+            if o["edge"] - h["edge"] < cfg.alloc_min_improvement - 1e-9:
+                break
+            x = min(h["avail"], o["avail"], room.get(o["eid"], 0.0), left)
+            if x < self.ALLOC_MIN_USD:
+                if room.get(o["eid"], 0.0) < self.ALLOC_MIN_USD or o["avail"] < self.ALLOC_MIN_USD:
+                    bi += 1
+                else:
+                    si += 1
+                continue
+            nb = int(x / o["unit"] + 1e-9)
+            x = nb * o["unit"]
+            s = sell_leg(h, x)
+            if s is None or nb < 1:
+                bi += 1
+                continue
+            b = {"eid": o["eid"], "label": o["label"], "short": o["short"], "px": o["px"], "qty": nb,
+                 "edge": o["edge"], "usd": x}
+            apply(hyp, s, b)
+            if bloc_fn is not None:
+                new = bloc_fn(hyp)
+                if abs(new) > cap + 1e-9 and abs(new) > abs(bloc) + 1e-9:
+                    apply(hyp, s, b, sign=-1)
+                    blocked["bloc"] += 1
+                    bi += 1                       # this level would push the bloc delta past the cap: the next one
+                    continue
+                bloc = new
+            cash_sell = h["kind"] == "cash"
+            pairs.append({"sell": s, "buy": b, "usd": x, "status": "sold" if cash_sell else "pending",
+                          "proceeds": x if cash_sell else 0.0, "sold_at": -1e18 if cash_sell else None})
+            gain += x * (o["edge"] - h["edge"])
+            h["avail"] -= x if cash_sell else s["usd"]
+            o["avail"] -= x
+            room[o["eid"]] = room.get(o["eid"], 0.0) - x
+            left -= x
+            if h["avail"] < self.ALLOC_MIN_USD:
+                si += 1
+            if o["avail"] < self.ALLOC_MIN_USD or room[o["eid"]] < self.ALLOC_MIN_USD:
+                bi += 1
+        if bloc_fn is None and pairs and not self.alloc_bloc_logged:
+            self.alloc_bloc_logged = True
+            log.info("ALLOC bloc check skipped: bloc_delta_enabled is off (Part A's bloc_delta_now / bloc_cap)")
+        if left < self.ALLOC_MIN_USD and si < len(sq) and bi < len(levels):
+            blocked["turnover"] += 1
+        return pairs, {"blocked_by": dict(blocked), "ev_gain_est": round(gain, 2)}
+
+    def alloc_journal(self, pr):
+        """The journal line of a planned pair: "ALLOC sell <label> <qty> @ <px> (edge-held x%) -> buy <label> <qty>
+        @ <px> (edge y%)"."""
+        s, b = pr["sell"], pr["buy"]
+        if s["kind"] == "cash":
+            left = f"spare cash ${pr['usd']:.0f}"
+        elif s["kind"] == "set":
+            left = f"unwind {s['label']} {s['qty']} sets @ asks sum {s['px']:.3f} (cost {100 * s['edge']:.1f}% per $)"
+        else:
+            left = (f"sell {s['label']} {'NO ' if s['kind'] == 'short' else ''}{s['qty']} @ {s['px']:.3f} "
+                    f"(edge-held {100 * s['edge']:.1f}%)")
+        right = (f"buy {b['label']} {'short YES ' if b['short'] else ''}{b['qty']} @ {b['px']:.3f} "
+                 f"(edge {100 * b['edge']:.1f}%)" if b else "the reserve")
+        return f"ALLOC {left} -> {right}"
+
+    def alloc_block(self, why):
+        bb = self.alloc_run.setdefault("blocked_by", {})
+        bb[why] = bb.get(why, 0) + 1
+
+    def alloc_tick(self, now, inv, mine_real, now_m=None, skip=()):
+        """Package 10 B, once a cycle (see Config): finish the run in flight (set unwinds seen, buys after a cash
+        read, sales), or start a new run once alloc_interval_s has passed since the last. Returns the exchanges
+        traded (not quoted this cycle)."""
+        cfg = self.cfg
+        now_w = now.timestamp()
+        now_m = time.monotonic() if now_m is None else now_m
+        if not cfg.alloc_enabled:
+            if self.alloc_pairs or self.alloc_set_races:
+                log.warning("ALLOC off: %d pair(s) dropped, %d set unwind registration(s) withdrawn (nothing forced; "
+                            "the cash stays)", len(self.alloc_pairs), len(self.alloc_set_races))
+            self.alloc_pairs, self.alloc_set_races, self.alloc_state = [], {}, "off"
+            if self.alloc_info:
+                self.alloc_info["state"] = "off"
+            return set()
+        self.alloc_ages = self.refs.ages() if self.refs is not None and hasattr(self.refs, "ages") else {}
+        inv = dict(inv)                           # (kept current with this tick's own trades: never an oversale)
+        turnover = self.alloc_turnover(now_w)
+        due = not self.alloc_pairs and (self.alloc_last_run_wall is None
+                                         or now_w - self.alloc_last_run_wall >= cfg.alloc_interval_s)
+        if not self.api.live:                     # dry run: the plan is logged, nothing sent
+            if due:
+                pairs, info = self.alloc_plan(inv, now_m, cfg.alloc_mm_reserve, skip,
+                                              cfg.alloc_max_turnover_per_hour - turnover)
+                self.alloc_last_run_wall = now_w
+                for pr in pairs:
+                    log.info("[dry] %s", self.alloc_journal(pr))
+                self.alloc_state = "dry run"
+                self.alloc_info = {"pairs_planned": len(pairs), **info, "reserve": cfg.alloc_mm_reserve}
+            return set()
+        age = self.cash_read_age()
+        if not (self.cash_gate_on() and getattr(self, "cg_cash", None) is not None and age is not None
+                and age < self.ALLOC_CASH_FRESH):        # no action at all without a fresh cash read
+            self.alloc_state = "waiting (no fresh cash read)"
+            self.alloc_block("cash")
+            self.alloc_info = {**self.alloc_info, "state": self.alloc_state,
+                               "blocked_by": dict(self.alloc_run.get("blocked_by", {}))}
+            return set()
+        traded = set()
+        if due:
+            cash = self.cash_left()
+            pairs, info = self.alloc_plan(inv, now_m, cash, skip, cfg.alloc_max_turnover_per_hour - turnover)
+            self.alloc_last_run_wall = now_w
+            self.alloc_totals["runs_total"] += 1
+            self.alloc_pairs, self.alloc_sells_stopped = pairs, False
+            for pr in pairs:
+                pr["planned_at"] = now_m
+            self.alloc_run = {"blocked_by": dict(info["blocked_by"]), "pairs_planned": len(pairs), "sold": 0.0,
+                              "bought": 0.0, "cash_before": round(cash, 2), "ev_gain_est": info["ev_gain_est"]}
+            log.warning("ALLOC run: %d pair(s) planned (cash %.0f, reserve %.0f, turnover left %.0f, est. gain %.0f)",
+                        len(pairs), cash, cfg.alloc_mm_reserve, cfg.alloc_max_turnover_per_hour - turnover,
+                        info["ev_gain_est"])
+            for pr in pairs:
+                log.warning("%s", self.alloc_journal(pr))
+        writes = getattr(self.api, "writes_left", lambda: 10 ** 6)()
+        n_left = int(min(cfg.alloc_max_orders_per_cycle, math.floor(cfg.alloc_writes_frac * max(0, writes) / 3 + 1e-9)))
+        # 1. registered NO+NO set unwinds (B3): done by take_arbitrage, or expired
+        for pr in self.alloc_pairs:
+            if pr["status"] == "set_wait":
+                self.alloc_set_check(pr, inv, now_m, now_w)
+        # 2. buys: pairs sold BEFORE the latest cash read (spare-cash pairs: the run's own fresh read)
+        read_at = getattr(self, "cg_read_at", None)
+        for pr in self.alloc_pairs:
+            if pr["status"] != "sold" or pr["buy"] is None or read_at is None or pr["sold_at"] >= read_at:
+                continue
+            if pr["sold_at"] > -1e17 and now_m - pr["sold_at"] > self.ALLOC_BUY_WAIT:
+                pr["status"] = "expired"
+                log.warning("ALLOC buy %s expired: no cash read showed the money within %.0f s (the cash stays)",
+                            pr["buy"]["label"], self.ALLOC_BUY_WAIT)
+                continue
+            if n_left < 1:
+                self.alloc_block("writes")
+                break
+            if self.alloc_buy(pr, inv, mine_real, now_m, now_w, skip):
+                n_left -= 1
+                traded.add(pr["buy"]["eid"])
+        # 3. sales (and set registrations)
+        for pr in self.alloc_pairs:
+            if pr["status"] != "pending":
+                continue
+            if self.alloc_sells_stopped:
+                pr["status"] = "skipped"
+                continue
+            if now_m - pr.get("planned_at", now_m) > cfg.alloc_interval_s:
+                pr["status"] = "expired"          # a sale still not sent after a whole interval: re-planned afresh
+                continue
+            if pr["sell"]["kind"] != "set" and n_left < 1:
+                self.alloc_block("writes")
+                break
+            if self.alloc_sell(pr, inv, mine_real, now_m, now_w, skip):
+                n_left -= 1
+                traded.add(pr["sell"]["eid"])
+        for pr in self.alloc_pairs:               # a refill (no buy) is finished once sold
+            if pr["status"] == "sold" and pr["buy"] is None:
+                pr["status"] = "done"
+        self.alloc_pairs = [pr for pr in self.alloc_pairs if pr["status"] not in self.ALLOC_DONE]
+        self.alloc_state = "running" if self.alloc_pairs else "idle"
+        self.alloc_info = {**self.alloc_run, "state": self.alloc_state, "cash_after": round(self.cash_left(), 2),
+                           "reserve": cfg.alloc_mm_reserve, "sells_stopped": self.alloc_sells_stopped,
+                           "set_unwinds_registered": sorted(self.alloc_set_races)}
+        return traded
+
+    def alloc_level_ok(self, b, book, p):
+        """(ok, touch, edge): the fresh book still shows the planned buy level (within ALLOC_LEVEL_TOL) at an edge >=
+        alloc_min_edge_buy."""
+        key = "bids" if b["short"] else "asks"
+        lv = (book or {}).get(key)
+        if not lv or p is None:
+            return False, None, None
+        best = lv[0]["price"]
+        if b["short"]:
+            near, edge = best >= b["px"] - self.ALLOC_LEVEL_TOL - 1e-9, (best - p) / max(1 - best, TICK)
+        else:
+            near, edge = best <= b["px"] + self.ALLOC_LEVEL_TOL + 1e-9, (p - best) / best
+        return near and edge >= self.cfg.alloc_min_edge_buy - 1e-9, best, edge
+
+    def alloc_download(self, ex, mine_real):
+        """A fresh book of ex, our own orders stripped (cached on ex), or None on a failed download."""
+        try:
+            ex.book = strip_own(self.api.book(ex.eid, self.tid), mine_real.get(ex.eid, []))
+            ex.book_time = ex.verified = time.monotonic()
+            return ex.book
+        except ApiError as err:
+            log.warning("ALLOC %s: book download failed (%s)", ex.label, err)
+            return None
+
+    def alloc_buy(self, pr, inv, mine_real, now_m, now_w, skip):
+        """The buy of a sold pair (after a cash read showing the money above the reserve): True if an order was
+        sent. The level gone -> the pair ends, its cash stays, no more sales this run."""
+        cfg, b = self.cfg, pr["buy"]
+        ex = self.ex.get(b["eid"])
+        if getattr(self, "global_reduce", False):     # (red team RT-2: no buy in reduce-only; the pair waits, then
+            self.alloc_block("risk")                  #  expires after ALLOC_BUY_WAIT with its cash kept)
+            return False
+        if ex is None or not self.alloc_market_ok(ex, skip) or busy(ex, now_m):
+            return False                          # (traded by another feature / a write in flight: next cycle)
+        q = float(inv.get(b["eid"], 0.0))
+        if (q < 0 and not b["short"]) or (q > 0 and b["short"]):
+            pr["status"] = "dropped"              # never flip a position: the cash stays
+            return False
+        avail = self.cash_left() - cfg.alloc_mm_reserve
+        if avail < (b["px"] if not b["short"] else 1 - b["px"]):
+            self.alloc_block("cash")              # the cash read does not show the money (yet)
+            return False
+        if not self.writes_ready(3):
+            self.alloc_block("writes")
+            return False
+        book = self.alloc_download(ex, mine_real)
+        if book is None:
+            return False
+        p = self.alloc_p(ex, now_m)
+        ok, best, edge = self.alloc_level_ok(b, book, p)
+        if not ok:
+            pr["status"] = "gone"
+            self.alloc_sells_stopped = True
+            self.alloc_block("depth")
+            log.warning("ALLOC buy %s skipped: the level is gone (touch %s, planned %.3f) - the cash stays, no more "
+                        "sales this run", b["label"], "none" if best is None else f"{best:.3f}", b["px"])
+            return False
+        unit = best if not b["short"] else 1 - best
+        key = "bids" if b["short"] else "asks"
+        room = cfg.alloc_max_contract_usd - self.alloc_held_usd(q, p)
+        qty = int(min(self.depth_within({key: book[key][:1]}, key, best), min(pr["proceeds"], avail, room) / unit)
+                  + 1e-9)
+        if qty < 1:
+            pr["status"] = "dropped"
+            return False
+        order = {"exchangeId": b["eid"], "side": "yes", "action": "sell" if b["short"] else "buy", "quantity": qty,
+                 "price": best, "tournamentId": self.tid,
+                 "expirationDate": iso(utcnow() + timedelta(seconds=cfg.take_order_ttl))}
+        if self.cash_gate_blocks([order]):
+            self.alloc_block("cash")
+            return False
+        done = self.alloc_send(ex, order, now_m, "buy")
+        if done is None:
+            return False
+        usd = done * unit
+        self.alloc_run["bought"] = round(self.alloc_run.get("bought", 0.0) + usd, 2)
+        self.alloc_totals["bought_total"] += usd
+        if pr["sell"]["kind"] == "cash" and usd > 0:
+            self.alloc_flows.append((now_w, usd))
+        inv[b["eid"]] = q + (-done if b["short"] else done)
+        if done >= 1:
+            pr["status"] = "bought"
+            log.warning("ALLOC bought %s %s%.0f @ %.3f (edge %.1f%%, $%.0f)", b["label"],
+                        "short YES " if b["short"] else "", done, best, 100 * edge, usd)
+        else:
+            pr["status"] = "gone"
+            self.alloc_sells_stopped = True
+            log.warning("ALLOC buy %s: nothing traded - the cash stays, no more sales this run", b["label"])
+        return True
+
+    def alloc_sell(self, pr, inv, mine_real, now_m, now_w, skip):
+        """A pending pair's sale (or B3 set registration): True if an order was sent. Paired: only while a fresh book
+        of the buy market still shows its level, and the edges still pass on both fresh books."""
+        cfg, s, b = self.cfg, pr["sell"], pr["buy"]
+        pins = self.alloc_pins()
+        if s["kind"] == "set":
+            exs = [self.ex.get(m) for m in s["members"]]
+            if any(x is None or x.label in pins for x in exs):
+                pr["status"] = "dropped"
+                return False
+            if any(not self.alloc_market_ok(x, skip) or busy(x, now_m) for x in exs):
+                return False
+        else:
+            ex = self.ex.get(s["eid"])
+            if ex is None or ex.label in pins:
+                pr["status"] = "dropped"
+                return False
+            if not self.alloc_market_ok(ex, skip) or busy(ex, now_m):
+                return False
+            q = float(inv.get(s["eid"], 0.0))
+            if (s["kind"] == "long" and q < 1) or (s["kind"] == "short" and q > -1):
+                pr["status"] = "dropped"
+                return False
+        if not self.writes_ready(3):
+            self.alloc_block("writes")
+            return False
+        bedge = None
+        if b is not None and getattr(self, "global_reduce", False):   # (red team RT-2: its buy could not follow)
+            self.alloc_block("risk")
+            return False
+        if b is not None:                         # the paired level first: no sale without it on a fresh book
+            bx = self.ex.get(b["eid"])
+            if bx is None or not self.alloc_market_ok(bx, skip):
+                return False
+            bbook = self.alloc_download(bx, mine_real)
+            if bbook is None:
+                return False
+            ok, _, bedge = self.alloc_level_ok(b, bbook, self.alloc_p(bx, now_m))
+            if not ok:
+                pr["status"] = "gone"
+                self.alloc_block("depth")
+                log.info("ALLOC %s not sold: its paired level (%s @ %.3f) is gone", s["label"], b["label"], b["px"])
+                return False
+        if s["kind"] == "set":
+            sets = min(-float(inv.get(m, 0.0)) for m in s["members"])
+            if sets < 1:
+                pr["status"] = "dropped"
+                return False
+            # "sets": what the plan needs - take_arbitrage unwinds no more at the allocator's cost (red team RT-1;
+            # several pairs of one race add up)
+            reg = self.alloc_set_races.get(s["race"]) or {}
+            self.alloc_set_races[s["race"]] = {"cost": max(s["px"] - 1 + 1e-9, reg.get("cost", -1.0)),
+                                               "until": now_m + self.ALLOC_SET_WAIT,
+                                               "sets_before": reg.get("sets_before", sets),
+                                               "free": len(s["members"]) - s["px"],
+                                               "sets": reg.get("sets", 0) + s["qty"]}
+            pr["status"] = "set_wait"
+            log.warning("ALLOC %s: registered for the short-set unwind at asks sum <= %.3f (%.0f sets held)",
+                        s["label"], s["px"], sets)
+            return False
+        book = self.alloc_download(ex, mine_real)
+        if book is None:
+            return False
+        key = "bids" if s["kind"] == "long" else "asks"
+        lv = book.get(key)
+        p = self.alloc_p(ex, now_m)
+        if not lv or p is None:
+            pr["status"] = "gone"
+            return False
+        best = lv[0]["price"]
+        edge = (p - best) / best if s["kind"] == "long" else (best - p) / max(1 - best, TICK)
+        if edge > cfg.alloc_max_edge_sell + 1e-9 or (bedge is not None
+                                                     and bedge - edge < cfg.alloc_min_improvement - 1e-9):
+            pr["status"] = "gone"
+            log.info("ALLOC %s not sold: edge-held now %.1f%% at %.3f (the pair no longer pays)", s["label"],
+                     100 * edge, best)
+            return False
+        unit = best if s["kind"] == "long" else 1 - best
+        cap_q = q if s["kind"] == "long" else self.alloc_lone_no(s["eid"], q)
+        qty = int(min(s["qty"], lv[0]["quantity"], cap_q) + 1e-9)
+        if qty < 1:
+            pr["status"] = "gone"
+            return False
+        order = {"exchangeId": s["eid"], "side": "yes", "action": "sell" if s["kind"] == "long" else "buy",
+                 "quantity": qty, "price": best, "tournamentId": self.tid,
+                 "expirationDate": iso(utcnow() + timedelta(seconds=cfg.take_order_ttl))}
+        if s["kind"] == "short":                  # a short's buy-back only as a covered "sell NO" (needs no cash)
+            order = self.no_sell_order(order, q)
+            if order is None or not order.get("_no_sell"):
+                pr["status"] = "dropped"
+                log.info("ALLOC %s not sold: its NO cannot go out as a covered sale", s["label"])
+                return False
+            order["quantity"] = min(int(order["quantity"]), qty)
+        if b is not None:
+            order["_alloc_paired"] = True          # (Part A1 v: an allocator sale, never a resting quote)
+        if self.cash_gate_blocks([order]):
+            self.alloc_block("cash")
+            return False
+        done = self.alloc_send(ex, order, now_m, "sell")
+        if done is None:
+            return False
+        if done < 1:
+            pr["status"] = "skipped"
+            return True
+        usd = done * unit
+        inv[s["eid"]] = q + (-done if s["kind"] == "long" else done)
+        pr.update(status="sold", proceeds=usd, sold_at=now_m)
+        self.alloc_flows.append((now_w, usd))
+        self.alloc_run["sold"] = round(self.alloc_run.get("sold", 0.0) + usd, 2)
+        self.alloc_totals["sold_total"] += usd
+        log.warning("ALLOC sold %s %.0f @ %.3f (edge-held %.1f%%, $%.0f freed)%s", s["label"], done, best, 100 * edge,
+                    usd, f" -> buy {b['label']} after the next cash read" if b else " (reserve refill)")
+        return True
+
+    def alloc_set_check(self, pr, inv, now_m, now_w):
+        """B3: a registered set race - its sets fell (take_arbitrage unwound some) -> sold (cash freed at the planned
+        asks sum); past ALLOC_SET_WAIT -> withdrawn, expired."""
+        s = pr["sell"]
+        reg = self.alloc_set_races.get(s["race"])
+        sets = min(-float(inv.get(m, 0.0)) for m in s["members"])
+        if reg is not None and sets <= reg["sets_before"] - 1:
+            n = reg["sets_before"] - max(0.0, sets)
+            usd = n * reg["free"]
+            self.alloc_set_races.pop(s["race"], None)
+            pr.update(status="sold", proceeds=usd, sold_at=now_m)
+            self.alloc_flows.append((now_w, usd))
+            self.alloc_run["sold"] = round(self.alloc_run.get("sold", 0.0) + usd, 2)
+            self.alloc_totals["sold_total"] += usd
+            log.warning("ALLOC %s: %.0f sets unwound (~$%.0f freed)", s["label"], n, usd)
+        elif reg is None or now_m > reg["until"]:
+            self.alloc_set_races.pop(s["race"], None)
+            pr["status"] = "expired"
+            log.info("ALLOC %s: no unwind within %.0f s - registration withdrawn", s["label"], self.ALLOC_SET_WAIT)
+
+    def alloc_send(self, ex, order, now_m, what):
+        """One immediate-or-cancel allocator order (as basket_send): our orders on ex cancelled first (refused if that
+        cannot be confirmed: never a price crossing our own order), the order (alive take_order_ttl), its leftover
+        cancelled at once. Returns the shares traded (quantityTraded; 0 if refused), or None if not sent."""
+        cfg, e = self.cfg, ex.eid
+        if not self.cancel(e, [], whole_exchange=True):
+            log.warning("ALLOC %s %s skipped: could not confirm our own orders there are cancelled", what, ex.label)
+            return None
+        self.orders_stale = True
+        try:
+            results = self.place_orders([order])
+        except ApiError as err:
+            if err.code == "WRITE_BUDGET_WAIT":
+                self.alloc_block("writes")
+                return None
+            ex.pending_until = now_m + cfg.pending_seconds
+            alert(f"allocator order on {ex.label} failed ({err}) - check positions")
+            if err.code in FATAL_API_CODES:
+                fatal(f"orders rejected with {err.code}")
+            return None
+        res = results[0] if results else {}
+        data = res.get("data") or {}
+        if res.get("ok"):
+            self.remember_order(order, data, now_m)
+        self.cancel(e, [], whole_exchange=True, quiet=True)     # the leftover, at once
+        if data.get("orderId") is not None:
+            self.order_meta[data["orderId"]] = {"our_side": "bid" if order["action"] == "buy" else "ask",
+                                                "price": order["price"], "take": True, "alloc": True, "eid": e,
+                                                "t": time.time(), **({"no_sell": True} if order.get("_no_sell") else {})}
+            self.notes_dirty = True
+        if not res.get("ok"):
+            log.info("ALLOC %s %s refused: %s", what, ex.label, (data.get("error") or {}).get("message", "?"))
+            return 0.0
+        return float(data.get("quantityTraded") or 0)
 
     # ------------------------------------------------------------------------------ fills
     def log_fills(self, fvs):
@@ -8136,6 +10750,12 @@ class Bot:
         if nn and nn.get("races"):
             part = f"NO+NO sets {nn['races']} (cap {nn['capital'] / 1000:.1f}k)"
             line = f"{line} | {part}" if line else part
+        part = self.basket_summary()                  # Package 9 F1: " | basket $X (N legs, state)"
+        if part:
+            line = f"{line} | {part}" if line else part
+        if getattr(self.cfg, "bloc_delta_enabled", False):   # Package 10 A2: " | bloc delta X/sd"
+            part = f"bloc delta {self.bloc_delta:+,.0f}/sd"
+            line = f"{line} | {part}" if line else part
         return line
 
     def safe_nono_sets(self):
@@ -8173,9 +10793,9 @@ class Bot:
             hrs = min((self.hours_to_close(ex) for ex in self.ex.values()), default=float("inf"))
             if hrs * 60 <= cfg.stop_minutes_before_close:
                 phase = "stopped for settlement"
-            elif hrs <= cfg.exit_hours_before_close:
+            elif hrs <= self.close_window("exit_hours_before_close"):
                 phase = f"election night: exiting positions ({hrs:.1f} h to close)"
-            elif hrs <= cfg.flatten_hours_before_close:
+            elif hrs <= self.close_window("flatten_hours_before_close"):
                 phase = f"election night: reducing positions ({hrs:.1f} h to close)"
             elif h and not h.get("orders_resting"):
                 problems.append("no orders resting")
@@ -8371,6 +10991,10 @@ class Bot:
                 # Package 7: NO+NO sets held (races, sets, capital at k - 1 per set) and the paired-unwind check
                 "nono_sets": self.safe_nono_sets(), "pairno_state": getattr(self, "pairno_state", None),
                 **owed,                                   # Package 7: pair unwind legs still owed {race: shares}
+                # Package 9 F1: the long-tilt basket (also what a restart restores; absent while never used)
+                **({"basket": self.basket_status()} if self.basket_persist_needed() else {}),
+                # Package 10 B: the allocator (also what a restart restores; absent while never used)
+                **({"alloc": self.alloc_status()} if self.alloc_persist_needed() else {}),
                 "seconds_since_cycle": round(time.monotonic() - self.last_cycle_done, 1)
                 if self.last_cycle_done is not None else None})
         except OSError as e:
@@ -8442,6 +11066,40 @@ class Bot:
             log.warning("tilt_exit_full_size is on without adding_factor_per_market: the race-netted adding factor "
                         "(0) can zero a tilt exit - turn both on together")
         self.warned_full_size = bad
+        bad = bool(getattr(self.cfg, "basket_enabled", False)) and not getattr(self.cfg, "cash_gate_enabled", False)
+        if bad and not getattr(self, "warned_basket_cash", False):
+            log.warning("basket_enabled is on without cash_gate_enabled: the basket buys nothing without the gate's "
+                        "fresh cash read (exits and the kill still run) - turn cash_gate_enabled on")
+        self.warned_basket_cash = bad
+        bad = bool(getattr(self.cfg, "alloc_enabled", False)) and not getattr(self.cfg, "cash_gate_enabled", False)
+        if bad and not getattr(self, "warned_alloc_cash", False):   # Package 10 B
+            log.warning("alloc_enabled is on without cash_gate_enabled: the allocator does nothing without the gate's "
+                        "fresh cash read - turn cash_gate_enabled on")
+        self.warned_alloc_cash = bad
+        unknown = tuple(sorted(self.alloc_pins() - {x.label for x in self.ex.values()})) if self.ex else ()
+        if unknown and unknown != getattr(self, "warned_alloc_pin", ()):   # (P10 red team RT-6: a typo pins nothing)
+            log.warning("alloc_pin names no market: %s - those labels pin nothing (labels are matched exactly, e.g. "
+                        "'Rep Ohio Senate')", ", ".join(unknown))
+        self.warned_alloc_pin = unknown
+        on = ()                               # Package 10 A1 (iv): mark-driven selling paths left on in value mode
+        if getattr(self.cfg, "value_mode", False):
+            c = self.cfg
+            on = tuple(n for n, hit in (
+                ("reduce_from_book", c.reduce_from_book), ("fast_unload_enabled", c.fast_unload_enabled),
+                ("hold_target_hours > 0", c.hold_target_hours > 0), ("tilt_exit_priority", c.tilt_exit_priority),
+                ("tilt_exit_full_size", c.tilt_exit_full_size), ("tilt_exit_take", c.tilt_exit_take),
+                ("ref_tilt_enabled", c.ref_tilt_enabled), ("take_tilted_ref", c.take_tilted_ref),
+                ("ref_guard_exits", c.ref_guard_exits)) if hit)
+            if on and on != self.warned_value:
+                log.warning("value_mode is on with %s: these sell at marks below Polymarket (their resting quotes "
+                            "still keep the value floor; turn them off for an outcome-settled book)", ", ".join(on))
+            closing = [n for n in ("exit_hours_before_close", "flatten_hours_before_close", "flatten_per_market_hours")
+                       if getattr(c, n) > 0]
+            if closing and not self.warned_value:
+                log.warning("value_mode: the pre-close windows are OFF (%s ignored; stop_minutes_before_close still "
+                            "stops quoting before the close)", ", ".join(f"{n} {getattr(c, n):g}" for n in closing))
+            on = on or ("(on)",)
+        self.warned_value = on
 
     def check_market_edge(self, force=False):
         """Every market_edge_reload_seconds: re-read market_edge.json (rival-floor map) if it changed. Bad entries

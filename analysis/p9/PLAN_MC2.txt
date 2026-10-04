@@ -1,0 +1,51 @@
+#### world BASE
+  cap 40k m5 built 24h (dry run: m 5 settles ~40k) P150   0.4% P200   0.0% P<=85   0.3% DD>20   1.6% med 114973
+  cap 45k m6 built 24h (stage3b)                 P150   1.8% P200   0.0% P<=85   0.4% DD>20   2.5% med 116673
+  cap 45k m6 built 24h + carry 300/day           P150   7.7% P200   0.0% P<=85   0.0% DD>20   2.5% med 125739
+  cap 30k m5 built 24h (cash-bound day 1)        P150   0.0% P200   0.0% P<=85   0.0% DD>20   0.1% med 111706
+  cap 45k m6 built 48h                           P150   0.2% P200   0.0% P<=85   0.4% DD>20   2.5% med 110918
+  floor 80k m5 cap 60k built 24h                 P150  10.6% P200   0.0% P<=85   0.8% DD>20   3.9% med 119960
+  floor 80k m6 cap 60k built 24h + carry         P150  19.7% P200   0.0% P<=85   0.2% DD>20   4.0% med 129385
+  floor 75k m6 cap 70k built 24h                 P150  17.3% P200   0.0% P<=85   1.0% DD>20   4.0% med 122344
+  floor 75k m8 cap 80k built 24h ratchet 0.75    P150  23.4% P200   0.2% P<=85   1.4% DD>20   6.1% med 127567
+#### world BEAR
+  cap 40k m5 built 24h (dry run: m 5 settles ~40k) P150   0.0% P200   0.0% P<=85   1.5% DD>20   3.4% med 102047
+  cap 45k m6 built 24h (stage3b)                 P150   0.2% P200   0.0% P<=85   2.2% DD>20   4.7% med 102050
+  cap 45k m6 built 24h + carry 300/day           P150   0.9% P200   0.0% P<=85   0.1% DD>20   4.6% med 111017
+  cap 30k m5 built 24h (cash-bound day 1)        P150   0.0% P200   0.0% P<=85   0.2% DD>20   0.1% med 101982
+  cap 45k m6 built 48h                           P150   0.0% P200   0.0% P<=85   2.0% DD>20   4.1% med 100638
+  floor 80k m5 cap 60k built 24h                 P150   1.4% P200   0.0% P<=85   3.2% DD>20   6.0% med 101620
+  floor 80k m6 cap 60k built 24h + carry         P150   3.2% P200   0.0% P<=85   1.0% DD>20   6.2% med 110581
+  floor 75k m6 cap 70k built 24h                 P150   2.4% P200   0.0% P<=85   3.6% DD>20   6.2% med 101137
+  floor 75k m8 cap 80k built 24h ratchet 0.75    P150   4.0% P200   0.0% P<=85   6.2% DD>20  10.1% med 102065
+#### world BULL
+  cap 40k m5 built 24h (dry run: m 5 settles ~40k) P150   0.6% P200   0.0% P<=85   0.1% DD>20   0.6% med 127536
+  cap 45k m6 built 24h (stage3b)                 P150   4.4% P200   0.0% P<=85   0.2% DD>20   1.0% med 130747
+  cap 45k m6 built 24h + carry 300/day           P150  23.0% P200   0.0% P<=85   0.0% DD>20   1.1% med 139681
+  cap 30k m5 built 24h (cash-bound day 1)        P150   0.0% P200   0.0% P<=85   0.0% DD>20   0.1% med 120940
+  cap 45k m6 built 48h                           P150   0.2% P200   0.0% P<=85   0.3% DD>20   1.0% med 122345
+  floor 80k m5 cap 60k built 24h                 P150  30.0% P200   0.0% P<=85   0.4% DD>20   1.7% med 139016
+  floor 80k m6 cap 60k built 24h + carry         P150  47.5% P200   0.0% P<=85   0.0% DD>20   1.7% med 148643
+  floor 75k m6 cap 70k built 24h                 P150  42.5% P200   0.0% P<=85   0.5% DD>20   1.8% med 144509
+  floor 75k m8 cap 80k built 24h ratchet 0.75    P150  52.0% P200   0.2% P<=85   0.6% DD>20   2.7% med 152175
+#### world FOOL
+  cap 40k m5 built 24h (dry run: m 5 settles ~40k) P150   0.0% P200   0.0% P<=85   0.7% DD>20   0.3% med  93847
+  cap 45k m6 built 24h (stage3b)                 P150   0.0% P200   0.0% P<=85   0.8% DD>20   0.6% med  93586
+  cap 45k m6 built 24h + carry 300/day           P150   0.0% P200   0.0% P<=85   0.0% DD>20   0.7% med 102556
+  cap 30k m5 built 24h (cash-bound day 1)        P150   0.0% P200   0.0% P<=85   0.2% DD>20   0.1% med  94336
+  cap 45k m6 built 48h                           P150   0.0% P200   0.0% P<=85   0.4% DD>20   0.3% med  94690
+  floor 80k m5 cap 60k built 24h                 P150   0.0% P200   0.0% P<=85   1.2% DD>20   0.9% med  92954
+  floor 80k m6 cap 60k built 24h + carry         P150   0.0% P200   0.0% P<=85   0.5% DD>20   0.9% med 101870
+  floor 75k m6 cap 70k built 24h                 P150   0.0% P200   0.0% P<=85   2.3% DD>20   1.0% med  92390
+  floor 75k m8 cap 80k built 24h ratchet 0.75    P150   0.0% P200   0.0% P<=85  26.2% DD>20  11.3% med  88193
+
+#### MIXED PRIOR | D PRIOR
+cap 40k m5 built 24h (dry run: m 5 settles ~40k) | P150  0.3% P200  0.0% P<=85 0.7% DD>20 1.9% | P150  0.2% P200  0.0% P<=85 0.7% DD>20 1.7%
+cap 45k m6 built 24h (stage3b)                 | P150  1.8% P200  0.0% P<=85 0.9% DD>20 2.9% | P150  1.3% P200  0.0% P<=85 1.0% DD>20 2.6%
+cap 45k m6 built 24h + carry 300/day           | P150  8.7% P200  0.0% P<=85 0.0% DD>20 2.9% | P150  6.4% P200  0.0% P<=85 0.0% DD>20 2.6%
+cap 30k m5 built 24h (cash-bound day 1)        | P150  0.0% P200  0.0% P<=85 0.1% DD>20 0.1% | P150  0.0% P200  0.0% P<=85 0.1% DD>20 0.1%
+cap 45k m6 built 48h                           | P150  0.2% P200  0.0% P<=85 0.9% DD>20 2.6% | P150  0.1% P200  0.0% P<=85 0.9% DD>20 2.3%
+floor 80k m5 cap 60k built 24h                 | P150 11.7% P200  0.0% P<=85 1.4% DD>20 4.1% | P150  8.6% P200  0.0% P<=85 1.5% DD>20 3.6%
+floor 80k m6 cap 60k built 24h + carry         | P150 20.3% P200  0.0% P<=85 0.4% DD>20 4.2% | P150 15.0% P200  0.0% P<=85 0.5% DD>20 3.7%
+floor 75k m6 cap 70k built 24h                 | P150 17.9% P200  0.0% P<=85 1.7% DD>20 4.2% | P150 13.2% P200  0.0% P<=85 2.0% DD>20 3.7%
+floor 75k m8 cap 80k built 24h ratchet 0.75    | P150 23.3% P200  0.1% P<=85 2.7% DD>20 6.6% | P150 17.2% P200  0.1% P<=85 7.7% DD>20 7.8%
