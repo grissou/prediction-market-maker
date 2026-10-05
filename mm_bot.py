@@ -12028,6 +12028,7 @@ class Bot:
                "refill": dict(self.mmf_refill),
                # P14.1 7: the refill report (flat keys beside "refill", which a restart restores)
                "refill_runs": self.mmf_refill["runs"], "refill_last": self.mmf_refill["last"],
+               "refill_sales_24h": (self.p141_sums(now).get("refill") or [0])[0],   # (hourly refills too)
                "refill_sold_usd": round((self.p141_sums(now).get("refill") or [0, 0.0])[1], 2),
                "refill_ev_given_24h": round(-(self.p141_sums(now).get("refill") or [0, 0.0, 0.0, 0.0])[3], 2),
                "deferred_buybacks": self.mmf_deferred, "refill_holds": len(self.mmf_hold),

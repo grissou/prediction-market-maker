@@ -20,7 +20,10 @@ TICK = 0.005
 
 
 def converge(api, b, c):
-    """Every book with a Polymarket p moved toward it: each level shifted by -(1 - c) x (mid - p), on the grid."""
+    """Every book with a Polymarket p moved toward it: each level shifted by -(1 - c) x (mid - p), on the grid.
+    The fake's books are copied first: the snapshot's own dict is shared between builds and must not be changed."""
+    api.base_books = {e: {s: [dict(lv) for lv in (v.get(s) or [])] for s in ("bids", "asks")}
+                      for e, v in api.base_books.items()}
     for e, bk in api.base_books.items():
         ex = b.ex.get(e)
         if ex is None or not bk.get("bids") or not bk.get("asks"):
