@@ -6424,12 +6424,14 @@ class Bot:
             side = self.tilt_exit_side(ex)
             if side is not None and sides[0 if side == "bid" else 1]:
                 head = 0.5
-        rec = 0
+        rec = ()
         if getattr(self.cfg, "mm_recycle_sell_first", False):   # P14.1 3: recycled SALES (the ask on a long: they
-            r = (self.mmf_recycling or {}).get(ex.eid)          #  free cash) before the rest, BUY-BACKS after it
-            if r is not None and not r.get("blocked"):
-                rec = -1 if r.get("side") == "ask" else 1
-        return (0 if pull else 0.5 if urgent else 1, head, rec,
+            r = (self.mmf_recycling or {}).get(ex.eid)          #  free cash) before the rest, BUY-BACKS after them
+            if r is None or r.get("blocked"):                   #  (one extra slot, absent while the flag is off: the
+                rec = (0,)                                      #  key's shape is then exactly 4ff7d91's)
+            else:
+                rec = (-1,) if r.get("side") == "ask" else (1,)
+        return (0 if pull else 0.5 if urgent else 1, head) + rec + (
                 1 if reprice else 0,
                 -self.size_plan.get(ex.eid, 0))
 

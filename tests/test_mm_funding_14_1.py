@@ -314,8 +314,9 @@ if base is not None:
     k_off = bn.change_key(bn.ex["21"], pull=False)
     k_head = bn.change_key(bn.ex["11"], pull=False)
     bn.mmf_recycling = {"21": {"side": "ask", "qty": 10, "price": 0.56, "why": "age"}}
-    check("change_key: the recycle slot is 0 while mm_recycle_sell_first is off (the order of changes unchanged)",
-          bn.change_key(bn.ex["21"], pull=False) == k_off and k_off[2] == 0
+    check("change_key: the key keeps 4ff7d91's exact shape while mm_recycle_sell_first is off (no recycle slot, the "
+          "order of changes unchanged)",
+          bn.change_key(bn.ex["21"], pull=False) == k_off and len(k_off) == 4
           and bn.change_key(bn.ex["11"], pull=False) == k_head, (k_off, k_head))
 
 # ============================================================================================ the refill with MM resting
@@ -484,7 +485,8 @@ b.mm_lots = {"21": [[600.0, 0.53, time.time() - 7 * H]], "22": [[-600.0, 0.47, t
 quiet(b.cycle)
 k_sell, k_buy = b.change_key(b.ex["21"], pull=False), b.change_key(b.ex["22"], pull=False)
 check("a recycled SALE (the ask on a long) sorts before a recycled BUY-BACK (the bid on a short)",
-      k_sell < k_buy and k_sell[2] == -1 and k_buy[2] == 1, (k_sell, k_buy, b.mmf_recycling))
+      k_sell < k_buy and len(k_sell) == 5 and k_sell[2] == -1 and k_buy[2] == 1,
+      (k_sell, k_buy, b.mmf_recycling))
 check("...and before an ordinary change in the same tier", k_sell < b.change_key(b.ex["12"], pull=False))
 check("cash well above half the target: the buy-back is quoted in full (600 shares)",
       b.mmf_recycling["22"]["qty"] == 600 and b.mmf_deferred == 0, (b.mmf_recycling, b.mmf_deferred))
@@ -520,7 +522,7 @@ b.mm_lots = {"21": [[600.0, 0.53, time.time() - 7 * H]], "22": [[-600.0, 0.47, t
 quiet(b.cycle)
 check("flag off: the recycler's own order and size are unchanged (no deferral, no re-ordering)",
       b.mmf_recycling["22"]["qty"] == 600 and b.mmf_deferred == 0
-      and b.change_key(b.ex["21"], pull=False)[2] == 0, (b.mmf_recycling, b.mmf_deferred))
+      and len(b.change_key(b.ex["21"], pull=False)) == 4, (b.mmf_recycling, b.mmf_deferred))
 
 # ============================================================================================ prefer_short
 print("--- (4) alloc_refill_ignore_prefer_short")
