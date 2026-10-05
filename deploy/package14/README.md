@@ -135,6 +135,12 @@ turnover $9.5k of 15k. The refill still raises only $487 at the value floor on t
 `alloc_refill_max_cost` 2c, $7.1k at 3c): cash_free stays near 0 with ~$6.8k locked in our own quotes, because the
 market maker re-deploys what the refill frees.
 
+## Suites (14.1)
+`tests/test_mm_funding_14_1.py` 100 and `tests/test_p14_1_dryrun.py` 32; all 50 suite files green, every one N/N
+(test_mm_bot 600, test_alloc 123, test_live_sim_marks 115, test_strategy 114, test_value_mode 101, test_mm_funding 100,
+test_p12_alloc 95, test_turnover 94, test_cash_gate 83, test_p12_quote 80, test_write_savers 75, test_hold_target 71,
+test_tilt 69, test_reduce_no 69, test_p9_dryrun 69, ...) plus `STRESS_LADDER=1 python tests/test_stress.py` 20/20.
+
 ## Deploy (14.1)
 1. Code: handover restart to THIS branch's head (on top of 4ff7d91) with the live 14.0 file unchanged - behaviour is
    byte-identical to 4ff7d91 (the only new thing while the flags are off: the read-only `mm_funding` report keys).
