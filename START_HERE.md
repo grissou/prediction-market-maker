@@ -1,8 +1,10 @@
 <!-- STATUS (Finisher 2b, updated on every push) -->
-**STATUS 19:05 UTC 4 Oct (branch claude/finisher-package9, head ae6c606+):** phase = Package 13 BUILDING: the owner's 20 / 40 / 40 AGGRESSIVE portfolio (18:40 brief + 18:55 answers; replaces every earlier sleeve / Package 13 message: "no modelling, no comparisons: aggression"). Spec: analysis/p12/SPEC_P13_AGGRESSIVE.md (v2). MM 20% (`alloc_mm_reserve` 20000 + risk reserve 5000/4000, middle-band two-way) / VALUE 40% (highest edge-per-$ kept; the allocator sells the rest down, lowest edge first, EXEMPT from the value floor) / MOMENTUM 40% (long the tilt: liquid longshot YES / favourite NO, bought as fast as the books allow; the bot decides sides: value shorts on the most extreme underdogs and the largest Polymarket gaps, momentum elsewhere; NO flip modelled: manual `momentum_exit` + kill at 75% of cost); `aggressive_value` (no reduce-only from risk / bloc / Kelly caps; backstop 1.0 as a bug tripwire; per-race 15k / per-market 12k combined; cash gate, value floor, 30% kill stay); harvest ladder; election-night mode (close override 17:00 UTC 4 Nov, 20k holdback from 3 Nov 12:00, takes only on called races = Polymarket >= 0.98 for 10 min); hourly +-5-point rebalance; buckets in status.json.
-Done today: ops fields (ev_outcome, mm_carry_24h), risk_unheld_legs, mm_risk_reserve_wc/_corr (992b4c3; 46 suites + stress green), FIELD_ACTIVATION.md, Z_board20, the spec.
-Deploy: nothing new until Package 13 is READY (then ONE file deploy/package13/settings_override.aggressive.json); stage1b_risk_reserve.json ready meanwhile (reserve 5k / 4k, backstop 0.90).
-Next: builder (worktree) -> red team (crash / duplicate orders only) -> dry run on snap04 -> all suites -> staged file + README + START_HERE note -> "READY: Package 13".
+**STATUS 00:10 UTC 5 Oct (branch claude/finisher-package9, head d515a21+):** phase = **Package 13 READY** (the 20 / 40 / 40 aggressive portfolio + the momentum sleeve's automation; owner's 18:40, 18:55, 20:30, 21:20 messages) and **Package 14 READY** (MM funding, on the LIVE head c7c0107, branch `claude/mm-funding` 4ff7d91, deployable on its own). Both all-OFF by default; one staged file each: `deploy/package13/settings_override.aggressive.json` (98 keys, everything on, `momentum_auto` true / `momentum_force` false), `deploy/package14/settings_override.mm_funding.json`.
+24-h tilt slope on the current data (snap04 to 15:57 UTC 4 Oct; non-headline, spread <= 6c, own prices stripped, 4-h bins): s 12.8 points; slope_24h +2.3 points/day, slope_6h +0.4 (decelerating: +1.0-1.2 per bin on 3 Oct, +0.07 in the last bin) -> the trigger would be ON today; the ramp likely stalls at the first 10k unless the tilt re-accelerates.
+Suites: 52 files green, every one N/N (test_p13 146, test_p13b 128, test_p13c 134, test_p13_redteam 90, test_p13_dryrun 94, test_mm_bot 600, ...), STRESS_LADDER=1 20/20. Red team (crash / duplicate orders): 5 bugs fixed (analysis/p13/REDTEAM.md); dry run on snap04: analysis/p13/DRYRUN.md.
+Package 14 is NOT merged into this branch (the owner asked for it on the live head); merging it here is the next step once the owner says which goes live first (both touch the allocator's refill and the cash reserve; a merge needs a conflict pass + the suites).
+Deploy: Package 13 = this branch's head + the aggressive file (README in deploy/package13/); Package 14 = `claude/mm-funding` head + its file (README in deploy/package14/). Rollbacks in each README.
+Next: the owner's choice (P13 / P14 / both); the P13+P14 merge on request; report `mm_carry_24h` once status.json after 24 h of funded stage 3 arrives.
 
 # START HERE (Team run, branch `claude/run-c-tournament-improvements-pycdet`)
 
@@ -10,6 +12,129 @@ Status: **complete** (Team complete at 14:45 UTC) (started 2026-10-02 08:50 UTC;
 The Builder's previous START_HERE is kept as `START_HERE_BUILDER.md`; Run A's notes are `ENGINEERING_NOTES.md`.
 Plan: `PLAN.md`. Packages appear below as they become READY (commit messages start "READY: Package N").
 Deploy only commits whose message starts "READY"; the branch is cumulative.
+
+## Package 13 (READY, 4 Oct ~23:30 UTC; branch `claude/p13-momentum-auto` = `claude/finisher-package9` f61495e + Package 13 C, on top of the live head c7c0107): the 20 / 40 / 40 AGGRESSIVE portfolio + the momentum sleeve's automation (all OFF; staged file in `deploy/package13/`)
+**The owner's instructions:** 18:40 + 18:55 (analysis/p12/SPEC_P13_AGGRESSIVE.md: "no modelling, no comparisons: aggression"; MM 20% /
+VALUE 40% / MOMENTUM 40%; limits that stay: the cash gate, the value floor for value positions, the backstop as a 1.0 bug tripwire, the
+30% drawdown kill, 15k / race and 12k / market of collateral); 20:30 (the momentum slope over 24 h, not 12, as a setting); 21:20
+(automate the sleeve's switch-on: trigger, ramp, funding order, automatic flip / exit, "no fake buying", status). The 21:20 message
+supersedes the spec's "flip not modelled" and, for the sleeve's own funding sales, the "sell-down exempt from the floor" answer.
+**Built (each OFF, in OVERRIDABLE with a range; flags off pinned byte-identical on grids: A + B to 663ede1, C to f61495e):**
+- A1 `buckets_enabled`: MM = `alloc_mm_reserve` cash (capped by the gate's cash) + middle-band inventory at p; VALUE = every other
+  position at p; MOMENTUM = the sleeve at cost; hourly (`alloc_interval_s`) VALUE above target + `bucket_band` sold down lowest
+  edge-held first, IOC at the touch, exempt from the floor (answer 1), <= `bucket_turnover_per_hour` 50k; MOMENTUM below target opens
+  a buy round. Classification (answer 2): longshots (p <= `mom_max_p` 0.25) with p <= `value_extreme_p` 0.04 or a short's edge per $
+  >= `value_min_edge` 0.12 are VALUE shorts, the other longshots MOMENTUM longs (YES, or the favourite's NO in a 2-leg race when
+  cheaper); favourites with (p - ask) / ask >= `value_min_edge_fav` 0.08 VALUE longs; one bucket a market. status `buckets`.
+- A2 `aggressive_value`: reduce-only only from the backstop TRIPWIRE (`worst_case_backstop_frac` 1.0); party / bloc caps do not block
+  adding; the fraction caps replaced by `aggr_max_market_usd` 12k / `aggr_max_race_usd` 15k of collateral (all buckets + resting
+  orders); "WARNING aggressive_value on" leads every summary; status `aggressive`.
+- A3 `momentum_enabled`: the sleeve (IOC takers at the touch, >= `mom_min_depth` 200, <= `mom_max_markets` 40, never headline /
+  basket / set-ladder / the opposite side of a position; its markets never quoted or traded by other features); `momentum_exit` (manual,
+  sold over `mom_exit_hours` 6, exempt from the floor), `mom_exit_utc`, the kill (mark < `mom_kill_frac` 0.75 x cost for 120 s:
+  latched "killed"); legs / cost / state persisted. status `momentum`.
+- B4 `tilt_harvest_ladder`: resting YES asks over longshots (p <= 0.10) / bids under favourites (p >= 0.90) at touch + `harvest_offsets`
+  0 / 2 / 4 / 6c, `harvest_level_usd` 3k a level where edge per $ >= `harvest_min_edge` 8%, <= `harvest_writes_frac` 0.4 of the writes,
+  re-quoted on a 1c move or every `harvest_requote_s` 900; hidden from the quote planner; fills are VALUE ("HARVEST fill"); status
+  `harvest`. B5 `election_night`: `election_holdback_usd` 20k kept in cash from `election_holdback_from_utc` 3 Nov 12:00; calls from
+  `election_start_utc` 23:00 (Polymarket >= `election_called_p` 0.98 / <= 0.02 for `election_called_min` 10 min, or resolved); stale
+  quotes on called races TAKEN below `election_take_max_price` 0.95 (IOC, batched, caps, the holdback); with `close_override_utc`
+  "2026-11-04T17:00:00Z" + `stop_minutes_before_close` 5 (SIG confirmed). status `election`.
+- C (Package 13 C, this branch) the sleeve's automation. `momentum_enabled` = the machinery only: **alone it no longer buys**; buys need
+  `momentum_force` (40% at once, no trigger; the slope flip off) or `momentum_auto` with the trigger ON. TiltSlope: every minute the
+  cross-section of non-headline markets with a liquid Polymarket price and an other-traders spread <= `momentum_slope_max_spread` 0.06
+  (own orders stripped, never our fills), the slope estimator (sum x g / sum x^2, g = r - mid winsorised 8c, x = r - 1/legs) per
+  `momentum_slope_bin_h` 4-h bin, 72 h in status.json, SEEDED on the first start from market_data.sqlite (background thread, read-only;
+  no file = "no history"); slope_24h (regression over `momentum_slope_hours` 24) and slope_6h in points a day. **snap04 (4 Oct 15:57):
+  bins 10.69 .. 12.82, slope_24h +2.29, slope_6h +0.42** (= the owner's). Trigger: slope_24h >= `momentum_on_slope` 0.5 and slope_6h
+  > 0 held `momentum_confirm_h` 4 h -> ON (ALERT); ramp `momentum_start_usd` 10k + `momentum_step_usd` 10k per `momentum_step_h` 6 h of
+  slope_6h > 0 (stalls on <= 0), capped at `bucket_mom_frac` x account. Funding: (a) cash above reserve + holdback; (b) the MM reserve
+  while `mm_carry_24h.per_day` < `mm_carry_min` 300 (None = no); (c) `momentum_fund_value`: VALUE sold lowest edge-held first, never
+  below the floor (`momentum_fund_floor`), status funded_from / ev_given_up / ev_given_up_per_10k; while the round is short the
+  allocator's spare-cash buys pause, the ladder keeps reserve + shortfall back and yields the candidates' races, the quoter leaves the
+  shortfall. Flip (automatic): slope_24h <= 0 (not forced), mark >= (1 + `momentum_profit_target` 0.25) x cost for 120 s, the date,
+  the manual exit, the kill -> the existing exit, the ladder takes over; "flipped" re-arms after `momentum_rearm_h` 24 of a fresh trigger
+  (0 = never), "killed" only by `momentum_enabled` false then true. Rule 5: never a buy where we rest / plan a sale (harvest in the
+  race, sell-down, allocator, other features' orders). status `momentum` {armed, on, size_usd, target_usd, slope_24h, slope_6h,
+  reason, funded_from, ...}; journal "MOMENTUM eval ..."; summary " | momentum armed/on X/Yk, slope24 +a.b, slope6 +c.d".
+**Red team** (analysis/p13/REDTEAM.md, crashes / duplicate orders only): RT13-1 a harvest batch timing out after landing placed a second
+ladder (adopted now); RT13-2 the quote's reduce cap double-offered harvest-covered shares; RT13-3 a lagging / 409 positions read
+dropped a sleeve leg and re-bought it (120-s grace); RT13-4 election "covered" sales from a stale ex.inv (this cycle's position);
+RT13-5 low, not fixed (a stop mid-tick lets that tick's IOCs go). Package 13 C found and fixed one more: with the sleeve armed but not
+buying, a harvest level could land at the price of our own resting quote on the same side (two of our orders at one price): `hv_plan`
+skips that level until the quote is gone.
+**Dry run** (analysis/p13/DRYRUN.md, the 4 Oct snapshot, 237 markets): six fixes (no momentum round trip within the hour; the exit
+serves the leg furthest behind; no ladder from a stale touch; calls read a dropped reference's raw price; election covered sales bound
+by this cycle's position; the quoter's budget less the holdback). With the staged file the sleeve is now ARMED and buys nothing in the
+harness (no recorder history: "no history"); the 1F fixture forces it on for an hour (books refilled every 10 min). Findings: F1 the
+sleeve starved (addressed by C's hold); F2 the ladder's resting collateral is in no bucket; F3 exits dribble ~5 small IOCs a cycle;
+F4 every race already priced <= 0.02 / >= 0.98 is called 10 min after 23:00; F5 a called race's p jumps when the reference is first
+dropped then accepted; F6 the "ignoring it (wrong match?)" alert fires on every call against a stale book.
+**Suites:** tests/test_p13c.py 134, test_p13.py 146, test_p13b.py 128, test_p13_redteam.py 90, test_p13_dryrun.py 94 (~5 min, needs
+/home/claude/snap04), every other suite N/N, STRESS_LADDER=1 test_stress 20/20. The P13 A / B / red-team harnesses set
+`momentum_force` where they enable the sleeve (= the old momentum_enabled behaviour); the red team's kill scenario moves every leg
+against the sleeve (a short leg's book up).
+**Deploy (owner; `deploy/package13/README.md`):** handover to this branch's head (flags off = live), then
+`settings_override.aggressive.json` (the live file + section 7's risk settings + every flag on, `momentum_auto` true, `momentum_force`
+false, `momentum_fund_floor` true, the C defaults explicit; 98 keys, validated). **Switches:** `momentum_force` (on now), `momentum_auto`
+false (off: no trigger buys), `momentum_exit` (sell the sleeve). **Watch, first hour:** "MOMENTUM tilt series seeded ... slope24 ~+2.3,
+slope6 ~+0.4" (vs the snapshot), "MOMENTUM eval: armed - confirming ..." and **no "MOMENTUM bought" before the 4-h confirm**, the ALERT
+on switch-on, the harvest ladder resting, "BUCKETS sold" / "MOMENTUM funding sold ... at / above the value floor" (never below p -
+0.5c), writes <= 28 a minute, "WARNING aggressive_value on" + " | momentum armed ..." on the summary.
+**Rollback:** `deploy/package12/settings_override.stage1b_risk_reserve.json` (sleeve legs are then held: `momentum_exit` first if
+they should go); code f61495e / c7c0107.
+**Caveats / not built:** funding (c) with the floor kept finds ~$1 on the 4 Oct book (every value position's touch is below its floor;
+floor exempt: ~$700 of EV given up for the first $10k, ~$1,050 per 10k over all $41k) - in practice (a) and (b) fund the sleeve; the
+seeding reads `reference` without its liquidity flag and keeps a snapshot only when our price is not at the touch (live samples see
+the others behind our quote); the sleeve's mark falls back to the fair value when a book side is empty (a sleeve that swept a whole
+side can read a mark far from its cost - the kill / profit target act on it after 120 s); the Package 9 basket's own 12-h change
+(`basket_s_change`) is unchanged (the 24-h window is the sleeve's); the write budget and the realtime feed are not modelled by the fakes.
+
+## Package 14 (READY, 4 Oct ~22:30 UTC; branch `claude/mm-funding` on top of the LIVE head c7c0107, not Package 13): MM funding - keep market making fully funded (all OFF; staged file in `deploy/package14/`)
+**The owner's instruction (21:10):** "keep market making FULLY FUNDED at all times" (live: `alloc_mm_reserve` 20000,
+`mm_risk_reserve_wc` 20000, `_corr` 4000, backstop 1.0). **MM inventory** = fills of our resting quotes (order notes: not take / arb /
+alloc / set ladder / basket) with p at fill (mm_carry_24h's; else fv at quote) in value_mid_low..high, kept per market as FIFO lots
+(an opposite MM fill closes the oldest; a fill that only shrinks a non-MM holding opens nothing; never more than the position) in
+status.json `mm_funding.lots`, restored at start, seeded on the first start from fills.csv's last 24 h (the order notes' horizon,
+p = fv_at_quote). STALE = a lot older than `mm_inv_max_age_h` 6 (0.5-168) or the market's MM $ at p above `mm_inv_max_usd` 3000
+(0-50000; 0 = no $ limit); stale shares = max(aged, the shares over the $ limit).
+**Built (each OFF, in OVERRIDABLE; flags off pinned byte-identical to c7c0107 on a grid):**
+- `mm_recycle_enabled`: the stale shares go out through the quoter's OWN reducing side (decide, after hold_quote, before the value
+  floor): price fair -+ `mm_recycle_concession` 0.01 (0-0.05), never crossing the best other bid / ask, never past the value floor
+  (live: the 0.5c margin binds), size max(quoter's, stale) <= position, our adding side a tick behind; one order per side as ever (no
+  duplicate), a side a guard left out stays out, pinned labels skipped. Edge-held >= `value_quote_hurdle` (0: alloc_min_edge_buy) ->
+  VALUE: the lots are handed to the value bucket (not recycled). Journal "MM RECYCLE ..."; fills of a recycled side are class
+  "recycle" (+ recycle_ev) in mm_carry_24h (keys only once one exists).
+- `mm_refill_fast` (needs alloc_enabled): free cash < `alloc_mm_reserve` -> the allocator's B2 refill on the NEXT cycle (at most
+  every 60 s, `alloc_max_turnover_per_hour`, the allocator's write share; the hourly clock untouched): stale MM shares first (IOC at
+  the best bid only within the concession of fair and at / above the floor, else they rest via the recycler), then value positions
+  lowest edge-held first; every refill sale >= p - value_sell_margin (shorts <= p + margin), hourly refills too while on; a market a
+  refill IOC sold is not planned / sold again until the positions read shows it or 120 s pass (RT13-3). "ALLOC fast refill ..." lines.
+- `mm_room_guard` (needs mm_risk_reserve_*): the MM lots' own worst-case / correlated contribution (risk with vs without them) counts
+  against the MM room first: the pause is decided on the value book's share, room + min(contribution, reserve), hysteresis 1.1x as
+  before; value buying (allocator buys, takes, basket buys, tail adds) stays paused until it is back; recycler / refills never paused.
+  status mm_risk_room.value_share_wc / _corr while on.
+- Monitoring (always written, read-only, `Bot.MM_FUNDING_KEYS` ignored by the identity checks like EV_KEYS): status.json `mm_funding`
+  {cash_free, cash_target, room_free {wc, corr}, room_target, inventory_usd, oldest_inventory_h, stale_markets, stale_usd, recycling,
+  handed_to_value, below_half, below_half_since, refill, lots_source, lots}; with a flag on, ONE alert when cash or a room stays below
+  50% of target for > `mm_funding_alert_h` 2 (0.25-24; re-armed after recovery) and " | MM funding cash Xk/Yk, room ..., inventory ..."
+  on the 2-hourly summary.
+**Suites:** tests/test_mm_funding.py 100 (settings / ranges; identity vs c7c0107 on a 3 x 4 grid with fills: orders, quotes, notes,
+status values less mm_funding, health, summary, alloc_plan, mm_risk_room_update; lots: classification, FIFO, reconcile, merge,
+persistence / restore, seeding from fills.csv; staleness by age / $; recycler price, crossing, floor, short side, one order, note tag,
+hand-over, pins; fast refill: next cycle, order, floor, turnover / write caps, concession gate, RT13-3; room guard accounting,
+hysteresis, reserve cap, recycler not paused; status fields, 2-h alert once / re-armed / restart; warnings; staged file; py_compile
+3.10); 48 suite files green, every one N/N (test_mm_bot 600, test_alloc 123, test_value_mode 101, test_mm_risk_reserve 66,
+test_ops_ev 63, test_p12_alloc 95, ...; identity checks in eight suites ignore `mm_funding` as EV_KEYS) + STRESS_LADDER=1 20/20.
+**Deploy (owner; `deploy/package14/README.md`):** code = handover to the branch head (flags off = c7c0107; check `mm_funding.lots_source`),
+then `settings_override.mm_funding.json` (the live file + the three flags + the defaults explicit). **Watch, first hour:** "MM RECYCLE"
+lines, one ask per recycled market never below Polymarket - 0.5c; "handed to the value bucket" (many in wide middle books); "ALLOC
+fast refill" while cash_free < 20k; turnover <= 15k/h; no market sold twice within 2 min; cash_free / room_free rising.
+**Rollback:** `settings_override.previous_live.json` (flags off); code: c7c0107.
+**Caveats / not built:** the hand-over uses the value hurdle on the allocator's edge-held at the best bid, so in wide middle books
+most MM inventory counts as value (no separate MM hurdle setting); the seeding sees only the last 24 h (older inventory is value);
+the recycler cannot add a reducing side a guard removed (it waits; the refill IOC is the other path); the fast refill does not run in
+a dry run; NO+NO set unwinds keep their own cost rule (alloc_set_cost_per_usd), not the value floor.
 
 ## Ops add-on (4 Oct 16:00 UTC, commit 39e4012; owner's request 11:35): expected value at the outcome and the market-making carry in status.json
 `ev_outcome` = cash + sum_long q x r + sum_short |q| x (1 - r), r = the race-scaled liquid Polymarket reference (the value-mode `value_p`
