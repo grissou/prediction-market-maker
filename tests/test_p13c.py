@@ -500,15 +500,15 @@ tmpd = tempfile.mkdtemp()
 dbp = os.path.join(tmpd, "md.sqlite")
 now_w = time.time()
 cur = math.floor(now_w / BIN) * BIN
-seed_db(dbp, cur - 5 * BIN, [10.0, 10.5, 11.0, 11.5, 12.0, 12.5])
+seed_db(dbp, cur - 6 * BIN, [10.0, 10.5, 11.0, 11.5, 12.0, 12.5])   # (every bin done: no row after now)
 bins = M.tilt_slope_seed(dbp, "live", now_w - 72 * H, now_w + 1, BIN, ("U.S. House", "U.S. Senate"), 0.06)
 tsx = M.TiltSlope(BIN)
 tsx.merge(bins)
-vv = [round(100 * v, 6) for _, v in tsx.values(cur + 3 * H)]
+vv = [round(100 * v, 6) for _, v in tsx.values(now_w)]
 check("seeded bins = the rows' tilt (10.0 .. 12.5): headline, own-at-the-touch, wide-spread and dry rows ignored",
       vv == [10.0, 10.5, 11.0, 11.5, 12.0, 12.5], vv)
-check("...slope_24h +3.00, slope_6h +3.00 points a day", abs(tsx.slope_24h(cur + 3 * H, 24.0) - 3.0) < 1e-6
-      and abs(tsx.slope_6h(cur + 3 * H) - 3.0) < 1e-6, (tsx.slope_24h(cur + 3 * H, 24.0), tsx.slope_6h(cur + 3 * H)))
+check("...slope_24h +3.00, slope_6h +3.00 points a day", abs(tsx.slope_24h(now_w, 24.0) - 3.0) < 1e-6
+      and abs(tsx.slope_6h(now_w) - 3.0) < 1e-6, (tsx.slope_24h(now_w, 24.0), tsx.slope_6h(now_w)))
 check("a missing file / a file without the table: no bins (best effort)",
       M.tilt_slope_seed(os.path.join(tmpd, "none.sqlite"), "live", 0, now_w, BIN) == {})
 api, b = mk_bot(momentum_enabled=True, momentum_auto=True)
