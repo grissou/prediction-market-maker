@@ -5,7 +5,7 @@ Both settings OFF by default (alloc_swap_sell_margin 0):
                           >= p - it (a short's buy-back <= p + it): in alloc_plan's pairing (blocked_by "swap_floor")
                           and again on the fresh book before the IOC (alloc_sell). Refills, stale-MM IOCs, quotes,
                           reduce-only quotes, the recycler, takes keep value_sell_margin.
-  alloc_swap_min_gain     with the margin on: buy edge - sale edge-held (both at the touch) >= max(alloc_min_improvement,
+  alloc_swap_min_gain     with the margin on: buy edge - sale edge-held (at the touch) >= max(alloc_min_improvement,
                           it) per $ (blocked_by "swap_gain"); the sale's cost IS its edge-held at the sale price (once).
   reporting               "ALLOC SWAP sold ... -> buy ...: net EV gain" at plan and at fill, alloc.swaps in status,
                           a WARNING while value_sell_margin > 0.01.
@@ -190,7 +190,8 @@ check("defaults: alloc_swap_sell_margin 0 (off), alloc_swap_min_gain 0.05",
       [getattr(D, k) for k in KEYS] == [0.0, 0.05])
 _f, _ov = list(M.Config.__dataclass_fields__), list(M.OVERRIDABLE)
 check("one contiguous block right after alloc_refill_max_cost, in Config and OVERRIDABLE",
-      _f[_f.index("alloc_refill_max_cost") + 1:][:2] == KEYS and _ov[_ov.index("alloc_refill_max_cost") + 1:][:2] == KEYS)
+      _f[_f.index("alloc_refill_max_cost") + 1:][:2] == KEYS
+      and _ov[_ov.index("alloc_refill_max_cost") + 1:][:2] == KEYS)
 check("ranges: margin 0-0.10, min gain 0-0.5", [M.OVERRIDABLE[k] for k in KEYS] == [(0.0, 0.10), (0.0, 0.5)],
       [M.OVERRIDABLE[k] for k in KEYS])
 good, bad = M.validate_overrides({"alloc_swap_sell_margin": 0.03, "alloc_swap_min_gain": 0.05}, D)
