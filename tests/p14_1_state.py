@@ -111,9 +111,17 @@ def build(S, overrides, K=1.0, C=0.8, mm_usd=10500.0, stale_usd=7900.0, oldest_h
     b.mm_lots, b.mm_lots_seeded = lots, True
     api.cash = account - api.market_value()   # (the grown inventory was paid for: the account unchanged)
     b.mmf_seed = "dry run: the 10:21 state"
-    # free cash (after our resting orders' locks) ~cash_free: a constant amount held elsewhere (cash_hold)
-    P.cycles(b, 1, stage="warm")
-    for _ in range(2):
+    # Free cash (after our resting orders' locks) ~cash_free: a constant amount held elsewhere (cash_hold). The
+    # allocator is off while that settles, so the state is the same every time; then it is on with its clock reset
+    # (the first run of the measurement is the FIRST allocator run on this state).
+    on, b.cfg.alloc_enabled = b.cfg.alloc_enabled, False
+    for _ in range(3):
         api.cash_hold += b.cash_left() - cash_free
         P.cycles(b, 1, stage="warm")
+    b.cfg.alloc_enabled = on
+    b.alloc_pairs, b.alloc_last_run_wall, b.alloc_sells_stopped = [], None, False
+    b.mmf_refill = {"runs": 0, "sold_usd": 0.0, "mm_sold_usd": 0.0, "last": None}
+    b.mmf_refill_last_m, b.p141_events, b.mmf_deferred = -1e18, type(b.p141_events)(), 0
+    b.alloc_totals = {k: 0.0 for k in b.alloc_totals}
+    b.alloc_flows.clear()
     return api, b

@@ -11804,7 +11804,9 @@ class Bot:
         """P14.1 alloc_swap_room_netting: (room_wc, room_corr) the positions inv would leave, measured as the cycle
         measures them (mm_risk_room_update; this cycle's fair values alloc_fvs and account), or None if unknown."""
         fvs, eq = getattr(self, "alloc_fvs", None), getattr(self, "last_equity", None)
-        if fvs is None or not eq:
+        if fvs is None:                           # before this cycle's step 6 (the file just landed): last values
+            fvs = {e: ex.last_fv for e, ex in self.ex.items()}
+        if not eq:
             return None
         cfg = self.cfg
         worst = self.total_worst_case(inv, fvs)
@@ -11844,7 +11846,7 @@ class Bot:
     def alloc_netting(self):
         """P14.1 5 in effect now: the flag, value adds paused, rooms measurable, not in reduce-only."""
         return (bool(getattr(self.cfg, "alloc_swap_room_netting", False)) and getattr(self, "mmr_paused", False)
-                and not getattr(self, "global_reduce", False) and getattr(self, "alloc_fvs", None) is not None
+                and not getattr(self, "global_reduce", False)
                 and bool(getattr(self, "last_equity", None)) and None not in tuple(self.mmr_room))
 
     def buyback_net(self, e, q, px, n):
@@ -12057,8 +12059,8 @@ class Bot:
 
     def mm_funding_summary(self):
         """P14: "MM funding cash Xk/Yk, room wc ..., inventory Zk (N stale, oldest H h)" for the 2-hourly summary
-        while a P14 flag is on; "" otherwise. Never raises."""
-        if not self.mmf_on():
+        while a P14 flag is on (P14.1 adds the refill / swap figures); "" otherwise. Never raises."""
+        if not (self.mmf_on() or self.p141_on()):
             return ""
         try:
             f, cfg = self.mm_funding_fields(), self.cfg
@@ -12999,6 +13001,16 @@ class Bot:
         bad = tuple(n for n, hit in (
             ("mm_refill_fast without alloc_enabled (the fast refill is the allocator's B2 refill)",
              getattr(c, "mm_refill_fast", False) and not getattr(c, "alloc_enabled", False)),
+            # P14.1: a refill flag does nothing without the fast refill, the netting nothing without a reserve
+            (f"{', '.join(k for k in ('alloc_cancel_mm_first', 'alloc_rank_all_markets', 'alloc_refill_ignore_prefer_short') if getattr(c, k, False))} without mm_refill_fast (they change the fast refill)",   # noqa: E501
+             any(getattr(c, k, False) for k in ("alloc_cancel_mm_first", "alloc_rank_all_markets",
+                                                 "alloc_refill_ignore_prefer_short"))
+             and not getattr(c, "mm_refill_fast", False)),
+            ("alloc_swap_room_netting with mm_risk_reserve_wc and _corr both 0 (no pause to work through)",
+             getattr(c, "alloc_swap_room_netting", False) and not (getattr(c, "mm_risk_reserve_wc", 0.0) > 0
+                                                                   or getattr(c, "mm_risk_reserve_corr", 0.0) > 0)),
+            ("alloc_refill_max_cost > 0 (refill sales may go below the value floor while cash is under half the "
+             "target)", float(getattr(c, "alloc_refill_max_cost", 0.0) or 0.0) > 0),
             ("mm_room_guard with mm_risk_reserve_wc and _corr both 0 (no room is kept, nothing to guard)",
              getattr(c, "mm_room_guard", False) and not (getattr(c, "mm_risk_reserve_wc", 0.0) > 0
                                                          or getattr(c, "mm_risk_reserve_corr", 0.0) > 0))) if hit)
