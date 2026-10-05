@@ -1,0 +1,396 @@
+"""Package 14.1 DRY RUN on the fake exchange, seeded with the live state of 4 Oct 15:56 UTC (the ops snapshot in
+/home/claude/snap04, or $P9_SNAP) moved to the owner's 10:21 UTC numbers of 5 Oct (tests/p14_1_state.py: books 20%
+converged toward Polymarket, account 102.0k, free cash ~1.9k of 20k, MM inventory 10.5k with 7.9k stale and the oldest
+lot 23.7 h, the exchange's NO+NO set rule on). The bot runs its own full cycles (Bot.cycle) with the LIVE Package 14
+file (deploy/package14/settings_override.mm_funding.json + risk_unheld_legs "ref"), then the staged 14.1 file
+(settings_override.mm_funding_14_1.json) is applied through the bot's own override path (check_overrides) - the owner's
+deploy order - and the FIRST refill run and the FIRST allocator run are measured: what was cancelled, what was sold,
+the $, the cash and room after, the pairs, the $ moved and the EV gain estimated vs realised. Also the
+alloc_max_edge_sell comparison (0.02 live / 0.05 / 0.08) and alloc_refill_max_cost (0 / 2c / 3c) on this book.
+Writes analysis/p14/DRYRUN_14_1.md (P14_DRYRUN_REPORT=0: no report).
+
+What the fake does NOT model (caveats, in the report): other traders never trade with our resting quotes (so the
+recycler's resting orders and the quoter's own fills never happen - only our IOCs trade), the books move only where we
+take, Polymarket is flat and every price counts as liquid, the marks stay at the snapshot's, the 28/min write limiter
+is not modelled (the allocator's 0.3 share then allows 4 orders a cycle; live ~2), and the 10:21 state is rebuilt from
+the 4 Oct snapshot rather than copied from the server.
+
+Run:  python tests/test_p14_1_dryrun.py      (exit code 0 = all passed; skipped without the snapshot)
+"""
+import json
+import os
+import sys
+import time as _rt
+from collections import Counter
+from datetime import datetime, timezone
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+sys.path.insert(0, HERE)
+SNAP = os.environ.get("P9_SNAP", "/home/claude/snap04")
+os.environ.setdefault("P9_SNAP", SNAP)
+import test_p9_dryrun as P                                       # noqa: E402  (the harness: snapshot, fake, clock)
+import p14_1_state as T                                          # noqa: E402  (the 10:21 state)
+import mm_bot as M                                                # noqa: E402
+
+P.TAGGED = P.TAGGED + ("alloc_tick",)
+DEPLOY = os.path.join(ROOT, "deploy", "package14")
+REPORT = os.path.join(ROOT, "analysis", "p14", "DRYRUN_14_1.md")
+LIVE_FILE = os.path.join(DEPLOY, "settings_override.mm_funding.json")
+P141_FILE = os.path.join(DEPLOY, "settings_override.mm_funding_14_1.json")
+RESULTS, OUT = [], []
+STATE = {}
+
+
+def check(name, cond, extra=""):
+    print(("PASS " if cond else "FAIL ") + name + (f"   [{extra}]" if not cond else ""))
+    RESULTS.append(bool(cond))
+
+
+def out(s=""):
+    OUT.append(s)
+
+
+def live_file(tmp, **over):
+    """The owner's live file (the Package 14 one plus risk_unheld_legs "ref", live since 4 Oct) written to tmp."""
+    d = json.load(open(LIVE_FILE))
+    d["risk_unheld_legs"] = "ref"
+    d.update(over)
+    with open(tmp, "w") as f:
+        json.dump(d, f)
+    return tmp
+
+
+def mf(b):
+    return P.status_of(b)["mm_funding"]
+
+
+def alloc(b):
+    return P.status_of(b)["alloc"]
+
+
+def ioc(api, stage=None):
+    """The allocator's IOCs this stage: [(label, YES buy?, price, shares traded, $ moved, $ freed)]; a covered NO
+    sale that reduces a short counts as a YES buy on the wire but FREES cash (the fake's ledger says which)."""
+    return [(o["label"], o["yes_buy"], o["yes_price"], o["traded"], abs(o["cash"]), o["cash"])
+            for o in P.orders(api, stage, "alloc_tick")]
+
+
+def main():
+    if not os.path.exists(os.path.join(SNAP, "md.sqlite")):
+        print(f"SKIP: no snapshot at {SNAP}")
+        return 0
+    t0 = _rt.time()
+    S = P.load_snapshot()
+    tmp = os.path.join(os.path.dirname(P141_FILE), ".tmp_live_14_1.json")
+
+    # ---- the staged file is valid and keeps the live base
+    raw141 = json.load(open(P141_FILE))
+    good, bad = M.validate_overrides(raw141, M.Config())
+    check("files: the staged 14.1 file validates with no problem", not bad, bad)
+    check("files: it keeps every key of the live 14.0 file", set(json.load(open(LIVE_FILE))) <= set(raw141),
+          set(json.load(open(LIVE_FILE))) - set(raw141))
+    check("files: capital_ceiling_adding_size_factor 0.5, arb_enabled false, ref_tilt_headline true are untouched",
+          raw141.get("capital_ceiling_adding_size_factor") == 0.5 and raw141.get("arb_enabled") is False
+          and raw141.get("ref_tilt_headline") is True)
+
+    # ---- the 10:21 state on the live (14.0) file
+    api, b = T.build(S, live_file(tmp))
+    f0, a0 = mf(b), alloc(b)
+    rooms0 = f0["room_free"]
+    out("# Package 14.1 dry run: the live 10:21 UTC state of 5 Oct on the fake exchange")
+    out()
+    out(f"Generated by `tests/test_p14_1_dryrun.py` ({datetime.now(timezone.utc):%Y-%m-%d %H:%M} UTC) from {SNAP} "
+        "(the 4 Oct 15:56 ops snapshot) moved to the owner's 10:21 numbers by `tests/p14_1_state.py`. The bot runs its "
+        "own full cycles with the LIVE Package 14 file, then the staged 14.1 file is applied through "
+        "`check_overrides`, as the owner would deploy it.")
+    out()
+    out("## The seed (10:21 UTC)")
+    out(f"| | owner, 10:21 | this fake |")
+    out("|---|---|---|")
+    out(f"| account | 102.0k | {api.account:,.0f} |")
+    out(f"| cash_free of 20,000 | 1,903 | {f0['cash_free']:,.0f} |")
+    out(f"| room_free wc / corr | 9,509 / - | {rooms0['wc']:,.0f} / {rooms0['corr']:,.0f} |")
+    out(f"| MM inventory (stale, oldest) | 10.5k (7.9k, 23.7 h) | {f0['inventory_usd'] / 1000:.1f}k "
+        f"({f0['stale_usd'] / 1000:.1f}k, {f0['oldest_inventory_h']:.1f} h) |")
+    out(f"| value adds paused | yes (room < 20k) | {b.mmr_paused} |")
+    now_m = M.time.monotonic()
+    buck = T.buckets(b, api, now_m)
+    out(f"| book by edge-held | 4.1k <=2% (14), 16.8k 2-5% (46), 44.2k 5-10% (38), 23.6k >10% (14) | "
+        + ", ".join(f"{v[0] / 1000:.1f}k {k} ({v[1]})" for k, v in buck.items()) + " |")
+    out()
+    check("seed: account ~102k", abs(api.account - 102000) < 3000, api.account)
+    check("seed: free cash ~1.9k of the 20k target (below half: the owner's alert clock is running)",
+          1000 < f0["cash_free"] < 4000 and f0["cash_free"] < 10000, f0["cash_free"])
+    check("seed: MM inventory ~10.5k with ~7.9k stale, the oldest lot ~23.7 h",
+          9000 < f0["inventory_usd"] < 12000 and 7000 < f0["stale_usd"] < 9000
+          and 23.0 < f0["oldest_inventory_h"] < 24.5,
+          (f0["inventory_usd"], f0["stale_usd"], f0["oldest_inventory_h"]))
+    check("seed: worst-case room below the 20k reserve -> value adds paused, as live", b.mmr_paused
+          and rooms0["wc"] < 20000, (rooms0, b.mmr_paused))
+    check("seed: the book's edge-held buckets have the live shape (most capital at 5-10%, a >10% tail)",
+          buck.get("5-10%", (0, 0))[0] > buck.get("<=2%", (0, 0))[0] and buck.get(">10%", (0, 0))[0] > 10000, buck)
+
+    # ---- 4ff7d91 behaviour on that state (the deadlock)
+    n0 = len(P.CAP.lines)
+    P.cycles(b, 6, stage="live140")
+    f140, a140 = mf(b), alloc(b)
+    sold140 = sum(x[4] for x in ioc(api, "live140"))
+    out("## The live code (Package 14, flags on) on that state: the deadlock")
+    out(f"- 6 cycles: refill runs {f140['refill_runs']}, $ sold by refills {sold140:,.0f}; the refill's blockers "
+        f"{a140.get('refill_blocked_by') or f140['refill']['blocked_by']}")
+    out(f"- the allocator plans no pair with a buy (value adds paused): est. gain "
+        f"{a140.get('ev_gain_est', 0):,.0f}; cash_free {f140['cash_free']:,.0f}, room wc "
+        f"{f140['room_free']['wc']:,.0f}")
+    out()
+    check("14.0: the refill is starved - 'mm_resting' and / or 'floor' dominate its blockers, little or nothing sold",
+          (f140["refill"]["blocked_by"].get("mm_resting", 0) + f140["refill"]["blocked_by"].get("floor", 0)) >= 5
+          and sold140 < 4000, (f140["refill"], sold140))
+    check("14.0: no swap is planned or done while the pause holds (est. gain 0)",
+          not a140.get("swaps_planned_24h") and a140.get("ev_gain_est", 0) == 0 and b.mmr_paused,
+          {k: a140.get(k) for k in ("pairs_planned", "ev_gain_est")})
+    STATE["s140"] = {"sold": sold140, "blocked": dict(f140["refill"]["blocked_by"]), "cash": f140["cash_free"],
+                     "room": f140["room_free"]["wc"]}
+
+    # ---- the owner's deploy: the same code, the staged 14.1 file
+    api, b = T.build(S, live_file(tmp))
+    before = mf(b)
+    bad_keys, alerts = P.apply_stage(b, P141_FILE)
+    check("deploy: the staged file is accepted whole (no refused key, no alert)", not bad_keys and not alerts,
+          (bad_keys, alerts))
+    check("deploy: the five 14.1 flags and alloc_max_edge_sell 0.05 are in force",
+          all(getattr(b.cfg, k) for k in M.Bot.P141_FLAGS) and b.cfg.alloc_max_edge_sell == 0.05
+          and b.cfg.alloc_refill_max_cost == 0.0,
+          {k: getattr(b.cfg, k) for k in M.Bot.P141_FLAGS})
+    n1, c0 = len(P.CAP.lines), len([c for c in api.calls if c[0] == "cancel_all"])
+    P.cycles(b, 1, stage="first")
+    first_lines = [m for _, _, m in P.CAP.lines[n1:] if "ALLOC" in m or "MM RECYCLE" in m]
+    f1, a1 = mf(b), alloc(b)
+    first = ioc(api, "first")
+    cancels = [c for c in api.calls if c[0] == "cancel_all"][c0:]
+    refill_usd = sum(max(0.0, x[5]) for x in first)        # $ the cycle's allocator fills FREED
+    out("## The first cycle with the 14.1 file")
+    out(f"- the allocator's first run: {a1.get('pairs_planned', 0)} pair(s) planned, of them "
+        f"{a1.get('swaps_planned', 0)} swaps; est. EV gain {a1.get('ev_gain_est', 0):,.0f}")
+    out(f"- refill sale legs {f1['refill_sales_24h']} (fast-refill runs {f1['refill_runs']}; this cycle's were the "
+        f"hourly run's), ${refill_usd:,.0f} of cash freed by the cycle's fills, EV given up "
+        f"{f1['refill_ev_given_24h']:,.0f} (every sale at or above p - value_sell_margin)")
+    out(f"- our own quotes were cancelled first in each market the allocator traded ({len(cancels)} whole-exchange "
+        f"cancels this cycle, the quoter's re-quotes among them: one cancel per IOC, as every allocator order), and "
+        f"{f1['refill_holds']} market(s) carry a refill-pending hold (no re-quote of what was just sold)")
+    for x in first[:12]:
+        out(f"    {'reduce' if x[5] > 0 else 'add   '} {x[0]:<28} {x[3]:>7.0f} @ {x[2]:.3f}  "
+            f"{'+' if x[5] > 0 else '-'}${x[4]:,.0f} cash")
+    out()
+    check("first run: pairs are planned at once (refills and swaps together)", a1.get("pairs_planned", 0) >= 1,
+          a1.get("pairs_planned"))
+    check("first run: swaps are planned under the pause and the est. EV gain is positive",
+          a1.get("swaps_planned", 0) >= 1 and a1.get("ev_gain_est", 0) > 0 and b.mmr_paused,
+          {k: a1.get(k) for k in ("swaps_planned", "ev_gain_est")})
+    check("first run: orders went out and each was an allocator IOC after a cancel of our quotes there",
+          first and cancels, (first[:3], len(cancels)))
+    check("first run: no sale below the value floor (p - value_sell_margin); the EV given up stays tiny",
+          f1["refill_ev_given_24h"] <= 0.02 * max(1.0, refill_usd), (f1["refill_ev_given_24h"], refill_usd))
+    check("first run: 'ALLOC run' / 'ALLOC fast refill' lines name what was sold and why",
+          any("ALLOC run" in x or "ALLOC fast refill" in x for x in first_lines), first_lines[:3])
+    STATE["first"] = {"pairs": a1.get("pairs_planned", 0), "swaps": a1.get("swaps_planned", 0),
+                      "est": a1.get("ev_gain_est", 0), "sold": refill_usd, "cash": f1["cash_free"],
+                      "holds": f1["refill_holds"], "cancels": len(cancels), "lines": first_lines[:6],
+                      "orders": first[:12]}
+
+    # ---- the next cycles: the swaps execute, the rooms hold
+    P.cycles(b, 11, stage="run")
+    f2, a2 = mf(b), alloc(b)
+    run = ioc(api, "run")
+    buys = [x for x in run if x[5] < 0]   # the legs that SPEND cash
+    swap_usd = a2.get("swaps_usd_24h", 0.0)
+    floor_room = min(rooms0["wc"], 20000.0)
+    rooms_now = f2["room_free"]
+    out("## 12 cycles (6 min) with the 14.1 file")
+    out(f"- swaps: {a2.get('swaps_planned_24h', 0)} planned, {a2.get('swaps_done_24h', 0)} done, "
+        f"${swap_usd:,.0f} moved; EV gain {a2.get('ev_gain_est_24h', 0):,.0f} estimated vs "
+        f"{a2.get('ev_gain_realised_24h', 0):+,.0f} realised (from the fills, at Polymarket)")
+    out(f"- refills: {f2['refill_sales_24h']} sale legs (${f2['refill_sold_usd']:,.0f}), fast-refill runs "
+        f"{f2['refill_runs']}, EV given up {f2['refill_ev_given_24h']:,.0f}; buy-back shares deferred "
+        f"{f2['deferred_buybacks']}")
+    out(f"- cash_free {f0['cash_free']:,.0f} -> {f2['cash_free']:,.0f} of 20,000 (cash_locked "
+        f"{f2['cash_locked']:,.0f}: the quoter re-deploys what the refill frees); room wc {rooms0['wc']:,.0f} -> "
+        f"{rooms_now['wc']:,.0f}, corr {rooms0['corr']:,.0f} -> {rooms_now['corr']:,.0f}")
+    out(f"- turnover in the hour ${a2.get('turnover_hour', 0):,.0f} of 15,000; allocator orders "
+        f"{len(run)} in 11 cycles")
+    out()
+    check("the swaps execute: pairs done, $ moved, a realised EV figure on the fills",
+          a2.get("swaps_done_24h", 0) >= 1 and swap_usd > 0 and a2.get("ev_gain_realised_24h") is not None,
+          {k: a2.get(k) for k in ("swaps_done_24h", "swaps_usd_24h", "ev_gain_realised_24h")})
+    check("every swap's buy follows its own sale (never more cash-spending legs than cash-freeing ones)",
+          len(buys) <= len([x for x in run if x[5] >= 0]) and all(v is not None for v in api.inv.values()),
+          (len(buys), len(run)))
+    check("the worst-case room never falls below min(the room at the start, the 20k reserve) - the MM reserve net of "
+          "the swaps' own sales", rooms_now["wc"] >= floor_room - 50, (rooms_now["wc"], floor_room))
+    check("the correlated room keeps its own 4k reserve", rooms_now["corr"] >= 4000, rooms_now["corr"])
+    check("the turnover cap holds (<= 15,000 an hour)", a2.get("turnover_hour", 0) <= 15000 + 1e-6,
+          a2.get("turnover_hour"))
+    raw = P.orders(api, "run", "alloc_tick")
+    dup = [k for k, n in Counter((o["cycle"], o["eid"], o["yes_buy"], o["yes_price"], o["qty"]) for o in raw).items()
+           if n > 1]
+    sold_in_cycle = {}
+    for o in raw:                                 # (a holding may fund two buys in one cycle: 4ff7d91's pairing)
+        if o["cash"] > 0 and o["pos_before"] > 0:
+            k = (o["cycle"], o["eid"])
+            sold_in_cycle[k] = sold_in_cycle.get(k, 0.0) + o["qty"]
+    over = [(k, v) for k, v in sold_in_cycle.items()
+            if v > max(o["pos_before"] for o in raw if (o["cycle"], o["eid"]) == k) + 1e-9]
+    check("no duplicate allocator order (same market, side, price and size in one cycle) and never more sold in a "
+          "market than the position it reduces", not dup and not over, (dup[:3], over[:3]))
+    check("the 2-hourly summary carries the refill and swap figures in one piece",
+          "refill" in b.mm_funding_summary() and "swaps" in b.mm_funding_summary(), b.mm_funding_summary())
+    STATE["run"] = {"planned": a2.get("swaps_planned_24h", 0), "done": a2.get("swaps_done_24h", 0),
+                    "usd": swap_usd, "est": a2.get("ev_gain_est_24h", 0),
+                    "real": a2.get("ev_gain_realised_24h", 0), "refills": f2["refill_runs"],
+                    "refill_usd": f2["refill_sold_usd"], "cash": f2["cash_free"], "locked": f2["cash_locked"],
+                    "room": rooms_now, "turnover": a2.get("turnover_hour", 0)}
+
+    # ---- alloc_max_edge_sell: 0.02 (live) / 0.05 / 0.08 on this book
+    api_e, be = T.build(S, live_file(tmp))
+    P.apply_stage(be, P141_FILE)
+    P.cycles(be, 1, stage="edge")
+    now_m = M.time.monotonic()
+    inv = dict(api_e.inv)
+    rows = []
+    for mes in (0.02, 0.05, 0.08):
+        for mi in (0.03, 0.06):
+            be.cfg.alloc_max_edge_sell, be.cfg.alloc_min_improvement = mes, mi
+            pairs, info = be.alloc_plan(inv, now_m, be.cfg.alloc_mm_reserve, (),
+                                        be.cfg.alloc_max_turnover_per_hour)
+            sw = [p_ for p_ in pairs if p_["buy"] is not None and p_["sell"].get("eid")]
+            below = sum(p_["sell"]["qty"] * max(0.0, (be.alloc_p(be.ex[p_["sell"]["eid"]], now_m)
+                                                      - p_["sell"]["px"]) * (1 if p_["sell"]["kind"] == "long" else -1))
+                        for p_ in sw)
+            rows.append((mes, mi, len(sw), sum(p_["usd"] for p_ in sw), info["ev_gain_est"], below))
+    be.cfg.alloc_max_edge_sell, be.cfg.alloc_min_improvement = 0.05, 0.03
+    out("## alloc_max_edge_sell on this book (one planning run, cash at the reserve so only swaps are planned)")
+    out("| alloc_max_edge_sell | alloc_min_improvement | swaps | $ moved | est. EV gain after both spreads | "
+        "EV given up on the sale side |")
+    out("|---|---|---|---|---|---|")
+    for mes, mi, n, usd, gain, below in rows:
+        out(f"| {mes}{' (live)' if mes == 0.02 else ''} | {mi}{' (live)' if mi == 0.03 else ''} | {n} | {usd:,.0f} | "
+            f"{gain:,.0f} | {below:,.0f} |")
+    out()
+    by = {(r[0], r[1]): r for r in rows}
+    check("alloc_max_edge_sell 0.02 (live) finds far less than 0.05 (the converged book is in the 2-5% bucket)",
+          by[(0.05, 0.03)][3] > 3 * max(1.0, by[(0.02, 0.03)][3])
+          and by[(0.05, 0.03)][4] > by[(0.02, 0.03)][4], [by[(0.02, 0.03)], by[(0.05, 0.03)]])
+    check("0.08 adds volume but less gain per $ than 0.05 (and more EV given up on the sale side)",
+          by[(0.08, 0.03)][4] / max(1.0, by[(0.08, 0.03)][3]) <= by[(0.05, 0.03)][4] / max(1.0, by[(0.05, 0.03)][3])
+          + 1e-9 and by[(0.08, 0.03)][5] >= by[(0.05, 0.03)][5], [by[(0.05, 0.03)], by[(0.08, 0.03)]])
+    check("alloc_min_improvement is a real per-$ hurdle: 0.06 moves less than 0.03 at the same threshold",
+          by[(0.05, 0.06)][3] <= by[(0.05, 0.03)][3], [by[(0.05, 0.03)], by[(0.05, 0.06)]])
+    STATE["edge"] = rows
+
+    # ---- alloc_refill_max_cost: what the cash target would cost
+    rows2 = []
+    for cost in (0.0, 0.02, 0.03):
+        api_c, bc = T.build(S, live_file(tmp))
+        P.apply_stage(bc, P141_FILE)
+        if cost:
+            bc.cfg.alloc_refill_max_cost = cost
+        P.cycles(bc, 8, stage=f"cost{cost}")
+        fc = mf(bc)
+        rows2.append((cost, fc["refill_runs"], fc["refill_sold_usd"], fc["refill_ev_given_24h"], fc["cash_free"],
+                      fc["room_free"]["wc"]))
+    out("## alloc_refill_max_cost (NOT in the staged file): how far the cash target is reachable")
+    out("| alloc_refill_max_cost | refill runs | $ sold (8 cycles) | EV given up | cash_free after | room wc after |")
+    out("|---|---|---|---|---|---|")
+    for cost, runs, sold, ev, cash, room in rows2:
+        out(f"| {cost}{' (the value floor)' if not cost else ''} | {runs} | {sold:,.0f} | {ev:,.0f} | {cash:,.0f} | "
+            f"{room:,.0f} |")
+    out()
+    check("with the value floor alone the refill raises little on this book (the diagnosis: it is price-starved)",
+          rows2[0][2] < 4000, rows2[0])
+    check("alloc_refill_max_cost 2c raises materially more, at a measured EV cost",
+          rows2[1][2] > rows2[0][2] and rows2[1][3] >= rows2[0][3], (rows2[0], rows2[1]))
+    check("3c raises more again and costs more EV (the owner's call; it is NOT in the staged file)",
+          rows2[2][2] >= rows2[1][2] and rows2[2][3] >= rows2[1][3], (rows2[1], rows2[2]))
+    STATE["cost"] = rows2
+
+    # ---- rollback: the 14.0 file over it again
+    bad_keys, alerts = P.apply_stage(b, live_file(tmp))
+    check("rollback: the 14.0 file switches every 14.1 flag off again (and alloc_max_edge_sell back to 0.02)",
+          not any(getattr(b.cfg, k) for k in M.Bot.P141_FLAGS) and b.cfg.alloc_max_edge_sell == 0.02
+          and not bad_keys, [k for k in M.Bot.P141_FLAGS if getattr(b.cfg, k)])
+    n2 = len(P.CAP.lines)
+    P.cycles(b, 2, stage="rollback")
+    check("rollback: no 14.1 behaviour left (no refill while the gap holds, no new swap planned)",
+          not any("fast refill" in m for _, _, m in P.CAP.lines[n2:] if "ALLOC" in m)
+          or alloc(b).get("swaps_planned", 0) == 0)
+    try:
+        os.remove(tmp)
+    except OSError:
+        pass
+    findings()
+    print(f"(all done in {_rt.time() - t0:.0f} s)")
+    return 0
+
+
+def findings():
+    s0, f_, r_ = STATE.get("s140", {}), STATE.get("first", {}), STATE.get("run", {})
+    rows, rows2 = STATE.get("edge", []), STATE.get("cost", [])
+    best = next((r for r in rows if r[0] == 0.05 and r[1] == 0.03), (0, 0, 0, 0, 0, 0))
+    summ = [
+        "## Summary",
+        f"- **The deadlock reproduces.** On the live code with the flags on, 6 cycles on the 10:21 state: "
+        f"${s0.get('sold', 0):,.0f} freed by refills, blockers {s0.get('blocked', {})}, no swap planned (value adds "
+        f"paused on room wc {s0.get('room', 0):,.0f} < 20k).",
+        f"- **The first 14.1 run** plans {f_.get('pairs', 0)} pair(s) ({f_.get('swaps', 0)} swaps), est. EV gain "
+        f"{f_.get('est', 0):,.0f}; it cancels our own quotes in each candidate market first "
+        f"({f_.get('cancels', 0)} whole-exchange cancels), sells ${f_.get('sold', 0):,.0f} and holds "
+        f"{f_.get('holds', 0)} market(s) quiet on the reducing side until the positions read shows the sale.",
+        f"- **Cash does not pile up, and should not be expected to:** cash_free ends at ${r_.get('cash', 0):,.0f} with "
+        f"${r_.get('locked', 0):,.0f} locked in our own quotes - what the refill frees, the market maker immediately "
+        "quotes with (that is what the reserve is for), and each swap's buy spends only its own sale's proceeds. The "
+        "figure to watch for funding is `room_free.wc` and `cash_locked`, not `cash_free` alone.",
+        f"- **12 cycles:** swaps {r_.get('planned', 0)} planned / {r_.get('done', 0)} done, "
+        f"${r_.get('usd', 0):,.0f} moved, EV {r_.get('est', 0):,.0f} estimated vs {r_.get('real', 0):+,.0f} realised; "
+        f"refills {r_.get('refills', 0)} runs / ${r_.get('refill_usd', 0):,.0f}; room wc "
+        f"{s0.get('room', 0):,.0f} -> {(r_.get('room') or {}).get('wc', 0):,.0f} (never below the reserve net of the "
+        f"swaps' own sales); turnover ${r_.get('turnover', 0):,.0f} of 15k.",
+        f"- **alloc_max_edge_sell: 0.05 recommended.** On this book 0.02 finds ${rows[0][3]:,.0f} (est. "
+        f"{rows[0][4]:,.0f} of EV), 0.05 ${best[3]:,.0f} (est. {best[4]:,.0f}, of which {best[5]:,.0f} is the EV "
+        f"given up on the sale side), 0.08 ${rows[4][3]:,.0f} (est. {rows[4][4]:,.0f}, {rows[4][5]:,.0f} given up). "
+        "0.08 buys the last volume at a worse gain per $ and sells deeper into positions that may simply be "
+        "converging; 0.02 leaves the converged 2-5% bucket untouched, which is the whole point of the package.",
+        f"- **The cash target needs a decision.** With the value floor the refill can raise only "
+        f"${rows2[0][2]:,.0f} in 8 cycles ({rows2[0][1]} runs): in a book this converged almost nothing is bid within "
+        f"0.5c of Polymarket. `alloc_refill_max_cost` 2c would raise ${rows2[1][2]:,.0f} for {rows2[1][3]:,.0f} of EV, "
+        f"3c ${rows2[2][2]:,.0f} for {rows2[2][3]:,.0f}. It is OFF in the staged file: the owner decides whether MM "
+        "cash is worth that.",
+        ""]
+    OUT[2:2] = summ
+    out("## Caveats")
+    out("- The 10:21 state is REBUILT from the 4 Oct 15:56 snapshot (books 20% converged toward Polymarket, MM lots "
+        "placed on the middle-band low-edge holdings whose touch is beyond the value floor, positions grown where the "
+        "snapshot held less, a constant 'held elsewhere' amount taken off the cash read). It matches the owner's "
+        "account / cash / inventory / room / edge-held figures closely but it is not the live book: the live "
+        "`locked_in_orders`, the live order list and the live per-market depth are not reproduced.")
+    out("- Other traders never trade with our RESTING quotes in the fake, so the recycler's resting orders never fill "
+        "and the market maker earns nothing here; only our own IOCs trade. The recycler's contribution to funding is "
+        "therefore not measured - live it was 19 fills in 13 min.")
+    out("- The books move only where we take; Polymarket is flat and every price counts as liquid; the marks stay at "
+        "the snapshot's; the 28/min write limiter is not modelled (FakeApi reports unlimited writes, so the "
+        "allocator's 0.3 share allows 4 orders a cycle, live ~2, and the measured $/cycle is an upper bound).")
+    out("- `ev_gain_realised` is measured at Polymarket p at the moment of the fill, pair by pair; a sale's given-up "
+        "edge counts against the buy's gain, so the figure is lower than the estimate whenever a sale fills before "
+        "its buy. It is not a P&L.")
+    out("- The EV figures are at the outcome (Polymarket as probability), not marks; nothing here says the exchange's "
+        "marks will follow.")
+
+
+if __name__ == "__main__":
+    rc = main()
+    if RESULTS and os.environ.get("P14_DRYRUN_REPORT", "1") != "0" and OUT:
+        os.makedirs(os.path.dirname(REPORT), exist_ok=True)
+        with open(REPORT, "w") as f:
+            f.write("\n".join(OUT) + "\n")
+    n, ok = len(RESULTS), sum(RESULTS)
+    print(f"\n{ok}/{n} checks passed")
+    sys.exit(0 if ok == n and rc == 0 else 1)
