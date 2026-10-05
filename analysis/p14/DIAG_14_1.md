@@ -90,3 +90,12 @@ quotes (the recycler's resting orders never fill here) and Polymarket is flat.
 - (3) sell-first / net-cash buy-backs: correct accounting; on this seed it changes little (cause 5).
 - The cash target itself: only selling below the floor reaches it in this book. 14.1 adds `alloc_refill_max_cost`
   (default 0 = the floor, NOT in the staged file) so the owner can decide with the numbers above.
+
+## Confirmed after the fix (tests/test_p14_1_dryrun.py, analysis/p14/DRYRUN_14_1.md)
+On the same 10:21 state, the staged 14.1 file applied through `check_overrides` over the running 14.0 file: the first
+allocator run plans 28 pairs (24 swaps, est. +680 of EV) instead of 4 refills at est. 0, and in 12 cycles 21 swaps
+execute, $6.5k moved, EV +680 estimated / +382 realised, the worst-case room 8.9k -> 11.6k and never below the reserve
+net of each swap's own sale; the refill still raises only $487 at the value floor (cause 1 is a price fact, not a bug),
+$3.8k at `alloc_refill_max_cost` 2c and $7.1k at 3c. Cash_free does not pile up (it ends near 0 with $6.8k locked in
+our own quotes): the market maker re-deploys what the refill frees, which is what the reserve is for - `room_free.wc`
+and `cash_locked` are the honest funding figures, not `cash_free` alone.
