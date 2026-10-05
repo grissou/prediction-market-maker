@@ -1322,14 +1322,14 @@ class Config:
     mm_refill_fast: bool = False
     mm_room_guard: bool = False
     mm_funding_alert_h: float = 2.0
-    # --- P14.1: the refill and the swaps unstuck (owner, 5 Oct 10:30 UTC; analysis/p14/DIAG_14_1.md; everything OFF) ---
+    # --- P14.1: refill and swaps unstuck (owner, 5 Oct 10:30 UTC; analysis/p14/DIAG_14_1.md; everything OFF) ---
     # Diagnosis on 4ff7d91: the fast refill is starved by PRICE (in a tilted book almost no holding's touch is within
     # value_sell_margin of p), a run in flight locks the fast refill out, and the risk-room pause drops every buy level
     # (no swap). Each flag below is independent; all off = 4ff7d91 byte for byte (orders, quotes, status values).
     # 1. alloc_cancel_mm_first True: stale MM shares are refill candidates like any holding, judged by the refill's
     #    price rule only (the value floor, or alloc_refill_max_cost below half the target) - no longer refused for being
     #    more than mm_recycle_concession from fair ("mm_resting" is no blocker; a refused one is counted "floor"). The
-    #    sale is the allocator's IOC (alloc_send: our orders on that exchange cancelled first - ONE whole-exchange cancel
+    #    sale is the allocator's IOC (alloc_send: our orders there cancelled first - ONE whole-exchange cancel
     #    - then the IOC, same cycle, the market not quoted that cycle), and after ANY allocator sale the market's
     #    REDUCING quote side is held off (a "refill pending" hold) until the positions read shows the sale or
     #    MM_SENT_LAG s pass: the quoter never re-offers shares already sold (live: an ask beyond the YES held is a NO
@@ -1347,7 +1347,7 @@ class Config:
     #    deferred (the recycler sizes the bid to the rest; counted in mm_funding.deferred_buybacks).
     # 4. alloc_refill_ignore_prefer_short True: while free cash < 0.5 x alloc_mm_reserve the fast refill skips the L2
     #    prefer-short scan (and the buy-level scan): the refill's blocked_by then holds only reasons that stop a SALE.
-    #    (In 4ff7d91 L2 only ever dropped buy levels - never a refill sale - but its count sat in the refill's blocked_by.)
+    #    (In 4ff7d91 L2 only ever dropped buy levels - never a refill sale - but its count sat in that blocked_by.)
     # 5. alloc_swap_room_netting True: while value adds are paused (mm_risk_reserve_*), the allocator still plans and
     #    executes SWAPS (sell low edge-held, buy high edge): a pair is admitted when, after its sale AND its buy, each
     #    risk room (worst case, correlated; the cycle's own measures) is >= min(the room now, its reserve) - a swap may
@@ -1358,7 +1358,7 @@ class Config:
     #    far below p (a long's bid >= p - it, a short's buy-back <= p + it) instead of value_sell_margin, lowest cost
     #    first. 0 = the value floor (as 4ff7d91). The EV given up is reported (mm_funding.refill_ev_given_24h).
     # 7. Reporting (always, read-only, MM_FUNDING_KEYS): mm_funding {refill_runs, refill_sold_usd (24 h), refill_last,
-    #    refill_ev_given_24h, deferred_buybacks, cash_locked}; with any 14.1 flag on: alloc {swaps_planned, swaps_done_24h,
+    #    refill_ev_given_24h, deferred_buybacks, cash_locked}; with any 14.1 flag on: alloc {swaps_planned,
     #    swaps_usd_24h, ev_gain_est_24h, ev_gain_realised_24h (from the IOC fills: qty x (p - price) bought, (price - p)
     #    sold, summed per pair), refill_blocked_by} and the 2-hourly summary piece " | refill ..., swaps ...".
     alloc_cancel_mm_first: bool = False
@@ -1663,6 +1663,8 @@ OVERRIDABLE = {
     "alloc_swap_room_netting": (False, True),
     "alloc_refill_max_cost": (0.0, 0.05),
 }
+P141_REFILL = ("alloc_cancel_mm_first", "alloc_rank_all_markets",   # P14.1: the flags that need
+               "alloc_refill_ignore_prefer_short")                 #  mm_refill_fast to do anything
 MM_RISK_HYST = 1.1        # mm_risk_reserve_*: value adds resume once each room set is >= this x its reserve
 MAX_ORDER_TTL = 7200.0    # no order of ours lives longer than this (dead-man's switch), whatever the TTL settings
 LADDER_MAX_LEVELS = 8
@@ -13005,10 +13007,9 @@ class Bot:
             ("mm_refill_fast without alloc_enabled (the fast refill is the allocator's B2 refill)",
              getattr(c, "mm_refill_fast", False) and not getattr(c, "alloc_enabled", False)),
             # P14.1: a refill flag does nothing without the fast refill, the netting nothing without a reserve
-            (f"{', '.join(k for k in ('alloc_cancel_mm_first', 'alloc_rank_all_markets', 'alloc_refill_ignore_prefer_short') if getattr(c, k, False))} without mm_refill_fast (they change the fast refill)",   # noqa: E501
-             any(getattr(c, k, False) for k in ("alloc_cancel_mm_first", "alloc_rank_all_markets",
-                                                 "alloc_refill_ignore_prefer_short"))
-             and not getattr(c, "mm_refill_fast", False)),
+            (f"{', '.join(k for k in P141_REFILL if getattr(c, k, False))} without mm_refill_fast (they change "
+             "the fast refill)",
+             any(getattr(c, k, False) for k in P141_REFILL) and not getattr(c, "mm_refill_fast", False)),
             ("alloc_swap_room_netting with mm_risk_reserve_wc and _corr both 0 (no pause to work through)",
              getattr(c, "alloc_swap_room_netting", False) and not (getattr(c, "mm_risk_reserve_wc", 0.0) > 0
                                                                    or getattr(c, "mm_risk_reserve_corr", 0.0) > 0)),
