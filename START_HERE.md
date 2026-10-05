@@ -1,9 +1,8 @@
 <!-- STATUS (Finisher 2b, updated on every push) -->
-**STATUS ~13:00 UTC 5 Oct:** **Package 14.1 READY** on `claude/mm-funding` (124ce75, on top of the LIVE 4ff7d91 only; nothing from Package 13). Staged file `deploy/package14/settings_override.mm_funding_14_1.json` (the 14.0 file + the owner's live values + five 14.1 flags + `alloc_max_edge_sell` 0.05; 58 keys, validated). Package 13 READY separately (claude/finisher-package9 1fdd467, PR #11), not deployed.
-Diagnosis (analysis/p14/DIAG_14_1.md): (1) the refill was starved by PRICE, not by our orders: stale MM shares' best other bid sits > 1c from fair / below the value floor ("mm_resting" = that price rule); at 10:21 only ~$0.8k of holdings are bid at >= p - 0.5c, so the 20k CASH target is unreachable at the floor; (2) the swaps were OFF because room_wc 9.5k < the 20k reserve paused ALL allocator buys (hence est. gain 0); (3) a run in flight + the 60-s gap locked the fast refill out; (4) "prefer_short" / "mm_risk_reserve" were buy-side counters reported as refill blockers; (5) buy-backs were mostly covered NO sales (free cash), slow because of price.
-Fixes (all OFF; flags off byte-identical to 4ff7d91): `alloc_cancel_mm_first`, `alloc_rank_all_markets` (every cycle while cash < target, blocked candidates skipped), `mm_recycle_sell_first` (+ net-cash buy-backs, deferred below half target), `alloc_refill_ignore_prefer_short`, `alloc_swap_room_netting` (a swap admitted while both rooms stay >= min(room now, reserve)), `alloc_refill_max_cost` (0 = floor kept; NOT in the staged file: 2c raises $3.8k for 71 of EV, 3c $7.1k for 192 - owner's call). Reports: mm_funding refill_runs / refill_sold_usd / deferred_buybacks / cash_locked; alloc swaps_planned / swaps_done_24h / ev_gain_est vs realised.
-`alloc_max_edge_sell` 0.05 recommended (10:21 book: 0.02 -> 8 swaps / $0.8k / +99; 0.05 -> 25 / $10.1k / +650; 0.08 -> 32 / $11.8k / +713). Dry run on the 10:21 state: first run 28 pairs (24 swaps, est +680) + $487 refill sold at/above the floor; 12 cycles: 21 swaps done, $6.5k moved, +382 realised at p; room_wc 8.9k -> 11.6k, never below the reserve floor. Suites: 50 files N/N (test_mm_funding_14_1 100, test_p14_1_dryrun 32) + STRESS_LADDER 20/20.
-Deploy: claude/mm-funding head 124ce75 (old file first = 4ff7d91 behaviour), then the 14.1 file; watch list + rollback in deploy/package14/README.md (14.1 section).
+**STATUS ~15:00 UTC 5 Oct:** **Package 14.2 READY** on `claude/mm-funding` (64f27c8, on 14.1 124ce75 on the LIVE 4ff7d91; nothing from Package 13). Staged file `deploy/package14/settings_override.mm_funding_14_2.json` = the 14.1 file + `alloc_swap_sell_margin` 0.03 + `alloc_swap_min_gain` 0.05 + `value_sell_margin` 0.005. Package 13 READY separately (claude/finisher-package9, PR #11), not deployed.
+Finding (analysis/p14/DIAG_14_2.md): `value_sell_margin` NEVER floored a paired allocator sale (a swap) in 4ff7d91 or 124ce75 - the sale is governed by `alloc_max_edge_sell` + `alloc_min_improvement` only; raising the margin live only let the REFILL sell more low-edge holdings (which swaps would have used) and moved stale-MM holdings into the refill-only pool: on the 10:21 state 14.1 swaps fall 24 -> 5 at 0.03. The sale's "cost" (p - price per $) IS edge-held at the sale price, so it is counted once. 14.2 = a NEW, tighter swap floor (p -+ 0.03, checked at pairing and on the fresh book before the IOC) + the hurdle max(alloc_min_improvement, alloc_swap_min_gain); every other reducing path keeps value_sell_margin; "ALLOC SWAP" journal lines at plan and fill (sold edge, price vs p, bought edge, net EV gain), status alloc.swaps, a WARNING while value_sell_margin > 0.01.
+Dry run (10:21 state, first run): 14.1 @0.005 24 swaps / $10.1k / +680; 14.2 staged 20 / $6.1k / +464 (7.6% per $; sales 0.7-3.0c below p), 19 done in 12 cycles, +318 realised at p; dropped: Rep Oklahoma Gov (0.89 vs p 0.92), two NO buy-backs 3.4-3.5c over p, one pair at 4.98%. Suites: 52 files N/N (test_mm_funding_14_2 79, test_p14_2_dryrun 25) + STRESS_LADDER 20/20.
+Deploy: claude/mm-funding head 64f27c8 + the 14.2 file (the 14.1 file first if 14.1 is not live yet; rollback = the 14.1 file); watch list in deploy/package14/README.md (14.2 section).
 
 # START HERE (Team run, branch `claude/run-c-tournament-improvements-pycdet`)
 
@@ -11,6 +10,43 @@ Status: **complete** (Team complete at 14:45 UTC) (started 2026-10-02 08:50 UTC;
 The Builder's previous START_HERE is kept as `START_HERE_BUILDER.md`; Run A's notes are `ENGINEERING_NOTES.md`.
 Plan: `PLAN.md`. Packages appear below as they become READY (commit messages start "READY: Package N").
 Deploy only commits whose message starts "READY"; the branch is cumulative.
+
+## Package 14.2 (READY, 5 Oct ~14:30 UTC; branch `claude/mm-funding` on top of 124ce75 = Package 14.1, itself on the LIVE head 4ff7d91; NOT merged with Package 13): a swap-only value-floor margin (OFF by default; staged file in `deploy/package14/`)
+**The owner's brief (13:20):** "a SWAP-ONLY value-floor margin ... `alloc_swap_sell_margin` (e.g. 0.03) ... when the
+paired buy's edge-held exceeds the sale's edge-held + the sale's cost by >= `alloc_swap_min_gain` (e.g. 0.05). All
+other reducing keeps `value_sell_margin` (the owner will return it to 0.005)."
+**Diagnosis** (`analysis/p14/DIAG_14_2.md`): `value_sell_margin` never limited a swap. In 4ff7d91 and 124ce75 a paired
+allocator sale is judged only by `alloc_max_edge_sell` and `alloc_min_improvement` (124ce75: `alloc_plan`, `alloc_sell`
+11045-11050); the margin is read by quotes, reduce-only quotes, the recycler, refills (`fast and b is None`, 11051),
+stale-MM IOCs, the set ladder and the exit - never by the pairing, the paired sale or the send path. Raising it makes
+swaps FEWER: the refill sells the low-edge holdings first and stale-MM holdings at the floor become refill-only legs
+(10:21 state, 14.1 file: 0.005 -> 24 swaps / est. +680; 0.03 -> 5 swaps / +274 and 26 refills). Live (4ff7d91) the
+risk-room pause allows no swap at any margin: the raise only added refills. The sale's cost IS its edge-held at the
+sale price ((p - price) / price for a long), so it is never added twice.
+**Built (OFF; flags off byte-identical to 124ce75):** `alloc_swap_sell_margin` (0-0.10): a SWAP sale must be within it
+of p (long >= p - m, short's buy-back <= p + m) in the pairing ("swap_floor") and on the fresh book right before the
+IOC; `alloc_max_edge_sell` still applies. `alloc_swap_min_gain` (0-0.5): swaps need buy edge - sale edge-held >=
+max(`alloc_min_improvement`, it) ("swap_gain"). Everything else keeps `value_sell_margin`. A buy that fails after its
+sale leaves the sale as traded (an IOC: nothing to reprice), the cash in the reserve. Journal "ALLOC SWAP sold ... ->
+buy ...: net EV gain +$x (per $ y%)" at plan and at fill; status `alloc.swaps` {last_run, counts_24h, usd_24h,
+ev_gain_est_24h, ev_gain_realised_24h}; a WARNING while the swap margin is on and `value_sell_margin` > 0.01.
+**Dry run** (`analysis/p14/DRYRUN_14_2.md`, 25 checks, the first allocator run on the 10:21 state): 14.1 at 0.005: 24
+swaps / $10.1k / est. +680 (6.8% per $); 14.1 at 0.03: 5 / $3.6k / +274; **14.2 staged: 20 / $6.1k / +464 (7.6% per
+$)**, every sale within 3c of p, every gain >= 5%; 12 cycles: 19 done, 0 buy failed, est. +464 / realised +318 at p,
+room_wc 8.6k -> 11.0k. 14.2 is a STRICTER swap rule than 14.1, not a looser one (it drops Oklahoma 3.0c+ below p, two
+NO buy-backs 3.4-3.5c above p and one 4.98% pair); a 5c margin with `alloc_max_edge_sell` 0.10 would move $8.1k for
++589.
+**Suites:** `tests/test_mm_funding_14_2.py` 79 + `tests/test_p14_2_dryrun.py` 25; all 52 suite files N/N +
+`STRESS_LADDER=1` 20/20.
+**Deploy:** handover to this branch's head, then `mv` `settings_override.mm_funding_14_2.json` (= the 14.1 file +
+`alloc_swap_sell_margin` 0.03 + `alloc_swap_min_gain` 0.05 + `value_sell_margin` 0.005) over the live file. **Watch:**
+"ALLOC SWAP sold ... - planned / - done, realised at p", `alloc.swaps.counts_24h`, `alloc.blocked_by` swap_floor /
+swap_gain, no WARNING line, plus the 14.1 list. **Rollback:** the 14.1 file (the margin off; `value_sell_margin` goes
+back to its 0.005 default), then the 14.0 file; code 124ce75 / 4ff7d91.
+**Caveats:** the swap margin is a NEW limit (swaps were never floored), so expect fewer, better swaps than 14.1, not
+more; the fake never fills our resting quotes, Polymarket is flat, writes are unlimited, and the 10:21 state is
+rebuilt from the 4 Oct snapshot; pairs that share one buy level can find it partly taken (the rest of the proceeds
+stays cash, 14.1's pairing); `alloc.swaps` events persist across a restart but pairs in flight do not (as before).
 
 ## Package 14.1 (READY, 5 Oct ~12:00 UTC; branch `claude/mm-funding` on top of the LIVE head 4ff7d91 = Package 14, NOT merged with Package 13): the MM funding refill and the allocator's swaps unstuck (every setting OFF; staged file in `deploy/package14/`)
 **The owner's brief (10:30):** "fix the market-making funding and the allocator's swaps; both are stuck live" (10:21:
