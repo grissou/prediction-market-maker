@@ -533,7 +533,8 @@ api, b = mk_bot(momentum_enabled=True, momentum_auto=True)
 warm(b)
 tick(b)
 check("no recorder (record_file ''): no seed, the reason says 'no history' (no crash)",
-      (b.ma_seed or {}).get("note") == "no recorder file" and b.ma["reason"] == "no history", (b.ma_seed, b.ma["reason"]))
+      (b.ma_seed or {}).get("note") == "no recorder file" and b.ma["reason"] == "no history",
+      (b.ma_seed, b.ma["reason"]))
 bad_p = os.path.join(tmpd, "bad.sqlite")
 with open(bad_p, "w") as f:
     f.write("not a database")
@@ -717,7 +718,8 @@ check("(c) cash short: VALUE sold for the shortfall, lowest edge-held first (G1 
 check("...never below the value floor: A2's buy-back at 0.08 (p 0.02 + 0.005) refused, not sent",
       not any(x[0] == "A2" for x in sold) and "A2" in b.ma_fund_refused, (sold, b.ma_fund_refused))
 g_sold = sum(x[4] for x in sold if x[0] == "G1")
-check("...funded_from.value_sales = the proceeds (shares x 0.81)", abs(b.ma_funded["value_sales"] - g_sold * 0.81) < 0.01,
+check("...funded_from.value_sales = the proceeds (shares x 0.81)",
+      abs(b.ma_funded["value_sales"] - g_sold * 0.81) < 0.01,
       (b.ma_funded, g_sold))
 check("...ev_given_up = shares x (p - price) = shares x (0.80 - 0.81) (a gain here)",
       abs(b.ma_ev_given_up - g_sold * (0.80 - 0.81)) < 1e-6, b.ma_ev_given_up)
@@ -808,7 +810,8 @@ tick(b, at_h(1.1))                                # (the exit is paced over mom_
 check("...the sleeve's YES sold into the bids (B2 sold at its bid 0.13)", any(x[:4] == ("B2", "yes", "sell", 0.13)
                                                                              for x in wire(api)[n_w:]), wire(api)[n_w:])
 check("...status: on false, auto_state flipped, the reason", not b.mom_status()["on"]
-      and b.mom_status()["auto_state"] == "flipped" and "24-h slope" in b.mom_status()["reason"], b.mom_status()["reason"])
+      and b.mom_status()["auto_state"] == "flipped" and "24-h slope" in b.mom_status()["reason"],
+      b.mom_status()["reason"])
 api, b = auto_bot(momentum_confirm_h=0.0, momentum_force=True)
 set_series(b, at_h(0), RISING)
 tick(b, at_h(0))
@@ -989,7 +992,7 @@ check("...funded_from restored", all(abs(b2.ma_funded[k] - b.ma_funded[k]) < 0.0
 quiet(b2.ts_seed_step, time.time())
 check("...a restored series is never re-seeded", (b2.ma_seed or {}).get("note") == "restored")
 
-# ============================================================================================ status, summary, robustness
+# ============================================================================================ status, summary, robust
 print("--- status, summary, robustness")
 st = b.mom_status()
 check("status momentum {armed, on, size_usd, target_usd, slope_24h, slope_6h, reason, funded_from, ev_given_up, "

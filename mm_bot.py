@@ -2993,7 +2993,8 @@ class TiltSlope:
             races[tilt_slope_race(row[1])].add(row[1])
         secs, bins = {}, {}
         for ts, label, bb, ba, r, ob, oa in rows:
-            if (not isinstance(label, str) or bb is None or ba is None or r is None or any(h in (label or "") for h in headline)
+            if (not isinstance(label, str) or bb is None or ba is None or r is None
+                    or any(h in label for h in headline)
                     or not 0 < ba - bb <= max_spread + 1e-9
                     or (ob is not None and abs(ob - bb) < 1e-9) or (oa is not None and abs(oa - ba) < 1e-9)):
                 continue
@@ -12615,7 +12616,7 @@ class Bot:
         self.ma_fund_at = -1e18                   # wall time of the last funding plan (MA_FUND_REPLAN_S)
         self.ma_fund_refused = {}                 # eid -> wall time a funding sale there met the value floor
         self.ma_hold = 0.0                        # $ the allocator's spare cash / the ladder / the quoter leave alone
-        self.ma_cand_raw = set()                  # this cycle's momentum candidates before rule 5 (the hold, the ladder)
+        self.ma_cand_raw = set()                  # this cycle's momentum candidates before rule 5 (hold, ladder)
         self.ma_cands = 0
         self.ma_s24 = self.ma_s6 = None           # this cycle's slopes (points a day)
         self.ma_pt_since = None                   # wall time the mark first reached the profit target (this run)
