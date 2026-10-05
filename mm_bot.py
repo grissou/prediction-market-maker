@@ -1367,6 +1367,28 @@ class Config:
     alloc_refill_ignore_prefer_short: bool = False
     alloc_swap_room_netting: bool = False
     alloc_refill_max_cost: float = 0.0
+    # --- P14.2: a swap-only value-floor margin (owner, 5 Oct 13:20 UTC; analysis/p14/DIAG_14_2.md; OFF) ---
+    # Diagnosis on 4ff7d91 / 124ce75: value_sell_margin never floored an allocator SWAP sale (a paired sale was judged
+    # by alloc_max_edge_sell and alloc_min_improvement only); raising it only let more REFILLS (no buy) and stale-MM
+    # IOCs through, rested every reducing quote / the recycler lower, and in 14.1 SHRANK the swaps (the refill sells
+    # the low-edge holdings first; stale-MM holdings at the floor become refill-only legs).
+    # alloc_swap_sell_margin > 0: a SWAP (a long / short sale paired with a buy in the same run) gets its OWN price
+    #    limit: the sale at the touch >= p - it (a short's buy-back <= p + it), checked when pairing (alloc_plan: a
+    #    holding beyond it is no swap candidate, blocked_by "swap_floor") and again on the fresh book right before the
+    #    IOC (alloc_sell; the IOC goes out at that very touch). alloc_max_edge_sell still picks the candidates (both
+    #    apply). Every other reducing path keeps value_sell_margin exactly: quotes and reduce-only quotes, the
+    #    recycler, refills (no buy), stale-MM IOCs, the set ladder, exits; NO+NO set and spare-cash pairs keep their own
+    #    rules. A swap whose buy fails after its sale: the sale stands as traded (an IOC: nothing left to reprice), the
+    #    cash stays, the market's quotes keep value_sell_margin. 0 = off (as 124ce75).
+    # alloc_swap_min_gain (only with the margin on): a swap is admitted only when buy edge - sale edge-held (both at
+    #    the touch) >= max(alloc_min_improvement, alloc_swap_min_gain) per $, at planning and before the sale
+    #    (blocked_by "swap_gain"). The sale's cost per $ it frees, (p - price) / price for a long ((price - p) /
+    #    (1 - price) for a short's buy-back), IS its edge-held at that price, so it is counted once, not twice.
+    # Reporting (with the margin on): "ALLOC SWAP sold ... -> buy ...: net EV gain" journal lines at plan and at fill
+    #    (realised at p), status.json alloc.swaps {last_run, counts_24h, usd_24h, ev_gain_est_24h,
+    #    ev_gain_realised_24h}, and a WARNING while value_sell_margin > 0.01 (the swap margin makes a raised one moot).
+    alloc_swap_sell_margin: float = 0.0
+    alloc_swap_min_gain: float = 0.05
 
 
 CFG = Config()
@@ -1662,6 +1684,9 @@ OVERRIDABLE = {
     "alloc_refill_ignore_prefer_short": (False, True),
     "alloc_swap_room_netting": (False, True),
     "alloc_refill_max_cost": (0.0, 0.05),
+    # --- P14.2: a swap-only value-floor margin ---
+    "alloc_swap_sell_margin": (0.0, 0.10),
+    "alloc_swap_min_gain": (0.0, 0.5),
 }
 P141_REFILL = ("alloc_cancel_mm_first", "alloc_rank_all_markets",   # P14.1: the flags that need
                "alloc_refill_ignore_prefer_short")                 #  mm_refill_fast to do anything
@@ -10272,6 +10297,13 @@ class Bot:
         self.alloc_ladder_info = {}               # its status (alloc.set_ladder), absent while never used
         self.alloc_ladder_refused = {}            # race -> when the exchange last refused its whole ladder (RT12-3)
         self.alloc_targets = {}                   # Package 12 M2: the latest plan's intended holdings {eid: shares}
+        self.p142_last_run = []                   # P14.2: the latest run's swap records (alloc.swaps.last_run)
+        self.p142_events = deque()                # P14.2: (wall, kind, $, est, realised) of the last 24 h
+        sw = d.get("swaps") if isinstance(d.get("swaps"), dict) else {}
+        for x in (sw.get("events") if isinstance(sw.get("events"), list) else ()):   # (restored after a restart)
+            if (isinstance(x, (list, tuple)) and len(x) == 5 and isinstance(x[1], str)
+                    and all(num(x[i]) is not None for i in (0, 2, 3, 4))):
+                self.p142_events.append((num(x[0]), x[1], num(x[2]), num(x[3]), num(x[4])))
 
     def alloc_persist_needed(self):
         return bool(self.alloc_info) or bool(self.alloc_pairs) or self.alloc_last_run_wall is not None
@@ -10296,6 +10328,7 @@ class Bot:
         swap report (p141_alloc_report) while a P14.1 setting is on."""
         now_w = time.time()
         return {**self.alloc_info, **self.p141_alloc_report(now_w),
+                **({"swaps": self.swap_report(now_w)} if self.p142_on() else {}),   # P14.2
                 "state": self.alloc_state, "last_run_wall": self.alloc_last_run_wall,
                 "last_run": (iso(datetime.fromtimestamp(self.alloc_last_run_wall, timezone.utc))
                              if self.alloc_last_run_wall is not None else None),
@@ -10464,6 +10497,7 @@ class Bot:
         pins = self.alloc_pins()
         fast = bool(getattr(cfg, "mm_refill_fast", False))
         rank_all = self.p141("alloc_rank_all_markets")   # P14.1 2: every holding ranked for the refill
+        swap_m = self.p142_on()                   # P14.2: swaps have their own floor and the stricter hurdle
         held, levels = [], []
         for e, q in sorted(inv.items()):
             ex = self.ex.get(e)
@@ -10492,6 +10526,7 @@ class Bot:
                 held.append({"kind": "long" if q > 0 else "short", "eid": e, "label": ex.label, "px": px, "edge": edge,
                              "unit": unit, "avail": qty * unit,
                              **({"refill_only": True} if rich else {}),                           # P14.1 2
+                             **({"p": p} if swap_m else {}),                                      # P14.2
                              **({"floor_ok": self.mm_floor_ok(q > 0, px, p)} if fast else {})})   # P14
         if cfg.alloc_set_cost_per_usd > 0 and cfg.pair_unwind_enabled and self.pair_no_unwind_on():
             for race, members in sorted(self.groups.items()):
@@ -10551,14 +10586,15 @@ class Bot:
                     edge = (p - px) / px
                     if edge >= cfg.alloc_min_edge_buy - 1e-9:
                         levels.append({"eid": e, "label": ex.label, "short": False, "px": px, "edge": edge, "unit": px,
-                                       "avail": lv["quantity"] * px})
+                                       "avail": lv["quantity"] * px, **({"p": p} if swap_m else {})})
             if q <= 0:
                 for lv in (book.get("bids") or [])[:3]:
                     px = lv["price"]
                     edge = (px - p) / max(1 - px, TICK)
                     if edge >= cfg.alloc_min_edge_buy - 1e-9:
                         levels.append({"eid": e, "label": ex.label, "short": True, "px": px, "edge": edge,
-                                       "unit": 1 - px, "avail": lv["quantity"] * (1 - px)})
+                                       "unit": 1 - px, "avail": lv["quantity"] * (1 - px),
+                                       **({"p": p} if swap_m else {})})
         levels.sort(key=lambda o: (-o["edge"], o["eid"], o["px"]))
         if getattr(self, "global_reduce", False) and levels:   # (red team RT-2: no buy while in reduce-only;
             blocked["risk"] += 1                                #  reserve refills, which only reduce, still run)
@@ -10634,11 +10670,24 @@ class Bot:
               and not h.get("refill_only")]                                             # P14.1: and edge-rich ones)
         if refill_only:                           # P14 mm_refill_fast: the fast refill plans no pairs
             sq = []
+        hurdle = cfg.alloc_min_improvement
+        if swap_m:                                # P14.2: a long / short beyond p -+ alloc_swap_sell_margin is no swap
+            hurdle = self.swap_hurdle()           #  candidate; swaps need the stricter of the two hurdles
+            keep = [h for h in sq if h["kind"] not in ("long", "short")
+                    or self.swap_floor_ok(h["kind"] == "long", h["px"], h["p"])]
+            if len(keep) < len(sq):
+                blocked["swap_floor"] += len(sq) - len(keep)
+            sq = keep
         si = bi = 0
         while si < len(sq) and bi < len(levels) and left >= self.ALLOC_MIN_USD and len(pairs) < 200:
             h, o = sq[si], levels[bi]
             if o["edge"] - h["edge"] < cfg.alloc_min_improvement - 1e-9:
                 break
+            swap = swap_m and h["kind"] in ("long", "short")
+            if swap and o["edge"] - h["edge"] < hurdle - 1e-9:   # P14.2: below the swap hurdle against the best
+                blocked["swap_gain"] += 1                         #  level left - so against every level left
+                si += 1
+                continue
             x = min(h["avail"], o["avail"], room.get(o["eid"], 0.0), left)
             if x < self.ALLOC_MIN_USD:
                 if room.get(o["eid"], 0.0) < self.ALLOC_MIN_USD or o["avail"] < self.ALLOC_MIN_USD:
@@ -10674,8 +10723,9 @@ class Bot:
             cash_sell = h["kind"] == "cash"
             pairs.append({"sell": s, "buy": b, "usd": x, "status": "sold" if cash_sell else "pending",
                           "proceeds": x if cash_sell else 0.0, "sold_at": -1e18 if cash_sell else None,
-                          **({"netting": True, "rfloor": tuple(rfloor)} if net else {})})   # P14.1 5 (re-checked
-        #                                                                                      before each leg)
+                          **({"netting": True, "rfloor": tuple(rfloor)} if net else {}),   # P14.1 5 (re-checked
+                          #                                                                  before each leg)
+                          **({"swap": self.swap_record(s, h["p"], b, o["p"], x)} if swap else {})})   # P14.2
             gain += x * (o["edge"] - h["edge"])
             h["avail"] -= x if cash_sell else s["usd"]
             o["avail"] -= x
@@ -10725,6 +10775,9 @@ class Bot:
             touched = set()
             if self.alloc_ladder or (self.api.live and self.sl_orders()):   # Package 12 L1: every ladder pulled
                 touched = self.alloc_ladder_tick(inv, now_m, now, skip)
+            for pr in self.alloc_pairs:           # P14.2: swaps in flight end here (the cash stays)
+                if pr.get("swap") is not None:
+                    self.swap_close(pr, now_w, "allocator off")
             if self.alloc_pairs or self.alloc_set_races:
                 log.warning("ALLOC off: %d pair(s) dropped, %d set unwind registration(s) withdrawn (nothing forced; "
                             "the cash stays)", len(self.alloc_pairs), len(self.alloc_set_races))
@@ -10753,6 +10806,8 @@ class Bot:
                 self.mm_risk_count("alloc", info["blocked_by"].get("mm_risk_reserve", 0))   # P12 ops
                 for pr in pairs:
                     log.info("[dry] %s", self.alloc_journal(pr))
+                if self.p142_on():                # P14.2: the swaps planned, one line each
+                    self.swap_plan_log(pairs, now_w)
                 self.alloc_state = "dry run"
                 self.alloc_info = {"pairs_planned": len(pairs), **info, "reserve": cfg.alloc_mm_reserve}
             return lad_touched
@@ -10787,6 +10842,8 @@ class Bot:
                         info["ev_gain_est"])
             for pr in pairs:
                 log.warning("%s", self.alloc_journal(pr))
+            if self.p142_on():                    # P14.2: the swaps planned, one line each
+                self.swap_plan_log(pairs, now_w)
         elif (getattr(cfg, "mm_refill_fast", False)                            # P14 2: the reserve refilled NOW
               # P14.1 2: every cycle while the cash is short, and also while an hourly run's pairs are still in
               # flight (their markets are skipped); 4ff7d91: only with no pairs in flight, at most every 60 s
@@ -10836,6 +10893,9 @@ class Bot:
         for pr in self.alloc_pairs:               # a refill (no buy) is finished once sold
             if pr["status"] == "sold" and pr["buy"] is None:
                 pr["status"] = "done"
+        for pr in self.alloc_pairs:               # P14.2: a finished swap's outcome (done / buy failed / not sold)
+            if pr.get("swap") is not None and pr["status"] in self.ALLOC_DONE:
+                self.swap_close(pr, now_w)
         self.alloc_pairs = [pr for pr in self.alloc_pairs if pr["status"] not in self.ALLOC_DONE]
         self.alloc_state = "running" if self.alloc_pairs else "idle"
         self.alloc_info = {**self.alloc_run, "state": self.alloc_state, "cash_after": round(self.cash_left(), 2),
@@ -10937,6 +10997,8 @@ class Bot:
             pr["status"] = "bought"
             got = done * ((p - best) if not b["short"] else (best - p))   # P14.1 7: EV bought (realised, at p)
             self.p141_log("swap_buy", usd, real=got, now_w=now_w)
+            if pr.get("swap") is not None:        # P14.2: the swap complete, journaled realised at p
+                self.swap_bought(pr["swap"], done, best, p, edge, usd, now_w)
             log.warning("ALLOC bought %s %s%.0f @ %.3f (edge %.1f%%, $%.0f)", b["label"],
                         "short YES " if b["short"] else "", done, best, 100 * edge, usd)
         else:
@@ -11048,6 +11110,20 @@ class Bot:
             log.info("ALLOC %s not sold: edge-held now %.1f%% at %.3f (the pair no longer pays)", s["label"],
                      100 * edge, best)
             return False
+        if (pr.get("swap") is not None and b is not None and self.p142_on()   # P14.2: the swap's own floor and
+                and s["kind"] in ("long", "short")):                          #  hurdle, on the fresh book (the IOC
+            why = None                                                        #  goes out at this very touch)
+            if not self.swap_floor_ok(s["kind"] == "long", best, p):
+                why = ("swap_floor", f"{best:.3f} is past the swap floor (p {p:.3f} -+ alloc_swap_sell_margin "
+                                     f"{cfg.alloc_swap_sell_margin:.3f})")
+            elif bedge is not None and bedge - edge < self.swap_hurdle() - 1e-9:
+                why = ("swap_gain", f"the gain {100 * (bedge - edge):.1f}% per $ is below the swap hurdle "
+                                    f"{100 * self.swap_hurdle():.1f}%")
+            if why is not None:
+                pr["status"] = "gone"
+                self.alloc_block(why[0])
+                log.info("ALLOC %s not sold (swap): %s", s["label"], why[1])
+                return False
         if fast and b is None and not self.mm_floor_ok(s["kind"] == "long", best, p):   # P14 2: refills >= floor
             pr["status"] = "gone"
             self.alloc_block("floor")
@@ -11096,6 +11172,8 @@ class Bot:
             self.mmf_hold[s["eid"]] = now_m       #  REDUCING side stays off until the positions read shows the sale
         gave = done * ((p - best) if s["kind"] == "long" else (best - p))   # P14.1 7: EV given up (< 0: above p)
         self.p141_log("swap_sell" if b is not None else "refill", usd, real=-gave, now_w=now_w)
+        if pr.get("swap") is not None:            # P14.2: the sale as traded (realised at p)
+            self.swap_sold(pr["swap"], done, best, p, usd)
         if fast or self.p141("alloc_cancel_mm_first"):   # P14: not planned / sold again until the read shows it
             self.mmf_sent[s["eid"]] = (now_m, abs(q), float(done))
             if pr.get("fast"):
@@ -11761,6 +11839,131 @@ class Bot:
         if cost > m and self.mm_cash_low():
             m = cost
         return px >= p - m - 1e-9 if long else px <= p + m + 1e-9
+
+    # ------------------------------------------------------------------------------ P14.2 helpers
+    P142_LOG_H = 24.0             # the 24-h window of alloc.swaps (counts, $ and EV)
+    P142_FINAL = ("done", "buy_failed", "not_sold")
+
+    def p142_on(self, cfg=None):
+        """P14.2 in effect: alloc_swap_sell_margin > 0 (the swap floor, the swap hurdle and the alloc.swaps report)."""
+        cfg = cfg or self.cfg
+        return float(getattr(cfg, "alloc_swap_sell_margin", 0.0) or 0.0) > 0
+
+    def swap_floor_ok(self, long, px, p):
+        """P14.2: a SWAP sale at px within alloc_swap_sell_margin of p - a long's >= p - it, a short's buy-back <= p +
+        it (the swaps' own floor; every other reducing path keeps value_sell_margin)."""
+        m = float(getattr(self.cfg, "alloc_swap_sell_margin", 0.0) or 0.0)
+        return px >= p - m - 1e-9 if long else px <= p + m + 1e-9
+
+    def swap_hurdle(self):
+        """P14.2: a swap's min gain per $ (buy edge - sale edge-held, both at the touch): the stricter of
+        alloc_min_improvement and alloc_swap_min_gain. The sale's cost IS its edge-held at the sale price: not added
+        again."""
+        cfg = self.cfg
+        return max(cfg.alloc_min_improvement, float(getattr(cfg, "alloc_swap_min_gain", 0.0) or 0.0))
+
+    @staticmethod
+    def swap_cost(kind, qty, px, p):
+        """(cost per $ freed, $ of EV given up) of selling qty of a holding at px: a long (p - px) / px and qty x
+        (p - px); a short's buy-back (px - p) / (1 - px) and qty x (px - p). Negative = sold above p."""
+        if kind == "long":
+            return (p - px) / max(px, TICK), qty * (p - px)
+        return (px - p) / max(1 - px, TICK), qty * (px - p)
+
+    def swap_record(self, s, p_s, b, p_b, usd):
+        """P14.2: the record of a planned swap (alloc.swaps.last_run, the journal): sold {label, kind, qty, price, p,
+        edge, cost, cost_usd}, bought {label, short, qty, price, p, edge, usd}, gain_est (= usd x (buy edge - sale
+        edge-held), net of both touches), gain_realised (None until the legs trade), status."""
+        c, cu = self.swap_cost(s["kind"], s["qty"], s["px"], p_s)
+        return {"sold": {"label": s["label"], "kind": s["kind"], "qty": s["qty"], "price": round(s["px"], 3),
+                         "p": round(p_s, 4), "edge": round(s["edge"], 4), "cost": round(c, 4),
+                         "cost_usd": round(cu, 2)},
+                "bought": {"label": b["label"], "short": b["short"], "qty": b["qty"], "price": round(b["px"], 3),
+                           "p": round(p_b, 4), "edge": round(b["edge"], 4), "usd": round(usd, 2)},
+                "gain_est": round(usd * (b["edge"] - s["edge"]), 2), "gain_realised": None, "status": "planned"}
+
+    def swap_line(self, r, when):
+        """"ALLOC SWAP sold <label> q @ price (p, edge-held s%, cost c%) -> buy <label> q @ price (p, edge b%): net EV
+        gain +$x (per $ y%)" - when "planned" (the estimate) or "done" (the fills, realised at p)."""
+        sd, bt = r["sold"], r["bought"]
+        g = r["gain_est"] if when == "planned" else (r["gain_realised"] or 0.0)
+        per = g / bt["usd"] if bt["usd"] else 0.0
+        return (f"ALLOC SWAP sold {sd['label']} {'NO ' if sd['kind'] == 'short' else ''}{sd['qty']:.0f} @ "
+                f"{sd['price']:.3f} (p {sd['p']:.3f}, edge-held {100 * sd['edge']:.1f}%, cost {100 * sd['cost']:.1f}% "
+                f"= ${sd['cost_usd']:,.2f}) -> buy {bt['label']} {'short YES ' if bt['short'] else ''}{bt['qty']:.0f} "
+                f"@ {bt['price']:.3f} (p {bt['p']:.3f}, edge {100 * bt['edge']:.1f}%): net EV gain "
+                f"{'+' if g >= 0 else '-'}${abs(g):,.2f} (per $ {100 * per:.1f}%)"
+                + (" - planned" if when == "planned" else " - done, realised at p"))
+
+    def swap_log(self, kind, usd, est=0.0, real=0.0, now_w=None):
+        """One event in alloc.swaps' 24-h log: "plan" (usd, est), "done" / "buy_failed" (usd, real), "not_sold"."""
+        now_w = time.time() if now_w is None else now_w
+        lg = self.__dict__.setdefault("p142_events", deque())
+        lg.append((now_w, kind, round(float(usd), 2), round(float(est), 2), round(float(real), 2)))
+        while lg and lg[0][0] < now_w - self.P142_LOG_H * 3600:
+            lg.popleft()
+
+    def swap_plan_log(self, pairs, now_w):
+        """P14.2 (alloc_tick, a new run): this run's swaps become alloc.swaps.last_run, each journaled."""
+        self.p142_last_run = [pr["swap"] for pr in pairs if pr.get("swap") is not None]
+        for r in self.p142_last_run:
+            log.warning("%s", self.swap_line(r, "planned"))
+            self.swap_log("plan", r["bought"]["usd"], est=r["gain_est"], now_w=now_w)
+
+    def swap_sold(self, r, done, px, p, usd):
+        """P14.2: the swap's sale traded (done shares at px; p at the fill): the record holds the sale as traded."""
+        c, cu = self.swap_cost(r["sold"]["kind"], done, px, p)
+        r["sold"].update(qty=float(done), price=round(px, 3), p=round(p, 4), cost=round(c, 4), cost_usd=round(cu, 2),
+                         edge=round(c, 4), usd=round(usd, 2))
+        r["real_sell"] = round(-cu, 2)
+        r["status"] = "sold"
+
+    def swap_bought(self, r, done, px, p, edge, usd, now_w):
+        """P14.2: the swap's buy traded: realised gain = the buy's (p - price) x shares less the sale's given-up EV,
+        both at p at their fills; journaled again."""
+        short = r["bought"]["short"]
+        got = done * ((px - p) if short else (p - px))
+        r["bought"].update(qty=float(done), price=round(px, 3), p=round(p, 4), edge=round(edge, 4), usd=round(usd, 2))
+        r["gain_realised"] = round(got + r.get("real_sell", 0.0), 2)
+        r["status"] = "done"
+        log.warning("%s", self.swap_line(r, "done"))
+        self.swap_log("done", usd, real=r["gain_realised"], now_w=now_w)
+
+    def swap_close(self, pr, now_w, why=None):
+        """P14.2: a swap's pair has finished: its buy not done after its sale -> "buy_failed" (the sale stands as
+        traded: an IOC leaves nothing to reprice, the cash stays in the reserve, the quotes keep value_sell_margin);
+        never sold -> "not_sold"."""
+        r = pr.get("swap")
+        if r is None or r["status"] in self.P142_FINAL:
+            return
+        why = why or pr["status"]
+        if r["status"] == "sold":
+            r["status"], r["gain_realised"] = "buy_failed", r.get("real_sell", 0.0)
+            log.warning("ALLOC SWAP sold %s %.0f @ %.3f (p %.3f) -> buy %s NOT bought (%s): the sale stands as traded "
+                        "(nothing to reprice), its cash stays; EV given up %+.2f", r["sold"]["label"], r["sold"]["qty"],
+                        r["sold"]["price"], r["sold"]["p"], r["bought"]["label"], why, r["gain_realised"])
+            self.swap_log("buy_failed", r["sold"].get("usd", 0.0), real=r["gain_realised"], now_w=now_w)
+        else:
+            r["status"], r["gain_realised"] = "not_sold", 0.0
+            log.info("ALLOC SWAP %s -> %s not done: the sale never went (%s)", r["sold"]["label"],
+                     r["bought"]["label"], why)
+            self.swap_log("not_sold", 0.0, now_w=now_w)
+        r["why"] = why
+
+    def swap_report(self, now_w=None):
+        """status.json alloc.swaps (P14.2 on): the latest run's swaps, the 24-h counts, $ moved and EV gain estimated
+        (planned) vs realised (done + buy-failed legs, at p), and the restart log."""
+        now_w = time.time() if now_w is None else now_w
+        ev = [x for x in getattr(self, "p142_events", ()) if x[0] >= now_w - self.P142_LOG_H * 3600]
+        cnt = {k: sum(1 for x in ev if x[1] == k) for k in ("plan", "done", "buy_failed", "not_sold")}
+        return {"last_run": [dict(r) for r in getattr(self, "p142_last_run", [])],
+                "counts_24h": {"planned": cnt["plan"], "done": cnt["done"], "buy_failed": cnt["buy_failed"],
+                               "not_sold": cnt["not_sold"]},
+                "usd_24h": round(sum(x[2] for x in ev if x[1] == "done"), 2),
+                "ev_gain_est_24h": round(sum(x[3] for x in ev if x[1] == "plan"), 2),
+                "ev_gain_realised_24h": round(sum(x[4] for x in ev if x[1] in ("done", "buy_failed")), 2),
+                "margin": self.cfg.alloc_swap_sell_margin, "hurdle": round(self.swap_hurdle(), 4),
+                "events": [list(x) for x in ev]}
 
     # ------------------------------------------------------------------------------ P14.1 helpers
     P141_FLAGS = ("alloc_cancel_mm_first", "alloc_rank_all_markets", "mm_recycle_sell_first",
@@ -13021,6 +13224,13 @@ class Bot:
         if bad and bad != getattr(self, "warned_mmf", ()):
             log.warning("MM funding: %s", "; ".join(bad))
         self.warned_mmf = bad
+        bad = self.p142_on() and float(getattr(c, "value_sell_margin", 0.0)) > 0.01   # P14.2: a raised margin left on
+        if bad and not getattr(self, "warned_swap_margin", False):
+            log.warning("WARNING alloc_swap_sell_margin %.3f is on while value_sell_margin is %.3f (> 0.01): every "
+                        "resting reducing quote, the recycler and the refills may still sell that far below p - the "
+                        "swaps no longer need it (they have their own floor): return value_sell_margin to 0.005",
+                        c.alloc_swap_sell_margin, c.value_sell_margin)
+        self.warned_swap_margin = bad
         on = ()                               # Package 10 A1 (iv): mark-driven selling paths left on in value mode
         if getattr(self.cfg, "value_mode", False):
             c = self.cfg

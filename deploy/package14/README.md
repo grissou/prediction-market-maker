@@ -170,6 +170,99 @@ test_tilt 69, test_reduce_no 69, test_p9_dryrun 69, ...) plus `STRESS_LADDER=1 p
   Package 14 itself, `settings_override.previous_live.json` (all flags off).
 - Code: handover back to 4ff7d91 (the new `mm_funding` / `alloc` report keys are then simply ignored).
 
+# Package 14.2 (owner, 5 Oct 13:20 UTC: "a SWAP-ONLY value-floor margin")
+Same branch, on top of Package 14.1 (124ce75, READY) and Package 14 (4ff7d91, LIVE). Deployable on its own (nothing
+from Package 13). Both new settings are OFF by default (`alloc_swap_sell_margin` 0) and the code with it off is pinned
+byte-identical to 124ce75 on a grid (orders, quotes, order notes, status.json values, health, summary line,
+`alloc_plan`; tests/test_mm_funding_14_2.py).
+
+## Diagnosis (analysis/p14/DIAG_14_2.md): the margin never limited a swap
+- No path floors a PAIRED allocator sale at p - `value_sell_margin`, in 4ff7d91 or 124ce75: a swap's sale is judged
+  only by `alloc_max_edge_sell` (edge-held at the touch) and `alloc_min_improvement` (buy edge - sale edge-held), in
+  `alloc_plan` and again in `alloc_sell` on the fresh book; `alloc_send` / `place_orders` / `wire_order` / the cash
+  gate apply no price rule. The margin is read only by quotes (normal and reduce-only), the recycler, refills (`b is
+  None`), stale-MM IOCs, the set ladder and the exit.
+- Raising it makes swaps FEWER: the refill (first, while cash < `alloc_mm_reserve`) sells more of the low-edge holdings
+  the swaps would have sold, and stale-MM holdings at the floor become refill-only legs. On the 10:21 state with the
+  14.1 file: 0.005 -> 24 swaps / $10.1k / est. +680; 0.03 -> 5 swaps / $3.6k / est. +274 (and 26 refills, $7.8k).
+  Live (4ff7d91) the risk-room pause drops every buy level, so no swap happens at any margin: the raise only added
+  refills (no buy), which the "ALLOC run: N pair(s) planned" line also counts as pairs.
+- The sale's "cost" is already inside edge-held: a long's (p - price) / price IS the EV given up per $ freed (a
+  short's (price - p) / (1 - price)); the planner's gain is net of it.
+
+## What 14.2 does
+- `alloc_swap_sell_margin` (0 = off; 0-0.10; the staged file 0.03): a SWAP sale (a long / short sale paired with a buy
+  in the same run) at the touch must be >= p - margin (a short's buy-back <= p + margin) - in the pairing (a holding
+  beyond it is no swap candidate, `blocked_by` "swap_floor") and again on the fresh book right before the IOC (which
+  goes out at that very touch). `alloc_max_edge_sell` still picks the candidates: both limits apply (the 3c floor is
+  the tighter one above p ~0.63, the 5% edge rule below). This is a NEW limit on swaps, not a loosening.
+- `alloc_swap_min_gain` (0.05; 0-0.5; only with the margin on): a swap needs buy edge - sale edge-held (both at the
+  touch) >= max(`alloc_min_improvement`, `alloc_swap_min_gain`) per $, at planning and before the sale (`blocked_by`
+  "swap_gain"). `alloc_min_improvement` measures the very same gap, so 14.2's rule is the stricter of the two; the
+  sale's cost is NOT added again (it is the edge-held at the sale price: counting it twice would demand 2x).
+- Untouched (they keep `value_sell_margin` exactly, tested at 0.005 and 0.03 with the swap margin on and off):
+  quotes, reduce-only quotes, the recycler, takes, refills with no paired buy, stale-MM IOCs, the set ladder, exits;
+  NO+NO set and spare-cash pairs keep their own rules.
+- A swap whose buy fails after its sale (level gone, nothing traded, ALLOC_BUY_WAIT expiry, reduce-only, allocator
+  off): the sale stands as traded - an IOC leaves nothing to reprice or re-send - its cash stays in the reserve, no more
+  sales this run (as before), the market's quotes keep `value_sell_margin`; the record closes "buy_failed" with the
+  sale's given-up EV as its realised figure.
+- Reporting (with the margin on): journal "ALLOC SWAP sold <label> q @ price (p, edge-held s%, cost c% = $z) -> buy
+  <label> q @ price (p, edge b%): net EV gain +$x (per $ y%) - planned" at plan and "... - done, realised at p" at the
+  buy's fill; "ALLOC SWAP sold ... NOT bought (<why>): the sale stands as traded ..." for a failed buy. status.json
+  `alloc.swaps` {last_run: [per swap: sold {label, kind, qty, price, p, edge, cost, cost_usd}, bought {label, short,
+  qty, price, p, edge, usd}, gain_est, gain_realised, status], counts_24h {planned, done, buy_failed, not_sold},
+  usd_24h, ev_gain_est_24h, ev_gain_realised_24h, margin, hurdle, events (restored after a restart)}; the 14.1 `alloc`
+  swap keys keep counting as before. A "WARNING alloc_swap_sell_margin ... value_sell_margin ... (> 0.01)" once while
+  the swap margin is on and `value_sell_margin` is still raised.
+
+## Dry run (analysis/p14/DRYRUN_14_2.md, tests/test_p14_2_dryrun.py, 25 checks): the first allocator run, 10:21 state
+| file | value_sell_margin | swaps | $ moved | est. EV gain | per $ | refills |
+|---|---|---|---|---|---|---|
+| 14.1 | 0.005 (restored) | 24 | 10,067 | +680 | 6.8% | 4 ($767) |
+| 14.1 | 0.03 (raised) | 5 | 3,617 | +274 | 7.6% | 26 ($7,806) |
+| **14.2 staged** | 0.005 | **20** | **6,090** | **+464** | **7.6%** | 4 ($767) |
+Every 14.2 swap sells within 3c of p (0.7-3.0c on the cost side; the report lists each one: sold edge-held, price
+vs p, bought edge, net gain) and gains >= 5% per $. Against 14.1 at 0.005 it drops: Rep Oklahoma Governor (two pairs,
+$2.1k: 0.890 vs p 0.920, just past 3c), Dem CO-03 NO and Dem FL-13 NO (buy-backs 3.4-3.5c above p) - the floor - and
+Dem MI-10 NO (gain 4.98% per $) - the hurdle; the rest is the same pairs. Over 12 cycles: 20 planned / 19
+done / 0 buy failed, $4.5k bought, EV +464 est. / +318 realised at p (partly-taken shared buy levels), room_wc 8.6k ->
+11.0k, never below the reserve net of each sale. Sensitivity on the same planning call: the 3c floor alone (min gain
+0.03) 21 / $6.5k / +482; 2c 12 / $3.4k / +308; alloc_max_edge_sell 0.08 or 0.10 under the 3c floor adds nothing (every
+extra candidate is more than 3c below p); 5c with 0.10: 21 / $8.1k / +589.
+
+## Suites (14.2)
+`tests/test_mm_funding_14_2.py` 79 (settings / ranges; flags off identical to 124ce75 on a 3 x 4 grid with fills and
+on `alloc_plan` x 5; the floor on paired sales only - refills, quotes, reduce-only quotes, the recycler and takes
+identical with the swap margin on, at value_sell_margin 0.005 and 0.03; the min-gain boundary, the cost counted once;
+the fresh-book re-check; a failed buy and the buy-wait expiry; the journal lines and `alloc.swaps`, the restart; no
+duplicate orders; no p / empty books / allocator off; the warning; the staged file; py_compile) +
+`tests/test_p14_2_dryrun.py` 25; all 52 suite files green, every one N/N (test_mm_bot 600, test_basket 150,
+test_alloc 123, test_live_sim_marks 115, test_strategy 114, test_nono_sets 103, test_value_mode 101, test_mm_funding
+100, test_mm_funding_14_1 100, ...) plus `STRESS_LADDER=1 python tests/test_stress.py` 20/20.
+
+## Deploy (14.2)
+1. Code: handover restart to THIS branch's head (flags off = 124ce75 = 4ff7d91 behaviour with the 14.0 file).
+2. File: write `settings_override.mm_funding_14_2.json` to a temp file beside `settings_override.json` and `mv` it
+   over. It is the 14.1 file + `alloc_swap_sell_margin` 0.03 + `alloc_swap_min_gain` 0.05 + `value_sell_margin` 0.005
+   (written out: this returns the raised live margin to 0.005). Validated: no problems. If your live file changed
+   since the 14.1 file in anything else (other than `value_sell_margin`), carry it over first.
+
+## What to watch in the first hour (14.2)
+- "ALLOC SWAP sold ... - planned" lines after "ALLOC run", each sale within 3c of p, each "per $" >= 5%; then
+  "... - done, realised at p" as the buys fill; `alloc.swaps.counts_24h` done rising, `buy_failed` rare.
+- `alloc.blocked_by` "swap_floor" / "swap_gain": how many candidates the rule refuses (high counts with few swaps =
+  the margin or the min gain is the binding limit; the dry run's sensitivity table says what 2c / 5c would do).
+- No "WARNING alloc_swap_sell_margin" line (it means `value_sell_margin` is still above 0.01).
+- Everything from the 14.1 watch list (rooms >= 20000 / 4000 net of each sale, one cancel per IOC, turnover <= 15k/h).
+
+## Rollback (14.2)
+- Settings: `mv` `settings_override.mm_funding_14_1.json` over the live file: the swap margin off (= 14.1 behaviour,
+  `alloc.swaps` gone). That file does not name `value_sell_margin`: a key removed from the file goes back to its
+  default (0.005), which is what you want - do NOT re-raise it to get swaps (it makes them fewer, see the diagnosis).
+  Then the 14.0 file, then `settings_override.previous_live.json`.
+- Code: handover back to 124ce75 (or 4ff7d91); the `alloc.swaps` key is then simply ignored.
+
 ---
 ## Rollback (Package 14)
 - Settings: `mv` `settings_override.previous_live.json` over the live file (every P14 flag off = c7c0107 behaviour; the
