@@ -3,7 +3,7 @@
 paired buy's edge-held exceeds the sale's edge-held + the sale's cost by >= `alloc_swap_min_gain` (e.g. 0.05). All
 other reducing keeps `value_sell_margin` (the owner will return it to 0.005)."
 **Diagnosis** (`analysis/p14/DIAG_14_2.md`): `value_sell_margin` never limited a swap. In 4ff7d91 and 124ce75 a paired
-allocator sale is judged only by `alloc_max_edge_sell` and `alloc_min_improvement` (`alloc_plan`, `alloc_sell`
+allocator sale is judged only by `alloc_max_edge_sell` and `alloc_min_improvement` (124ce75: `alloc_plan`, `alloc_sell`
 11045-11050); the margin is read by quotes, reduce-only quotes, the recycler, refills (`fast and b is None`, 11051),
 stale-MM IOCs, the set ladder and the exit - never by the pairing, the paired sale or the send path. Raising it makes
 swaps FEWER: the refill sells the low-edge holdings first and stale-MM holdings at the floor become refill-only legs
