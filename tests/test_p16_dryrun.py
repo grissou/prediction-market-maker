@@ -422,6 +422,7 @@ def scenario4(api, b):
         D.run(b, 1, step=300.0, stage="s4", refill_s=H)
         if flip_at is None and b.ma["state"] == "flipped":
             flip_at, k_flip = now_w() - 300 - t0, bin_no(b)
+            STATE["flip_s24"] = b.ma_s24
     ls = lines_since(n0)
     check("4: the 24-h slope turned <= 0: flipped (ALERT 'switched OFF (24-h slope ...)')", flip_at is not None
           and any("switched OFF" in a and "24-h slope" in a for a in M_ALERTS[a0:]), (flip_at, M_ALERTS[a0:][:2]))
@@ -439,8 +440,9 @@ def scenario4(api, b):
     STATE["s4"] = dict(flip_at=flip_at, sold=sum(o["traded"] for o in sells), n=len(sells),
                        why={b.ex[e].label: why.get(e, "laddered") for e in legs0}, lines=[x for x in ls if x.startswith(
                            ("MOMENTUM auto switched OFF", "MOMENTUM EXITING"))][:3])
-    out(f"- slope_24h fell to {M.Bot.ma_fmt(b.ma_s24)}: flipped {flip_at / H:.2f} h after the fall began; "
-        f"{len(sells)} exit sales, {sum(o['traded'] for o in sells):,.0f} shares, over mom_exit_hours 6")
+    out(f"- slope_24h fell to {M.Bot.ma_fmt(STATE.get('flip_s24'))} (a -2-point bin): flipped {flip_at / H:.2f} h "
+        f"after the fall began; {len(sells)} exit sales, {sum(o['traded'] for o in sells):,.0f} shares, over "
+        "mom_exit_hours 6 (a thin book's leg takes longer: the fake refills its books hourly)")
     for x in STATE["s4"]["lines"]:
         out(f"    {x}")
     out("- the ladder on the former sleeve markets: " + ", ".join(f"{k}: {v_}" for k, v_ in
