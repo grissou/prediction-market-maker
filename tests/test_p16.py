@@ -1073,6 +1073,18 @@ quiet(b.cycle)
 b.drain_writes(5)
 check("...the quoter's plan budget leaves the kept-back cash + what the sleeve can spend (cash left - quote_hold)",
       seen and seen["hold"] > 0 and abs(seen["plan"] - max(0.0, seen["cash"] - seen["hold"])) < 1e-6, seen)
+api, b = fund_bot(5000.0, momentum_writes_frac=0.0, take_respect_reserve=True)
+take = {"exchangeId": "21", "side": "yes", "action": "buy", "price": 0.56, "quantity": 2000}
+blk1 = b.take_blocked_by_reserve(dict(take))
+hold_, b.ma_hold = b.ma_hold, 0.0
+blk0 = b.take_blocked_by_reserve(dict(take))
+b.ma_hold = hold_
+check("...a stale-quote take (take_respect_reserve) keeps the round's hold back too: a $1,120 take with $5,000 free "
+      "is blocked with the hold, allowed without", blk1 is True and blk0 is False, (blk1, blk0, hold_))
+i6a, i6b, i6d = (src.index(x) for x in ("# 6a'. P16: the momentum sleeve", "# 6b. Take tournament quotes",
+                                         "# 6d. Package 10 B: the capital allocator"))
+check("the sleeve runs FIRST among the traders in a cycle (step 6a': before the takes and the allocator)",
+      i6a < i6b < i6d)
 
 # ============================================================================================ flips
 print("--- the flip: slope_24h <= 0, the profit target, the date, the manual exit, the kill; the ladder takes over")
