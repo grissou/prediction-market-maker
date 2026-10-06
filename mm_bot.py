@@ -1445,7 +1445,8 @@ class Config:
     # --- P16: the ARMED momentum sleeve (Package 13 A's sleeve + 13 C's automation, ported onto Package 15; owner
     # 6 Oct 11:00 UTC; everything OFF). Not ported: buckets_enabled (the 20/40/40 rebalance and its floor-exempt
     # sell-down), aggressive_value (aggr_* caps), election_night (but election_holdback_usd below is its hook).
-    # 1. momentum_enabled True: the sleeve's MACHINERY (state, legs at cost, status, exits, the kill). Alone it never
+    # 1. momentum_enabled True: the sleeve's MACHINERY (state, legs at cost, status, exits, the kill; Bot.mom_tick,
+    #    cycle step 6c', before the allocator). Alone it never
     #    buys: it buys only with momentum_auto and the trigger on (2), or momentum_force (the manual override). The
     #    sleeve is LONG the tilt: it buys the MOMENTUM longs - longshots with value_extreme_p < p <= mom_max_p whose
     #    short edge per $ (ask - p) / (1 - ask) is below value_min_edge (Bot.mom_classify; a market holding a position
@@ -1457,8 +1458,8 @@ class Config:
     #    cap (state_max_usd: the sleeve's collateral counts there as any position); at most mom_max_markets markets,
     #    never a headline race unless mom_headline; momentum_writes_frac of the writes left (3 a order). The sleeve's
     #    markets are never quoted by the market maker, never traded by takes / tilt exits / hold takes / arbitrage /
-    #    pair unwinds / the allocator, and never laddered by the harvest ladder while held. Fill class "momentum"
-    #    in mm_carry_24h (key only once one exists). Legs, cost and state persist in status.json "momentum". A leg
+    #    pair unwinds / the allocator, and the harvest ladder leaves their whole race while held (rule 5 both
+    #    ways). Fill class "momentum" in mm_carry_24h (key only once one exists). Legs, cost and state persist in status.json "momentum". A leg
     #    the sleeve traded within 120 s is not cut to the positions read (P13 RT13-3: a lagging read re-bought it).
     #    momentum_exit True (manual) or mom_exit_utc passed: the sleeve is sold into the bids over mom_exit_hours (a
     #    long at the best bid, a short bought back as a covered "sell NO"), EXEMPT from the value floor (these are
@@ -1487,9 +1488,12 @@ class Config:
     #    positions sold lowest edge-held first for the shortfall (a), (b) leave, through the allocator's refill sale
     #    path (alloc_plan refill-only, alloc_sell), within alloc_max_turnover_per_hour, NEVER below the value floor
     #    (p - value_sell_margin; no exemption) - middle-band (MM) holdings and the sleeve's own legs are not sold.
-    #    While a buy round is short (a target not reached, candidates seen) the allocator's spare-cash buys pause,
-    #    the harvest ladder places no NEW levels (it keeps its resting ones and yields the candidates' races) and the
-    #    quoter's plan budget leaves the shortfall, so the cash and the sale proceeds reach the sleeve.
+    #    While a buy round is short (a target not reached, candidates seen) AND there is cash to protect for it (cash
+    #    (a) / (b) lets it spend now, or funding sales pending / their proceeds unspent) the allocator's spare-cash
+    #    buys pause, the harvest ladder places no NEW levels (it keeps its resting ones and yields the candidates'
+    #    races) and the quoter's plan budget leaves the sleeve's kept-back cash + what it can spend of the shortfall,
+    #    so the cash and the sale proceeds reach the sleeve. A round the sleeve cannot fund holds nothing back (Package
+    #    13 held the whole shortfall from the quoter: with no funding that starved the market maker indefinitely).
     # Rule 5 (no fake buying): the sleeve never buys a market (or race) where we rest or plan a sale - harvest levels
     # in the race, a refill / swap / funding sale pending there, another feature's resting order; our plain quotes
     # there are cancelled before the buy and a sleeve market is never quoted after it.
@@ -5204,9 +5208,23 @@ class Bot:
 
         if self.st_on():                          # P15 state_max_usd: each state's collateral this cycle
             self.st_refresh(inv, now_m)
+        mom_taken = set()
+        # 6a'. P16: the momentum sleeve (trigger, ramp, flips, exits, kill; immediate-or-cancel buys / sales) - FIRST
+        #     among the traders: its round's cash is not spent by this cycle's takes / allocator first (ma_hold: the
+        #     takes' reserve, the allocator's spare-cash pause, the ladder's pause), its funding sales are sold by this
+        #     cycle's alloc_tick, and the takes / allocator then leave its new legs alone
+        if self.running and self.mom_on():
+            try:
+                mom_taken = self.mom_tick(now, inv, mine_real, now_m, skip=set(arb_races))
+            except ApiError:
+                raise                                 # (as the takes: the cycle's own error handling)
+            except Exception:                         # a sleeve bug must never stop the market maker
+                self.orders_stale = True
+                log.exception("momentum tick failed - skipped this cycle")
         # 6b. Take tournament quotes that Polymarket says are clearly stale (confirmed over 2 readings) ---
         taken = (self.take_stale_quotes(refs, liquid, fvs, inv, mine_real, global_reduce, party_delta, now_m)
                  if self.running else set())
+        taken |= mom_taken
         if cfg.hold_target_hours <= 0:                     # C off (or switched off live): turning it back on
             self.hold_open_at = None                        #   restarts the 1-hour hold-off
         if cfg.hold_target_hours > 0 and self.running:      # C hold target: aged lots taken within the hourly budget
@@ -5235,15 +5253,6 @@ class Bot:
             except Exception:                         # an allocator bug must never stop the market maker
                 self.orders_stale = True
                 log.exception("allocator tick failed - skipped this cycle")
-        # 6d'. P16: the momentum sleeve (trigger, ramp, flips, exits, kill; immediate-or-cancel buys / sales)
-        if self.running and self.mom_on():
-            try:
-                taken |= self.mom_tick(now, inv, mine_real, now_m, skip=taken | arb_races)
-            except ApiError:
-                raise                                 # (as the takes: the cycle's own error handling)
-            except Exception:                         # a sleeve bug must never stop the market maker
-                self.orders_stale = True
-                log.exception("momentum tick failed - skipped this cycle")
         # 6e. P15: the harvest ladder (resting maker levels; pulls)
         if self.running and self.hv_on():
             try:
@@ -5265,8 +5274,8 @@ class Bot:
             self.cg_plan_left, self.cg_capped_now = self.cash_left(), 0
             if self.hv_plans:                     # P15: the quotes leave the ladder the part of its carve-out it
                 self.cg_plan_left = max(0.0, self.cg_plan_left - self.hv_quote_hold())   # still waits to place
-            if getattr(self, "ma_hold", 0.0) > 0:   # P16: and the momentum sleeve its open round's shortfall
-                self.cg_plan_left = max(0.0, self.cg_plan_left - self.ma_hold)
+            if getattr(self, "ma_quote_hold", 0.0) > 0:   # P16: and the momentum sleeve the cash it can spend now
+                self.cg_plan_left = max(0.0, self.cg_plan_left - self.ma_quote_hold)
         self.ladder_setup(equity, capital, raw_orders, liquid, party_delta, resting)
         for eid, ex in list(self.ex.items()):
             if not self.running:          # Ctrl+C: stop touching the book immediately
@@ -7938,6 +7947,8 @@ class Bot:
                               float(order["quantity"]))
         if need <= 1e-9:
             return False
+        if getattr(self, "ma_hold", 0.0) > 0:     # P16: and the momentum sleeve's round, while it has cash to protect
+            reserve += self.ma_hold
         if self.cash_left() + self.hv_carve_used() - need < reserve - 1e-9:   # (P15: the carve-out counts)
             self.take_reserve_blocked = getattr(self, "take_reserve_blocked", 0) + 1
             return True
@@ -12233,15 +12244,16 @@ class Bot:
         on = bool(cfg.tilt_harvest_ladder) and bool(offs) and not self.global_reduce
         basket = self.basket_legs or {}
         sl = {o.eid for o in self.sl_orders()}
-        mom_races = ({self.ex[m].group for m in getattr(self, "ma_cand_raw", ()) if m in self.ex}
-                     if getattr(self, "ma_hold", 0.0) > 0 else set())
+        mom_races = ({self.ex[m].group for m in getattr(self, "ma_cand_raw", ()) if m in self.ex}   # (P16: a round's
+                     if getattr(self, "ma_hold", 0.0) > 0 else set())                             #  candidates' races,
+        mom_races |= {self.ex[m].group for m in (getattr(self, "mom_legs", None) or ()) if m in self.ex}   # the legs')
         cands = []
         for e, ex in sorted(self.ex.items()):
             if not on:
                 why[e] = "reduce-only" if self.global_reduce and cfg.tilt_harvest_ladder else "off"
             elif e in basket:
                 why[e] = "basket"
-            elif e in (getattr(self, "mom_legs", None) or ()) or ex.group in mom_races:   # P16: a sleeve leg / race
+            elif ex.group in mom_races:           # P16: a sleeve leg's race (rule 5 both ways) / a round's candidates
                 why[e] = "momentum"
             elif ex.group in cfg.headline_races and not cfg.alloc_headline:
                 why[e] = "headline"
@@ -12717,7 +12729,9 @@ class Bot:
         self.ma_fund_prs = []                     # the funding sales planned (allocator refill pairs; this run)
         self.ma_fund_at = -1e18                   # wall time of the last funding plan (MA_FUND_REPLAN_S)
         self.ma_fund_refused = {}                 # eid -> wall time a funding sale there was refused (floor, ...)
-        self.ma_hold = 0.0                        # $ the allocator's spare cash / the ladder / the quoter leave alone
+        self.ma_hold = 0.0                        # $ the allocator's spare cash / the ladder leave alone (ma_hold_step)
+        self.ma_short = 0.0                       # the open round's shortfall ($)
+        self.ma_quote_hold = 0.0                  # free cash the quotes' plan budget leaves to the sleeve
         self.ma_cand_raw = set()                  # this cycle's momentum candidates before rule 5 (hold, ladder)
         self.ma_cands = 0
         self.ma_s24 = self.ma_s6 = None           # this cycle's slopes (points a day)
@@ -12730,7 +12744,7 @@ class Bot:
                         self.ma["target_usd"], len(self.tslope.bins), self.tslope.source)
 
     def mom_on(self):
-        """Cycle step 6e runs: a sleeve flag on, or state left to manage."""
+        """Cycle step 6c' runs: a sleeve flag on, or state left to manage."""
         cfg = self.cfg
         return bool(getattr(cfg, "momentum_enabled", False) or getattr(cfg, "momentum_auto", False)
                     or getattr(cfg, "momentum_force", False) or self.mom_legs or self.mom_state != "off"
@@ -13221,10 +13235,10 @@ class Bot:
             self.mom_state = "off"
 
     def mom_tick(self, now, inv, mine_real, now_m=None, skip=()):
-        """P16, cycle step 6e (after the allocator, before the harvest ladder and quoting): the tilt series and its
-        slopes, the state machine (kill, exits), the automation (trigger, ramp, flips), the exit's sales, then the
-        sleeve's buys and the funding (c) plan - at most momentum_writes_frac of the writes left (3 per order).
-        Returns the exchanges traded."""
+        """P16, cycle step 6c' (after the takes and the basket; BEFORE the allocator, the ladder and quoting): the tilt
+        series and its slopes, the state machine (kill, exits), the automation (trigger, ramp, flips), the exit's sales,
+        then the sleeve's buys and the funding (c) plan (sold by this cycle's alloc_tick) - at most
+        momentum_writes_frac of the writes left (3 per order). Returns the exchanges traded."""
         cfg = self.cfg
         now_w = now.timestamp()
         now_m = time.monotonic() if now_m is None else now_m
@@ -13254,16 +13268,39 @@ class Bot:
             t, n_left = self.mom_buy_step(inv, mine_real, now_m, now_w, skip | traded, cls, n_left)
             traded |= t
             self.ma_fund_step(inv, now_m, now_w, skip | traded)   # source (c): sales planned for the allocator
-        # what the allocator's spare cash, the harvest ladder and the quoter leave for the sleeve while its round is
-        # open with a shortfall and candidates (momentum_auto only; 0 otherwise)
-        self.ma_hold = 0.0
-        tgt = self.mom_target_usd if self.mom_may_buy() else None
-        if cfg.momentum_auto and tgt is not None and self.ma_cands:
-            short = tgt - self.mom_cost()
-            self.ma_hold = short if short >= self.ALLOC_MIN_USD else 0.0
+        self.ma_hold_step()
         on = cfg.momentum_enabled or self.mom_legs or self.mom_state != "off" or track
         self.mom_info = self.mom_status(now_m) if on else {}
         return traded
+
+    def ma_hold_step(self):
+        """What the others leave for the sleeve while its buy round is open with a shortfall and candidates
+        (momentum_auto only; 0 otherwise). ma_short = the shortfall. ma_hold = the shortfall while there is cash for
+        it to protect - cash the funding order lets the sleeve spend now ((a) / (b): ma_cash_avail), or funding sales
+        pending / their proceeds not spent yet - else 0: a round the sleeve cannot fund holds nothing back (never a
+        standing pause of the allocator / the ladder). It pauses the allocator's spare-cash buys and the ladder's NEW
+        levels. ma_quote_hold = the free cash the quotes' plan budget leaves: the sleeve's kept-back cash + what it
+        can spend of the shortfall, only while it can spend some (so the quoter never sits on the MM's reserve for a
+        round that cannot be funded)."""
+        cfg = self.cfg
+        self.ma_short = self.ma_hold = self.ma_quote_hold = 0.0
+        tgt = self.mom_target_usd if self.mom_may_buy() else None
+        if not (cfg.momentum_auto and tgt is not None and self.ma_cands):
+            return
+        short = tgt - self.mom_cost()
+        if short < self.ALLOC_MIN_USD:
+            return
+        self.ma_short = short
+        if not self.api.live:
+            self.ma_hold = short
+            return
+        usable = max(0.0, self.ma_cash_avail()) if getattr(self, "cg_cash", None) is not None else 0.0
+        inflight = (self.ma_pool >= self.ALLOC_MIN_USD or bool(self.ma_unseen)
+                    or any(pr.get("status") == "pending" for pr in self.ma_fund_prs))
+        if usable >= self.ALLOC_MIN_USD or inflight:
+            self.ma_hold = short
+        if usable >= self.ALLOC_MIN_USD:
+            self.ma_quote_hold = (self.cash_left() - usable) + min(short, usable)
 
     def mom_status(self, now_m=None):
         """status.json "momentum": {state, cost, value_mark, value_outcome, markets, legs, kill_level, exit_progress,
@@ -13609,7 +13646,7 @@ class Bot:
         (b), the proceeds not yet in a cash read and the funding sales still pending leave: alloc_plan refill-only
         with fund_usd (lowest edge-held first; never a sleeve / basket / pinned / headline / middle-band market; the
         value floor p -+ value_sell_margin and alloc_max_edge_sell as the refill's; within alloc_max_turnover_per_hour)
-        - appended to the allocator's pairs ("fund"), sold by alloc_sell from the next alloc_tick, their proceeds
+        - appended to the allocator's pairs ("fund"), sold by alloc_sell in this cycle's alloc_tick, their proceeds
         earmarked for the sleeve (ma_pool). A new plan at most every MA_FUND_REPLAN_S; a market refused is not
         planned again for MA_FUND_REFUSED_S."""
         cfg = self.cfg
@@ -13703,7 +13740,8 @@ class Bot:
                 "confirm_since": t(a["confirm_since"]), "steps": a["steps"], "next_step_at": t(nxt),
                 "series_bins": [[t(k), round(100 * v, 3)] for k, v in self.tslope.values(now_w)],
                 "series_source": self.tslope.source or ("none" if not self.ma_seed else self.ma_seed.get("note")),
-                "hold_usd": round(self.ma_hold, 2),
+                "short_usd": round(self.ma_short, 2), "hold_usd": round(self.ma_hold, 2),
+                "quote_hold_usd": round(self.ma_quote_hold, 2),
                 # (restored by a restart)
                 "auto": {**{k: v for k, v in a.items()}, "funded_from": dict(self.ma_funded),
                          "ev_given_up": self.ma_ev_given_up, "pool": self.ma_pool},

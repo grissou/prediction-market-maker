@@ -548,8 +548,8 @@ check("...the allocator (refill / swaps / funding sales) leaves them alone (allo
       not b.alloc_market_ok(b.ex["B2"]) and not b.alloc_market_ok(b.ex["D1"]))
 b.cfg.tilt_harvest_ladder = True
 _, why_ = quiet(b.hv_plan, dict(api.inv), time.monotonic())
-check("...the harvest ladder never ladders a sleeve market while it is held (why 'momentum')",
-      all(why_.get(e) == "momentum" for e in ("B2", "D1", "11")), {e: why_.get(e) for e in ("B2", "D1", "11")})
+check("...the harvest ladder leaves a sleeve market AND its whole race while held (why 'momentum'; rule 5 both ways)",
+      all(why_.get(e) == "momentum" for e in ("B1", "B2", "D1", "D2", "11", "12")), why_)
 b.cfg.tilt_harvest_ladder = False
 check("...tilt exits leave them alone (tilt_exit_side None)", b.tilt_exit_side(b.ex["B2"], 0.12, 2000) is None)
 quiet(b.log_fills, {})
@@ -1010,11 +1010,20 @@ api, b = fund_bot(1500.0, inv={"G1": 3000}, books=VB, alloc_enabled=True, alloc_
 fp = [pr for pr in b.alloc_pairs if pr.get("fund")]
 check("within alloc_max_turnover_per_hour (500): the funding sale is cut to it (617 shares at 0.81)",
       len(fp) == 1 and fp[0]["sell"]["qty"] == int(500 / 0.81), [pr["sell"] for pr in fp])
-# the others leave the shortfall alone while the round is open
+# the others leave the shortfall alone while the round is open - and there is cash to protect for it
 api, b = fund_bot(1500.0)
+check("a round short but unfundable (the $500 above the reserve spent, no funding sale): ma_short > 0 but NOTHING "
+      "held back (hold_usd 0, quote_hold_usd 0): the allocator / ladder / quoter are not paused for nothing",
+      b.ma_short > 5000 and b.ma_hold == 0 and b.ma_quote_hold == 0 and b.mom_status()["short_usd"] > 5000,
+      (b.ma_short, b.ma_hold, b.ma_quote_hold))
+api, b = fund_bot(1500.0, inv={"G1": 3000}, books=VB, alloc_enabled=True)
+check("...a funding sale pending (or its proceeds unspent): the shortfall IS held (hold_usd)", b.ma_hold > 5000
+      and abs(b.mom_status()["hold_usd"] - b.ma_hold) < 0.01, b.ma_hold)
+api, b = fund_bot(5000.0, momentum_writes_frac=0.0)   # (no order this tick: the cash above the reserve is usable)
 hold = b.ma_hold
-check("a round open with a shortfall and candidates: ma_hold = the shortfall (status hold_usd)",
-      hold > 5000 and abs(b.mom_status()["hold_usd"] - hold) < 0.01, hold)
+check("...cash the sleeve can spend now (4,000 above the reserve): hold = the shortfall 10,000; the quotes leave the "
+      "kept-back 1,000 + the 4,000 (quote_hold_usd 5,000)", abs(hold - 10000) < 1e-6
+      and abs(b.ma_quote_hold - 5000) < 1e-6, (hold, b.ma_quote_hold))
 pr = {"buy": {"eid": "21", "short": False, "px": 0.56, "label": "Rep Utah Senate"}, "sold_at": -1e18,
       "status": "sold", "sell": {"kind": "cash"}}
 b.alloc_run = {}
@@ -1048,13 +1057,13 @@ check("...and yields the candidates' races (B / D / Ohio: 'momentum')",
 b.ma_hold = 0.0
 quiet(b.hv_tick, M.utcnow(), dict(api.inv), b.orders_by_eid(M.utcnow()), None, set())
 check("...the round funded (no shortfall): the ladder places again", sent and not b.hv_mom_paused, len(sent))
-api, b = fund_bot(1500.0)
+api, b = fund_bot(5000.0, momentum_writes_frac=0.0)
 seen = {}
 orig_setup = b.ladder_setup
 
 
 def spy(*a, **k):
-    seen.update(plan=b.cg_plan_left, cash=b.cash_left(), hold=b.ma_hold)
+    seen.update(plan=b.cg_plan_left, cash=b.cash_left(), hold=b.ma_quote_hold)
     return orig_setup(*a, **k)
 
 
@@ -1062,7 +1071,7 @@ b.ladder_setup = spy
 set_series(b, M.utcnow(), RISING)
 quiet(b.cycle)
 b.drain_writes(5)
-check("...the quoter's plan budget leaves the shortfall (cash left - ma_hold)",
+check("...the quoter's plan budget leaves the kept-back cash + what the sleeve can spend (cash left - quote_hold)",
       seen and seen["hold"] > 0 and abs(seen["plan"] - max(0.0, seen["cash"] - seen["hold"])) < 1e-6, seen)
 
 # ============================================================================================ flips
