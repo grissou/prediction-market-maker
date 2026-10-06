@@ -1,7 +1,7 @@
 <!-- STATUS (Finisher 2b, updated on every push) -->
-**STATUS ~12:30 UTC 6 Oct:** **Package 15 READY** = the harvest ladder ALONE on the live 64f27c8: `claude/mm-funding` fast-forwarded to ed65638 (also `claude/package15`). Staged file `deploy/package15/settings_override.harvest.json` = the live 14.2 file (value_sell_margin 0.01) + `tilt_harvest_ladder` on (+0/2/4/6c, 3k a level, edge >= 8%/$, 900-s requote) + `harvest_total_usd` 10000 (carved from the 20k MM reserve: MM keeps 10k; the refill target stays 20k = free cash + ladder resting) + `state_max_usd` 15000 (per-state collateral cap on ladder / allocator buys / takes / tail adding quotes; existing positions kept). Flags off = 64f27c8 byte-identical. Tests test_p15 138, test_p15_dryrun 34; 54 suites N/N + STRESS_LADDER 20/20.
-Dry run on the live state: AS IT IS the ladder rests almost nothing (free cash ~1.6k and the value-adds pause while risk room < 22k block 117 markets) - expect no new levels until the refill lifts free cash above ~10k and room above 22k; FUNDED (+25k) 6 levels / $5.0k in 2 h, all >= 8%, none crossing or at our own price; a +3c tilt hour then fills 8 levels / $8.1k at 12.6% per $ (+1.8k EV). Rhode Island on the snapshot 13.3k (owner: ~23k live) - every RI add stops at the cap at once. Package 16 (the armed momentum sleeve on top of 15) building next.
-Package 13 (1fdd467, claude/finisher-package9) predates 14-14.2 and is NOT to be deployed; it is the source of the ports. Tilt outlook: analysis/p15/TILT_PATHS.md.
+**STATUS ~14:30 UTC 6 Oct:** **Package 16 READY** = the armed momentum sleeve ported onto Package 15: `claude/mm-funding` fast-forwarded to d9220c1 (also `claude/package16`; Package 15 = ed65638 = `claude/package15`). Deployment order (owner 11:00): 14.1/14.2 (LIVE 64f27c8) -> Package 15 (deploy/package15/settings_override.harvest.json) -> Package 16 (deploy/package16/settings_override.momentum_armed.json = the P15 file + momentum_enabled/momentum_auto true, momentum_force false, the C defaults explicit; 88 keys). Flags off = ed65638 byte-identical; tests test_p16 233, test_p16_dryrun 37; 56 suites N/N + STRESS_LADDER 20/20.
+Sleeve: armed; trigger slope_24h >= 0.5 pt/day AND slope_6h > 0 held 4 h from other traders' prices (seeded from market_data.sqlite at start: snap04 reads +2.29 / +0.42); ramp 10k + 10k per 6 h of rising tilt to <= momentum_max_usd 40k; funding (a) free cash above the MM effective reserve + ladder carve-out (+ election_holdback_usd hook, 0) -> (b) the MM reserve only while mm_carry_24h < 300/day -> (c) value lowest edge first via the 14.1 refill sale path, never below the floor; flip into the ladder on slope_24h <= 0 / profit target 25% / mom_exit_utc / manual; kill at 75% of cost; rule 5 (no fake buying; the ladder leaves a sleeve leg's whole race). Dry run on the live state: the trigger would be ON 4 h after the seed on the 4 Oct data but it buys $0 as the live state is (free cash 1.6k, nothing sellable at the floor) - and today's live tilt_s is FALLING (0.137 -> 0.109), so slope_24h is negative: expect "armed - waiting" for now. Funded (+45k): first round 10k in 15 markets, ramp 20/30/40k at +6/12/18 h, flip at slope -1.9 sold over ~6 h, kill on -30% after 120 s.
+Package 13 (1fdd467) is NOT to be deployed; it is the source of the ports. Tilt outlook: analysis/p15/TILT_PATHS.md.
 
 # START HERE (Team run, branch `claude/run-c-tournament-improvements-pycdet`)
 
@@ -9,6 +9,29 @@ Status: **complete** (Team complete at 14:45 UTC) (started 2026-10-02 08:50 UTC;
 The Builder's previous START_HERE is kept as `START_HERE_BUILDER.md`; Run A's notes are `ENGINEERING_NOTES.md`.
 Plan: `PLAN.md`. Packages appear below as they become READY (commit messages start "READY: Package N").
 Deploy only commits whose message starts "READY"; the branch is cumulative.
+
+## Package 16 (READY, 6 Oct; branch `claude/package16` on ed65638 = Package 15): the ARMED momentum sleeve (OFF by default; staged file in `deploy/package16/`)
+**The brief (11:00):** Package 13's sleeve + its automation on Package 15 - `momentum_auto` armed; trigger slope_24h >=
+0.5 pt/day AND slope_6h > 0 held 4 h (other traders' prices only); ramp 10k steps to <= 40k; flip into the harvest ladder
+on slope_24h <= 0 / the profit target / the date; kill at 75% of cost; funding (a) free cash above the kept-back cash ->
+(b) the MM reserve only if mm_carry_24h < 300/day -> (c) value sales lowest edge first never below the floor; no fake
+buying. Triggered, never forced (TILT_PATHS 4.2).
+**Built (flags off byte-identical to ed65638):** `momentum_enabled` / `momentum_auto` / `momentum_force` /
+`momentum_exit` / `momentum_max_usd` 40k + the Package 13 C settings; TiltSlope seeded from market_data.sqlite; the sleeve
+first among the traders (step 6a'); funding (c) through the allocator's refill sale path, floor always kept; the ladder
+leaves a leg's whole race; a round holds back the allocator / ladder / quotes only when it has cash to protect.
+`election_holdback_usd` is a hook (0). Status `momentum`, journal "MOMENTUM eval ...", ALERTs on/off/re-arm/kill.
+**Dry run** (`analysis/p16/DRYRUN_P16.md`, 37 checks): 4 Oct 15:57 seed -> slope_24h +2.29, slope_6h +0.42, ON after
+4 h; on the live state as it is it buys $0 (free cash 1.6k < 20k kept back, nothing above the floor) and holds nothing
+back; funded (+45k) it buys $10k in 15 markets, ramps 10k -> 40k target in 18 h of rising tilt, flips on slope <= 0, kills
+on -30%.
+**Suites:** `tests/test_p16.py` 233 + `tests/test_p16_dryrun.py` 37; all 56 suite files N/N + `STRESS_LADDER=1` 20/20.
+**Deploy:** after Package 15 is live: handover to the branch head, then `mv` `settings_override.momentum_armed.json`
+(= the Package 15 file + the P16 keys). **Watch:** the "MOMENTUM tilt series seeded ... slope24 / slope6" line vs your
+tilt_s trend (expect slope24 < 0 today: armed, no buys), "MOMENTUM eval: armed ..." lines, no buy before the 4-h confirm
+and its ALERT, `momentum.funded_from`, `harvest.paused_for_momentum` during a funded round, writes <= 28.
+**Rollback:** the Package 15 file (legs then held: `momentum_exit` true first if they should go); code ed65638.
+Details: `deploy/package16/README.md`.
 
 ## Package 15 (READY, 6 Oct; branch `claude/package15` on the LIVE head 64f27c8 = Package 14.2; NOT merged with Package 13): the harvest ladder alone + a per-state collateral cap (OFF by default; staged file in `deploy/package15/`)
 **The brief (11:00):** the Package 13 harvest ladder ALONE on 64f27c8; `harvest_total_usd` (10k) carved from
