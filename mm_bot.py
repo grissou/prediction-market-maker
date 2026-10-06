@@ -1402,7 +1402,8 @@ class Config:
     #    collateral (an ask sells the YES held first - covered - then is a short: 1 - price a share; a bid where we
     #    hold NO goes out as a covered "sell NO" of what is held, cash-free). Caps: the market's position at p + the
     #    ladder's adds <= alloc_max_contract_usd (the per-market $ cap the allocator's value buys keep), the state cap
-    #    (3), the carve-out (2), the cash gate keeping the MM's effective reserve, at most harvest_max_markets markets
+    #    (3), the carve-out (2), the cash gate keeping the MM's effective reserve, no adds while value adds are paused
+    #    (mm_risk_reserve_*: the ladder's levels are tail adds - only covered ones), at most harvest_max_markets markets
     #    (markets already laddered first, then the best edge at the touch) and harvest_writes_frac of the cycle's
     #    writes left (pulls always), batch_size orders a write. Resting MAX_ORDER_TTL, tagged "harvest" in the order
     #    notes, hidden from the quote planner (plan_exchange: the quote's bid kept a tick below our harvest asks); the
@@ -11899,7 +11900,8 @@ class Bot:
             if o.order_id not in hv_ids:
                 own[o.eid].append(o)
         carve_left = float(cfg.harvest_total_usd)
-        n = 0
+        paused = bool(getattr(self, "mmr_paused", False))   # P12 ops mm_risk_reserve_*: value adds paused -> the
+        n = 0                                               #  ladder's levels only sell what is held (covered)
         for e, ex, p, ask_side, book, t, edge0 in sorted(cands, key=lambda c: (c[0] not in laddered, -c[6], c[0])):
             if n >= cfg.harvest_max_markets:
                 why[e] = "max markets"
@@ -11944,7 +11946,8 @@ class Bot:
                     qty = cov
                 else:
                     cov = int(min(want, free) + 1e-9) if ask_side else 0
-                    caps = {"market_cap": max(0.0, room_m - used) / max(val, TICK),
+                    caps = {"mm_risk_reserve": 0.0 if paused else float("inf"),   # (P12 ops: tail adds paused)
+                            "market_cap": max(0.0, room_m - used) / max(val, TICK),
                             "state_cap": max(0.0, room_s - used) / max(val, TICK),
                             "carve": max(0.0, carve_left - carve) / max(lock, TICK)}
                     add = want - cov

@@ -575,6 +575,20 @@ plans, why = plan(b)
 check("state_max_usd 0 (off): the RI ladders are planned (only the market / carve caps)",
       any(e in plans for e in ("R1", "R2")), why)
 
+# the P12 ops pause (value adds paused on the risk room): the ladder's levels are tail adds
+api, b = mk_bot(tilt_harvest_ladder=True, refs=ALPHA, inv={"A2": 2000}, **BIG)
+warm(b)
+b.mmr_paused = True
+plans, why = plan(b)
+check("value adds paused (mm_risk_reserve_*): covered levels only - A2 sells its 2000 YES at 0.10, no short; A1 "
+      "(nothing held) none, why mm_risk_reserve", lv(plans, "A2") == [(0.10, 2000)] and "A1" not in plans
+      and why.get("A1") == "mm_risk_reserve", (lv(plans, "A2"), why.get("A1")))
+api, b = laddered()
+b.mmr_paused = True
+hv(b)
+check("...the pause starting while levels rest: every adding level is pulled", not b.hv_orders() and not api.orders,
+      ours(api, "A2"))
+
 # the MM's effective reserve at the gate
 api, b = mk_bot(tilt_harvest_ladder=True, refs=ALPHA, alloc_mm_reserve=20000.0, cash=12000.0,
                 alloc_max_contract_usd=1e5)
