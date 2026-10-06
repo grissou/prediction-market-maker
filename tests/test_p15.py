@@ -413,8 +413,9 @@ if os.path.exists(os.path.join(SNAP, "md.sqlite")):
 check("the snapshot's 237 market labels read", len(labels) == 237, len(labels))
 got = {lb: M.state_of(lb) for lb in labels}
 check("every label maps to a state but the 4 headline U.S. House / U.S. Senate ones (None)",
-      sorted(lb for lb, s in got.items() if s is None) == ["Dem U.S. House", "Dem U.S. Senate", "Rep U.S. House",
-                                                           "Rep U.S. Senate"], [lb for lb, s in got.items() if s is None])
+      sorted(lb for lb, s in got.items() if s is None)
+      == ["Dem U.S. House", "Dem U.S. Senate", "Rep U.S. House", "Rep U.S. Senate"],
+      [lb for lb, s in got.items() if s is None])
 exp = {}
 for lb in labels:
     rest = lb.split(" ", 1)[1]
@@ -817,7 +818,8 @@ check("harvest_writes_frac 0: no placement", not b.hv_orders() and not api.order
 api, b = mk_bot(tilt_harvest_ladder=True, harvest_max_markets=1, **BIG)
 warm(b)
 hv(b)
-check("harvest_max_markets 1: one market only", len({o.eid for o in b.hv_orders()}) == 1, {o.eid for o in b.hv_orders()})
+check("harvest_max_markets 1: one market only", len({o.eid for o in b.hv_orders()}) == 1,
+      {o.eid for o in b.hv_orders()})
 api, b = mk_bot(tilt_harvest_ladder=True, live=False, **BIG)
 warm(b)
 n_w = len(api.wire)

@@ -380,7 +380,8 @@ def scenario0():
           strip(sn) == strip(sb) and len(sn) > 0, (len(sn), len(sb)))
     check("s0: ...and the same status.json (but timings, HARVEST_KEYS and mm_funding)",
           norm_status(stn) == norm_status(stb) and "harvest" not in stn and "state_caps" not in stn,
-          [k for k in set(norm_status(stn)) | set(norm_status(stb)) if norm_status(stn).get(k) != norm_status(stb).get(k)])
+          [k for k in set(norm_status(stn)) | set(norm_status(stb))
+           if norm_status(stn).get(k) != norm_status(stb).get(k)])
     off = {**json.load(open(STAGED)), "tilt_harvest_ladder": False, "state_max_usd": 0}
     so, _ = s0_run(M, "s0o", write_file(off, "staged_off.json"))
     check("s0: the staged file with tilt_harvest_ladder false and state_max_usd 0 = the live file (same orders)",
@@ -466,7 +467,7 @@ def scenario_a():
 def scenario_b():
     out("## Scenario B: the funded fixture (+$25,000 cash), the staged file, 2 h")
     api, b = build(live_file())
-    api.cash += 25000.0                           # (the cash arrives with the staged file: the next cycle's read sees it)
+    api.cash += 25000.0                           # (the cash arrives with the staged file: the next read sees it)
     free0 = api.cash - api.cash_locked() - api.cash_hold
     P.apply_stage(b, STAGED)
     P.cycles(b, 1, step=60.0, stage="fund")
@@ -541,7 +542,8 @@ def scenario_b():
     for e, lv in sorted(lad.items(), key=lambda kv: -sum(x[5] for x in kv[1])):
         p = pval(b, e)
         out(f"| {b.ex[e].label} | {b.st_key(e) or '-'} | {p:.3f} | " + " ".join(
-            f"{'bid' if x[1] else 'ask'} {x[2]:.3f}x{x[3]:.0f} ({100 * x[4]:.1f}%)" for x in sorted(lv, key=lambda x: x[2]))
+            f"{'bid' if x[1] else 'ask'} {x[2]:.3f}x{x[3]:.0f} ({100 * x[4]:.1f}%)"
+            for x in sorted(lv, key=lambda x: x[2]))
             + f" | {sum(x[5] for x in lv):,.0f} |")
     out()
     caps = st.get("state_caps") or {}
