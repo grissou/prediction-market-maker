@@ -443,6 +443,9 @@ def scenario_a():
           [(o["label"], o["free"], o["need"]) for o in bad_send[:3]])
     check("A: the carve-out never exceeded: resting harvest collateral <= 10,000 at every sample",
           all(r[2] <= 10000 + 1 for r in rows), [r[2] for r in rows])
+    ri_end = ((st.get("state_caps") or {}).get("RI") or {}).get("collateral", 0.0)
+    check("A: Rhode Island's adds stop at the 15,000 cap (the swaps' buys trimmed to the room; positions kept)",
+          ri_end <= 15000 + 600, ri_end)
     STATE["A"] = dict(rows=rows, h=h, mf=mf, orders=len(hv_o), traded=sum(1 for o in hv_o if o["traded"] > 0),
                       blocked=h.get("blocked_by") or {}, state_caps=st.get("state_caps") or {})
     lad = ladder_view(b, api)
@@ -452,6 +455,10 @@ def scenario_a():
         f"; refill sold ${mf.get('refill_sold_usd', 0):,.0f} (24 h); value adds paused {b.mmr_paused}")
     out(f"- blocked_by (markets without a ladder, by reason): {h.get('blocked_by')}")
     out(f"- state_caps: {st.get('state_caps')}")
+    ri = (st.get("state_caps") or {}).get("RI") or {}
+    out(f"- Rhode Island: {STATE['ri0']:,.0f} at the seed -> {ri.get('collateral', 0):,.0f} after 2 h (the allocator's "
+        f"swap buys - short YES on Rep Rhode Island Senate - added up to the cap and stopped there: "
+        f"{ri.get('blocked_adds', 0)} adds held back)")
     out("| min | levels | $ resting | free cash | reserve cash | room wc | paused | refill sold 24h | blocked_by |")
     out("|---|---|---|---|---|---|---|---|---|")
     for r in rows:
@@ -676,7 +683,9 @@ def summarise():
              f"reserve is 10,000) and value adds paused on the worst-case room -> the ladder rests "
              f"{ha.get('levels_resting', 0)} levels (${ha.get('collateral_resting', 0):,.0f}); it starts once the "
              "refill has the free cash above 10,000 and the room is back above 1.1 x 20,000 (both existing limits). "
-             f"blocked_by {ha.get('blocked_by')}.")
+             f"blocked_by {ha.get('blocked_by')}. The state cap works at once: the allocator's swap buys took RI "
+             f"from {STATE.get('ri0', 0):,.0f} to "
+             f"{((A.get('state_caps') or {}).get('RI') or {}).get('collateral', 0):,.0f} and stopped at the cap.")
     hb = B.get("h") or {}
     s.append(f"- **B, funded (+25k):** {hb.get('levels_resting', 0)} levels in {hb.get('markets', 0)} markets, "
              f"${hb.get('collateral_resting', 0):,.0f} resting of the 10,000 carve-out "

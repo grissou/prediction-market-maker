@@ -10863,8 +10863,9 @@ class Bot:
                     lim = max(0.0, st_room.get(sk, cfg.state_max_usd)) / max(per, 1e-9)
                     if lim < x - 1e-9:
                         x = lim
+                        blocked["state_cap"] += 1
+                        self.st_blocked[sk] += 1
                         if x < self.ALLOC_MIN_USD:
-                            blocked["state_cap"] += 1
                             bi += 1
                             continue
             if x < self.ALLOC_MIN_USD:
