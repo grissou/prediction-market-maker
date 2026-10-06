@@ -1389,6 +1389,56 @@ class Config:
     #    ev_gain_realised_24h}, and a WARNING while value_sell_margin > 0.01 (the swap margin makes a raised one moot).
     alloc_swap_sell_margin: float = 0.0
     alloc_swap_min_gain: float = 0.05
+    # --- P15: the harvest ladder alone + a per-state collateral cap (owner, 6 Oct 11:00 UTC; everything OFF) ---
+    # Package 13's harvest ladder (1fdd467, analysis/p12/SPEC_P13_AGGRESSIVE.md section 4) ported ALONE onto 14.2:
+    # no momentum sleeve / buckets / election holdback / aggr_* caps here.
+    # 1. tilt_harvest_ladder True: sell the tilt as a MAKER (Bot.hv_tick, cycle step 6e, after the allocator). Every
+    #    market with a fresh liquid race-scaled p (alloc_p) that is not a basket leg, a headline (party-control) market
+    #    (unless alloc_headline) or a P12 set-ladder market: a LONGSHOT (p <= 0.10) gets resting YES ASKS at its best
+    #    other ask + each harvest_offsets, a FAVOURITE (p >= 0.90) resting YES BIDS at its best other bid - each
+    #    offset; a level only where its edge per $ of collateral clears harvest_min_edge ((ask - p) / (1 - ask),
+    #    (p - bid) / bid), never at / through the other side of the book, never at / through our own orders there and
+    #    never at the price of our own resting quote on that side (skipped, never clipped); each harvest_level_usd of
+    #    collateral (an ask sells the YES held first - covered - then is a short: 1 - price a share; a bid where we
+    #    hold NO goes out as a covered "sell NO" of what is held, cash-free). Caps: the market's position at p + the
+    #    ladder's adds <= alloc_max_contract_usd (the per-market $ cap the allocator's value buys keep), the state cap
+    #    (3), the carve-out (2), the cash gate keeping the MM's effective reserve, at most harvest_max_markets markets
+    #    (markets already laddered first, then the best edge at the touch) and harvest_writes_frac of the cycle's
+    #    writes left (pulls always), batch_size orders a write. Resting MAX_ORDER_TTL, tagged "harvest" in the order
+    #    notes, hidden from the quote planner (plan_exchange: the quote's bid kept a tick below our harvest asks); the
+    #    market maker does not quote the ladder's side on a laddered market except what reduces a position, net of the
+    #    harvest levels on that side (P13 RT13-2). Re-quoted when a level is > 1c off its target or p moved > 1c, else
+    #    at most every harvest_requote_s (an order exactly at its target keeps its queue spot); a level gone is
+    #    re-placed at once. Pulled at once when p is unknown, reduce-only (the tripwire), the pre-close stop or the
+    #    flag goes off (the kill switch cancels everything). A batch whose outcome is unknown (timeout / 409 / 5xx):
+    #    its levels are adopted from the next orders read (P13 RT13-1), never placed twice. Fills are VALUE positions
+    #    (held to the outcome; the value floor protects them): journal "HARVEST fill ...", fill class "harvest" in
+    #    mm_carry_24h (key only once one exists), status.json "harvest", a " | harvest ..." summary piece.
+    # 2. harvest_total_usd: the ladder's collateral budget, CARVED FROM alloc_mm_reserve. It is a budget for RESTING
+    #    collateral (the cash our resting harvest levels lock). The MM's own reserve is alloc_mm_reserve -
+    #    harvest_total_usd (mm_reserve_effective: 20k - 10k = 10k live): the ladder places only through the cash
+    #    gate with that much held back, so it never takes the MM's cash below it. The whole reserve is still refilled:
+    #    the refill / swaps / spare-cash buys / take_respect_reserve count the cash locked in resting harvest levels
+    #    (up to harvest_total_usd) as part of the reserve (free cash + ladder resting >= alloc_mm_reserve), so the
+    #    refill target stays alloc_mm_reserve. A FILLED level is a value position: its collateral is value collateral
+    #    (the state cap, alloc_max_contract_usd) and it frees its budget slot for the next level - the ladder recycles
+    #    its budget into fills, the refill tops the reserve back up.
+    # 3. state_max_usd > 0: a per-STATE collateral cap (state_of(label): "Rep Rhode Island Senate", "Dem RI-01 House
+    #    race" -> "RI"; the headline U.S. House / Senate markets have no state). Collateral = longs q x p, shorts |q| x
+    #    (1 - p) (p the liquid race-scaled Polymarket price, else the exchange's mark, else the fair value) + the cash
+    #    our resting orders there lock. Existing positions are KEPT (never a forced reduce); ADDS stop at the cap: the
+    #    harvest ladder, the allocator's buys (swaps, spare cash; blocked_by "state_cap"), the stale-quote takes and
+    #    the quoter's adding side in the tails (outside value_mid_low..value_mid_high; the R3 ladder too). status.json
+    #    state_caps {state over 50% of the cap: {collateral, cap, blocked_adds}}. 0 = off.
+    tilt_harvest_ladder: bool = False
+    harvest_offsets: tuple = (0.0, 0.02, 0.04, 0.06)   # YES-price offsets away from the touch (asks up, bids down)
+    harvest_level_usd: float = 3000.0     # collateral per level, $
+    harvest_min_edge: float = 0.08        # edge per $ of collateral a level must clear
+    harvest_max_markets: int = 237        # laddered markets, at most
+    harvest_writes_frac: float = 0.4      # placements / re-quotes a cycle <= this x the writes left (pulls: always)
+    harvest_requote_s: float = 900.0      # a ladder is re-quoted at most this often unless a level / p moved > 1c
+    harvest_total_usd: float = 10000.0    # the ladder's resting collateral budget, carved from alloc_mm_reserve
+    state_max_usd: float = 0.0            # per-state collateral cap, $ (0 = off; staged 15,000)
 
 
 CFG = Config()
@@ -1687,6 +1737,16 @@ OVERRIDABLE = {
     # --- P14.2: a swap-only value-floor margin ---
     "alloc_swap_sell_margin": (0.0, 0.10),
     "alloc_swap_min_gain": (0.0, 0.5),
+    # --- P15: the harvest ladder alone + a per-state collateral cap ---
+    "tilt_harvest_ladder": (False, True),
+    "harvest_offsets": (0.0, 0.2),       # a list of 1..LADDER_MAX_LEVELS offsets, each in 0..0.2
+    "harvest_level_usd": (0.0, 50000.0),
+    "harvest_min_edge": (0.0, 2.0),
+    "harvest_max_markets": (0, 1000),
+    "harvest_writes_frac": (0.0, 1.0),
+    "harvest_requote_s": (60.0, 7200.0),
+    "harvest_total_usd": (0.0, 100000.0),
+    "state_max_usd": (0.0, 200000.0),
 }
 P141_REFILL = ("alloc_cancel_mm_first", "alloc_rank_all_markets",   # P14.1: the flags that need
                "alloc_refill_ignore_prefer_short")                 #  mm_refill_fast to do anything
@@ -4120,6 +4180,47 @@ class Ex:
     lad_tag: str = ""                     # " L3" on the quote log line while 3 ladder orders rest
     lad_ctx: tuple = (1.0, 1.0, None)     # ...decide's (adding_factor, adding_limit_factor, frag_limit) this cycle
     mmr_tail: bool = False                # P12 ops: value adds paused and a tail market (decide; the ladder too)
+    st_caps: tuple | None = None          # P15 state_max_usd: decide's (bid, ask) adding caps in shares (the ladder)
+
+
+US_STATES = {
+    "Alabama": "AL", "Alaska": "AK", "Arizona": "AZ", "Arkansas": "AR", "California": "CA", "Colorado": "CO",
+    "Connecticut": "CT", "Delaware": "DE", "Florida": "FL", "Georgia": "GA", "Hawaii": "HI", "Idaho": "ID",
+    "Illinois": "IL", "Indiana": "IN", "Iowa": "IA", "Kansas": "KS", "Kentucky": "KY", "Louisiana": "LA",
+    "Maine": "ME", "Maryland": "MD", "Massachusetts": "MA", "Michigan": "MI", "Minnesota": "MN", "Mississippi": "MS",
+    "Missouri": "MO", "Montana": "MT", "Nebraska": "NE", "Nevada": "NV", "New Hampshire": "NH", "New Jersey": "NJ",
+    "New Mexico": "NM", "New York": "NY", "North Carolina": "NC", "North Dakota": "ND", "Ohio": "OH", "Oklahoma": "OK",
+    "Oregon": "OR", "Pennsylvania": "PA", "Rhode Island": "RI", "South Carolina": "SC", "South Dakota": "SD",
+    "Tennessee": "TN", "Texas": "TX", "Utah": "UT", "Vermont": "VT", "Virginia": "VA", "Washington": "WA",
+    "West Virginia": "WV", "Wisconsin": "WI", "Wyoming": "WY", "District of Columbia": "DC"}
+_STATE_CODES = set(US_STATES.values())
+_STATE_NAMES = sorted(US_STATES, key=len, reverse=True)       # (longest first: "West Virginia" before "Virginia")
+_STATE_CODE_RE = re.compile(r"^([A-Z]{2})(?:-(?:\d{1,2}|AL))?(?=\s|$)")
+
+
+def state_of(label):
+    """P15: the US state a market belongs to, as its postal code ("Rep Rhode Island Senate", "Dem Rhode Island
+    Governor", "Ind RI Governor", "Dem RI-01 House race" -> "RI"), or None (the headline "U.S. House" / "U.S. Senate"
+    markets, anything unrecognised). The label's first word (the party: "Rep", "Dem", "Ind", ...) is skipped when the
+    whole label does not start with a state."""
+    if not isinstance(label, str) or not label.strip():
+        return None
+    s = " ".join(label.split())
+    tries = [s]
+    if " " in s:
+        tries.append(s.split(" ", 1)[1])
+    for t in tries:
+        if t.startswith("U.S.") or t.startswith("US "):
+            return None
+        m = _STATE_CODE_RE.match(t)
+        if m and m.group(1) in _STATE_CODES:
+            return m.group(1)
+        low = t.lower()
+        for name in _STATE_NAMES:
+            n = name.lower()
+            if low == n or low.startswith(n + " "):
+                return US_STATES[name]
+    return None
 
 
 def busy(ex, now_m):
@@ -4195,6 +4296,7 @@ class Bot:
         self.basket_init(self.load_basket())   # Package 9 F1: the long-tilt basket (restored from status.json)
         self.alloc_init(self.load_status_key("alloc"))   # Package 10 B: the allocator (last run, turnover)
         self.mmf_init(self.load_status_key("mm_funding"))   # P14: MM inventory lots, alert state (status.json)
+        self.p15_init()                                     # P15: the harvest ladder, the state cap (this run)
         self.pos_marks = {}             # {eid: the exchange's own valuation price of the position (currentPrice)}
         self.fv_fallback_logged = {}      # {eid: source} - which fallback risk_fv used for a held position (logged once)
         self.mark_sd = {}                 # eid -> sd of the 10-min mid change (mark_frag_*; from the recorder)
@@ -4268,6 +4370,7 @@ class Bot:
         self.refs = self.load_reference_prices()
         self.ref_version_seen = 0         # last Polymarket reading the jump guard has looked at
         self.last_tops = {}               # latest bulk best bid/ask per exchange (for recording)
+        self.last_tops_at = {}            # (when each was read, monotonic: P15 hv_top_moved)
         self.other_tops = {}              # eid -> (other traders' best bid, best ask, time read) from bulk prices
         self.ref_tops = {}                # eid -> (best bid, best ask): R5 priced it from other_tops this cycle
         self.trading_since = None         # time.monotonic() when the trading loop started (startup priming)
@@ -4783,6 +4886,8 @@ class Bot:
             self.health["bloc_delta"] = round(self.bloc_delta, 2)
             self.health["bloc_delta_frac"] = round(self.bloc_delta / equity, 4) if equity else None
 
+        if self.st_on():                          # P15 state_max_usd: each state's collateral this cycle
+            self.st_refresh(inv, now_m)
         # 6b. Take tournament quotes that Polymarket says are clearly stale (confirmed over 2 readings) ---
         taken = (self.take_stale_quotes(refs, liquid, fvs, inv, mine_real, global_reduce, party_delta, now_m)
                  if self.running else set())
@@ -4814,6 +4919,15 @@ class Bot:
             except Exception:                         # an allocator bug must never stop the market maker
                 self.orders_stale = True
                 log.exception("allocator tick failed - skipped this cycle")
+        # 6e. P15: the harvest ladder (resting maker levels; pulls)
+        if self.running and self.hv_on():
+            try:
+                taken |= self.hv_tick(now, inv, mine_real, now_m, skip=taken | arb_races)
+            except ApiError:
+                raise                                 # (as the takes: the cycle's own error handling)
+            except Exception:                         # a ladder bug must never stop the market maker
+                self.orders_stale = True
+                log.exception("harvest ladder tick failed - skipped this cycle")
 
         self.phase_mark("fills_risk_takes")
         # 7. Decide + reconcile each exchange. One write at a time (parallel_writes = 1): cancels happen now,
@@ -5194,6 +5308,7 @@ class Bot:
             else:
                 tops.update(res)
         self.last_tops = tops
+        self.last_tops_at = dict.fromkeys(tops, now_m)
         self.note_other_tops(tops, mine_real, now_m)
 
         extra = []
@@ -5234,6 +5349,7 @@ class Bot:
                 log.warning("bulk re-check failed for %d books (%s)", len(chunk), res)
                 continue
             self.last_tops.update(res)
+            self.last_tops_at.update(dict.fromkeys(res, now_m))
             self.note_other_tops(res, mine_real, now_m)
             for eid in chunk:
                 ex = self.ex.get(eid)
@@ -6053,6 +6169,25 @@ class Bot:
             self.mmr_tail_now = getattr(self, "mmr_tail_now", 0) + held
             bid_cap = red_bid if bid_cap is None else min(bid_cap, red_bid)
             ask_cap = red_ask if ask_cap is None else min(ask_cap, red_ask)
+        # P15: the harvest ladder's side quotes only what reduces this position (the ladder is that side), less what
+        # our harvest levels there already offer (P13 RT13-2)
+        hv_s = (getattr(self, "hv_sides", None) or {}).get(ex.eid)
+        if hv_s == "bid":
+            red = max(0, int(-ex.inv - self.hv_side_qty(ex.eid, True)))
+            bid_cap = red if bid_cap is None else min(bid_cap, red)
+        if hv_s == "ask":
+            red = max(0, int(ex.inv - self.hv_side_qty(ex.eid, False)))
+            ask_cap = red if ask_cap is None else min(ask_cap, red)
+        # P15 state_max_usd: in the tails the side ADDING to this position stops at the state's collateral cap
+        ex.st_caps = self.st_quote_caps(ex, fv, ref, ref_liquid) if self.st_on() else None
+        if ex.st_caps is not None:
+            sb, sa = ex.st_caps
+            if sb is not None and (bid_cap is None or bid_cap > sb):
+                self.st_count(ex, "quote")
+                bid_cap = sb
+            if sa is not None and (ask_cap is None or ask_cap > sa):
+                self.st_count(ex, "quote")
+                ask_cap = sa
 
         reduce_only = global_reduce or hrs <= self.close_window("flatten_hours_before_close", cfg)
         # From flatten_per_market_hours: flatten each market on its own, i.e. judge (and skew) by this
@@ -6589,6 +6724,16 @@ class Bot:
         if ex.mmr_tail and getattr(self, "mmr_paused", False):   # P12 ops mm_risk_reserve_*: tails only shrink a position
             extra[True].append(max(0.0, -inv))
             extra[False].append(max(0.0, inv))
+        hv_s = (getattr(self, "hv_sides", None) or {}).get(ex.eid)   # P15: the harvest ladder's side
+        if hv_s == "bid":
+            extra[True].append(max(0.0, -inv - self.hv_side_qty(ex.eid, True)))   # (P13 RT13-2)
+        if hv_s == "ask":
+            extra[False].append(max(0.0, inv - self.hv_side_qty(ex.eid, False)))
+        st_caps = getattr(ex, "st_caps", None)             # P15 state_max_usd: the adding side's room (decide)
+        if st_caps is not None:
+            for is_bid, c in zip((True, False), st_caps):
+                if c is not None:
+                    extra[is_bid].append(c)
         sign = PARTY_SIGN.get(ex.party, 0)
         if sign and getattr(cfg, "bloc_delta_enabled", False):   # Package 10 A2: room in bloc delta / sensitivity
             d, cap = self.party_measure(self.lad_party_delta)
@@ -6678,13 +6823,17 @@ class Bot:
 
     def plan_exchange(self, ex, q, resting, fv, now, now_m):
         """plan_exchange_core, except (Package 12 L1) that our rich-leg set ladder's orders resting here are left
-        alone: not seen by the quote's plan, never in a cancel-all, and the quote's ask kept above them."""
+        alone: not seen by the quote's plan, never in a cancel-all, and the quote's ask kept above them. P15: the
+        harvest ladder's orders too (its bids as the set ladder's; the quote's bid kept below its asks)."""
         meta = self.order_meta
-        lad = [o for o in resting if (meta.get(o.order_id) or {}).get("set_ladder")] if resting else []
+        lad = [o for o in resting if (meta.get(o.order_id) or {}).get("set_ladder")
+               or (meta.get(o.order_id) or {}).get("harvest")] if resting else []
         if not lad:
             return self.plan_exchange_core(ex, q, resting, fv, now, now_m)
-        ch = self.plan_exchange_core(ex, self.sl_guard_quote(ex, q, lad), [o for o in resting if o not in lad], fv,
-                                     now, now_m)
+        bids, asks = [o for o in lad if o.is_bid], [o for o in lad if not o.is_bid]
+        q = self.sl_guard_quote(ex, q, bids) if bids else q
+        q = self.hv_guard_quote(ex, q, asks) if asks else q
+        ch = self.plan_exchange_core(ex, q, [o for o in resting if o not in lad], fv, now, now_m)
         if ch is not None:
             ch.whole = False                      # (a cancel-all would take the ladder too)
         return ch
@@ -7122,6 +7271,8 @@ class Bot:
                         if o.eid == eid and o.is_bid and self.order_level(o) != level)
             if level == 0 and not (getattr(self.cfg, "no_set_aware_bids", False) and not sets_ok):
                 held -= sum(o.qty for o in self.sl_orders(eid))   # Package 12 L1: what our set ladder sells there
+            if level == 0 and getattr(self, "hv_sides", None):   # P15: what our harvest bids there buy back
+                held -= sum(o.qty for o in self.hv_orders(eid) if o.is_bid)
             held -= sum(q for lv, q in (getattr(self, "cover_planned", {}).get(eid) or {}).items() if lv != level)
         return max(0, int(held + 1e-9))
 
@@ -7451,7 +7602,7 @@ class Bot:
                               float(order["quantity"]))
         if need <= 1e-9:
             return False
-        if self.cash_left() - need < reserve - 1e-9:
+        if self.cash_left() + self.hv_carve_used() - need < reserve - 1e-9:   # (P15: the carve-out counts)
             self.take_reserve_blocked = getattr(self, "take_reserve_blocked", 0) + 1
             return True
         return False
@@ -9004,6 +9155,14 @@ class Bot:
                 self.mm_risk_count("takes")
                 log.info("take on %s skipped: value adds paused (mm_risk_reserve)", ex.label)
             qty = cut
+        if self.st_on() and qty >= 1:             # P15 state_max_usd: the adding part only within the state's room
+            red = int(min(qty, max(0.0, -inv) if buy else max(0.0, inv)))
+            add = self.st_add_room(ex, buy, qty - red)
+            if red + add < qty:
+                self.st_count(ex, "take")
+                if red + add < 1:
+                    log.info("take on %s skipped: the state cap (state_max_usd) is reached", ex.label)
+            qty = red + add
         if qty >= 1 and not self.writes_ready(3):
             # Checked BEFORE pulling our own quote (cancel + take + leftover cancel): a take that can't be sent
             # must not leave the market unquoted. The direction stays confirmed: taken once the budget frees.
@@ -10495,6 +10654,7 @@ class Bot:
         cfg = self.cfg
         blocked = defaultdict(int)
         pins = self.alloc_pins()
+        cash = cash + self.hv_carve_used()        # P15: the ladder's resting carve-out is part of the reserve
         fast = bool(getattr(cfg, "mm_refill_fast", False))
         rank_all = self.p141("alloc_rank_all_markets")   # P14.1 2: every holding ranked for the refill
         swap_m = self.p142_on()                   # P14.2: swaps have their own floor and the stricter hurdle
@@ -10586,7 +10746,7 @@ class Bot:
                     edge = (p - px) / px
                     if edge >= cfg.alloc_min_edge_buy - 1e-9:
                         levels.append({"eid": e, "label": ex.label, "short": False, "px": px, "edge": edge, "unit": px,
-                                       "avail": lv["quantity"] * px, **({"p": p} if swap_m else {})})
+                                       "avail": lv["quantity"] * px, **({"p": p} if swap_m else {}), "pv": p})
             if q <= 0:
                 for lv in (book.get("bids") or [])[:3]:
                     px = lv["price"]
@@ -10594,7 +10754,7 @@ class Bot:
                     if edge >= cfg.alloc_min_edge_buy - 1e-9:
                         levels.append({"eid": e, "label": ex.label, "short": True, "px": px, "edge": edge,
                                        "unit": 1 - px, "avail": lv["quantity"] * (1 - px),
-                                       **({"p": p} if swap_m else {})})
+                                       **({"p": p} if swap_m else {}), "pv": p})
         levels.sort(key=lambda o: (-o["edge"], o["eid"], o["px"]))
         if getattr(self, "global_reduce", False) and levels:   # (red team RT-2: no buy while in reduce-only;
             blocked["risk"] += 1                                #  reserve refills, which only reduce, still run)
@@ -10604,6 +10764,7 @@ class Bot:
             blocked["mm_risk_reserve"] += 1                     #  (the same: no buy; reserve refills still run)
             levels = []
         rfloor = self.alloc_room_floor() if net else None       # a swap may not take a room below this
+        st_room = self.st_rooms(inv, now_m) if self.st_on() else None   # P15 state_max_usd: {state: $ room}
         left = float("inf") if turnover_left is None else max(0.0, turnover_left)
         pairs, gain = [], 0.0
         hyp = {e: float(q) for e, q in inv.items()}
@@ -10689,6 +10850,18 @@ class Bot:
                 si += 1
                 continue
             x = min(h["avail"], o["avail"], room.get(o["eid"], 0.0), left)
+            sk = per = None
+            if st_room is not None:               # P15 state_max_usd: the buy's collateral at p within its state's room
+                sk = self.st_key(o["eid"])
+                if sk is not None:
+                    per = ((1 - o["pv"]) / max(1 - o["px"], TICK)) if o["short"] else o["pv"] / max(o["px"], TICK)
+                    lim = max(0.0, st_room.get(sk, cfg.state_max_usd)) / max(per, 1e-9)
+                    if lim < x - 1e-9:
+                        x = lim
+                        if x < self.ALLOC_MIN_USD:
+                            blocked["state_cap"] += 1
+                            bi += 1
+                            continue
             if x < self.ALLOC_MIN_USD:
                 if room.get(o["eid"], 0.0) < self.ALLOC_MIN_USD or o["avail"] < self.ALLOC_MIN_USD:
                     bi += 1
@@ -10727,6 +10900,8 @@ class Bot:
                           #                                                                  before each leg)
                           **({"swap": self.swap_record(s, h["p"], b, o["p"], x)} if swap else {})})   # P14.2
             gain += x * (o["edge"] - h["edge"])
+            if sk is not None:                    # P15: the state's room shrinks by this buy's collateral at p
+                st_room[sk] = st_room.get(sk, cfg.state_max_usd) - x * per
             h["avail"] -= x if cash_sell else s["usd"]
             o["avail"] -= x
             room[o["eid"]] = room.get(o["eid"], 0.0) - x
@@ -10849,7 +11024,7 @@ class Bot:
               # flight (their markets are skipped); 4ff7d91: only with no pairs in flight, at most every 60 s
               and (self.p141("alloc_rank_all_markets")
                    or (not self.alloc_pairs and now_m - self.mmf_refill_last_m >= self.MM_REFILL_GAP))
-              and self.cash_left() < cfg.alloc_mm_reserve - self.ALLOC_MIN_USD):
+              and self.cash_left() + self.hv_carve_used() < cfg.alloc_mm_reserve - self.ALLOC_MIN_USD):
             self.mm_refill_tick(inv, now_m, now, skip, turnover)
         writes = getattr(self.api, "writes_left", lambda: 10 ** 6)()
         n_left = int(min(cfg.alloc_max_orders_per_cycle, math.floor(cfg.alloc_writes_frac * max(0, writes) / 3 + 1e-9)))
@@ -10949,8 +11124,8 @@ class Bot:
             return False
         # P14.1 5: a netted swap's buy may spend the proceeds of its OWN sale even below the reserve (the cash the MM
         # reserve held before that sale is never touched); every other buy keeps to the cash above alloc_mm_reserve.
-        avail = self.cash_left() - cfg.alloc_mm_reserve
-        if pr.get("netting"):
+        avail = self.cash_left() + self.hv_carve_used() - cfg.alloc_mm_reserve   # (P15: the ladder's carve-out
+        if pr.get("netting"):                                                    #  resting counts as reserve)
             avail = max(avail, min(pr.get("proceeds", 0.0), self.cash_left()))
         if avail < (b["px"] if not b["short"] else 1 - b["px"]):
             self.alloc_block("cash")              # the cash read does not show the money (yet)
@@ -10978,6 +11153,14 @@ class Bot:
         if qty < 1:
             pr["status"] = "dropped"
             return False
+        if self.st_on():                          # P15 state_max_usd: the buy only within its state's room (it waits,
+            n_ok = self.st_add_room(ex, not b["short"], qty, p=p, commit=False)   # then expires: the cash stays)
+            if n_ok < qty:
+                self.alloc_block("state_cap")
+                self.st_count(ex, "alloc")
+                if n_ok < 1:
+                    return False
+                qty = n_ok
         order = {"exchangeId": b["eid"], "side": "yes", "action": "sell" if b["short"] else "buy", "quantity": qty,
                  "price": best, "tournamentId": self.tid,
                  "expirationDate": iso(utcnow() + timedelta(seconds=cfg.take_order_ttl))}
@@ -10993,6 +11176,8 @@ class Bot:
         if pr["sell"]["kind"] == "cash" and usd > 0:
             self.alloc_flows.append((now_w, usd))
         inv[b["eid"]] = q + (-done if b["short"] else done)
+        if done >= 1 and self.st_on():            # P15: the state's collateral grows by this buy (this cycle)
+            self.st_add_room(ex, not b["short"], done, p=p, commit=True, force=True)
         if done >= 1:
             pr["status"] = "bought"
             got = done * ((p - best) if not b["short"] else (best - p))   # P14.1 7: EV bought (realised, at p)
@@ -11474,6 +11659,609 @@ class Bot:
         return replace(q, ask=lo, ask_limit=max(lo, q.ask_limit) if q.ask_limit is not None else lo)
 
     # ------------------------------------------------------------------------------ fills
+    # ------------------------------------------------------------------------------ P15: harvest ladder, state cap
+    HARVEST_KEYS = ("harvest", "state_caps")   # status.json keys P15 adds (absent while unused; identity checks skip)
+    HV_LONGSHOT, HV_FAVOURITE = 0.10, 0.90   # the harvest ladder's bands: asks where p <= / bids where p >= these
+    HV_TOL = 0.01                 # a level more than this off its target, or p moved more since the re-quote: at once
+    HV_KEEP_MARGIN = 60.0         # at a re-quote an order exactly at its target stays if it outlives the next by this
+    HV_REFUSED_WAIT = 900.0       # the exchange refused a market's levels: not re-sent there before this (s)
+    ST_REPORT_FRAC = 0.5          # status state_caps: the states above this x state_max_usd
+
+    def p15_init(self):
+        """P15 state (this run): the harvest ladder's per-market re-quote state, its fills, and the state cap's
+        per-cycle collateral and blocked counters."""
+        self.hv_state = {}                        # eid -> {"at": monotonic re-quote time, "p": p then, "side"}
+        self.hv_plans = {}                        # this cycle's plans {eid: plan}
+        self.hv_why = {}                          # this cycle's reasons a market has no ladder {eid: why}
+        self.hv_sides = {}                        # eid -> "ask" / "bid": the ladder's side (decide, ladder_caps)
+        self.hv_refused = {}                      # eid -> monotonic time the exchange refused a level there
+        self.hv_fills = deque()                   # (wall, shares, edge $ at p, collateral $) of harvest fills, 24 h
+        self.hv_totals = {"placed": 0, "pulled": 0}
+        self.hv_info = {}                         # status.json "harvest"
+        self.st_coll = {}                         # state -> $ of collateral (positions at p + resting locks)
+        self.st_own = {}                          # eid -> {is_bid: $ our resting non-harvest orders there lock}
+        self.st_blocked = defaultdict(int)        # state -> adds held back by the cap (this run)
+        self.st_keys = {}                         # eid -> state (state_of(label), cached)
+
+    # --- the carve-out (harvest_total_usd from alloc_mm_reserve) ---
+    def hv_carve_used(self):
+        """$ of the reserve the ladder's RESTING levels hold now (the cash they lock, at most harvest_total_usd);
+        0 with the ladder off. The refill / spare cash / take reserve count it as reserve (cash + this >= target)."""
+        if not getattr(self.cfg, "tilt_harvest_ladder", False):
+            return 0.0
+        return min(float(self.cfg.harvest_total_usd), self.hv_resting_lock())
+
+    def hv_resting_lock(self):
+        return sum(self.resting_lock(o) for o in self.hv_orders()) if self.api.live else 0.0
+
+    def mm_reserve_effective(self):
+        """The cash the MM keeps for itself: alloc_mm_reserve - harvest_total_usd while the ladder is on (the ladder
+        never places below it), else alloc_mm_reserve."""
+        res = float(self.cfg.alloc_mm_reserve)
+        if not getattr(self.cfg, "tilt_harvest_ladder", False):
+            return res
+        return max(0.0, res - float(self.cfg.harvest_total_usd))
+
+    def hv_carve_fields(self):
+        """{"budget", "resting", "free"}: the carve-out (harvest_total_usd) and what the resting levels use."""
+        total = float(self.cfg.harvest_total_usd)
+        used = self.hv_resting_lock()
+        return {"budget": round(total, 2), "resting": round(used, 2), "free": round(max(0.0, total - used), 2)}
+
+    def place_orders_keep(self, orders, keep):
+        """place_orders with `keep` $ of the gate's cash held back (the MM's effective reserve): the gate sees that
+        much less while it trims / drops these orders. keep 0 or no gate: place_orders as it is."""
+        if keep <= 0 or not self.cash_gate_on() or getattr(self, "cg_cash", None) is None:
+            return self.place_orders(orders)
+        self.cg_spent = getattr(self, "cg_spent", 0.0) + keep
+        try:
+            return self.place_orders(orders)
+        finally:
+            self.cg_spent -= keep
+
+    # --- the per-state collateral cap (state_max_usd) ---
+    def st_on(self):
+        return float(getattr(self.cfg, "state_max_usd", 0.0) or 0.0) > 0
+
+    def st_key(self, eid):
+        """The state of a market (state_of its label; cached), or None."""
+        if eid not in self.st_keys:
+            ex = self.ex.get(eid)
+            self.st_keys[eid] = state_of(ex.label) if ex is not None else None
+        return self.st_keys[eid]
+
+    def st_px(self, ex, now_m=None):
+        """The value of one YES share for the state cap: the liquid race-scaled Polymarket p (alloc_p), else the
+        exchange's mark, else the fair value, else 0.5."""
+        p = self.alloc_p(ex, now_m)
+        if p is None:
+            p = (getattr(self, "pos_marks", None) or {}).get(ex.eid)
+        if p is None:
+            p = ex.last_fv
+        return min(1.0, max(0.0, float(p))) if p is not None else 0.5
+
+    def st_snapshot(self, inv, now_m=None, skip_ids=()):
+        """({state: $ collateral}, {eid: {is_bid: $ our other resting orders lock}}): positions at p (longs q x p,
+        shorts |q| x (1 - p)) + the cash our resting orders lock (resting_lock), but those in skip_ids."""
+        coll, own = defaultdict(float), {}
+        for e, q in (inv or {}).items():
+            ex = self.ex.get(e)
+            st = self.st_key(e) if ex is not None else None
+            if st is None or abs(float(q)) < 1:
+                continue
+            p = self.st_px(ex, now_m)
+            coll[st] += float(q) * p if q > 0 else -float(q) * (1 - p)
+        for o in (list(self.my_orders.values()) if self.api.live else []):
+            st = self.st_key(o.eid)
+            if st is None or o.order_id in skip_ids:
+                continue
+            lock = self.resting_lock(o)
+            coll[st] += lock
+            if not (self.order_meta.get(o.order_id) or {}).get("harvest"):
+                d = own.setdefault(o.eid, {True: 0.0, False: 0.0})
+                d[o.is_bid] += lock
+        return dict(coll), own
+
+    def st_refresh(self, inv, now_m=None):
+        """Cycle step 6 (state_max_usd > 0): this cycle's per-state collateral (the takes, the allocator, the ladder
+        and the quoter then add to it as they go)."""
+        try:
+            self.st_coll, self.st_own = self.st_snapshot(inv, now_m)
+        except Exception as err:                  # (a reporting-grade figure: never stops a cycle)
+            log.warning("state cap: collateral not computed (%s) - no state adds blocked this cycle", err)
+            self.st_coll, self.st_own = {}, {}
+
+    def st_rooms(self, inv, now_m=None):
+        """{state: $ left under state_max_usd} on these positions (and our resting orders)."""
+        coll, _ = self.st_snapshot(inv, now_m)
+        return {s: self.cfg.state_max_usd - c for s, c in coll.items()}
+
+    def st_count(self, ex, kind):
+        st = self.st_key(ex.eid) if ex is not None else None
+        if st is not None:
+            self.st_blocked[st] += 1
+
+    def st_add_room(self, ex, buy, n, p=None, commit=True, force=False):
+        """Shares (<= n) of an ADD on ex (buy: YES bought, else YES sold short) its state's room allows now, valued at
+        p (a long p a share, a short 1 - p); commit: the state's collateral grows by them (force: by all n). Markets
+        without a state: n."""
+        st = self.st_key(ex.eid)
+        n = int(max(0, n))
+        if st is None or n < 1:
+            return n
+        p = self.st_px(ex) if p is None else p
+        unit = max(p if buy else 1 - p, TICK)
+        room = self.cfg.state_max_usd - self.st_coll.get(st, 0.0)
+        ok = n if force else int(min(n, max(0.0, room) / unit) + 1e-9)
+        if commit and ok >= 1:
+            self.st_coll[st] = self.st_coll.get(st, 0.0) + ok * unit
+        return ok
+
+    def st_quote_caps(self, ex, fv, ref, ref_liquid):
+        """decide (state_max_usd > 0): (bid cap, ask cap) in shares for a TAIL market (its liquid race-scaled p, else
+        its fair value, outside value_mid_low..value_mid_high) of a state: the reducing part + what the state's room
+        allows at p (our own resting non-harvest orders on that side excluded: the quote replaces them). None for a
+        middle-band / stateless market (no cap)."""
+        st = self.st_key(ex.eid)
+        if st is None:
+            return None
+        p = self.value_p(ex, ref, ref_liquid)
+        p = fv if p is None else p
+        if p is None or self.cfg.value_mid_low <= p <= self.cfg.value_mid_high:
+            return None
+        own = self.st_own.get(ex.eid) or {True: 0.0, False: 0.0}
+        caps = []
+        for is_bid in (True, False):
+            room = self.cfg.state_max_usd - (self.st_coll.get(st, 0.0) - own.get(is_bid, 0.0))
+            unit = max(p if is_bid else 1 - p, TICK)
+            red = max(0, int(-ex.inv)) if is_bid else max(0, int(ex.inv))
+            caps.append(red + int(max(0.0, room) / unit + 1e-9))
+        return tuple(caps)
+
+    def st_status(self):
+        """status.json state_caps: {state over ST_REPORT_FRAC of the cap: {collateral, cap, blocked_adds}}."""
+        cap = float(self.cfg.state_max_usd)
+        return {s: {"collateral": round(c, 2), "cap": cap, "blocked_adds": int(self.st_blocked.get(s, 0))}
+                for s, c in sorted(self.st_coll.items()) if c > self.ST_REPORT_FRAC * cap}
+
+    # --- the harvest ladder ---
+    def hv_orders(self, eid=None):
+        """Our resting harvest-ladder orders (order_meta "harvest" = level + 1), on eid or everywhere."""
+        meta = self.order_meta
+        return [o for o in list(self.my_orders.values()) if (eid is None or o.eid == eid)
+                and (meta.get(o.order_id) or {}).get("harvest")]
+
+    def hv_side_qty(self, eid, is_bid):
+        """Shares our resting harvest levels on eid offer on one side (0 without any). P13 RT13-2: the quote's
+        reduce-only cap on a laddered market leaves those to the ladder."""
+        if not self.hv_sides:
+            return 0.0
+        return sum(o.qty for o in self.hv_orders(eid) if o.is_bid == is_bid)
+
+    def hv_on(self):
+        """Cycle step 6e runs: the flag, a plan / state left, or levels of ours resting (pulled once the flag is
+        off)."""
+        return bool(getattr(self.cfg, "tilt_harvest_ladder", False) or self.hv_state or self.hv_plans
+                    or self.hv_sides or self.hv_info or (self.api.live and self.hv_orders()))
+
+    def hv_plan(self, inv, now_m, skip=()):
+        """THE PURE PLANNER: ({eid: plan}, {eid: why}). plan = {"eid", "label", "side": "ask" | "bid", "p", "touch",
+        "other", "edge" (at the touch), "levels": [(level, YES price, shares, edge per $, covered shares)], "coll" ($
+        of collateral the adds hold at p), "carve" ($ of cash the levels lock)}; why = "soft" (cannot be judged now:
+        no fresh book / no touch, traded by another feature this cycle, a write in flight, the touch moved since the
+        cached book - resting levels stay) or why the market has no ladder (its levels are pulled). Caps: the market
+        (alloc_max_contract_usd at p), the state (state_max_usd), the carve-out (harvest_total_usd of cash locked),
+        harvest_max_markets; markets already laddered are served first, then the best edge at the touch."""
+        cfg, plans, why = self.cfg, {}, {}
+        offs = sorted({round(float(x), 3) for x in (cfg.harvest_offsets or ())})[:LADDER_MAX_LEVELS]
+        on = bool(cfg.tilt_harvest_ladder) and bool(offs) and not self.global_reduce
+        basket = self.basket_legs or {}
+        sl = {o.eid for o in self.sl_orders()}
+        cands = []
+        for e, ex in sorted(self.ex.items()):
+            if not on:
+                why[e] = "reduce-only" if self.global_reduce and cfg.tilt_harvest_ladder else "off"
+            elif e in basket:
+                why[e] = "basket"
+            elif ex.group in cfg.headline_races and not cfg.alloc_headline:
+                why[e] = "headline"
+            elif e in sl:
+                why[e] = "set ladder"
+            elif self.hours_to_close(ex) * 60 <= cfg.stop_minutes_before_close:
+                why[e] = "stop"
+            else:
+                p = self.alloc_p(ex, now_m)
+                if p is None:
+                    why[e] = "no p"
+                elif self.HV_LONGSHOT + 1e-12 < p < self.HV_FAVOURITE - 1e-12:
+                    why[e] = "middle"
+                elif e in skip or ex.group in skip or busy(ex, now_m) or self.hv_top_moved(ex, now_m):
+                    why[e] = "soft"
+                else:
+                    book = self.alloc_fresh_book(ex, now_m)
+                    ask_side = p <= self.HV_LONGSHOT + 1e-12
+                    touch = ((book or {}).get("asks" if ask_side else "bids") or [None])[0]
+                    if touch is None:
+                        why[e] = "soft"
+                    else:
+                        t = touch["price"]
+                        cands.append((e, ex, p, ask_side, book, t,
+                                      (t - p) / max(1 - t, TICK) if ask_side else (p - t) / max(t, TICK)))
+        if not cands:
+            return plans, why
+        hv = self.hv_orders() if self.api.live else []
+        hv_ids = {o.order_id for o in hv}
+        laddered = {o.eid for o in hv}
+        st_coll, _ = self.st_snapshot(inv, now_m, skip_ids=hv_ids) if self.st_on() else ({}, {})
+        rest = list(self.my_orders.values()) if self.api.live else [o for v in self.sim_by_eid().values() for o in v]
+        own = defaultdict(list)                   # our other orders, per market (never crossed)
+        for o in rest:
+            if o.order_id not in hv_ids:
+                own[o.eid].append(o)
+        carve_left = float(cfg.harvest_total_usd)
+        n = 0
+        for e, ex, p, ask_side, book, t, edge0 in sorted(cands, key=lambda c: (c[0] not in laddered, -c[6], c[0])):
+            if n >= cfg.harvest_max_markets:
+                why[e] = "max markets"
+                continue
+            o_lv = ((book.get("bids") if ask_side else book.get("asks")) or [None])[0]
+            other = o_lv["price"] if o_lv is not None else None   # the other side's best (other traders)
+            mine, q = own.get(e, []), float(inv.get(e, 0.0))
+            # the market's room (alloc_max_contract_usd: the position at p and our other resting orders' locks)
+            room_m = cfg.alloc_max_contract_usd - self.alloc_held_usd(q, p) - sum(self.resting_lock(o) for o in mine)
+            st = self.st_key(e) if self.st_on() else None
+            room_s = cfg.state_max_usd - st_coll.get(st, 0.0) if st is not None else float("inf")
+            if ask_side:                          # YES held and not yet on sale: sold covered first
+                free = max(0.0, q) - sum(o.qty for o in mine if not o.is_bid)
+                lim = max([o.price for o in mine if o.is_bid], default=None)
+            else:                                 # NO held and not yet on sale: a covered "sell NO" (whole levels)
+                free = (self.cover_no_qty(e, q) - sum(o.qty for o in mine if o.is_bid and (
+                    self.order_meta.get(o.order_id) or {}).get("no_sell"))) if q <= -1 else 0.0
+                lim = min([o.price for o in mine if not o.is_bid], default=None)
+            free = max(0.0, free)
+            # (P13 C: a quote order of ours resting on the ladder's side at a level's price: that level waits for
+            #  it to go - never two of our orders at one price)
+            same = {round(o.price, 3) for o in mine if o.is_bid != ask_side}
+            levels, used, carve, cut = [], 0.0, 0.0, None
+            for k, off in enumerate(offs):
+                if ask_side:
+                    px = round(t + off, 3)
+                    if (px > PMAX + 1e-9 or (other is not None and px <= other + 1e-9)
+                            or (lim is not None and px <= lim + 1e-9) or px in same):
+                        continue                  # (off the grid / at or through the book or our own bid: skipped)
+                    edge, lock, val = (px - p) / max(1 - px, TICK), 1 - px, max(1 - px, 1 - p)
+                else:
+                    px = round(t - off, 3)
+                    if (px < PMIN - 1e-9 or (other is not None and px >= other - 1e-9)
+                            or (lim is not None and px >= lim - 1e-9) or px in same):
+                        continue
+                    edge, lock, val = (p - px) / max(px, TICK), px, max(px, p)
+                if edge < cfg.harvest_min_edge - 1e-9:
+                    continue
+                want = int(cfg.harvest_level_usd / max(lock, TICK) + 1e-9)
+                if not ask_side and free >= 1:    # (buying back NO held: cash-free, reduces the collateral)
+                    cov = int(min(want, free) + 1e-9)
+                    qty = cov
+                else:
+                    cov = int(min(want, free) + 1e-9) if ask_side else 0
+                    caps = {"market_cap": max(0.0, room_m - used) / max(val, TICK),
+                            "state_cap": max(0.0, room_s - used) / max(val, TICK),
+                            "carve": max(0.0, carve_left - carve) / max(lock, TICK)}
+                    add = want - cov
+                    for why_k, c in caps.items():
+                        if c < add - 1e-9:
+                            add, cut = c, why_k
+                    qty = cov + int(max(0.0, add) + 1e-9)
+                if qty < 1:
+                    continue
+                free -= cov
+                used += (qty - cov) * val
+                carve += (qty - cov) * lock
+                levels.append((k, px, qty, edge, cov))
+            if not levels:
+                why[e] = cut or "no edge"
+                if cut == "state_cap":
+                    self.st_count(ex, "harvest")
+                continue
+            if cut == "state_cap":
+                self.st_count(ex, "harvest")
+            if st is not None:
+                st_coll[st] = st_coll.get(st, 0.0) + used     # (the state's other markets see this one's levels)
+            carve_left -= carve
+            plans[e] = {"eid": e, "label": ex.label, "side": "ask" if ask_side else "bid", "p": p, "touch": t,
+                        "other": other, "edge": edge0, "levels": levels, "coll": used, "carve": carve}
+            n += 1
+        return plans, why
+
+    def hv_top_moved(self, ex, now_m):
+        """The latest bulk best bid / ask (last_tops) shows this market's top moved since its cached book (not
+        re-downloaded yet: max_books_per_cycle), so the cached touch may be stale: no new levels from it this cycle
+        (a level planned from it could cross the book). A book confirmed / downloaded since that reading is current."""
+        top = (getattr(self, "last_tops", None) or {}).get(ex.eid)
+        at = (getattr(self, "last_tops_at", None) or {}).get(ex.eid)
+        if top is None or at is None or ex.book is None or ex.verified >= at - 1e-9:
+            return False
+        mine = ([o for o in self.my_orders.values() if o.eid == ex.eid] if self.api.live
+                else self.sim_by_eid().get(ex.eid, []))
+        theirs = others_top(tuple(top), mine)     # (a side where our own order is at / better than the top: unknown)
+        for k, key in ((0, "bids"), (1, "asks")):
+            lv = ex.book.get(key) or []
+            if theirs[k] is not None and (not lv or abs(rnd(lv[0]["price"]) - theirs[k]) > 1e-9):
+                return True
+        return False
+
+    def hv_level_lock(self, side, px, n, cov):
+        """Cash a planned level locks: an ask (1 - price) a share beyond the covered part, a bid its price a share
+        (a covered "sell NO": 0)."""
+        if side == "ask":
+            return (1 - px) * max(0.0, n - cov)
+        return 0.0 if cov >= n else px * n
+
+    def hv_tick(self, now, inv, mine_real, now_m=None, skip=()):
+        """P15 cycle step 6e: plan (hv_plan); pull a market's levels when it has no plan (unless only "soft") or an
+        order that no longer clears (hv_order_ok); re-quote a market when an order is > HV_TOL off its nearest
+        target, p moved > HV_TOL or harvest_requote_s passed (an order exactly at a target with life left keeps its
+        queue spot); place a missing level (filled / gone) at once. Placements and re-quotes within
+        harvest_writes_frac of the writes left (pulls always), batched batch_size orders a write, within the carve-out
+        (harvest_total_usd of cash locked) and through the cash gate with the MM's effective reserve held back.
+        Returns the exchanges where orders were placed or cancelled (not quoted this cycle)."""
+        cfg = self.cfg
+        now_m = time.monotonic() if now_m is None else now_m
+        self.alloc_ages = self.refs.ages() if self.refs is not None and hasattr(self.refs, "ages") else {}
+        plans, why = self.hv_plan(dict(inv), now_m, skip)
+        self.hv_plans, self.hv_why = plans, why
+        meta, touched = self.order_meta, set()
+        rest = defaultdict(list)
+        for o in self.hv_orders():
+            rest[o.eid].append(o)
+        # 1. pulls: no plan (unless soft); on a planned market an order on the other side, one whose edge at today's p
+        #    no longer clears harvest_min_edge, or one at / through the other side of the book
+        for e, os_ in sorted(rest.items()):
+            plan = plans.get(e)
+            if plan is None:
+                if why.get(e) == "soft":
+                    continue
+                bad = list(os_)
+            else:
+                bad = [o for o in os_ if not self.hv_order_ok(o, plan)]
+            if not bad or not self.writes_ready(len(bad)):
+                continue
+            if self.cancel(e, bad, whole_exchange=False):
+                touched.add(e)
+                self.orders_stale = True
+                self.hv_totals["pulled"] += len(bad)
+                log.warning("HARVEST %s: %d level(s) pulled (%s)", self.ex[e].label if e in self.ex else e, len(bad),
+                            why.get(e, "?") if plan is None else "no longer clears")
+        for e in [e for e in self.hv_state if e not in plans and why.get(e) != "soft"]:
+            self.hv_state.pop(e, None)
+        # 2. re-quotes (due) and missing levels. A resting order belongs to the target nearest its price.
+        writes = getattr(self.api, "writes_left", lambda: 10 ** 6)()
+        budget = cfg.harvest_writes_frac * max(0, writes)
+        bs = max(1, int(cfg.batch_size))
+        send = []
+        tol = self.HV_TOL + 1e-9
+        locked = self.hv_resting_lock()           # (the carve-out: what our resting levels lock now)
+        for e, plan in sorted(plans.items(), key=lambda kv: (-kv[1]["edge"], kv[0])):
+            ex = self.ex[e]
+            tg = list(plan["levels"])
+            cur = self.hv_orders(e)
+            st = self.hv_state.get(e)
+
+            def near(o, tg=tg):
+                return min(tg, key=lambda t: (abs(t[1] - o.price), t[1]))
+            due = (st is None or abs(plan["p"] - st["p"]) > tol or now_m - st["at"] >= cfg.harvest_requote_s - 1e-9
+                   or len(cur) > len(tg) or len({round(o.price, 3) for o in cur}) < len(cur)
+                   or any(abs(near(o)[1] - o.price) > tol or o.qty > near(o)[2] + 1e-9 for o in cur))
+            if due:
+                keep, left = [], list(tg)
+                for o in sorted(cur, key=lambda o: o.order_id):
+                    t = next((t for t in left if abs(t[1] - o.price) < 1e-9 and abs(t[2] - o.qty) < 1e-9), None)
+                    life = (o.expires - now).total_seconds() if o.expires else 0.0
+                    if t is not None and life >= cfg.harvest_requote_s + self.HV_KEEP_MARGIN:
+                        keep.append(o)            # (exactly at its target: keeps its queue spot)
+                        left.remove(t)
+                want = left
+            else:                                 # (only levels with no order of ours within HV_TOL: filled / gone)
+                keep = list(cur)
+                want = [t for t in tg if not any(abs(o.price - t[1]) <= tol for o in cur)]
+            gone = [o for o in cur if o not in keep]
+            if not gone and not want:
+                if due:
+                    self.hv_state[e] = {"at": now_m, "p": plan["p"], "side": plan["side"]}
+                continue
+            if not self.api.live:                 # dry run: planned and logged once per re-quote, nothing sent
+                if due:
+                    self.hv_state[e] = {"at": now_m, "p": plan["p"], "side": plan["side"]}
+                    log.info("[dry] HARVEST %s: %s YES (p %.3f, touch %.3f): %s", ex.label, plan["side"], plan["p"],
+                             plan["touch"], " ".join(f"{n}@{px:.3f}" for _, px, n, _, _ in plan["levels"]))
+                continue
+            if want and now_m - self.hv_refused.get(e, -1e18) < self.HV_REFUSED_WAIT and not gone:
+                continue                          # (the exchange refused here lately: not re-sent yet)
+            # the carve-out: what stays resting + these levels <= harvest_total_usd of cash locked
+            after = locked - sum(self.resting_lock(o) for o in gone)
+            fit = []
+            for lv in want:
+                need = self.hv_level_lock(plan["side"], lv[1], lv[2], lv[4])
+                if after + need > cfg.harvest_total_usd + 1e-6:
+                    continue
+                after += need
+                fit.append(lv)
+            want = fit
+            if not gone and not want:
+                continue
+            cost = len(gone) + len(want) / bs
+            if cost > budget + 1e-9:
+                continue                          # (this cycle's writes share is spent: next cycle)
+            if gone:
+                if not self.writes_ready(len(gone)) or not self.cancel(e, gone, whole_exchange=False):
+                    continue                      # (never new levels on top of ones not confirmed gone)
+                touched.add(e)
+                self.orders_stale = True
+            locked = after
+            budget -= cost
+            if due:
+                self.hv_state[e] = {"at": now_m, "p": plan["p"], "side": plan["side"]}
+            for k, px, n, edge, cov in want:
+                o = {"exchangeId": e, "side": "yes", "action": "sell" if plan["side"] == "ask" else "buy",
+                     "quantity": int(n), "price": px, "tournamentId": self.tid,
+                     "expirationDate": iso(now + timedelta(seconds=MAX_ORDER_TTL))}
+                if plan["side"] == "bid" and cov >= n:
+                    o["_no_sell"] = True          # (buying back NO held: the covered "sell NO")
+                send.append((e, k, edge, plan, o))
+        # 3. the batches (several markets a write), through the cash gate with the MM's effective reserve kept
+        keep_usd, placed = self.mm_reserve_effective(), defaultdict(list)
+        for i in range(0, len(send), bs):
+            chunk = send[i:i + bs]
+            if not self.writes_ready(1):
+                break
+            try:
+                results = self.place_orders_keep([c[4] for c in chunk], keep_usd)
+            except ApiError as err:
+                if err.code == "WRITE_BUDGET_WAIT":
+                    break
+                for e in {c[0] for c in chunk}:
+                    self.ex[e].pending_until = now_m + cfg.pending_seconds
+                if err.status in (0, 409, 502, 503, 504):   # (P13 RT13-1: outcome unknown - levels may rest: re-read
+                    self.orders_stale = True                 #  the list and adopt them as harvest levels, as
+                    if cfg.recover_unconfirmed:              #  apply_batch does; never a second ladder on top)
+                        for e, k, edge, plan, o in chunk:
+                            self.unconfirmed.setdefault(e, []).append((o, {
+                                "our_side": "ask" if plan["side"] == "ask" else "bid", "price": o["price"],
+                                "harvest": k + 1, "p": round(plan["p"], 4), "edge": round(edge, 4), "t": time.time(),
+                                **({"no_sell": True} if o.get("_no_sell") else {})}, now_m))
+                alert(f"harvest ladder orders failed ({err}) - check positions")
+                if err.code in FATAL_API_CODES:
+                    fatal(f"orders rejected with {err.code}")
+                continue
+            by_index = {r.get("index", j): r for j, r in enumerate(results or []) if isinstance(r, dict)}
+            for j, (e, k, edge, plan, o) in enumerate(chunk):
+                res = by_index.get(j) or {}
+                data = res.get("data") or {}
+                if not res.get("ok"):
+                    if not res.get("cash_gated"):
+                        self.hv_refused[e] = now_m
+                        log.info("HARVEST %s level %d refused: %s", plan["label"], k + 1,
+                                 (data.get("error") or {}).get("message", "?"))
+                    continue                      # (cash gate: tried again next cycle, no write until it fits)
+                touched.add(e)
+                self.orders_stale = True
+                self.remember_order(o, data, now_m)
+                self.hv_totals["placed"] += 1
+                placed[e].append(f"{o['quantity']}@{o['price']:.3f}")
+                if data.get("orderId") is not None:
+                    meta[data["orderId"]] = {"our_side": "ask" if plan["side"] == "ask" else "bid", "price": o["price"],
+                                             "harvest": k + 1, "eid": e, "p": round(plan["p"], 4),
+                                             "edge": round(edge, 4), "t": time.time(),
+                                             **({"no_sell": True} if o.get("_no_sell") else {})}
+                    self.notes_dirty = True
+        for e, lv in sorted(placed.items()):
+            pl = plans[e]
+            log.warning("HARVEST %s: %s YES (p %.3f, touch %.3f, edge at touch %.1f%%): %s", pl["label"],
+                        "ask" if pl["side"] == "ask" else "bid", pl["p"], pl["touch"], 100 * pl["edge"], " ".join(lv))
+        sides = {e: pl["side"] for e, pl in plans.items()}
+        for o in self.hv_orders():
+            sides.setdefault(o.eid, "bid" if o.is_bid else "ask")
+        self.hv_sides = sides
+        on = cfg.tilt_harvest_ladder or sides or self.hv_fills
+        self.hv_info = self.hv_status() if on else {}
+        return touched
+
+    def hv_order_ok(self, o, plan):
+        """A resting harvest order may stay on its planned market: the plan's side, an edge per $ at today's p still >=
+        harvest_min_edge, not at / through the other side of the book (other traders' best)."""
+        p, ask = plan["p"], plan["side"] == "ask"
+        if o.is_bid == ask:
+            return False
+        edge = (o.price - p) / max(1 - o.price, TICK) if ask else (p - o.price) / max(o.price, TICK)
+        if edge < self.cfg.harvest_min_edge - 1e-9:
+            return False
+        other = plan.get("other")
+        return other is None or (o.price > other + 1e-9 if ask else o.price < other - 1e-9)
+
+    def hv_guard_quote(self, ex, q, asks):
+        """P15: the quote's bid on a market where our harvest asks rest stays at least a tick below the lowest of
+        them (a kept resting bid at / above that is replaced): never a self-cross. None if that is off the grid."""
+        low = round(min(o.price for o in asks), 3)
+        hi = round(low - TICK, 3)
+        if q.bid is None:
+            return q
+        if q.bid < low - 1e-9:
+            if q.bid_limit is not None and q.bid_limit > hi + 1e-9:
+                return replace(q, bid_limit=hi)     # (a resting bid at / above the ladder is never kept)
+            return q
+        if hi < PMIN - 1e-9:
+            return replace(q, bid=None, bid_size=0, bid_limit=None, bid_max=None)
+        return replace(q, bid=hi, bid_limit=min(hi, q.bid_limit) if q.bid_limit is not None else hi)
+
+    def hv_status(self):
+        """status.json "harvest": {markets, levels_resting, collateral_resting, filled_24h, edge_filled_24h, carve
+        {total, used, free}, blocked_by, ...}."""
+        now_w = time.time()
+        while self.hv_fills and self.hv_fills[0][0] < now_w - 86400:
+            self.hv_fills.popleft()
+        rest = self.hv_orders() if self.api.live else []
+        c = self.hv_carve_fields()
+        blocked = defaultdict(int)
+        for w in self.hv_why.values():
+            if w not in ("off", "middle"):
+                blocked[w] += 1
+        return {"enabled": bool(getattr(self.cfg, "tilt_harvest_ladder", False)),
+                "markets": len({o.eid for o in rest}) if self.api.live else len(self.hv_plans),
+                "levels_resting": len(rest),
+                "collateral_resting": round(sum(self.resting_lock(o) for o in rest), 2),
+                "filled_24h": int(sum(x[1] for x in self.hv_fills) + 1e-9),
+                "edge_filled_24h": round(sum(x[2] for x in self.hv_fills), 2),
+                "collateral_filled_24h": round(sum(x[3] for x in self.hv_fills), 2),
+                "carve": {"total": c["budget"], "used": c["resting"], "free": c["free"]},
+                "mm_reserve_effective": round(self.mm_reserve_effective(), 2),
+                "blocked_by": dict(sorted(blocked.items())),
+                "planned_markets": len(self.hv_plans),
+                "planned_levels": sum(len(pl["levels"]) for pl in self.hv_plans.values()),
+                "planned_collateral": round(sum(pl["carve"] for pl in self.hv_plans.values()), 2),
+                **{k: int(v) for k, v in self.hv_totals.items()}}
+
+    def hv_note_fills(self, new):
+        """log_fills: each new fill of a harvest level -> journal "HARVEST fill ..." and the 24-h tallies (shares, edge
+        at p = the market's race-scaled liquid Polymarket price now, collateral)."""
+        for f in reversed(new):                   # (oldest first)
+            m = self.order_meta.get(f.get("orderId")) or {}
+            if not m.get("harvest"):
+                continue
+            e = str(f.get("exchangeId"))
+            qty = abs(float(f.get("quantity") or 0))
+            px = float(m.get("price") if m.get("price") is not None else (f.get("price") or 0))
+            p = self.ev_p(e)
+            bid = m.get("our_side") == "bid"
+            edge = 0.0 if p is None else qty * ((p - px) if bid else (px - p))
+            self.hv_fills.append((time.time(), qty, edge, qty * (px if bid else 1 - px)))
+            ex = self.ex.get(e)
+            log.warning("HARVEST fill %s: %s %.0f YES @ %.3f (level %s; p %s, edge $%.2f) - a VALUE position, held "
+                        "to the outcome", ex.label if ex else e, "bought" if bid else "sold", qty, px, m.get("harvest"),
+                        f"{p:.3f}" if p is not None else "?", edge)
+        if self.hv_info:
+            self.hv_info = self.hv_status()
+
+    def hv_summary(self):
+        """" | harvest N mkts, L levels, $Xk resting of $Yk, F filled 24h ($E edge)" (+ " | state caps RI 23.1k/15k,
+        ...") for the 2-hourly summary while in use; "" otherwise. Never raises."""
+        try:
+            parts = []
+            h = self.hv_info or {}
+            if h:
+                parts.append(f"harvest {h.get('markets', 0)} mkts, {h.get('levels_resting', 0)} levels, "
+                             f"${h.get('collateral_resting', 0) / 1000:.1f}k resting of "
+                             f"${(h.get('carve') or {}).get('total', 0) / 1000:.1f}k, {h.get('filled_24h', 0)} filled "
+                             f"24h (${h.get('edge_filled_24h', 0):.0f} edge)")
+            if self.st_on():
+                over = sorted(((c, s) for s, c in self.st_coll.items() if c > self.cfg.state_max_usd), reverse=True)
+                if over:
+                    parts.append("state caps " + ", ".join(f"{s} {c / 1000:.1f}k/{self.cfg.state_max_usd / 1000:.0f}k"
+                                                           for c, s in over[:4]))
+            return " | ".join(parts)
+        except (TypeError, ValueError, AttributeError) as e:
+            log.warning("summary P15 part failed: %s", e)
+            return ""
+
     # ------------------------------------------------------------------------------ P14: market-making funding
     MM_FUNDING_KEYS = ("mm_funding",)   # read-only status.json key(s): identity checks ignore them (as EV_KEYS)
     MM_LOTS_MAX = 20              # MM lots kept per market (beyond it the two oldest merge: older time, mean price)
@@ -11482,7 +12270,7 @@ class Bot:
     MM_FAST_EXPIRE = 300.0        # ...a fast refill sale still not sent after this long is dropped (re-planned) (s)
     MM_SENT_LAG = 120.0           # ...a market a refill IOC sold is not planned again until the positions read
                                   #    shows the sale, or this long after it (red team RT13-3: a lagging read) (s)
-    MM_MAKER_SKIP = ("basket", "alloc", "set_ladder", "arb", "take")   # order notes that are not resting quotes
+    MM_MAKER_SKIP = ("basket", "alloc", "set_ladder", "arb", "take", "harvest")   # notes that are not resting quotes
 
     def mmf_init(self, d=None):
         """P14 state, restored from status.json "mm_funding" (d): the MM lots {eid: [[signed shares, YES price, wall
@@ -11983,7 +12771,8 @@ class Bot:
     def mm_cash_low(self):
         """Free cash (the gate's, read) below half of alloc_mm_reserve (> 0)."""
         res = float(getattr(self.cfg, "alloc_mm_reserve", 0.0) or 0.0)
-        return res > 0 and getattr(self, "cg_cash", None) is not None and self.cash_left() < 0.5 * res - 1e-9
+        return (res > 0 and getattr(self, "cg_cash", None) is not None
+                and self.cash_left() + self.hv_carve_used() < 0.5 * res - 1e-9)   # (P15: the carve-out counts)
 
     def p141_log(self, kind, usd, est=0.0, real=0.0, now_w=None):
         """One event in the 24-h report log: kind "refill" (a refill sale: usd, real = the EV given up, <= 0 when below
@@ -12181,6 +12970,8 @@ class Bot:
         """What is below half its target now: ["cash 4,100 of 20,000", "risk room wc ..."] ([] = funded)."""
         cfg, out = self.cfg, []
         cash = self.cash_left() if getattr(self, "cg_cash", None) is not None else None
+        if cash is not None:
+            cash += self.hv_carve_used()          # P15: the ladder's resting carve-out is part of the reserve
         if cfg.alloc_mm_reserve > 0 and cash is not None and cash < 0.5 * cfg.alloc_mm_reserve - 1e-9:
             out.append(f"cash {cash:,.0f} of {cfg.alloc_mm_reserve:,.0f}")
         rw, rc = self.mmr_room
@@ -12249,6 +13040,10 @@ class Bot:
                "lots_source": self.mmf_seed,
                "lots": {e: [[round(x[0], 2), round(x[1], 4), round(x[2], 1)] for x in v]
                         for e, v in sorted(self.mm_lots.items())}}
+        if getattr(cfg, "tilt_harvest_ladder", False):   # P15: the reserve's split (absent while the ladder is off)
+            out["mm_reserve_effective"] = round(self.mm_reserve_effective(), 2)
+            out["harvest_carve"] = self.hv_carve_fields()
+            out["reserve_cash"] = rnd2(None if cash is None else cash + self.hv_carve_used())
         if getattr(cfg, "mm_room_guard", False):
             mw, mc = self.mmf_room_mm
             vw, vc = self.mmf_room_value
@@ -12334,6 +13129,10 @@ class Bot:
         if new:
             self.fills.record(new, self.order_meta, fvs)
             self.note_fill_p(new)                             # (mm_carry_24h: Polymarket p at fill time)
+            try:
+                self.hv_note_fills(new)                       # P15: "HARVEST fill ..." and its tallies
+            except Exception as e:                            # reporting must never disturb trading
+                log.warning("harvest fill note failed: %s", e)
         for f in reversed(new):                               # oldest first
             oid = f.get("orderId")
             o = self.my_orders.get(oid)
@@ -12660,6 +13459,9 @@ class Bot:
         if part:
             line = f"{line} | {part}" if line else part
         part = self.mm_funding_summary()              # P14: " | MM funding cash Xk/Yk, ..." (a P14 flag on)
+        if part:
+            line = f"{line} | {part}" if line else part
+        part = self.hv_summary()                      # P15: " | harvest ... | state caps ..." (while in use)
         if part:
             line = f"{line} | {part}" if line else part
         for fn in (ev_outcome_part, mm_carry_part):   # " | EV outcome X (+Y 24h, N unpriced) | MM carry 24h ..."
@@ -12991,7 +13793,10 @@ class Bot:
             if meta is None:
                 missing += 1
                 meta = {}
-            if meta.get("basket"):
+            if meta.get("harvest"):               # P15: its own class (the key absent until such a fill exists)
+                cls = "harvest"
+                counts[cls] = counts.get(cls, 0)
+            elif meta.get("basket"):
                 cls = "basket"
             elif meta.get("alloc") or meta.get("set_ladder"):
                 cls = "alloc"
@@ -13110,6 +13915,9 @@ class Bot:
                 **({"alloc": self.alloc_status()} if self.alloc_persist_needed() else {}),
                 # P14: market-making funding (read-only; MM_FUNDING_KEYS; also what a restart restores: the MM lots)
                 "mm_funding": self.safe_mm_funding(),
+                # P15: the harvest ladder, the state cap (HARVEST_KEYS; absent while unused)
+                **({"harvest": self.hv_info} if getattr(self, "hv_info", None) else {}),
+                **({"state_caps": self.st_status()} if self.st_on() else {}),
                 # ev_outcome_delta_24h's ring of (wall, ev) samples (also what a restart restores)
                 "ev_outcome_history": [list(x) for x in self.ev_hist],
                 "seconds_since_cycle": round(time.monotonic() - self.last_cycle_done, 1)
