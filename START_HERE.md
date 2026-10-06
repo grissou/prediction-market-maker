@@ -1,7 +1,7 @@
 <!-- STATUS (Finisher 2b, updated on every push) -->
-**STATUS 11:15 UTC 6 Oct:** LIVE = `claude/mm-funding` 64f27c8 (Package 14.2; alloc_swap_sell_margin 0.03, alloc_swap_min_gain 0.05, value_sell_margin 0.01, MM reserve 20k cash / 20k room). Owner's deployment order (11:00): 14.1/14.2 (live) -> **Package 15 = the harvest ladder ALONE ported onto 64f27c8** (building now: `tilt_harvest_ladder` + its settings; `harvest_total_usd` 10k carved from `alloc_mm_reserve`; per-state cap `state_max_usd` 15k across ladder levels, value buys and takes; flags off = 64f27c8 byte-identical; staged file with only the ladder + state cap on) -> **Package 16 = the armed momentum sleeve ported onto Package 15** (momentum_auto trigger 24-h slope >= 0.5 and 6-h > 0 held 4 h from other traders' prices; 10k ramp to <= 40k; flip into the ladder on slope <= 0 / profit target / date; kill 75%; funding cash > holdback -> MM reserve only if carry < 300/day -> value lowest edge never below the floor; no fake buying). Package 13 (1fdd467, claude/finisher-package9) predates 14-14.2 and must NOT be deployed as is; it is the source the ports are taken from.
-Tilt outlook: analysis/p15/TILT_PATHS.md (A range 40 / B up 25 / C reversion 25 / D collapse 10; sell the tilt in tranches = the ladder; the sleeve armed, never forced; election night the largest lever).
-Next: P15 builder -> suites -> dry run -> READY push on claude/mm-funding -> P16 builder on top.
+**STATUS ~12:30 UTC 6 Oct:** **Package 15 READY** = the harvest ladder ALONE on the live 64f27c8: `claude/mm-funding` fast-forwarded to ed65638 (also `claude/package15`). Staged file `deploy/package15/settings_override.harvest.json` = the live 14.2 file (value_sell_margin 0.01) + `tilt_harvest_ladder` on (+0/2/4/6c, 3k a level, edge >= 8%/$, 900-s requote) + `harvest_total_usd` 10000 (carved from the 20k MM reserve: MM keeps 10k; the refill target stays 20k = free cash + ladder resting) + `state_max_usd` 15000 (per-state collateral cap on ladder / allocator buys / takes / tail adding quotes; existing positions kept). Flags off = 64f27c8 byte-identical. Tests test_p15 138, test_p15_dryrun 34; 54 suites N/N + STRESS_LADDER 20/20.
+Dry run on the live state: AS IT IS the ladder rests almost nothing (free cash ~1.6k and the value-adds pause while risk room < 22k block 117 markets) - expect no new levels until the refill lifts free cash above ~10k and room above 22k; FUNDED (+25k) 6 levels / $5.0k in 2 h, all >= 8%, none crossing or at our own price; a +3c tilt hour then fills 8 levels / $8.1k at 12.6% per $ (+1.8k EV). Rhode Island on the snapshot 13.3k (owner: ~23k live) - every RI add stops at the cap at once. Package 16 (the armed momentum sleeve on top of 15) building next.
+Package 13 (1fdd467, claude/finisher-package9) predates 14-14.2 and is NOT to be deployed; it is the source of the ports. Tilt outlook: analysis/p15/TILT_PATHS.md.
 
 # START HERE (Team run, branch `claude/run-c-tournament-improvements-pycdet`)
 
@@ -9,6 +9,31 @@ Status: **complete** (Team complete at 14:45 UTC) (started 2026-10-02 08:50 UTC;
 The Builder's previous START_HERE is kept as `START_HERE_BUILDER.md`; Run A's notes are `ENGINEERING_NOTES.md`.
 Plan: `PLAN.md`. Packages appear below as they become READY (commit messages start "READY: Package N").
 Deploy only commits whose message starts "READY"; the branch is cumulative.
+
+## Package 15 (READY, 6 Oct; branch `claude/package15` on the LIVE head 64f27c8 = Package 14.2; NOT merged with Package 13): the harvest ladder alone + a per-state collateral cap (OFF by default; staged file in `deploy/package15/`)
+**The brief (11:00):** the Package 13 harvest ladder ALONE on 64f27c8; `harvest_total_usd` (10k) carved from
+`alloc_mm_reserve`; a per-state cap `state_max_usd` (15k) on ladder levels, value buys and takes; levels +0/2/4/6c, asks
+above longshots, bids below favourites, edge >= 8% per $, never crossing our own quotes.
+**Built (flags off byte-identical to 64f27c8):** `tilt_harvest_ladder` + `harvest_offsets` / `_level_usd` / `_min_edge`
+/ `_max_markets` / `_writes_frac` / `_requote_s` (P13's ladder: covered rules, re-quotes, pulls, RT13-1 adoption, RT13-2
+reduce cap, the P13 C own-price rule, the stale-touch wait), capped per market by `alloc_max_contract_usd`, by the state
+cap and by the carve-out, no adds while value adds are paused. `harvest_total_usd`: a budget for RESTING collateral;
+the MM keeps `alloc_mm_reserve` - it (10k) - the gate holds it back from the ladder, and the quotes leave the ladder its
+planned-but-unplaced part; the refill / swaps / spare cash / take reserve count the ladder's resting collateral as
+reserve, so the refill target stays 20k; a filled level is a value position and frees its slot. `state_max_usd` (0 =
+off; staged 15k): `state_of(label)` (233 of the 237 live labels in 45 states, the 4 U.S. headline ones none); positions
+kept, adds stop at the cap (ladder, allocator buys, takes, the quoter's tail adds). Status `harvest`, `state_caps`,
+`mm_funding` {mm_reserve_effective, harvest_carve, reserve_cash}; journal "HARVEST ..." / "HARVEST fill ..."; fill
+class "harvest"; summary " | harvest ... | state caps ...".
+**Dry run** (`analysis/p15/DRYRUN_P15.md`, 34 checks): the live state as it is (free cash ~1.6k, value adds paused):
+the ladder rests only covered levels (it waits for free cash > 10k and the risk room) - RI 13.3k on the snapshot, the
+swaps took it to the cap 15.0k and stopped; funded (+25k): 6 levels / 5 markets / $5.0k of the 10k, every level >= 8%,
+none crossing; +3c tilt hour: 8 fills, $8.1k collateral, $1.0k edge at p (12.6% per $), EV +1.8k.
+**Suites:** `tests/test_p15.py` 138 + `tests/test_p15_dryrun.py` 34; all 54 suite files N/N + `STRESS_LADDER=1` 20/20.
+**Deploy:** handover to the branch head, then `mv` `settings_override.harvest.json` (= the 14.2 file with
+`value_sell_margin` 0.01 + the P15 keys) over the live file. **Watch:** levels resting <= 10k, no level crossing or at
+our own quote's price, edge >= 8% at every level, MM reserve effective 10k, Rhode Island adds blocked, writes <= 28.
+**Rollback:** the 14.2 file; code 64f27c8. Details: `deploy/package15/README.md`.
 
 ## Package 14.2 (READY, 5 Oct ~14:30 UTC; branch `claude/mm-funding` on top of 124ce75 = Package 14.1, itself on the LIVE head 4ff7d91; NOT merged with Package 13): a swap-only value-floor margin (OFF by default; staged file in `deploy/package14/`)
 **The owner's brief (13:20):** "a SWAP-ONLY value-floor margin ... `alloc_swap_sell_margin` (e.g. 0.03) ... when the
