@@ -607,6 +607,24 @@ hv(b)
 check("...cash 9,000 (below the MM's 10,000): no level placed, no write spent", not b.hv_orders()
       and len(api.sent("batch")) == n_b, api.sent("batch")[n_b:])
 
+# the other direction: the quotes leave the ladder what it plans but has not placed (hv_quote_hold)
+api, b = mk_bot(tilt_harvest_ladder=True, refs=ALPHA, alloc_mm_reserve=20000.0, cash=12000.0,
+                alloc_max_contract_usd=1e5)
+warm(b)
+read(b, cash=12000.0)
+hv(b)
+want = min(10000.0, sum(pl_["carve"] for pl_ in b.hv_plans.values()))
+check("hv_quote_hold = what the ladder plans (<= harvest_total_usd) less what its levels lock (~$8,000 here)",
+      abs(b.hv_quote_hold() - (want - b.hv_resting_lock())) < 1e-6 and b.hv_quote_hold() > 7000, b.hv_quote_hold())
+quiet(b.cycle)
+b.drain_writes(5)
+q_lock = sum(b.resting_lock(o) for o in b.my_orders.values() if not (b.order_meta.get(o.order_id) or {}).get("harvest"))
+check("...a full cycle: the quotes lock at most the free cash less that hold (12,000 - ladder - hold ~ 2,000), not "
+      "the ladder's part", q_lock <= max(0.0, 12000.0 - b.hv_resting_lock() - b.hv_quote_hold()) + 50, (
+          round(q_lock), round(b.hv_resting_lock()), round(b.hv_quote_hold())))
+b.cfg.tilt_harvest_ladder = False
+check("...0 with the ladder off (the quotes as 64f27c8)", b.hv_quote_hold() == 0.0)
+
 # ============================================================================================ carve-out accounting
 print("--- the carve-out: budget, resting, free; the refill target")
 api, b = mk_bot(tilt_harvest_ladder=True, refs=ALPHA, alloc_mm_reserve=20000.0, cash=50000.0,

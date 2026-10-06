@@ -1418,7 +1418,9 @@ class Config:
     # 2. harvest_total_usd: the ladder's collateral budget, CARVED FROM alloc_mm_reserve. It is a budget for RESTING
     #    collateral (the cash our resting harvest levels lock). The MM's own reserve is alloc_mm_reserve -
     #    harvest_total_usd (mm_reserve_effective: 20k - 10k = 10k live): the ladder places only through the cash
-    #    gate with that much held back, so it never takes the MM's cash below it. The whole reserve is still refilled:
+    #    gate with that much held back, so it never takes the MM's cash below it; and the quotes' plan budget leaves
+    #    the ladder what it plans but has not placed yet (hv_quote_hold: the MM never eats the ladder's part either,
+    #    nothing is held while the ladder plans no more). The whole reserve is still refilled:
     #    the refill / swaps / spare-cash buys / take_respect_reserve count the cash locked in resting harvest levels
     #    (up to harvest_total_usd) as part of the reserve (free cash + ladder resting >= alloc_mm_reserve), so the
     #    refill target stays alloc_mm_reserve. A FILLED level is a value position: its collateral is value collateral
@@ -4939,6 +4941,8 @@ class Bot:
             self.mmf_recycling = {}
         if self.cash_gate_on():                   # Package 8: the quotes' plan budget, after this cycle's takes
             self.cg_plan_left, self.cg_capped_now = self.cash_left(), 0
+            if self.hv_plans:                     # P15: the quotes leave the ladder the part of its carve-out it
+                self.cg_plan_left = max(0.0, self.cg_plan_left - self.hv_quote_hold())   # still waits to place
         self.ladder_setup(equity, capital, raw_orders, liquid, party_delta, resting)
         for eid, ex in list(self.ex.items()):
             if not self.running:          # Ctrl+C: stop touching the book immediately
@@ -11695,6 +11699,15 @@ class Bot:
     def hv_resting_lock(self):
         return sum(self.resting_lock(o) for o in self.hv_orders()) if self.api.live else 0.0
 
+    def hv_quote_hold(self):
+        """$ of free cash the quotes' plan budget leaves to the ladder this cycle: what this cycle's ladder plans lock,
+        up to harvest_total_usd, less what its levels already lock (the carve-out is the ladder's: the MM keeps the
+        rest of the reserve, never the ladder's part). 0 while the ladder plans nothing more (off, paused, capped)."""
+        if not getattr(self.cfg, "tilt_harvest_ladder", False) or not self.hv_plans:
+            return 0.0
+        want = min(float(self.cfg.harvest_total_usd), sum(pl["carve"] for pl in self.hv_plans.values()))
+        return max(0.0, want - self.hv_resting_lock())
+
     def mm_reserve_effective(self):
         """The cash the MM keeps for itself: alloc_mm_reserve - harvest_total_usd while the ladder is on (the ladder
         never places below it), else alloc_mm_reserve."""
@@ -12217,6 +12230,7 @@ class Bot:
                 "collateral_filled_24h": round(sum(x[3] for x in self.hv_fills), 2),
                 "carve": {"total": c["budget"], "used": c["resting"], "free": c["free"]},
                 "mm_reserve_effective": round(self.mm_reserve_effective(), 2),
+                "held_from_quotes": round(self.hv_quote_hold(), 2),
                 "blocked_by": dict(sorted(blocked.items())),
                 "planned_markets": len(self.hv_plans),
                 "planned_levels": sum(len(pl["levels"]) for pl in self.hv_plans.values()),
