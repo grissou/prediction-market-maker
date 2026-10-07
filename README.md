@@ -1,129 +1,142 @@
-# Prediction-market market-making bot
+# Prediction-market trading bot
 
-A Python bot that makes markets in the **SIG Predictions Cup**: US midterm elections, 237 contracts
-across 117 races, traded through the exchange's REST API and realtime feed. It quotes two-sided
-prices to earn the bid/ask spread while keeping its inventory close to flat. It takes no view on
-who wins.
+A Python bot for the **SIG Predictions Cup**: US midterm elections, 237 contracts across 117 races,
+traded through the exchange's REST API and realtime feed, play-money, 1 October to 4 November 2026.
 
-## How it works
+It started as a pure market maker (earn the spread, stay flat). After the first days it became clear
+that the tournament settles every contract at the **outcome**, that there are no fees, and that the
+tournament's prices sit systematically away from the real-money market (a favourite-longshot "tilt":
+longshots too dear, favourites too cheap). The bot now runs several strategies side by side, each with
+its own capital, all priced off **Polymarket** as the estimate of the true probability:
 
-**Event-driven.** The exchange pushes book changes and fills over a WebSocket (Supabase Realtime).
-The bot reacts in about 1–2 s (each request takes ~0.4 s from the UK, less from a server in San Francisco)
-and sends no requests while nothing changes. A new Polymarket price (every 5 s) also starts a cycle at once. A full check from the REST API
-runs every 30 s, because pushed delivery is best-effort. If the feed drops, the bot falls back to
-polling every 10 s on its own.
+| Layer | What it does | Capital |
+|---|---|---|
+| **Value book** | Holds positions bought toward Polymarket's price and never sells them below it. Pays off at the outcome | Most of the account |
+| **Allocator** | Hourly: rotates capital from the lowest-edge holdings into the highest-edge levels on the book ("swaps"), and refills the market-making reserve | — |
+| **Market making** | Two-sided quotes in the middle of the range (15–85%), inventory recycled when stale | A 20k reserve (cash + risk room) |
+| **Harvest ladder** | Resting orders that sell the tilt *above* today's prices: asks over longshots, bids under favourites, 0/2/4/6c away, only at ≥ 8% edge per $ | 10k carved out of the reserve |
+| **Momentum sleeve** | Armed, not on: buys longshots only if the tilt is measurably rising (24-h slope ≥ +0.5 pt/day and 6-h slope > 0, held 4 h), in 10k steps, and sells them back when the slope turns, at +25%, or at −25% | Up to `momentum_max_usd` |
 
-Each cycle the bot:
+The live state of each layer is in `status.json` (`alloc`, `mm_funding`, `mm_risk_room`, `harvest`,
+`state_caps`, `momentum`, `ev_outcome`, `mm_carry_24h`) and on the 2-hourly phone summary.
 
-1. reads positions after a fill, and its open orders only on the 30 s full check: in between it keeps its
-   own record of its orders, so its own placements and cancels cost no extra requests;
-2. downloads the books reported as changed. When many change at once, one bulk request per 100
-   contracts finds which best prices actually moved, and only those books are downloaded;
-3. computes a **fair value**: 70% **Polymarket** (the real-money market the tournament is seeded
-   from, refreshed every 5 s; used only where its own spread is 3c or less) and 30% the tournament
-   book. For the book, price levels are skipped until 200 shares have accumulated, so a 1-share order
-   can't move it. The parties in a race are scaled to sum to 1;
-4. takes **risk-free arbitrage** when other traders' bids on every party of a race add up to more than 1
-   by at least 3c, and
-   **trades against stale house quotes** when Polymarket has been 5c+ past them on every reading for 30 s;
-5. quotes **one tick inside the best other trader**, never closer than 1c to fair value, with prices
-   skewed against its inventory (netted across the parties of each race) and against its net
-   Republican-vs-Democrat exposure;
-6. compares against the orders actually resting and changes only what differs. An order one tick off
-   its target is kept while it's still safe, which saves requests and keeps its place in line.
+## How a cycle works
+
+**Event-driven.** The exchange pushes book changes and fills over a WebSocket (Supabase Realtime). The
+bot reacts in about 1–2 s and sends nothing while nothing changes. A new Polymarket reading (every 5 s)
+also starts a cycle. A full check from the REST API runs every 30 s because pushed delivery is
+best-effort; if the feed drops, it polls every 10 s and reconnects itself.
+
+Each cycle:
+
+1. reads positions after a fill and its open orders on the 30 s full check; in between it keeps its own
+   record of its orders, so placements and cancels cost no extra requests;
+2. downloads the books reported as changed (one bulk request per 100 contracts finds which best prices
+   actually moved);
+3. computes each market's **fair value** from Polymarket, with the parties of a race scaled to sum to 1,
+   used only where Polymarket's own spread is tight; markets without a liquid reference fall back to the
+   tournament book and are reported as "unpriced";
+4. runs the traders in order: the momentum sleeve (when on), stale-quote **takes** (Polymarket 5c+ past a
+   resting house quote for 30 s), the allocator (its run spans cycles: each sale is an immediate-or-cancel
+   at the touch, each buy waits for a cash read that shows the money), the harvest ladder;
+5. **quotes** one tick inside the best other trader, never closer than 1c to fair value, skewed against
+   inventory (netted across the parties of a race) and against the net Republican-vs-Democrat exposure.
+   The side that *reduces* a position never rests below value (`value_sell_margin`), so the bot cannot be
+   panicked out of a good position by the tilt;
+6. compares with the orders actually resting and changes only what differs, within the write budget.
 
 ## Risk controls
 
 | Control | What it does |
 |---|---|
-| Position sizing | **Quarter Kelly** per market and side, using Polymarket as the true probability, capped at 2% of the account per market. All other sizes are fractions of account value too, so the bot sizes up after gains and down after losses (in 5% steps, so small wobbles don't resize every order) |
-| Quote sizes by activity | Capital goes where the trades are: party control of the House and Senate get 10,000-share quotes and a flat 10,000-share position limit (10% of the account), busy races up to 2,000, quiet ones 100, ranked by Polymarket volume and then by the tournament's own trades (re-planned every 30 min). All resting quotes together lock at most 60% of the account, and every size scales with the account |
-| Kill switch | Stops and cancels everything if account value falls a set % below the starting balance. Needs 2 readings in a row, is corrected for cash locked in open orders, and leaves a marker file so nothing can auto-restart trading |
-| Worst-case loss cap | Reduce-only everywhere if the worst settlement outcome would cost more than 30% of the account |
-| National-swing cap | Net Republican-vs-Democrat exposure summed over all races: quotes are shaded against it (up to 1.5c), so it sheds while still quoting both sides; at 5% of the account the side that would add to it is blocked |
-| Jump guard | Pauses a market after a sudden price move (likely news) |
-| Tail guard | Near 0% or 100%, never takes the side that risks ~$1 to earn ~1c (for quotes and for taking stale quotes) |
-| Wrong-match guard | Ignores a Polymarket price more than 25c from the tournament book (almost always a wrong match) and sends one alert |
-| Outside-price guard | Quotes one side only where Polymarket disagrees with the tournament book by more than 5c |
-| Polymarket jump guard | Pulls a market's quotes for 60 s when its Polymarket price jumps 3c+ between readings. Steps back before the tournament book catches up, and ignores spikes that revert |
-| Startup self-test | Before quoting live, places and cancels two 1-share orders at extreme prices to check the API behaves as assumed; stops with an alert if not |
-| Election night | 12 h before close: reduce only. 6 h: flatten every market on its own. 2 h: exit, trading against other orders if needed (at most 3c from fair). 15 min: nothing. The exit still works if the book gets too thin for a fair value (it uses the last known one, or Polymarket's) |
-| Order expiry | Every order expires after 30 min, so quotes vanish even if the bot dies |
-| Crash handling | Ctrl+C, errors or a crash cancel all orders; exit codes tell systemd whether a restart is safe |
-| Rate-limit budget | Never more than 80 requests a minute (the API allows ~100; measured), with part kept free for orders. A 429 pauses every request and lowers the budget |
+| Value floor | A reducing order never rests more than `value_sell_margin` below Polymarket's price (above it for a short). Allocator swaps have their own floor (`alloc_swap_sell_margin`) and must gain ≥ `alloc_swap_min_gain` per $ net |
+| Correlated worst case | Settlement risk from a national swing shock plus the rest (`risk_model` "correlated"); above `max_worst_case_frac` of the account the bot is reduce-only everywhere. The old sum-of-maxima worst case is a backstop (`worst_case_backstop_frac`) |
+| Market-making room | Value buying pauses while the risk room or cash left for market making is below its reserve (`mm_risk_reserve_wc`, `alloc_mm_reserve`), with hysteresis |
+| Per-market and per-state caps | `alloc_max_contract_usd` per market; `state_max_usd` of collateral per state across every adding path (existing positions are kept, adds stop) |
+| Cash gate | Every order is checked against the cash the exchange actually shows free; reducing a NO holding goes out as a covered "sell NO", which needs no cash |
+| Position sizing | Quarter Kelly per market and side against Polymarket's probability, capped per market; sizes scale with the account; the adding side shrinks (`capital_ceiling_adding_size_factor`) when most capital is in positions |
+| Kill switch | Stops and cancels everything if account value falls a set % below the start; leaves a marker file so nothing auto-restarts |
+| Jump, tail, wrong-match and outside-price guards | Pause after sudden moves; never risk ~$1 to earn ~1c near 0 or 100%; ignore a Polymarket price far from the book; quote one side only where the two disagree |
+| Startup self-test | Places and cancels 1-share orders (including a covered "sell NO") to check the API behaves as assumed; stops with an alert if not |
+| Order expiry | Every order expires on its own, so quotes vanish even if the bot dies |
+| Watchdog and crash handling | No cycle for 10 minutes → cancel everything and exit for systemd to restart; errors cancel all orders; exit codes tell systemd whether a restart is safe |
+| Rate-limit budgets | Never more than 80 requests a minute, with a separate budget of 28 order writes a minute; a 429 pauses everything and lowers the budget |
+
+## Operating the live bot
+
+**Settings without a restart.** `settings_override.json` next to the bot (one JSON object) is re-read
+every 30 s. Only the names in `OVERRIDABLE` are accepted, each range-checked; a refused key is reported
+once; every change is logged as `SETTING name: old -> new`. Removing a key returns the default. The live
+file is the Team's staged file for the current package (`deploy/package16/`) with the owner's changes.
+
+**Code without pulling quotes.** `deploy/handover-restart.sh` sends SIGUSR1: the old bot exits without
+cancelling and the new one adopts the resting orders. A plain `systemctl restart` cancels everything.
+The owner's recipe is in `deploy/RUNBOOK.md`: back up, stage, compile with the server's Python, copy in,
+handover, watch `journalctl -u mmbot -f` for the self-test, then switch the new settings on.
+
+**Packages.** New behaviour arrives as a numbered package: every new setting is OFF by default, the
+code with the flags off is pinned byte-identical to the previous package by tests, and the package ships
+with a staged settings file, a dry run on a live snapshot and a README under `deploy/package<N>/`.
+Packages 5–16 are on the branch history; 14 (market-making funding), 15 (harvest ladder and state cap)
+and 16 (armed momentum sleeve) are the ones that shape the bot today.
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| `mm_bot.py` | The bot. **All tunable settings are in the SETTINGS block at the top** |
-| `ref_prices.py` | Outside reference prices from Polymarket/Kalshi, plus tools to match races to their markets |
-| `ref_map.json` | Which Polymarket market each tournament contract matches (229 of 237) |
-| `deploy/` | systemd service + one-command setup script for an Ubuntu server (firewall, key-only SSH, auto-updates) |
-| `tests/` | Offline test suites: a fake exchange that follows the API spec. Run on every push by GitHub Actions |
+| `mm_bot.py` | The bot. Every tunable is in the `Config` block, with its documentation; `OVERRIDABLE` lists the live-changeable ones |
+| `ref_prices.py`, `ref_map.json` | Polymarket/Kalshi reference prices and the race-to-market mapping (229 of 237 matched) |
+| `deploy/` | systemd unit, server setup script, handover restart, `RUNBOOK.md`, and each package's staged settings and notes |
+| `tests/` | 56 offline suites against a fake exchange that follows the API spec, plus two simulators (`strategy_sim.py`, `live_sim.py`) and a stress test |
+| `analysis/` | The research behind each package: valuation, tilt paths, turnover, markouts, rival floors, dry-run reports |
 
-Created while running (git-ignored): `fills.csv` (every fill), `mm_bot.log`, `status.json` (health),
-`market_data.sqlite` (snapshots for tuning), `order_notes.json`, and `kill_switch.tripped` (only if the kill switch fired).
+Created while running (git-ignored): `fills.csv`, `mm_bot.log`, `status.json`, `order_notes.json`,
+`position_lots.json`, `market_data.sqlite` (books, prices and positions over time: the seed for every
+dry run), and `kill_switch.tripped` if the kill switch fired. `settings_override.json` lives only on the
+server; the staged copies under `deploy/package<N>/` are the record of what was switched on.
 
-## Setup
+## Setup and commands
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt     # Python 3.10+
 printf 'SUPERMARKET_API_KEY=...\nTOURNAMENT_SLUG=midterm-elections\n' > .env   # never commit this
 source .venv/bin/activate
-```
 
-Optional: `ALERT_URL=https://ntfy.sh/<long-random-name>` in `.env` sends phone alerts (kill switch,
-crashes) and a **summary every 2 hours**, on the hour UTC (P&L, rank, Smart Score, fills, edge, bot health) via the
-free ntfy app: install it and subscribe to the same topic name.
-
-## Commands
-
-```bash
 python mm_bot.py status        # balance, P&L, positions, open orders
-python mm_bot.py markets       # every market and its exchange ids
 python mm_bot.py run           # dry run: live data, orders only simulated
 python mm_bot.py run --live    # trade
 python mm_bot.py cancel        # cancel every open order
 python mm_bot.py report        # edge and adverse selection from logged fills
-python mm_bot.py summary       # the phone summary, now (tests your ALERT_URL)
-
-python ref_prices.py check     # tournament price vs outside price for every contract
-python ref_prices.py suggest   # match unmapped races to Polymarket (review the result)
-python ref_prices.py search "Alaska Senate"   # find a market id to map by hand
+python mm_bot.py analyze 24    # per-market edge, markouts, P&L from local files
+python mm_bot.py summary       # the phone summary, now
+python ref_prices.py check     # tournament price vs Polymarket for every contract
 ```
 
-## Going live
-
-1. Start `python mm_bot.py run --live` **at least 30 minutes before trading opens**. It downloads every
-   order book while it waits, goes quiet in the last minute (saving the request budget), checks every
-   second from the start time and quotes within ~1 s of the open, then runs the self-test.
-2. On day 1, trade a few markets first (`ONLY_EXCHANGES="1071,1070"` in `.env`), check the orders in
-   `status` and the web UI, then remove it.
-3. Keep an eye on `status.json`: `"realtime": "connected"`, `"rate_limited_total": 0`, `"last_cycle_ok": true`.
-4. Don't run other commands in a loop while the bot is live: they share the same request budget.
+Optional: `ALERT_URL=https://ntfy.sh/<long-random-name>` in `.env` sends phone alerts and a summary
+every 2 hours. Don't run other commands in a loop while the bot is live: they share its request budget.
 
 ## Running 24/7 on a server
 
 ```bash
 scp -r mm_bot.py ref_prices.py ref_map.json deploy root@SERVER_IP:/root/mmbot-src
 ssh -t root@SERVER_IP 'bash /root/mmbot-src/deploy/setup.sh'    # installs, hardens, asks for the key
-ssh root@SERVER_IP 'systemctl enable --now mmbot'               # start (restarts on crashes and reboots)
+ssh root@SERVER_IP 'systemctl enable --now mmbot'               # restarts on crashes and reboots
 ssh root@SERVER_IP 'journalctl -u mmbot -f'                     # live log
 ```
 
-The API runs in San Francisco (Vercel `sfo1`), so a server in that region gets the fastest responses.
+The API runs in San Francisco (Vercel `sfo1`); a server in that region gets the fastest responses.
 
 ## Tests
 
 ```bash
-python tests/test_mm_bot.py && python tests/test_ref_prices.py && python tests/test_stress.py
+for t in tests/test_*.py; do python "$t" | tail -1; done      # 56 suites, about 3 minutes in parallel
+STRESS_LADDER=1 python tests/test_stress.py                    # long randomised sessions against a flaky exchange
 ```
 
-209 offline checks cover quoting, fair value, Kelly sizing, taking stale quotes, election night, the self-test, reconciling orders, fills, arbitrage, every risk guard,
-the kill switch, crash and restart behaviour, the rate limiter and the realtime feed. The **stress test**
-then runs long randomised sessions against a deliberately flaky exchange (errors on any request, lost
-responses, a lagging order list, the feed dropping, election night) and checks after every cycle that the
-bot never crashes, never double-quotes or crosses itself, keeps its positions within limits, and recovers
-fully once the faults stop (100 seeds passed; CI runs 5). No API key or network needed. GitHub Actions
-runs all three on every push.
+The suites cover quoting, fair value, sizing, takes, arbitrage, every guard, the kill switch, crash and
+restart behaviour, the rate limiter, the realtime feed, the value floor, the allocator, market-making
+funding, the ladder, the state cap and the momentum sleeve, and pin each package's flags-off behaviour to
+the previous one. The dry-run suites (`test_p*_dryrun.py`) replay a recorded live snapshot: point
+`P9_SNAP` at a folder holding `md.sqlite` (built from an `ops-snapshot-*` branch's `market_data.sql.gz`)
+and the snapshot's `status.json`, `order_notes.json`, `position_lots.json` and `settings_override.json`;
+without it they skip. Three checks look for a `python3.10` binary and fail on a machine without one.
