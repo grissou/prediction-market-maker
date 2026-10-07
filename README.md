@@ -186,7 +186,7 @@ without cancelling and the new one adopt the resting orders, so a code change co
 **Release discipline.** New behaviour arrives as a numbered release ("package") with: every new setting
 OFF by default; a test that pins the code with the flags off byte-identical in its orders, quotes and
 status to the previous release; a dry run replaying a recorded live snapshot; a staged settings file; and
-a note under `deploy/package<N>/` with the first-hour watch list and the rollback. Sixteen numbered releases were built between 2 and 6 October; thirteen went live, one at a time, each
+a note under `deploy/package<N>/` with the first-hour watch list and the rollback. Sixteen numbered releases were built between 2 and 6 October; twelve went live (with hot-fix revisions), one at a time, each
 after the previous one had run for a few hours.
 
 **Testing.** 56 offline suites (about 4,000 checks) run against a fake exchange that follows the API
