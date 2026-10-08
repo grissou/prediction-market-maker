@@ -29,7 +29,7 @@ stop. `STRESS_LADDER=1` runs it with the harvest ladder on.
 ## The simulators
 
 There are three, at three levels of realism. They were used to rank strategy ideas before building them,
-and to size settings; the numbers they produced are in `docs/notes/SIM_NOTES.md` on the archive branch.
+and to size settings; the numbers they produced are in `docs/notes/SIM_NOTES.md` on the branch `archive/build-notes-2026-10`.
 
 ### `strategy_sim.py`: the quoting decisions in a crowded book
 
