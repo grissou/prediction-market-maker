@@ -343,7 +343,7 @@ def twin(inv, bk, overrides, cash):
         if mod is base:
             cfg = base.Config()
             for k_ in base.Config.__dataclass_fields__:
-                setattr(cfg, k_, getattr(bn.cfg, k_))
+                setattr(cfg, k_, getattr(bn.cfg, k_, getattr(cfg, k_)))
             d = tempfile.mkdtemp()
             for k_ in ("fills_csv", "status_file", "order_notes_file", "kill_file", "position_lots_file",
                        "overrides_file", "market_edge_file", "handover_file"):

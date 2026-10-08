@@ -219,7 +219,7 @@ def twin(inv, cash, **cfg):
     api_n, bn = alloc_bot(inv=inv, cash=cash, enabled=False, **cfg)
     c = base.Config()
     for k in base.Config.__dataclass_fields__:
-        setattr(c, k, getattr(bn.cfg, k))
+        setattr(c, k, getattr(bn.cfg, k, getattr(c, k)))
     api_b = FakeApi(True)
     api_b.markets_list = list(api_n.markets_list)
     api_b.books = {e: {"bids": [dict(x) for x in v["bids"]], "asks": [dict(x) for x in v["asks"]]}
@@ -342,7 +342,7 @@ check("own quotes stripped from the fresh book (our 0.61 bid is not the touch)",
       fresh["bids"][:2])
 
 # ============================================================================================ thresholds / exclusions
-print("--- thresholds, pins, headline, basket, skip")
+print("--- thresholds, pins, headline, skip")
 api, b = alloc_bot()
 warm(b)
 b.cfg.alloc_max_edge_sell = -0.01
@@ -362,9 +362,6 @@ b.cfg.alloc_pin = ""
 check("skip: a market another feature traded this cycle is neither sold...", not plan(b, cash=1000.0, skip={"A1"})[0])
 check("...nor bought (its race in skip)", all(p_["buy"]["eid"] != "B1"
                                               for p_ in plan(b, cash=1000.0, skip={"Beta Senate"})[0] if p_["buy"]))
-b.basket_legs = {"B1": 10.0}
-check("basket legs never touched", all(p_["buy"]["eid"] != "B1" for p_ in plan(b, cash=1000.0)[0] if p_["buy"]))
-b.basket_legs = {}
 b.cfg.headline_races = ("Beta Senate",)
 check("headline markets excluded (alloc_headline False)",
       all(p_["buy"]["eid"] != "B1" for p_ in plan(b, cash=1000.0)[0] if p_["buy"]))

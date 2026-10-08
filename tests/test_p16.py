@@ -379,7 +379,7 @@ if base is not None:
             if mod is base:
                 cfg = base.Config()
                 for k in base.Config.__dataclass_fields__:
-                    setattr(cfg, k, getattr(bn.cfg, k))
+                    setattr(cfg, k, getattr(bn.cfg, k, getattr(cfg, k)))
                 d = tempfile.mkdtemp()
                 for k in ("fills_csv", "status_file", "order_notes_file", "kill_file", "position_lots_file",
                           "overrides_file", "market_edge_file", "handover_file"):
@@ -489,9 +489,10 @@ if base is not None:
         fresh(bn)
         cfg = base.Config()
         for k in base.Config.__dataclass_fields__:
-            setattr(cfg, k, getattr(bn.cfg, k))
+            setattr(cfg, k, getattr(bn.cfg, k, getattr(cfg, k)))
         bb_ = base.Bot.__new__(base.Bot)
         bb_.__dict__.update(bn.__dict__)
+        bb_.basket_legs = {}                # (the base revision's retired long-tilt basket: never any legs)
         bb_.cfg = cfg
         now_m = time.monotonic()
         for ro in (False, True):

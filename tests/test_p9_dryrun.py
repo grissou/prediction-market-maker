@@ -206,7 +206,7 @@ class DryApi(FakeApi):
         return res
 
 
-TAGGED = ("take_stale_quotes", "take_aged", "tilt_exit_takes", "basket_tick", "take_arbitrage", "pair_followup_step",
+TAGGED = ("take_stale_quotes", "take_aged", "tilt_exit_takes", "take_arbitrage", "pair_followup_step",
           "pair_passive_step")
 
 
@@ -258,11 +258,17 @@ def build(S, cash=None, overrides="live"):
     return api, b
 
 
+def staged(path):
+    """A Package 9 staged file less its basket_* keys (the long-tilt basket was removed, never enabled live)."""
+    return {k: v for k, v in json.load(open(path)).items() if not k.startswith("basket_")}
+
+
 def apply_stage(b, path):
     """The owner's deployment step: the file copied over settings_override.json, read by the bot's own override path."""
-    raw = json.load(open(path))
+    raw = staged(path)
     good, bad = M.validate_overrides(raw, b.cfg)
-    shutil.copy(path, b.cfg.overrides_file)
+    with open(b.cfg.overrides_file, "w") as f:
+        json.dump(raw, f)
     b.overrides_mtime = None
     n = len(ALERTS)
     b.check_overrides(force=True)
@@ -351,7 +357,7 @@ def main():
     # ---- the staged files are valid and keep the live base
     live = json.load(open(os.path.join(SNAP, "settings_override.json")))
     for k, p in files.items():
-        raw = json.load(open(p))
+        raw = staged(p)
         good, bad = M.validate_overrides(raw, M.Config())
         check(f"files: {k} validates (no refused key)", not bad, bad)
         check(f"files: {k} keeps capital_ceiling_adding_size_factor 0 and ref_tilt_headline",
@@ -388,9 +394,8 @@ def main():
     cycles(b, 8, stage="stage0")
     o0 = orders(api, "stage0") + orders(api, "warm")
     tags0 = Counter(o["tag"] for o in o0)
-    check("stage0: no tilt exit takes, no basket, no arbitrage orders",
-          not any(tags0[t] for t in ("tilt_exit_takes", "basket_tick", "take_arbitrage")), tags0)
-    check("stage0: status has no basket section", "basket" not in status_of(b))
+    check("stage0: no tilt exit takes, no arbitrage orders",
+          not any(tags0[t] for t in ("tilt_exit_takes", "take_arbitrage")), tags0)
     out("## Stage 0 (code only, = Package 8 behaviour)")
     summarise(api, "stage0", "stage0")
     take0 = orders(api, "stage0", "take_stale_quotes") + orders(api, "warm", "take_stale_quotes")
@@ -414,8 +419,8 @@ def main():
         if edge < b.cfg.take_edge - 0.005:
             badtake.append((o["label"], o["yes_price"], round(p, 4), round(edge, 4)))
     check("stage1: every stale-quote take has >= take_edge against the TILTED reference", not badtake, badtake[:5])
-    check("stage1: no tilt exit take / basket / arbitrage", not any(o["tag"] in ("tilt_exit_takes", "basket_tick",
-                                                                                  "take_arbitrage") for o in o1))
+    check("stage1: no tilt exit take / arbitrage", not any(o["tag"] in ("tilt_exit_takes", "take_arbitrage")
+                                                       for o in o1))
     scan = take_scan(b)
     inj = injected_take(S, files)
     out("## Stage 1 (hygiene: takes from the tilted reference, ref_tilt_max 0.20, sets kept)")
@@ -568,17 +573,7 @@ def main():
     STATE["seed"], STATE["hourly"] = seed, hourly
     print(f"(stage 0-2 done in {_rt.time() - t0:.0f} s)")
     depth_analysis(S, b)
-    skip = set(os.environ.get("P9_SKIP", "").split(","))          # (debugging: run parts only)
-    if "zero" not in skip:
-        stage3_zero_cash(S, files)
-    stage3_main(b, api, files)
     stage4(b, api, files)
-    if "flat" not in skip:
-        kill_path(*stage3_flattened(S, files))
-    if "3b" not in skip:
-        stage3b_flattened(S, files)
-    if "exit" not in skip:
-        exit_path(S, files)                               # (last: it moves the shared clock 15 days on)
     findings()
     print(f"(all done in {_rt.time() - t0:.0f} s)")
     return 0
@@ -682,126 +677,6 @@ def injected_take(S, files):
     return res
 
 
-def basket_adds(xs):
-    return [o for o in xs if o["tag"] == "basket_tick" and
-            ((o["yes_buy"] and o["pos_before"] >= 0) or (not o["yes_buy"] and o["pos_before"] <= 0))]
-
-
-def stage3_zero_cash(S, files):
-    """The owner switches stage 3 on while the cash gate is still ~0 (stage 2 has freed nothing yet)."""
-    api, b = build(S)
-    cycles(b, 4, stage="z-warm")
-    apply_stage(b, files["stage2_flatten"])
-    api.cash_cap = 0.0                                    # nothing freed yet (the P&L read shows 0 cash)
-    bad, al = apply_stage(b, files["stage3_basket"])
-    n0 = len(CAP.lines)
-    cycles(b, 6, step=60.0, stage="z-stage3")
-    st = status_of(b)
-    bo = orders(api, "z-stage3", "basket_tick")
-    info = st.get("basket") or {}
-    blog = [m for _, _, m in CAP.lines[n0:] if "BASKET" in m or "basket" in m]
-    check("stage3 at 0 cash: applied", not bad and not al and b.cfg.basket_enabled, (bad, al))
-    check("stage3 at 0 cash: the basket sends NOTHING", not bo, len(bo))
-    check("stage3 at 0 cash: status.json basket says why (refused)", bool(info.get("refused")), info.get("refused"))
-    out("## Stage 3 switched on at 0 cash (too early)")
-    out(f"- basket orders: {len(bo)}; basket state {info.get('state')}, refused {info.get('refused')!r}, target "
-        f"{info.get('target')} (full {info.get('target_full')}), floor {info.get('floor')}, cushion {info.get('cushion')},"
-        f" liquidation {info.get('liquidation')}, cash_gate_left {st.get('cash_gate_left')}")
-    out("- log lines: " + ("; ".join(blog[:4]) or "(none)"))
-    out()
-
-
-def basket_checks(b, api, stage, label, full_max=None):
-    """The basket's leg rules on every add the fake received in `stage`; returns (adds, legs, info)."""
-    xs = orders(api, stage)
-    adds = basket_adds(xs)
-    info = b.basket_info
-    full = max(full_max or 0.0, info.get("target_full") or 0.0)   # (the cap applies at add time: the target since)
-    bad = []
-    fvs = {e: M.fair_value(x.book, b.cfg) for e, x in b.ex.items()}
-    for o in adds:
-        ex = b.ex[o["eid"]]
-        members = b.groups[ex.group]
-        rs = {m: b.cur_refs.get(m) for m in members}
-        tot = sum(v for v in rs.values() if v is not None) or 1.0
-        sc = rs[o["eid"]] / tot if rs[o["eid"]] is not None else None
-        fav = max(members, key=lambda m: (rs[m] or 0))
-        if ex.group in b.cfg.headline_races:
-            bad.append(("headline", o["label"]))
-        if ex.label.startswith("Ind"):
-            bad.append(("independent", o["label"]))
-        if o["own_resting"]:
-            bad.append(("own order resting", o["label"]))
-        if o["yes_buy"] and not (o["yes_price"] <= 0.25 + 1e-9 and sc is not None and sc < 0.10):
-            bad.append(("YES add not a longshot <= 25c", o["label"], o["yes_price"], sc))
-        if not o["yes_buy"] and not (o["yes_price"] >= 0.75 - 1e-9 and o["eid"] == fav):
-            bad.append(("NO add not the favourite >= 75c", o["label"], o["yes_price"]))
-    check(f"{label}: every basket add is longshot YES <= 25c or favourite NO >= 75c, no headline, no independent, "
-          "no own resting order", not bad, bad[:5])
-    over = [(b.ex[e].label, round(b.basket_leg_value(e, q, fvs, b.cur_book_fvs)))
-            for e, q in b.basket_legs.items()
-            if b.basket_leg_value(e, q, fvs, b.cur_book_fvs) > 0.05 * full * 1.02 + 5]
-    check(f"{label}: every leg <= 5% of the highest full target of the build ({0.05 * full:,.0f})", not over, over[:5])
-    now_over = [e for e, q in b.basket_legs.items()
-                if b.basket_leg_value(e, q, fvs, b.cur_book_fvs) > 0.05 * (info.get("target_full") or 0) * 1.02 + 5]
-    STATE.setdefault("leg_over", {})[label] = (len(now_over), len(b.basket_legs), info.get("target_full"), full)
-    quoted = [b.ex[e].label for e in b.basket_legs if any(r["exchangeId"] == e for r in api.orders.values())]
-    check(f"{label}: no resting quote of ours on a basket leg", not quoted, quoted[:5])
-    per_cycle = Counter(o["cycle"] for o in xs if o["tag"] == "basket_tick")
-    check(f"{label}: <= 4 basket orders a cycle", max(per_cycle.values() or [0]) <= 4, per_cycle.most_common(2))
-    return adds, info
-
-
-def target_check(b, label):
-    info, cfg = b.basket_info, b.cfg
-    liq, floor, acct = info.get("liquidation"), info.get("floor"), b.last_equity
-    if liq is None:
-        check(f"{label}: target known", False)
-        return
-    want = max(0.0, min(cfg.basket_mult * (liq - floor - info.get("impact", 0.0)), cfg.basket_cap,
-                        cfg.basket_cap_frac * acct))
-    check(f"{label}: target = min(5 x (liquidation - floor - impact), cap, 0.85 x account)",
-          abs(want - info.get("target_full", -1)) < 2, (want, info.get("target_full")))
-    check(f"{label}: floor = max(86k, 0.85 x peak)",
-          abs(info["floor"] - max(cfg.basket_floor, cfg.basket_floor_peak_frac * (info.get("peak") or 0))) < 1)
-
-
-def basket_table(b, adds, title, n=12):
-    out(f"{title}: {len(b.basket_legs)} legs held, ${b.basket_info.get('held', 0):,.0f} (target "
-        f"{b.basket_info.get('target')}, full {b.basket_info.get('target_full')}), state {b.basket_state}, "
-        f"refused {b.basket_info.get('refused')!r}")
-    out()
-    sample(adds, n)
-    out()
-
-
-def stage3_main(b, api, files):
-    """The main flow: stage 3 on after the simulated stage-2 hours (whatever cash they freed)."""
-    bad, al = apply_stage(b, files["stage3_basket"])
-    check("stage3: applied", not bad and not al and b.cfg.basket_enabled, (bad, al))
-    cash0, worst0 = api.cash, status_of(b)["worst_case_loss"]
-    hist = []
-    for h in range(4):                                     # the 4-h build
-        cycles(b, 60, step=60.0, stage="stage3")
-        st = status_of(b)
-        hist.append((h + 1, len(b.basket_legs), b.basket_info.get("held"), b.basket_info.get("target"),
-                     b.basket_info.get("target_full"), api.cash, st["worst_case_loss"], b.basket_info.get("refused")))
-        STATE.setdefault("ro", {})[f"stage3 h{h + 1}"] = st["reduce_only"]
-    adds, info = basket_checks(b, api, "stage3", "stage3 (cash from stage 2)", max(h[4] or 0 for h in hist))
-    target_check(b, "stage3")
-    out("## Stage 3 after the simulated stage-2 hours (the cash stage 2 really freed)")
-    out(f"- at switch-on: cash {cash0:,.0f}, worst case {worst0:,.0f}")
-    out()
-    out("| hour | legs | held $ | target (ramped) | full target | cash | worst case (basket at 40%) | refused |")
-    out("|---|---|---|---|---|---|---|---|")
-    for h, n, held, tgt, full, cash, worst, ref in hist:
-        out(f"| {h} | {n} | {held or 0:,.0f} | {tgt or 0:,.0f} | {full or 0:,.0f} | {cash:,.0f} | {worst:,.0f} | {ref} |")
-    out()
-    basket_table(b, adds, "Basket adds (main flow)")
-    summarise(api, "stage3", "stage3")
-    STATE["stage3_main"] = (len(b.basket_legs), info.get("held"), info.get("target_full"), cash0)
-
-
 def flattened_snapshot(S, b_ref):
     """The plan's go-condition reached: every toward-Polymarket position sold at its mark (cash in), the rest held."""
     S2 = dict(S)
@@ -816,179 +691,6 @@ def flattened_snapshot(S, b_ref):
             del pos[e]
     S2["pos"] = pos
     return S2, cash_in
-
-
-def stage3_flattened(S, files):
-    """Stage 3 in the state the plan expects at its go-condition (the short-tilt book flattened at the marks, the
-    cash freed): the basket's full build, >= 20 legs, the backstop refusal, the ask-share caps."""
-    _, ref = build(S)
-    cycles(ref, 2, stage="f-ref")
-    S2, cash_in = flattened_snapshot(S, ref)
-    api, b = build(S2, cash=(float(S["status"]["account_value"]) - sum(leg_value(q, S["marks"].get(e, 0.5))
-                                                                       for e, q in S2["pos"].items())))
-    cycles(b, 4, stage="f-warm")
-    apply_stage(b, files["stage2_flatten"])
-    cycles(b, 2, stage="f-warm")
-    st = status_of(b)
-    worst0, cash0 = st["worst_case_loss"], api.cash
-    apply_stage(b, files["stage3_basket"])
-    hist = []
-    for h in range(5):
-        cycles(b, 60, step=60.0, stage="f-stage3")
-        st = status_of(b)
-        hist.append((h + 1, len(b.basket_legs), b.basket_info.get("held"), b.basket_info.get("target"),
-                     b.basket_info.get("target_full"), api.cash, st["worst_case_loss"], b.basket_info.get("refused")))
-    adds, info = basket_checks(b, api, "f-stage3", "stage3 flattened", max(h[4] or 0 for h in hist))
-    target_check(b, "stage3 flattened")
-    check("stage3 flattened: >= 20 legs", len(b.basket_legs) >= 20, len(b.basket_legs))
-    # the ask-share caps: per market, first build hour <= 0.75 x the snapshot's top-3 depth on that side
-    share_bad = []
-    first_h = defaultdict(float)
-    t_on = min([o["t"] for o in adds] or [0])
-    for o in adds:
-        if o["t"] - t_on < 3600:
-            first_h[o["eid"]] += o["traded"]
-    for e, q in first_h.items():
-        side = "asks" if b.basket_legs.get(e, 1) > 0 else "bids"
-        depth = sum(l["quantity"] for l in (S["books"][e].get(side) or [])[:3])
-        if q > 0.75 * depth + 1:
-            share_bad.append((b.ex[e].label, q, depth))
-    check("stage3 flattened: first-build ask share <= 75% of the top-3 depth per market", not share_bad, share_bad[:5])
-    # worst-case backstop: refused whenever the stressed worst case is above 0.9 x account
-    worst_now = b.total_worst_case(dict(api.inv), {e: M.fair_value(x.book, b.cfg) for e, x in b.ex.items()})
-    out("## Stage 3 at the plan's go-condition (short-tilt book flattened at the marks, cash freed)")
-    out(f"- synthetic start: {len(S['pos']) - len(S2['pos'])} toward-Polymarket positions removed at their marks "
-        f"(+{cash_in:,.0f} cash); cash {cash0:,.0f}, worst case {worst0:,.0f}")
-    out()
-    out("| hour | legs | held $ | target (ramped) | full target | cash | worst case (basket at 40%) | refused |")
-    out("|---|---|---|---|---|---|---|---|")
-    for h, n, held, tgt, full, cash, worst, refd in hist:
-        out(f"| {h} | {n} | {held or 0:,.0f} | {tgt or 0:,.0f} | {full or 0:,.0f} | {cash:,.0f} | {worst:,.0f} | {refd} |")
-    out()
-    basket_table(b, adds, "Basket adds (go-condition)", n=25)
-    summarise(api, "f-stage3", "stage3 (go-condition)")
-    STATE["flat"] = (len(b.basket_legs), info.get("held"), info.get("target_full"), cash0, worst0, worst_now)
-    # the worst-case backstop, forced: at a 0.5 backstop the stressed worst case is above it -> no add, status says so
-    b.cfg.worst_case_backstop_frac = 0.2
-    b.basket_target_frozen = None
-    cycles(b, 3, step=60.0, stage="f-backstop")
-    ba = basket_adds(orders(api, "f-backstop"))
-    check("stage3 flattened: adds refused while the stressed worst case > backstop x account (forced 0.2)",
-          not ba and b.basket_info.get("refused") == "worst-case backstop", (len(ba), b.basket_info.get("refused")))
-    apply_stage(b, files["stage3_basket"])
-    b.cfg.worst_case_backstop_frac = 0.9
-    return api, b, files
-
-
-def stage3b_flattened(S, files):
-    """stage3b (m 6, cap 90k) at the go-condition: where the build settles."""
-    _, ref = build(S)
-    cycles(ref, 2, stage="g-ref")
-    S2, _ = flattened_snapshot(S, ref)
-    api, b = build(S2, cash=(float(S["status"]["account_value"]) - sum(leg_value(q, S["marks"].get(e, 0.5))
-                                                                       for e, q in S2["pos"].items())))
-    cycles(b, 4, stage="g-warm")
-    apply_stage(b, files["stage3b_basket_m6"])
-    hist = []
-    for h in range(5):
-        cycles(b, 60, step=60.0, stage="g-stage3b")
-        hist.append((h + 1, len(b.basket_legs), b.basket_info.get("held"), b.basket_info.get("target_full")))
-    out("## Stage 3b (m 6, cap 90k) at the same go-condition")
-    out("| hour | legs | held $ | full target |")
-    out("|---|---|---|---|")
-    for h, n, held, full in hist:
-        out(f"| {h} | {n} | {held or 0:,.0f} | {full or 0:,.0f} |")
-    out()
-    STATE["3b"] = hist
-
-
-def kill_path(api, b, files):
-    """Push the liquidation value below the floor: the kill confirms after 120 s, sells the basket down over 2 h
-    as a taker and latches (re-applying the same stage-3 file does not clear it)."""
-    legs0 = dict(b.basket_legs)
-    liq = b.basket_info.get("liquidation")
-    floor = b.basket_info.get("floor")
-    api.equity_shift = -(liq - floor) - 2000.0            # the account value drops 2k below the floor
-    cycles(b, 1, step=60.0, stage="kill")
-    s1 = b.basket_state
-    cycles(b, 3, step=60.0, stage="kill")
-    s2 = b.basket_state
-    check("kill: breach seen, not killed on the first read", s1 != "killed", s1)
-    check("kill: killed after the 120-s confirmation", s2 == "killed", s2)
-    check("kill: alert sent", any("BASKET KILLED" in a for a in ALERTS))
-    api.equity_shift = 0.0                                 # value back: the latch holds
-    apply_stage(b, files["stage3_basket"])
-    k0 = sum(abs(q) for q in b.basket_kill_start.values()) or 1.0
-    left_h = []
-    for _ in range(3):                                     # 3 h, the books refilled to the snapshot depth each hour
-        cycles(b, 60, step=60.0, stage="kill")
-        api.refill()
-        left_h.append(sum(abs(q) for q in b.basket_legs.values()) / k0)
-    check("kill: on schedule - 1 h into the 2-h sale <= 65% of the shares left", left_h[0] <= 0.65, left_h)
-    ko = orders(api, "kill", "basket_tick")
-    adds = basket_adds(ko)
-    check("kill: no basket add after the kill", not adds, len(adds))
-    check("kill: sales sent", len(ko) > 0, len(ko))
-    check("kill: latched (still killed after the value recovered and the stage-3 file re-applied)",
-          b.basket_state == "killed" and b.basket_killed)
-    check("kill: >= 95% of the basket's shares sold within 3 h (the rest: legs whose exit side is thin)",
-          left_h[-1] <= 0.05, {b.ex[e].label: q for e, q in b.basket_legs.items()})
-    STATE["kill_left"] = {b.ex[e].label: (q, [(l["price"], l["quantity"]) for l in
-                                               (b.api.base_books[e]["asks" if q < 0 else "bids"] or [])[:3]])
-                          for e, q in b.basket_legs.items()}
-    STATE["kill_h"] = left_h
-    left = {b.ex[e].label: q for e, q in b.basket_legs.items()}
-    out("## Kill path (liquidation pushed 2k below the floor)")
-    out(f"- breach -> killed after {'<= 4' if s2 == 'killed' else '?'} cycles of 60 s; {len(ko)} sale orders over 3 h, books refilled hourly; "
-        f"share of the basket's shares left after 1 / 2 / 3 h: {' / '.join(f'{x:.0%}' for x in left_h)}; "
-        f"({sum(1 for o in ko if o['traded'] > 0)} traded, ${sum(usd(o) for o in ko):,.0f}); legs {len(legs0)} -> "
-        f"{len(b.basket_legs)} still held {left if len(left) < 8 else str(len(left)) + ' legs'}")
-    out()
-    sample(ko, 6)
-    out()
-    STATE["kill"] = (len(legs0), len(b.basket_legs), len(ko))
-
-
-def exit_path(S, files):
-    """A basket built for an hour, then the clock moved past basket_exit_utc: sales only, down to 0 over 24 h."""
-    _, ref = build(S)
-    cycles(ref, 2, stage="e-ref")
-    S2, _ = flattened_snapshot(S, ref)
-    api, b = build(S2, cash=(float(S["status"]["account_value"]) - sum(leg_value(q, S["marks"].get(e, 0.5))
-                                                                       for e, q in S2["pos"].items())))
-    cycles(b, 4, stage="e-warm")
-    apply_stage(b, files["stage3_basket"])
-    cycles(b, 60, step=60.0, stage="e-build")
-    legs0 = len(b.basket_legs)
-    sched = b.basket_schedule()
-    # 11 Oct + 1 h: inside the no-add window (7 days before the exit)
-    CLK.off += sched["no_add"] + 3600 - CLK.time()
-    cycles(b, 3, step=60.0, stage="e-noadd")
-    noadd = basket_adds(orders(api, "e-noadd"))
-    refused = b.basket_info.get("refused")
-    check("exit: no adds inside the 7-day no-add window", not noadd and refused == "no adds this close to the exit",
-          (len(noadd), refused))
-    CLK.off += sched["start"] + 3600 - CLK.time()          # 18 Oct 13:00 UTC
-    cycles(b, 3, step=60.0, stage="e-exit")
-    st1 = b.basket_state
-    done_h = None
-    for h in range(30):                                    # up to 30 h at 10-min cycles (books refilled every hour)
-        cycles(b, 6, step=600.0, stage="e-exit")
-        api.refill()
-        if b.basket_state == "done" and done_h is None:
-            done_h = h + 1
-    xo = orders(api, "e-exit", "basket_tick")
-    check("exit: state exiting after basket_exit_utc", st1 == "exiting", st1)
-    check("exit: only sales after the exit start", not basket_adds(xo), len(basket_adds(xo)))
-    check("exit: the basket is sold to 0 (state done) within ~2 h after the 24-h schedule ends (depth-limited)",
-          not b.basket_legs and b.basket_state == "done" and done_h is not None and done_h <= 27,
-          (len(b.basket_legs), b.basket_state, done_h))
-    out("## Exit path (clock moved to 11 Oct then past basket_exit_utc 18 Oct 12:00)")
-    out(f"- built 1 h: {legs0} legs; 11 Oct: refused {refused!r}; 18 Oct 13:00: state {st1}; done after {done_h} h "
-        f"(exit window 24 h from 12:00, books refilled hourly); legs left {len(b.basket_legs)}; {len(xo)} sale orders "
-        f"({sum(1 for o in xo if o['traded'] > 0)} traded, ${sum(usd(o) for o in xo):,.0f})")
-    out()
-    STATE["exit"] = (legs0, st1, b.basket_state, len(b.basket_legs), len(xo), done_h)
 
 
 def stage4(b, api, files):
@@ -1023,10 +725,6 @@ def stage4(b, api, files):
         f"cash_gate_left now {cgl:,.0f}; all arbitrage-path orders {len(ao)} (incl. covered set unwinds / sell-backs)")
     STATE["stage4"] = (len(a_low), blocked_low, len(a_hi), sum(1 for o in a_hi if o["traded"] > 0))
     for m in lines[:8]:
-        out(f"    {m}")
-    blines = [m for _, _, m in CAP.lines[n0:] if "BASKET" in m]
-    out(f"- basket log lines in stage 4: {len(blines)}")
-    for m in blines[:8]:
         out(f"    {m}")
     out()
     summarise(api, "stage4", "stage4 (0 cash)")

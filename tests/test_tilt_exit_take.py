@@ -215,7 +215,7 @@ api, b = bot({"21": -3000})                      # short where r > c: shrinks |t
 run(api, b)
 check("a position against the tilt total is not an exit: nothing", not api.wire)
 
-print("--- guards: jump, liquidity, set legs, basket legs, skip")
+print("--- guards: jump, liquidity, set legs, skip")
 api, b = bot(A)
 now = time.monotonic()
 b.ex["11"].ref_jump_at = now - 5
@@ -238,10 +238,6 @@ check("... 12 (short the favourite) is no tilt exit; the NO+NO set (600) stays",
 api, b = bot({"11": -1000, "12": -1000, "21": 3000}, tilt_exit_take_max_leg_frac=1.0)
 run(api, b)
 check("all of 11's NO in a set: 11 not touched", not [x for x in sent(api) if x[0] in ("11", "12")], sent(api))
-api, b = bot(A)
-b.basket_legs = {"11": 1000.0, "12": 500.0}
-run(api, b)
-check("basket legs never taken", [x[0] for x in sent(api)] == ["21"], sent(api))
 api, b = bot(A)
 run(api, b, skip={"11", "Ohio Senate"})
 check("markets / races already acted on this cycle skipped", [x[0] for x in sent(api)] == ["21"], sent(api))
@@ -361,8 +357,6 @@ check("F2b: the gate is charged 1.0 a set share (cg_spent 1000)", abs(b.cg_spent
 sp = b.tet_splits
 check("F2b stats: splits {count 1, shares 1000, cash_freed 895}", sp["count"] == 1 and sp["shares"] == 1000
       and abs(sp["cash_freed"] - 895.0) < 1e-6, sp)
-check("F2b: no basket leg created (the remaining favourite NO is ordinary inventory)", not b.basket_legs,
-      b.basket_legs)
 check("F2b: the remaining favourite NO is no tilt exit while tilt_exposure > 0 (contribution < 0)",
       b.tilt_exposure > 0 and -1000 * (0.95 - 0.5) < 0 and b.tilt_exit_side(b.ex["12"], 0.95, -1000) is None
       and b.tet_market(b.ex["12"], 0.95, -1000, {"11": 0.0, "12": -1000.0}, time.monotonic()) is None)
@@ -545,7 +539,7 @@ def twin(inv, refs, overrides, books):
         if mod is base:
             cfg = base.Config()
             for k_ in base.Config.__dataclass_fields__:
-                setattr(cfg, k_, getattr(bn.cfg, k_))
+                setattr(cfg, k_, getattr(bn.cfg, k_, getattr(cfg, k_)))
             d = tempfile.mkdtemp()
             for k_ in ("fills_csv", "status_file", "order_notes_file", "kill_file", "position_lots_file",
                        "overrides_file", "market_edge_file", "handover_file"):

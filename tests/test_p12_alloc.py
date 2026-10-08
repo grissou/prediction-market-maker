@@ -213,7 +213,7 @@ def twin(inv, cash, books=None, **cfg):
     api_n, bn = mk_bot(inv=inv, cash=cash, books=books, **cfg)
     c = base.Config()
     for k in base.Config.__dataclass_fields__:
-        setattr(c, k, getattr(bn.cfg, k))
+        setattr(c, k, getattr(bn.cfg, k, getattr(c, k)))
     api_b = FakeApi(True)
     api_b.markets_list = list(api_n.markets_list)
     api_b.books = {e: {"bids": [dict(x) for x in v["bids"]], "asks": [dict(x) for x in v["asks"]]}

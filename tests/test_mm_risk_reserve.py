@@ -2,10 +2,10 @@
 just cash. Twice on 4 Oct value buying filled the worst-case backstop and the bot went reduce-only with the 15k cash
 reserve idle. With a reserve set, once room_wc = worst_case_backstop_frac x account - worst case or room_corr =
 max_worst_case_frac x account - settlement risk falls below it, value adds pause (takes that grow a position,
-allocator buys, basket buys, tail adding quotes) while middle-band two-way quoting and every reducing side go on;
+allocator buys, tail adding quotes) while middle-band two-way quoting and every reducing side go on;
 it lifts at 1.1 x the reserve. Reduce-only itself is never changed.
   settings / ranges; room math on the fake exchange; pause / resume with hysteresis; takes; allocator (buys blocked,
-  refills allowed); basket; tail adds dropped, middle two-way kept, reducing sides unchanged; the ladder's caps;
+  refills allowed); tail adds dropped, middle two-way kept, reducing sides unchanged; the ladder's caps;
   reduce-only unchanged; status.json / journal / summary; flags off identical to the branch head (git show
   34f5503:mm_bot.py) on a grid (quotes, wire orders, takes, allocator plan, status keys); py_compile on 3.10.
 Run:  python tests/test_mm_risk_reserve.py      (exit code 0 = all passed)"""
@@ -345,28 +345,6 @@ check("paused: a refill sale (no buy) is sent",
       quiet(b.alloc_sell, pr3, dict(api.inv), {}, time.monotonic(), time.time(), set()) is True and len(api.wire) > n0)
 check("allocator blocks counted in mm_risk_room", b.mmr_blocked["alloc"] >= 2, b.mmr_blocked)
 
-# ============================================================================================ basket
-print("--- basket: buys refused while paused")
-check("basket_tick refuses adds with 'mm risk reserve' while paused (sales go on)",
-      'refuse = "mm risk reserve"' in src and src.index('refuse = "mm risk reserve"') > src.index(
-          'refuse = "worst-case backstop"'))
-api, b = plain_bot()
-b.basket_info = {}
-b.mmr_paused = True
-fv = {e: x.last_fv for e, x in b.ex.items()}
-b.cfg.basket_enabled = True
-b.cfg.cash_gate_enabled = True
-b.cfg.basket_exit_utc = M.iso(NOW + timedelta(days=20))
-b.basket_state, b.basket_on_wall, b.basket_peak = "building", time.time() - 5 * 3600, 100000.0
-b.cg_cash, b.cg_reserved, b.cg_spent, b.cg_read_at = 50000.0, 0.0, 0.0, time.monotonic()
-quiet(b.basket_tick, M.utcnow(), {}, fv, fv, 100000.0, {})
-check("basket building, paused: refused 'mm risk reserve', counted", (b.basket_info or {}).get("refused")
-      == "mm risk reserve" and b.mmr_blocked["basket"] == 1, (b.basket_info or {}).get("refused"))
-b.mmr_paused = False
-quiet(b.basket_tick, M.utcnow(), {}, fv, fv, 100000.0, {})
-check("not paused: no such refusal", (b.basket_info or {}).get("refused") != "mm risk reserve",
-      (b.basket_info or {}).get("refused"))
-
 # ============================================================================================ status / summary
 print("--- status.json, summary")
 api, b = plain_bot({"11": 3000}, mm_risk_reserve_wc=50000.0, mm_risk_reserve_corr=4000.0)
@@ -424,7 +402,7 @@ if base is not None:
             if mod is base:
                 cfg = base.Config()
                 for k in base.Config.__dataclass_fields__:
-                    setattr(cfg, k, getattr(bn.cfg, k))
+                    setattr(cfg, k, getattr(bn.cfg, k, getattr(cfg, k)))
                 d = tempfile.mkdtemp()
                 for k in ("fills_csv", "status_file", "order_notes_file", "kill_file", "position_lots_file",
                           "overrides_file", "market_edge_file", "handover_file"):
@@ -507,9 +485,10 @@ if base is not None:
         pn = plan(bn, cash)
         cfg = base.Config()
         for k in base.Config.__dataclass_fields__:
-            setattr(cfg, k, getattr(bn.cfg, k))
+            setattr(cfg, k, getattr(bn.cfg, k, getattr(cfg, k)))
         bb_ = base.Bot.__new__(base.Bot)
         bb_.__dict__.update({k: v for k, v in bn.__dict__.items() if not k.startswith("mmr_")})
+        bb_.basket_legs = {}                # (the base revision's retired long-tilt basket: never any legs)
         bb_.cfg = cfg
         pb = quiet(base.Bot.alloc_plan, bb_, dict(api_n.inv), time.monotonic(), cash, set(), None)
         ok_a = ok_a and json.dumps(pn, sort_keys=True, default=str) == json.dumps(pb, sort_keys=True, default=str)

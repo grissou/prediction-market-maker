@@ -189,8 +189,33 @@ def notes(b):
 
 # Retired features: the status.json fields they owned, with the value the OLD code reports while the feature is off.
 # The new code may drop the field; the old code must have reported it at that value (so nothing live changed).
-RETIRED_STATUS = {}                               # e.g. "basket": ({"state": "off", ...},) or a tuple of allowed values
-RETIRED_SUBKEYS = {}                              # e.g. "mm_carry_24h": {"fills.basket": 0} is NOT supported: top-level sub-keys only
+RETIRED_STATUS = {                                # e.g. "basket": ({"state": "off", ...},) or a tuple of allowed values
+    # P9 F1 long-tilt basket (removed on simplify): the old code writes "basket" only once it was used (legs, a
+    # state other than "off", a kill or a tick's figures), so while off the key is absent; any value it does write
+    # means the basket was doing something, and nothing below forgives that
+    "basket": (),
+}
+RETIRED_SUBKEYS = {                               # sub-keys of a surviving top-level dict, dotted paths allowed
+    # (mm_risk_room.blocked.basket and mm_carry_24h.fills.basket stay in the new code at 0: the older twin suites
+    # compare status.json against pinned revisions; drop them here once those suites are retired)
+}
+
+
+def has_path(d, path):
+    """The dotted path exists in the nested dict d."""
+    head, _, rest = path.partition(".")
+    return isinstance(d, dict) and head in d and (not rest or has_path(d[head], rest))
+
+
+def drop_subkey(d, path, off):
+    """d with the dotted path removed when it is there at its OFF value; d itself otherwise."""
+    head, _, rest = path.partition(".")
+    if not isinstance(d, dict) or head not in d:
+        return d
+    if rest:
+        inner = drop_subkey(d[head], rest, off)
+        return d if inner is d[head] else {**d, head: inner}
+    return {k: v for k, v in d.items() if k != head} if d[head] == off else d
 
 # ------------------------------------------------------------------------------------------ the comparison
 if base is not None:
@@ -215,11 +240,11 @@ if base is not None:
                 if co[k] in off if isinstance(off, tuple) else co[k] == off:
                     co.pop(k)
                     so = {a: v for a, v in so.items() if a != k}
-        for k, sub in RETIRED_SUBKEYS.items():
-            if k in co and k in cn and isinstance(co[k], dict):
+        for k, sub in RETIRED_SUBKEYS.items():    # a retired feature's sub-keys of a surviving dict: gone from the
+            if k in co and k in cn and isinstance(co[k], dict):   # new status, at their OFF value in the old one
                 for a, off in sub.items():
-                    if a in co[k] and a not in cn[k] and co[k][a] == off:
-                        co[k] = {x: v for x, v in co[k].items() if x != a}
+                    if not has_path(cn[k], a):
+                        co[k] = drop_subkey(co[k], a, off)
         if cn != co or set(sn) ^ set(so):
             what.append(("status", sorted(k for k in set(cn) | set(co) if cn.get(k) != co.get(k)) +
                          sorted(set(sn) ^ set(so))))

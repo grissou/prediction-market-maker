@@ -116,8 +116,8 @@ for v in ("tomorrow", "2026-11-04T17:00:00", "2026-10-31T23:00:00Z", "2026-11-08
 for v in (-1, 121, True, "15"):
     good, bad = M.validate_overrides({"stop_minutes_before_close": v}, c)
     check(f"validate: stop_minutes_before_close {v!r} refused", not good and len(bad) == 1, (good, bad))
-good, bad = M.validate_overrides({"basket_exit_utc": ""}, c)
-check("basket_exit_utc still refuses '' (only close_override_utc takes it)", not good and len(bad) == 1)
+good, bad = M.validate_overrides({"mom_exit_utc": "x"}, c)
+check("mom_exit_utc still refuses an unparseable time (only '' or an ISO UTC time)", not good and len(bad) == 1)
 
 # ============================================================================================ M1
 print("--- M1 close_override_utc: hours_to_close, the stop, the windows")
@@ -203,9 +203,6 @@ try:
     quiet_cycle(b)
     check("stop 60: 90 min before the close -> quoting again (the exit window, 2 h: long 600 -> an exit ask)",
           b.ex["21"].quote.ask is not None, b.ex["21"].quote)
-    a, b = plain_bot({}, close_override_utc=OVR)
-    check("nothing else changes: the basket schedule still uses the API close",
-          b.basket_schedule()["close"] == plain_bot({})[1].basket_schedule()["close"])
 finally:
     reset_clock()
 
@@ -423,7 +420,7 @@ if base is not None:
                 if mod is base:
                     cfg = base.Config()
                     for k in base.Config.__dataclass_fields__:
-                        setattr(cfg, k, getattr(bn.cfg, k))
+                        setattr(cfg, k, getattr(bn.cfg, k, getattr(cfg, k)))
                     d = tempfile.mkdtemp()
                     for k in ("fills_csv", "status_file", "order_notes_file", "kill_file", "position_lots_file",
                               "overrides_file", "market_edge_file", "handover_file"):

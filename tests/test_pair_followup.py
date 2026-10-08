@@ -382,7 +382,7 @@ def base_bot(inv, reduce):
     api_n, bn = bot(inv, reduce=reduce, on=False)
     cfg = base.Config()
     for k in base.Config.__dataclass_fields__:
-        setattr(cfg, k, getattr(bn.cfg, k))
+        setattr(cfg, k, getattr(bn.cfg, k, getattr(cfg, k)))
     api_b = FakeApi(True)
     api_b.markets_list = list(api_n.markets_list)
     api_b.books = {e: {"bids": [dict(x) for x in v["bids"]], "asks": [dict(x) for x in v["asks"]]}
