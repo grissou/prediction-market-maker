@@ -187,6 +187,11 @@ def notes(b):
                   for x in b.order_meta.values())
 
 
+# Retired features: the status.json fields they owned, with the value the OLD code reports while the feature is off.
+# The new code may drop the field; the old code must have reported it at that value (so nothing live changed).
+RETIRED_STATUS = {}                               # e.g. "basket": ({"state": "off", ...},) or a tuple of allowed values
+RETIRED_SUBKEYS = {}                              # e.g. "mm_carry_24h": {"fills.basket": 0} is NOT supported: top-level sub-keys only
+
 # ------------------------------------------------------------------------------------------ the comparison
 if base is not None:
     WORLDS = (({}, 50000.0, {}, False),
@@ -205,6 +210,16 @@ if base is not None:
         if notes(bn) != notes(bo):
             what.append("notes")
         cn, co = cut(sn), cut(so)
+        for k, off in RETIRED_STATUS.items():     # a retired feature's own fields: gone from the new status, and
+            if k in co and k not in cn:           # at their OFF value in the old one (else it was doing something)
+                if co[k] in off if isinstance(off, tuple) else co[k] == off:
+                    co.pop(k)
+                    so = {a: v for a, v in so.items() if a != k}
+        for k, sub in RETIRED_SUBKEYS.items():
+            if k in co and k in cn and isinstance(co[k], dict):
+                for a, off in sub.items():
+                    if a in co[k] and a not in cn[k] and co[k][a] == off:
+                        co[k] = {x: v for x, v in co[k].items() if x != a}
         if cn != co or set(sn) ^ set(so):
             what.append(("status", sorted(k for k in set(cn) | set(co) if cn.get(k) != co.get(k)) +
                          sorted(set(sn) ^ set(so))))
