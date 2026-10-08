@@ -1,6 +1,7 @@
 .venv/
 .env
 __pycache__/
+.DS_Store
 
 # files the bot writes while running (your data - not code)
 fills.csv
@@ -11,4 +12,10 @@ order_notes.json
 position_lots.json
 kill_switch.tripped
 market_data.sqlite*
+market_edge.json
 *.tmp
+
+# live-only: the server's settings file and deploy folders (the staged copies live in deploy/package<N>/)
+settings_override.json
+backup-20*/
+staging-20*/
