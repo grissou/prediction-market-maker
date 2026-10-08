@@ -149,7 +149,7 @@ longshots most exposed to a further rise (priced 4–25%, with less than 12% edg
 time while the rise continues, up to a cap. It sells them again, over six hours, when the 24-hour slope
 stops rising, when they are up 25%, or when they are down 25%; after that the ladder takes over those
 markets. It never buys in a race where the bot is selling. The expected return of this bet is modest and
-uncertain: the analysis in `analysis/p15/TILT_PATHS.md` puts an unconditional long-tilt bet at about +7%
+uncertain: the analysis in `analysis/reports/TILT_PATHS.md` puts an unconditional long-tilt bet at about +7%
 with a 35% chance of losing a third or more. That is why it waits for a trigger rather than running
 always, and why it is capped at 10k on the live bot.
 
@@ -266,7 +266,7 @@ exploitation of exchange bugs; these constraints were part of every design brief
 |---|---|
 | `mm_bot.py` | The bot. Every tunable is in the `Config` block, with its documentation; `OVERRIDABLE` lists the ones that can be changed live |
 | `ref_prices.py`, `ref_map.json` | Polymarket (and Kalshi) prices and the mapping from races to their markets |
-| `tests/` | The 56 suites, the two simulators and the stress test |
+| `tests/` | The 56 suites, the three simulators and the stress test; `tests/README.md` explains them |
 | `analysis/` | The research behind each release: valuation, tilt paths, turnover, fill analysis, dry-run reports |
 | `deploy/` | Service unit, server setup, the handover script, `RUNBOOK.md`, and each release's staged settings and notes |
 

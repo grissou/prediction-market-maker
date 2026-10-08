@@ -6,6 +6,8 @@ imports `mark_rule.py`, everything else is read or run by hand.
 | Path | What it is |
 |---|---|
 | `p9/` … `p16/` | One folder per release: the spec, the red-team review, the dry run on a recorded snapshot, the diagnosis that led to it |
+| `literature/` | Six literature reviews written before release 12: market making, forecasting, anomalies, portfolio choice, election night, trading competitions |
+| `reports/` | Stand-alone reports: `TILT_PATHS.md`, the tilt's likely paths to 4 November and what each pays |
 | `poly_bias/` | The study of where the tournament's prices sit relative to Polymarket's |
 | `explorer_r2/` | The second exploration round's notes |
 | `sim_results/` | Raw output of `tests/live_sim.py` and `tests/strategy_sim.py` runs, by round; `docs/notes/SIM_NOTES.md` summarises them |
