@@ -233,6 +233,8 @@ class Gate:
         self.state_usd = dict(risk.state_usd)
         self.unclaimed = {e: list(rs) for e, rs in view.resting.items()}
         self.refused_usd = {}        # tag -> cash the strategy wanted and the gate could not give
+        self.blocked = {}            # rule -> orders refused outright (status.json blocked_by)
+        self.why = None              # the rule that stopped the last order's adding part
 
     def admit(self, order):
         """The order, trimmed to what every rule allows, or None if less than a share is left. The part that sells
@@ -243,21 +245,31 @@ class Gate:
         reduce = math.floor(min(order.size, covered) + 1e-9)
         self.covered[key] -= reduce
         self.bloc += reduce * self.bloc_step(order)
+        self.why = None
         add = self.add_allowed(order, math.floor(order.size - reduce + 1e-9), qty)
         self.commit(order, add)
         size = reduce + add
         if size < MIN_SHARES:
+            why = self.why or "size"
+            self.blocked[why] = self.blocked.get(why, 0) + 1
             return None
         return order if size == order.size else replace(order, size=size)
 
     def add_allowed(self, order, n, qty):
         """Shares (<= n) of the order's adding part every rule allows, in order: reduce-only, the reserve pause, the
         per-market, per-state and bloc caps, then cash (the only refusal counted in refused_usd)."""
-        if n < MIN_SHARES or self.risk.reduce_only:
+        if n < MIN_SHARES:
             return 0
-        if self.risk.adds_paused and order.tag in VALUE_TAGS:
+        if self.risk.reduce_only or self.risk.adds_paused and order.tag in VALUE_TAGS:
+            self.why = "reduce_only" if self.risk.reduce_only else "adds_paused"
             return 0
-        n = min(n, self.market_room_shares(order, qty), self.state_room_shares(order), self.bloc_room_shares(order))
+        for why, room in (("market_cap", self.market_room_shares(order, qty)), ("state_cap", self.state_room_shares(order)),
+                          ("bloc_cap", self.bloc_room_shares(order))):
+            n = min(n, room)
+            if n < MIN_SHARES:
+                self.why = why
+                return 0
+        self.why = "cash"
         return self.cash_shares(order, max(0, n))
 
     def unit(self, order):

@@ -12,6 +12,8 @@ ORIGIN   Day one: the API's limit measured at about 100 requests a minute, and e
          so our own orders are stripped from every book before anyone prices from it, or fair value would follow
          our quotes. The feed died silently for two days (29 Sep) while reporting "connected": hence the dead-socket
          checks and the session renewal.
+FOREIGN  The client lists every order on the account; which are ours is the bot's (bot.py header: FOREIGN). It never
+         calls cancel-all while a foreign order rests; `cancel(oid, wait=True)` lets a stop wait for the budget.
 OPEN     A NO-side fill's price is read as the NO price (day one: an ask at 0.62 filled "at 0.38"); the old bot also
          accepted the YES price there. The exchange's handling of a "sell NO" beyond the NO held is unknown, so a
          covered sale is trimmed to the NO held.
@@ -496,12 +498,13 @@ class Client:
         return Placed(Order(order.eid, order.is_bid, order.price, order.size, order.tag, order.ioc, oid,
                             order.expires), oid, float(data.get("quantityTraded") or 0), None)
 
-    def cancel(self, oid):
-        """True once the order is gone; 404 / 409 mean it already is (filled, expired or cancelled)."""
+    def cancel(self, oid, wait=False):
+        """True once the order is gone; 404 / 409 mean it already is (filled, expired or cancelled). `wait`: a stop
+        waits for the write budget rather than be refused."""
         if not self.live:
             return True
         try:
-            self.call("DELETE", f"/orders/{oid}", ok=(200,), write=True)
+            self.call("DELETE", f"/orders/{oid}", ok=(200,), write=True, wait=wait)
         except ApiError as e:
             if e.status not in (404, 409):
                 raise

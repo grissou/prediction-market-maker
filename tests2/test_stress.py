@@ -84,12 +84,12 @@ class StressClient(FakeClient):
         super().place(orders, positions)
         return [Placed(o, None, 0.0, "response lost", unknown=True) for o in orders]
 
-    def cancel(self, oid):
+    def cancel(self, oid, wait=False):
         if self.cancels_fail:
             self.calls.append("cancel")
             raise ApiError(503, "INJECTED", "cancel failed")
         if self.lose_cancels <= 0:
-            return super().cancel(oid)
+            return super().cancel(oid, wait)
         self.lose_cancels -= 1
         super().cancel(oid)
         raise ApiError(504, "GATEWAY_TIMEOUT", "cancel response lost")

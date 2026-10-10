@@ -1,14 +1,42 @@
 # Rewrite status
 
 ```
-STATUS (2026-10-10 15:00 UTC, branch rewrite) - READY
-done:     'Done means' 1-4; tests2/ all pass (exchange 70, pricing 40, risk 55, value 57, mm 58, ladder 28,
-          bot+ops 38, stress 60, replay 5); owner decisions 1-3 built (risk-neutral swaps while paused,
-          MM inventory credited to its own room, covered "sell NO" start-up probe with fallback)
-left:     the owner's shadow run (`python3 mm_bot2.py run` against the real feed: not possible from here);
-          decision 4 kept as is (no exit orders resting in the tails)
-lines:    mmbot2/ + mm_bot2.py = 3,486 (target < 4,000; brief 3,000-3,500); tests2/ 10 files; 59 settings
+STATUS (2026-10-10, branch rewrite) - IN PROGRESS: rewrite 2 (docs/REWRITE_FIX_BRIEF.md)
+done:     fix 1 - the cause of "no orders": the request budget left the books nothing (below); foreign orders;
+          DRY PLACE logging; books_fresh / books_dirty / orders_foreign / blocked_by in status.json and the line
+left:     mm_quote_frac 0.0005; the recorder; the stripped phone summary and alerts; line count; READY
+lines:    see the table (updated at READY)
 ```
+
+## Rewrite 2: why the 10 Oct shadow planned nothing (fix 1)
+
+Cause: at `requests_per_minute` 20 the full REST check ran every 30 s (`full_check_s`) and cost ~7 requests
+(positions, fills, open orders, account, 3 bulk-price pages): ~14 a minute. Book reads stopped while 10 or fewer
+requests were left in the minute (a fixed `REQUEST_SPARE` 10, sized for 80/min), so after the first cycle the bot
+read almost no books. With no fresh book no strategy plans anything (market making, value quotes and the ladder
+need the book; the allocator found "no level"), and the tilt needs 50 markets with a book mid, so it stayed null.
+`priced 226/237` counted Polymarket prices, not books, so the status line hid it. The feed's dirty flags were
+consumed every cycle even when the budget could not serve them (lost, not applied: the feed carries no levels).
+
+Fix (`bot.py` header BOOKS, FOREIGN):
+- the full check is spaced so it spends at most 40% of the budget (60 s at 20/min, 30 s at 80), account reads
+  between full checks at most 20%; the spare is 10% of the budget (2 at 20/min); the books get the rest;
+- a book stays fresh while the bulk tops at each full check still match it (net of the account's own orders), so
+  3 requests confirm every book; a moved top or a feed flag marks it dirty until a REST read; dirty flags persist;
+- reads go never-read and dirty first, then oldest; at 20/min all 240 books are fresh within 40 minutes (test);
+- foreign orders (on the account, not placed by this process) are never cancelled, adopted or counted, stripped
+  from books, never traded against (blocked_by self_trade), and never stop quoting; a live stop cancels only ours
+  (cancel-all only when no foreign order rests). Live, the old code cancelled the live bot's orders on its first
+  cycle and its cancel-all on stop pulled them all;
+- dry run logs `DRY PLACE <market> <side> <qty>@<price> <tag>` (and `DRY CANCEL`) per order;
+- status.json: `books_fresh`, `books_dirty`, `orders_foreign`, `blocked_by` {rule: orders refused this cycle, and
+  no_book: priced markets without a fresh book}; the status line shows them.
+
+Tests: `tests2/test_shadow.py` (24 checks) - 240 markets, 170 foreign orders, 20 requests/min on a sliding minute,
+the feed churning 3 books a cycle, dry run: DRY PLACE within 10 minutes, all books fresh in 40, tilt 8% recovered,
+never over budget; live with foreign orders: none cancelled or adopted, quotes beside them, a stop leaves them;
+crossing a foreign order is refused and counted; a dirty flag without a book builds none and is remembered. On the
+old code it fails the same way the shadow did (resting 0, tilt None, foreign orders cancelled).
 
 ## Line counts
 

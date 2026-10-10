@@ -217,7 +217,7 @@ class FakeClient:
             self.drop(oid)
         return self.fill_log[-1]
 
-    def cancel(self, oid):
+    def cancel(self, oid, wait=False):
         self.call("cancel", "write")
         if self.live:
             self.drop(oid)

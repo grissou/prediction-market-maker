@@ -13,6 +13,20 @@ ORIGIN   The old bot was one class of seven mixins and ~150 attributes, its cycl
          morning), keep market making small (finding 3.3), and spend cash only where a buyer can place it (the
          refill that sold 110k of value for 43k of buying, RETURNS_ATTRIBUTION.md). A strategy that is off is
          simply not called (config.strategies).
+FOREIGN  Orders on the account that this process did not place (10 Oct shadow: the live bot's 170) are foreign.
+         Ours = an order whose id came back when we placed it (self.tags, saved in state.json, so a restart or a
+         handover keeps them) or one matching an order we sent whose outcome was lost (market, side, price and the
+         expiry we set). A foreign order is never cancelled (a stop cancels ours one by one when any is present),
+         never adopted or counted as a quote, stripped from books like ours (it is not other traders' liquidity),
+         and a wanted order that would trade against it is not sent (a self-trade: blocked_by self_trade). It never
+         stops us quoting: everything else is planned as if it were not there. In a dry run every real order is
+         foreign. The account's free cash is net of its locks, so it does take cash.
+BOOKS    The feed only flags a book as changed (it carries no levels): the flag marks it dirty until a REST read;
+         no book is ever built from the feed. A book is fresh (tradable) for BOOK_STALE_S after it was read or last
+         confirmed by the bulk tops at a full check (top unchanged net of the account's own orders). Requests: the
+         full check at most FULL_SHARE of the budget, the account reads at most ACCOUNT_SHARE, a spare of 10%; the
+         books get the rest, never-read and dirty first. At 20 a minute 237 books download in ~25 minutes.
+         status.json books_fresh / books_dirty / blocked_by say why nothing is quoted.
 OPEN     Value quotes on the reducing side in the tails are left to the allocator and the ladder; the old bot
          also rested them at fair value plus 1c, where they almost never filled. Owner: keep it that way?
 """
@@ -21,18 +35,22 @@ import logging
 import os
 import time
 from collections import defaultdict
-from dataclasses import asdict, replace
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from mmbot2 import config, ladder, mm, pricing, risk, value
-from mmbot2.exchange import ApiError
-from mmbot2.state import Account, Order, View, held_usd
+from mmbot2.exchange import BULK_MAX_IDS as BULK_IDS, ApiError
+from mmbot2.state import Account, View
 
 log = logging.getLogger("mm2")
 
-BOOK_STALE_S = 300.0          # a book older than this is not traded on (the old book_stale)
-BOOK_REFRESH_S = 120.0        # a book is re-read at least this often when the request budget allows
-REQUEST_SPARE = 10            # requests left unspent each minute, for the writes' own reads and a resync
+BOOK_STALE_S = 300.0          # a book not read or confirmed for this long is not traded on (the old book_stale)
+BOOK_REFRESH_S = 120.0        # a book not read or confirmed for this long is re-read when the budget allows
+SPARE_FRAC, SPARE_MIN = 0.1, 2   # requests left unspent each minute (10%, at least 2) for the writes and a resync:
+                              #   a fixed 10 of 20 (10 Oct shadow) left the books none at all
+FULL_SHARE = 0.4              # the full REST check spends at most this share of the request budget...
+ACCOUNT_SHARE = 0.2           # ...the account reads between full checks (fills seen by the feed) at most this...
+ACCOUNT_READS = 3             # ...(positions, fills, account); the books get the rest
 PRICE_TOL = 1e-6
 SIZE_KEEP_FRAC = 0.5          # a resting order at the wanted price is kept while it is at least half the wanted size...
 SIZE_TOL = 1.0                # ...and no larger than the gate now allows (a cap that tightened replaces it)
@@ -69,6 +87,10 @@ class Bot:
         self.markets_read = -1e9
         self.books = {}                        # eid -> Book of other traders
         self.tops = {}                         # eid -> (bid, ask) from the last bulk read, ours included
+        self.confirmed = {}                    # eid -> monotonic time the book was last read or matched the tops
+        self.dirty = set()                     # books the feed or the tops say changed, until they are re-read
+        self.account_pending, self.last_account = False, -1e9   # a fill seen by the feed, not yet read back
+        self.blocked = defaultdict(int)        # reason -> orders not sent this cycle (status.json blocked_by)
         self.positions = {}                    # eid -> signed YES shares
         self.marks = {}                        # eid -> the exchange's valuation price (leaderboard)
         self.account = Account()
@@ -77,6 +99,7 @@ class Bot:
         self.tags = {}                         # oid -> strategy tag, kept across restarts for fill attribution
         self.last_full = -1e9                  # monotonic time of the last full REST reconciliation
         self.last_fill_id = None               # newest fill already processed
+        self.unconfirmed = []                  # orders sent whose outcome was lost: ours if they turn up resting
         self.cost = {}                         # eid -> average cost of the open position (realised P&L)
         self.realised = 0.0                    # realised P&L from our fills
         self.last_p, self.paused = {}, {}      # jump guard: last fair value, and eid -> paused until (monotonic)
@@ -106,6 +129,7 @@ class Bot:
         gate = risk.Gate(view, state, self.s)          # gate first, so reconcile compares with what may rest
         admitted = [o for o in (gate.admit(o) for o in by_priority(wanted)) if o is not None]
         self.refused = dict(gate.refused_usd)
+        self.blocked = defaultdict(int, gate.blocked)
         keep, cancels, new = self.reconcile(view, admitted)
         self.send(view, cancels, new)
         self.report(view, state)
@@ -127,18 +151,35 @@ class Bot:
         """One cycle's View. A full REST reconciliation every full_check_s (the feed is best-effort), otherwise
         only what the feed says changed."""
         dirty, account_changed, resync = self.feed.take() if self.feed else (set(), True, True)
+        self.dirty |= dirty                     # the feed only flags a book: it is re-read by REST, never patched
+        self.account_pending |= account_changed
         if mono - self.markets_read >= MARKETS_RELOAD_S or (resync and self.feed):
             self.load_markets(mono)             # (the feed flags a resync when a market settles)
-        full = resync or not (self.feed and self.feed.healthy()) or mono - self.last_full >= self.s.full_check_s
-        if full or account_changed:
-            self.read_account(full)
+        full = resync or mono - self.last_full >= self.full_interval()
+        if full or (self.account_pending and mono - self.last_account >= self.spacing(ACCOUNT_READS, ACCOUNT_SHARE)):
+            self.read_account(full, mono)
         if full:
             self.last_full = mono
             self.tops = self.client.tops(list(self.markets))
-        self.read_books(dirty, mono)
-        live_books = {e: b for e, b in self.books.items() if mono - b.at < BOOK_STALE_S and e in self.markets}
+            self.confirm_books(mono)
+        self.read_books(mono)
+        live_books = {e: b for e, b in self.books.items() if self.fresh(e, mono) and e in self.markets}
         return View(now=now, mono=mono, markets=self.tradable(now), books=live_books,
                     positions=dict(self.positions), resting=self.resting_by_eid(now), account=self.account)
+
+    def rpm(self):
+        return getattr(self.client, "rpm", self.s.requests_per_minute)   # after a 429 the client's cut budget
+
+    def spacing(self, requests, share):
+        """Seconds between reads costing `requests` so they spend at most `share` of the request budget."""
+        return 60.0 * requests / (share * max(1.0, self.rpm()))
+
+    def full_interval(self):
+        """full_check_s while the feed is healthy (every cycle while it is not), stretched so the full check never
+        takes more than FULL_SHARE of the budget: at 20 a minute its ~7 requests every 30 s left the books nothing."""
+        cost = 4 + -(-len(self.markets) // BULK_IDS)    # positions, fills, orders, account + the bulk tops
+        healthy = self.feed is None or self.feed.healthy()
+        return max(self.s.full_check_s if healthy else self.s.cycle_s, self.spacing(cost, FULL_SHARE))
 
     def load_markets(self, mono):
         self.markets = {m.eid: m for m in self.client.markets()}
@@ -150,8 +191,10 @@ class Bot:
         cutoff = now + timedelta(minutes=self.s.stop_minutes_before_close)
         return {e: m for e, m in self.markets.items() if m.close is None or m.close > cutoff}
 
-    def read_account(self, full):
-        """Positions, the account and new fills; on a full check also our open orders (live only)."""
+    def read_account(self, full, mono=None):
+        """Positions, the account and new fills; on a full check also the account's open orders. Live, the bot
+        adopts only the orders it placed (their ids are in self.tags, saved across restarts); the rest are foreign."""
+        self.account_pending, self.last_account = False, time.monotonic() if mono is None else mono
         self.positions = self.client.positions()
         self.marks = dict(self.client.marks)
         self.note_fills(self.client.fills(self.last_fill_id))   # before the list, which already shows them
@@ -159,27 +202,63 @@ class Bot:
             self.account_orders = defaultdict(list)
             for o in self.client.open_orders():
                 self.account_orders[o.eid].append(o)
+                if self.live and o.oid not in self.tags:
+                    self.claim(o)
             if self.live:
-                self.orders = {o.oid: replace(o, tag=self.tags.get(o.oid, ""))
-                               for orders in self.account_orders.values() for o in orders}
+                self.orders = {o.oid: replace(o, tag=self.tags[o.oid])
+                               for orders in self.account_orders.values() for o in orders if o.oid in self.tags}
         self.account = self.client.account()
 
-    def read_books(self, dirty, mono):
-        """Books the feed flagged, then books whose bulk top moved or that are getting old, within the budget."""
-        wanted = [e for e in dirty if e in self.markets]
-        for e in self.markets:
-            b = self.books.get(e)
-            if b is None or mono - b.at >= BOOK_REFRESH_S or self.top_moved(e, b):
-                wanted.append(e)
+    def claim(self, o):
+        """An order on the account we have no id for is ours if it matches one we sent whose outcome was lost (same
+        market, side, price and expiry: we set the expiry to the second); otherwise it is foreign."""
+        now = utcnow()
+        self.unconfirmed = [u for u in self.unconfirmed if u.expires is not None and u.expires > now]
+        for u in self.unconfirmed:
+            if (u.eid, u.is_bid) == (o.eid, o.is_bid) and abs(u.price - o.price) < PRICE_TOL and o.expires \
+                    and abs((u.expires - o.expires).total_seconds()) < 1.5:
+                self.unconfirmed.remove(u)
+                self.tags[o.oid] = u.tag
+                return
+
+    def read_books(self, mono):
+        """Books in order of need: never read or flagged dirty first, then the longest unconfirmed; held markets a
+        little ahead. Each read spends one request, down to the spare. A dirty flag stays until its book is read."""
         held = {e for e, q in self.positions.items() if q}
-        wanted = sorted(dict.fromkeys(wanted), key=lambda e: (e not in held, e not in dirty))
-        for e in wanted:
-            if self.client.requests_left() <= REQUEST_SPARE:
+        def need(e):
+            age = mono - self.confirmed.get(e, -1e9)
+            return age + (BOOK_STALE_S if e in self.dirty else 0.0) + (BOOK_REFRESH_S if e in held else 0.0)
+        self.dirty &= set(self.markets)
+        wanted = [e for e in self.markets if e in self.dirty or e not in self.books
+                  or mono - self.confirmed.get(e, -1e9) >= BOOK_REFRESH_S]
+        spare = max(SPARE_MIN, int(SPARE_FRAC * self.rpm()))
+        for e in sorted(wanted, key=need, reverse=True):
+            if self.client.requests_left() <= spare:
                 break
             try:
                 self.books[e] = self.client.book(e, self.mine(e))
             except ApiError as err:
                 log.warning("book %s: %s", self.markets[e].label, err)
+                continue
+            self.confirmed[e] = self.books[e].at
+            self.dirty.discard(e)
+
+    def confirm_books(self, mono):
+        """At a full check a book whose bulk top (net of the account's own orders) still matches is current again
+        without a read: 3 requests for every book instead of 237. A dirty flag is cleared by a match too (the
+        feed flags every change, most of them deeper in the book or the account's own requotes; quotes and the
+        tilt read the top). A book whose top moved is flagged dirty."""
+        for e, b in self.books.items():
+            if self.tops.get(e) is None:
+                continue
+            if self.top_moved(e, b):
+                self.dirty.add(e)
+            else:
+                self.confirmed[e] = mono
+                self.dirty.discard(e)
+
+    def fresh(self, e, mono):
+        return mono - self.confirmed.get(e, -1e9) < BOOK_STALE_S
 
     def top_moved(self, eid, book):
         """True if the bulk top (ours included) no longer matches the cached book plus our own orders."""
@@ -192,11 +271,17 @@ class Bot:
         return top != (max(bids, default=None), min(asks, default=None))
 
     def mine(self, eid):
-        """The account's real resting orders on one market, stripped from its book. Live they are ours; in a
-        dry run (the shadow) they are the live bot's, and still not other traders' liquidity."""
-        if self.live:
-            return [o for o in self.orders.values() if o.eid == eid]
-        return self.account_orders.get(eid, [])
+        """The account's real resting orders on one market, stripped from its book: ours and foreign alike (in a
+        dry run all of them are the live bot's), for none of them is other traders' liquidity."""
+        if not self.live:
+            return list(self.account_orders.get(eid, []))
+        ours = [o for o in self.orders.values() if o.eid == eid]
+        return ours + [o for o in self.foreign(eid) if o.oid not in self.orders]
+
+    def foreign(self, eid):
+        """Orders on the account we did not place (README: the foreign-order rule in the header), at the last full
+        read. In a dry run every real order is foreign."""
+        return [o for o in self.account_orders.get(eid, []) if not self.live or o.oid not in self.tags]
 
     def resting_by_eid(self, now):
         out = defaultdict(list)
@@ -322,19 +407,28 @@ class Bot:
         resting = defaultdict(list)                    # what is really still resting after the cancels
         for o in self.orders.values():
             resting[o.eid].append(o)
-        places = [p for p in places if not self.crosses_own(p, resting[p.eid])]   # a cancel failed: wait for it
+        sendable = []
+        for p in places:
+            if self.crosses_own(p, self.foreign(p.eid)):
+                self.blocked["self_trade"] += 1        # it would trade with a foreign order of this account
+            elif self.crosses_own(p, resting[p.eid]):
+                self.blocked["cancel_pending"] += 1    # a cancel failed: wait for it
+            else:
+                sendable.append(p)
+        places = sendable
         for k in range(0, len(places), BATCH_MAX):
             if not self.place_batch(view, places[k:k + BATCH_MAX]):
                 self.deferred += len(places) - k
                 break
         if self.deferred:
+            self.blocked["write_budget"] += self.deferred
             log.info("write budget: %d writes deferred to the next cycle", self.deferred)
 
     def cancel_order(self, o):
         """Cancel one order; it stays in self.orders (and blocks crossing placements) unless it is gone."""
         if not self.live:
-            log.info("WOULD cancel %s %s %.3f x%d [%s]", self.label(o.eid), "bid" if o.is_bid else "ask",
-                     o.price, o.size, o.tag)
+            log.info("DRY CANCEL %s %s %d@%.3f %s", self.label(o.eid).replace(" ", "_"),
+                     "bid" if o.is_bid else "ask", o.size, o.price, o.tag)
             self.orders.pop(o.oid, None)
             return True
         if self.client.writes_left() < 1:
@@ -355,8 +449,8 @@ class Bot:
         batch = [replace(o, expires=None if o.ioc else expires) for o in batch]
         if not self.live:
             for o in batch:
-                log.info("WOULD %s %s %s %.3f x%d [%s]", "take" if o.ioc else "place", self.label(o.eid),
-                         "bid" if o.is_bid else "ask", o.price, o.size, o.tag)
+                log.info("DRY PLACE %s %s %d@%.3f %s%s", self.label(o.eid).replace(" ", "_"),
+                         "bid" if o.is_bid else "ask", o.size, o.price, o.tag, " ioc" if o.ioc else "")
                 if not o.ioc:
                     self.sim_ids += 1
                     self.orders[f"dry-{self.sim_ids}"] = replace(o, oid=f"dry-{self.sim_ids}")
@@ -367,6 +461,7 @@ class Bot:
             results = self.client.place(batch, self.positions)
         except ApiError as err:
             log.warning("batch of %d: %s", len(batch), err)
+            self.unconfirmed += [o for o in batch if not o.ioc]
             self.last_full = -1e9               # outcome unknown: re-read our orders next cycle
             return True
         for r in results:
@@ -375,6 +470,7 @@ class Bot:
 
     def note_placed(self, r):
         if r.unknown:
+            self.unconfirmed += [] if r.order.ioc else [r.order]
             self.last_full = -1e9               # it may be resting: read our orders before placing it again
         if r.error:
             log.warning("refused %s %s %.3f x%d [%s]: %s", self.label(r.order.eid),
@@ -390,12 +486,27 @@ class Bot:
             self.last_full = -1e9               # positions changed: read them next cycle
 
     def cancel_everything(self):
-        """Cancel every order we have (the kill switch, a stop, the watchdog)."""
+        """Cancel every order WE placed (the kill switch, a stop, the watchdog, a plain start), never a foreign one.
+        The account is read afresh (if that fails: the orders we know); with no foreign order on it one cancel-all
+        does it, else ours go one by one, waiting for the write budget."""
         if self.live:
             try:
-                self.client.cancel_all()
+                open_ = self.client.open_orders()
+                for o in open_:
+                    if o.oid not in self.tags:
+                        self.claim(o)
+                ours = [o for o in open_ if o.oid in self.tags]
+                foreign = len(ours) < len(open_)
             except ApiError as err:
-                log.error("cancel-all failed: %s", err)
+                log.error("open orders unread (%s): cancelling the %d we know", err, len(self.orders))
+                ours = list(self.orders.values())
+                foreign = any(self.foreign(e) for e in self.account_orders)
+            for cancel in [self.client.cancel_all] if not foreign else \
+                    [lambda oid=o.oid: self.client.cancel(oid, wait=True) for o in ours]:
+                try:
+                    cancel()
+                except ApiError as err:
+                    log.error("cancel failed: %s", err)
         self.orders = {}
 
     def adopt(self, orders):
@@ -469,7 +580,9 @@ class Bot:
             "reduce_only": state.reduce_only, "worst_case_loss": round(state.worst_case, 2),
             "settlement_risk": round(state.correlated, 2), "bloc_delta": round(state.bloc_delta, 2),
             "orders_resting": len(self.orders), "markets_priced": len(view.p), "markets_tracked": len(view.markets),
-            "tilt_s": view.tilt, "writes_deferred": self.deferred,
+            "tilt_s": view.tilt, "writes_deferred": self.deferred, "books_fresh": len(view.books),
+            "books_dirty": len(self.dirty), "orders_foreign": sum(len(self.foreign(e)) for e in self.account_orders),
+            "blocked_by": self.blocked_by(view),
             "rate_limited_total": self.client.rate_limited, "realtime": self.feed_state(),
             "alloc": self.allocator.status(), "mm_funding": self.mm_funding(view),
             "harvest": self.ladder.status(), "state_caps": self.state_caps(state),
@@ -479,6 +592,13 @@ class Bot:
         write_json(os.path.join(self.env.run_dir, STATUS_FILE), status)
         if view.mono - self.last_full < 1.0:
             log.info(self.summary_line(status))
+
+    def blocked_by(self, view):
+        """reason -> orders not sent this cycle (the gate's rules, self_trade, cancel_pending, write_budget), and
+        no_book: priced markets without a fresh book, which no strategy quotes."""
+        out = {k: v for k, v in self.blocked.items() if v}
+        no_book = sum(1 for e in view.p if e not in view.books)
+        return {**out, "no_book": no_book} if no_book else out
 
     def mm_funding(self, view):
         """The old mm_funding field: the reserve, what market making holds, and what the refill may raise."""
@@ -500,7 +620,9 @@ class Bot:
         return (f"account {st['account_value']} | EV outcome {st['ev_outcome']} | realised {st['realised_pnl']} | "
                 f"worst case {st['worst_case_loss']:.0f} (corr {st['settlement_risk']:.0f})"
                 f"{' REDUCE-ONLY' if st['reduce_only'] else ''} | priced {st['markets_priced']}/"
-                f"{st['markets_tracked']} | resting {st['orders_resting']} | tilt {st['tilt_s']}")
+                f"{st['markets_tracked']} | books {st['books_fresh']} fresh {st['books_dirty']} dirty | resting "
+                f"{st['orders_resting']} (foreign {st['orders_foreign']}) | tilt {st['tilt_s']} | blocked "
+                f"{' '.join(f'{k}={v}' for k, v in sorted(st['blocked_by'].items())) or '-'}")
 
     def label(self, eid):
         m = self.markets.get(eid)

@@ -74,6 +74,7 @@ def test_fill_and_state():
     eid, o = next((o.eid, o) for o in bot.orders.values() if o.tag == "mm")
     client.fill(eid, o.is_bid, 50)
     feed.push(account=True)
+    bot.last_account = -1e9                        # account reads are spaced within the budget (ACCOUNT_SHARE)
     bot.cycle()
     check("a fill reaches the position", bot.positions.get(eid) == (50 if o.is_bid else -50), str(bot.positions))
     check("the fill is attributed to market making", bot.inventory.status() is not None)
