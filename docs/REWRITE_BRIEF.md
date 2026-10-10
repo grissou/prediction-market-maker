@@ -11,9 +11,32 @@ A bot a reader can follow in an afternoon and any module in ten minutes, that ru
 live one. It does not have to send identical orders. It has to be clearly right, small, and explain itself:
 every module's header says which finding or failure produced it, so the owner can write a paper from the code.
 
+**The existing code is the basis.** The package `mmbot/` is a working, tested implementation of this strategy;
+the rewrite is that implementation written clearly, not a new design. For each module, start by reading the
+old module's public methods (grep `def `, then the docstrings and the first 30 lines of each method that
+matters) so you know what the live bot actually does; carry over the logic and the numbers; leave behind the
+flags, the release history, the duplicated state and the paths that are never taken. Where the old code does
+something you cannot explain in one sentence, keep the behaviour and write the sentence in the header as an
+open question for the owner rather than inventing a different rule.
+
+**Clarity is the first priority, ahead of size.** The reader is a student or an interviewer with ten minutes
+per file. Concretely:
+- one idea per function, 40 lines or fewer; a function's name says what it returns, not what release added it;
+- the cycle reads top to bottom as the story in README §4: read, price, risk, decide (allocator, ladder,
+  quotes), reconcile, send, report; no feature flag checks inside it (a strategy that is off is simply not
+  called, from `config.py`);
+- state lives in a few plain dataclasses (`Book`, `Position`, `Order`, `Account`), each defined once, with a
+  one-line comment per field; no attribute is added to the bot object outside `__init__`;
+- numbers that are decisions are settings with a one-line reason; numbers that are facts about the exchange
+  (tick, request limit, the band) are named constants next to their use;
+- every module starts with a 10–15 line header: what it owns, what it must never do, where it came from;
+- comments explain WHY (the finding, the failure, the number's origin), never WHAT the next line does;
+- no cleverness: no metaprogramming, no mixins, no `getattr` tricks, no `**kwargs` plumbing.
+
 Targets: 3,000–3,500 lines across 8–10 files in `mmbot2/`; 40–60 settings, each a real decision (everything
 else is a named constant beside the code that uses it); a test suite in `tests2/` of 6–8 files; one entry
 point `mm_bot2.py` with the same command line as `mm_bot.py` (`run`, `run --live`, `status`, `cancel`).
+If clarity and the size target conflict, clarity wins and the STATUS file says by how much.
 
 ## Sources of truth, in this order (read these; do not read the old package end to end)
 
@@ -26,7 +49,7 @@ point `mm_bot2.py` with the same command line as `mm_bot.py` (`run`, `run --live
    refill selling more than the deployers could place; a sleeve that could not buy). Design the funding so a
    sale only happens when a buy can use the cash.
 4. `deploy/RELEASES.md` and `docs/TALK.md`: the history and the plain-English story, for the module headers.
-5. The old package `mmbot/`, as a reference for exchange details only: `mmbot/exchange.py` (the API's
+5. The old package `mmbot/`, the implementation you are rewriting. For every module, grep its public methods first (see The goal); for the plumbing, these are the files that matter: `mmbot/exchange.py` (the API's
    endpoints, idempotency keys, the 429 handling, the WebSocket feed, the 80 requests / 28 writes a minute
    budgets), `mmbot/util.py` (paths, alerts, the settings-file reader), `mmbot/ops.py` (handover via SIGUSR1
    and the handover file, the watchdog, the start-up self-test, exit codes), `mmbot/status.py` (the
