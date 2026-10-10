@@ -162,6 +162,7 @@ def test_dry_run_shadow():
     catcher = LogCatcher()
     logging.getLogger("mm2").addHandler(catcher)
     logging.getLogger("mm2").setLevel(logging.INFO)
+    logging.getLogger("mm2").propagate = False
     status = run(bot, client, feed, 10, catcher)
     first = [ln for ln in catcher.lines if ln.startswith("DRY PLACE")]
     check("the dry run plans and logs orders within 10 minutes (DRY PLACE lines)", len(first) > 0,
@@ -184,6 +185,7 @@ def test_dry_run_shadow():
     check("the status line shows fresh books and blocked_by", lines and "books" in lines[-1]
           and "blocked" in lines[-1], lines[-1:] if lines else None)
     logging.getLogger("mm2").removeHandler(catcher)
+    logging.getLogger("mm2").propagate = True
 
 
 def test_foreign_live():

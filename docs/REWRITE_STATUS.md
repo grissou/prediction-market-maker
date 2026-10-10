@@ -4,8 +4,9 @@
 STATUS (2026-10-10, branch rewrite) - IN PROGRESS: rewrite 2 (docs/REWRITE_FIX_BRIEF.md)
 done:     fix 1 - the cause of "no orders": the request budget left the books nothing (below); foreign orders;
           DRY PLACE logging; books_fresh / books_dirty / orders_foreign / blocked_by in status.json and the line;
-          mm_quote_frac 0.002 -> 0.0005 (the replay still runs at 0.002: it compares logic, see below)
-left:     the recorder; the stripped phone summary and alerts; line count; READY
+          mm_quote_frac 0.002 -> 0.0005 (the replay still runs at 0.002: it compares logic, see below);
+          the recorder (mmbot2/record.py: run_dir/market_data.sqlite, the old snapshots/account schema, once a minute)
+left:     the stripped phone summary and alerts; line count; READY
 lines:    see the table (updated at READY)
 ```
 
@@ -127,7 +128,8 @@ the NO held, as the exchange does, so it does not re-quote every cycle; value qu
 ## Not in the rewrite (as the brief says)
 
 Arbitrage, takes, NO+NO pair unwinds (the 4 Oct snapshot holds 1 set worth 1.0: `status.json` nono_sets), the momentum
-sleeve, the capital ceiling, mark fragility, activity size plans, fl-bias, churn control, burst mode, the recorder.
+sleeve, the capital ceiling, mark fragility, activity size plans, fl-bias, churn control, burst mode, the recorder's
+book and trade tables (the `snapshots` and `account` tables are back, rewrite 2).
 
 ## Ideas not built
 

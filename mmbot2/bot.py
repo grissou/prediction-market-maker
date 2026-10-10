@@ -38,7 +38,7 @@ from collections import defaultdict
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
-from mmbot2 import config, ladder, mm, pricing, risk, value
+from mmbot2 import config, ladder, mm, pricing, record, risk, value
 from mmbot2.exchange import BULK_MAX_IDS as BULK_IDS, ApiError
 from mmbot2.state import Account, View
 
@@ -113,6 +113,7 @@ class Bot:
         self.kill_hits = 0                     # account readings in a row below the kill line
         self.tilt = pricing.TiltEstimator()
         self.allocator, self.inventory, self.ladder = value.Allocator(), mm.Inventory(), ladder.Ladder()
+        self.recorder = record.Recorder(env.run_dir)
         self.load()
 
     # ------------------------------------------------------------------ the cycle (README §4)
@@ -590,6 +591,10 @@ class Bot:
             "seconds_since_cycle": 0.0,
         }
         write_json(os.path.join(self.env.run_dir, STATUS_FILE), status)
+        ours = defaultdict(list)                # what rests after this cycle's sends
+        for o in self.orders.values():
+            ours[o.eid].append(o)
+        self.recorder.record(view, self.tops, self.refs.get(), ours, status)
         if view.mono - self.last_full < 1.0:
             log.info(self.summary_line(status))
 

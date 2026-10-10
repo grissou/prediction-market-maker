@@ -143,8 +143,22 @@ def test_ops():
     check("with the fallback a buy-back goes out whole as 'buy YES'", placed and placed[0].order.size == 300, placed)
 
 
+def test_recorder():
+    import sqlite3
+    client, feed, bot = make()
+    bot.cycle()
+    bot.cycle()
+    db = sqlite3.connect(os.path.join(bot.env.run_dir, "market_data.sqlite"))
+    rows = db.execute("select eid, best_bid, best_ask, fair_value, reference, our_bid, our_ask, position "
+                      "from snapshots").fetchall()
+    check("the recorder writes one row per priced market a minute", len(rows) == 4, rows)
+    check("with the bulk top, Polymarket and our quotes", all(r[1] is not None and r[4] is not None for r in rows)
+          and any(r[5] is not None for r in rows), rows)
+    check("and an account row", db.execute("select count(*) from account").fetchone()[0] == 1)
+
+
 if __name__ == "__main__":
-    for t in (test_cycle, test_dry_run, test_fill_and_state, test_kill_switch, test_settings_file, test_ops):
+    for t in (test_recorder, test_cycle, test_dry_run, test_fill_and_state, test_kill_switch, test_settings_file, test_ops):
         try:
             t()
         except Exception as e:                     # a crash is a failure of that test, not of the suite
