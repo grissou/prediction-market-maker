@@ -228,30 +228,12 @@ os.environ["MM_TEST_B"] = "keep"; load_env_file(envf)
 check(".env loader: reads values, doesn't override existing ones", os.environ["MM_TEST_A"] == "hello" and os.environ["MM_TEST_B"] == "keep")
 
 # =============================================================================================
-# NEW FEATURES: arbitrage, tail guard, reference prices, recording, phone summary, parallel
+# NEW FEATURES: tail guard, reference prices, recording, phone summary, parallel
 # =============================================================================================
-print("--- arbitrage")
-arb_books = {"11": {"bids": [lvl(0.60, 300)], "asks": [lvl(0.70, 300)]},    # Rep Ohio bid 0.60
-             "12": {"bids": [lvl(0.45, 200)], "asks": [lvl(0.55, 200)]},    # Dem Ohio bid 0.45 -> sum 1.05
+arb_books = {"11": {"bids": [lvl(0.60, 300)], "asks": [lvl(0.70, 300)]},    # two races, four books
+             "12": {"bids": [lvl(0.45, 200)], "asks": [lvl(0.55, 200)]},
              "21": {"bids": [lvl(0.48, 1000)], "asks": [lvl(0.56, 1000)]},
              "22": {"bids": [lvl(0.44, 1000)], "asks": [lvl(0.52, 1000)]}}
-a, b = make_bot(books=json.loads(json.dumps(arb_books)))
-b.cycle()
-check("bids summing to 1.05 -> sold 200 YES on both parties", a.inv == {"11": -200, "12": -200}, a.inv)
-check("no arbitrage leftovers resting, Ohio not quoted this cycle", not a.ours("11") and not a.ours("12"), (a.ours("11"), a.ours("12")))
-check("the other race is still quoted normally", len(a.ours("21")) == 2 and len(a.ours("22")) == 2)
-b.cycle()
-check("arbitrage position has zero worst-case loss", b.health["worst_case_loss"] < 1e-6, b.health["worst_case_loss"])
-arb_rows = [r for r in read_fills(b.cfg.fills_csv) if r["exchange_id"] in ("11", "12")]
-check("arbitrage fills logged as our asks at 0.60 / 0.45",
-      sorted((r["our_side"], r["quote_price"]) for r in arb_rows) == [("ask", "0.45"), ("ask", "0.6")], arb_rows)
-check("arbitrage counted once", b.arbs_total == 1, b.arbs_total)
-
-a, b = make_bot(live=False, books=json.loads(json.dumps(arb_books)))
-b.cycle(); b.cycle()
-check("dry run: arbitrage logged but nothing sent, and not repeated during the cooldown",
-      not a.inv and b.arbs_total == 1 and not a.orders)
-
 print("--- tail guard")
 tail_market = {"id": "5", "title": "Will turnout exceed 70%?", "isComposite": False,
                "settlementDate": "2026-11-04T00:00:00Z", "exchanges": [{"id": "51", "option": "YES"}]}
@@ -839,63 +821,6 @@ check("race_variance and worst case treat a long pair as zero risk",
 b.unwind_is_safe = lambda *args: False
 b.cycle()
 check("unwind skipped when the risk guard refuses it", a.inv == {"11": 500, "12": 500} and b.unwinds_total == 0, a.inv)
-
-print("--- two-sided arbitrage (buy every leg when the asks add up to <= 0.985)")
-# A set pays 1 only if a LISTED party wins: every leg needs a liquid Polymarket price and the RAW prices must add
-# up to >= arb_buy_min_ref_sum (0.99). Book fair values are normalised to 1, so they cannot see an outsider.
-ohio_refs = lambda r, d, spread=0.01: FakeRefs({"Ohio Senate|Republican": r, "Ohio Senate|Democratic": d,
-                                                "Utah Senate|Republican": 0.52, "Utah Senate|Democratic": 0.48}, spread=spread)
-a, b = unwind_bot({}, unwind_books((0.50, 300), (0.30, 200), a11=(0.58, 300), a12=(0.40, 200)))
-b.cycle()
-check("asks add up to 0.98 but NO Polymarket prices -> nothing bought (the guard needs liquid references)",
-      not a.inv and b.arbs_total == 0, a.inv)
-a, b = unwind_bot({}, unwind_books((0.50, 300), (0.30, 200), a11=(0.58, 300), a12=(0.40, 200)))
-b.refs = ohio_refs(0.56, 0.39)                            # raw references add up to 0.95: an outsider is priced
-b.cycle()
-check("asks 0.98, references add up to 0.95 -> nothing bought (unlisted candidate)", not a.inv and b.arbs_total == 0, a.inv)
-a, b = unwind_bot({}, unwind_books((0.50, 300), (0.30, 200), a11=(0.58, 300), a12=(0.40, 200)))
-b.refs = ohio_refs(0.56, 0.44, spread=None)               # last-trade-only Polymarket: not liquid
-b.cycle()
-check("asks 0.98, references 1.00 but one leg is not liquid -> nothing bought", not a.inv and b.arbs_total == 0, a.inv)
-a, b = unwind_bot({}, unwind_books((0.50, 300), (0.30, 200), a11=(0.58, 300), a12=(0.40, 200)))
-b.refs = ohio_refs(0.56, 0.44)
-b.cycle()
-check("asks add up to 0.98, liquid references add up to 1.00 -> bought 200 YES on both legs (the ask size)",
-      a.inv == {"11": 200, "12": 200}, a.inv)
-check("counted as an arbitrage", b.arbs_total == 1 and b.unwinds_total == 0, (b.arbs_total, b.unwinds_total))
-check("no buy leftovers resting on the Ohio legs", not a.ours("11") and not a.ours("12"), (a.ours("11"), a.ours("12")))
-b.cycle()
-arb_buy_rows = [r for r in read_fills(b.cfg.fills_csv) if r["exchange_id"] in ("11", "12")]
-check("buy-side fills logged as our bids", sorted(r["our_side"] for r in arb_buy_rows) == ["bid", "bid"], arb_buy_rows)
-a, b = unwind_bot({}, unwind_books((0.50, 300), (0.30, 200), a11=(0.59, 300), a12=(0.40, 200)))
-b.refs = ohio_refs(0.56, 0.44)
-b.cycle()
-check("asks add up to 0.99 -> nothing bought", not a.inv and b.arbs_total == 0, a.inv)
-a, b = unwind_bot({}, unwind_books((0.50, 300), (0.30, 200), a11=(0.58, 300), a12=(0.40, 200)), arb_two_sided=False)
-b.cycle()
-check("arb_two_sided False -> 0.98 is left alone", not a.inv and b.arbs_total == 0, a.inv)
-a, b = unwind_bot({}, unwind_books((0.50, 300), (0.20, 200), a11=(0.58, 300), a12=(0.25, 200)))
-b.cycle()
-check("asks add up to 0.83 (< arb_buy_min_sum 0.90: an outsider is likely priced) -> nothing bought", not a.inv, a.inv)
-a, b = unwind_bot({}, unwind_books((0.50, 300), (0.30, 200), a11=(0.58, 300), a12=(0.40, 200)))
-b.global_reduce = True
-b.cycle()
-check("no buy-side arbitrage in reduce-only (it adds gross positions)", not a.inv.get("11") and not a.inv.get("12"), a.inv)
-a, b = unwind_bot({}, unwind_books((0.50, 300), (0.30, 200), a11=(0.60, 300), a12=(0.40, 200)))
-a.orders[998] = {"id": 998, "exchangeId": "11", "quantity": 50, "open": True, "expirationDate": own_exp,
-                 "side": "yes", "action": "sell", "priceLimit": 0.57}  # OUR ask on top: with it the asks add up to 0.97
-b.cycle()
-check("our own ask at the top is excluded from the sum (others' 1.00 -> no buy)",
-      not a.inv.get("11") and not a.inv.get("12") and b.arbs_total == 0, a.inv)
-a, b = unwind_bot({}, unwind_books((0.50, 300), (0.30, 200), a11=(0.58, 300), a12=(0.40, 200)))
-b.refs = ohio_refs(0.56, 0.44)
-b.cycle()
-a.books.update(unwind_books((0.605, 300), (0.40, 200), a11=(0.70, 300), a12=(0.55, 200)))
-b.arb_cooldown.clear()
-a.cancel_all("T")
-b.cycle()
-check("the bought set is later unwound when the bids add up to 1.005 (round trip +0.025 per set)",
-      a.inv == {"11": 0, "12": 0} and b.arbs_total == 1 and b.unwinds_total == 1, a.inv)
 
 print("--- taking stale house quotes")
 def take_setup(**kw):
@@ -2379,25 +2304,6 @@ _k = compute_quote(0.50, 100, 5000, None, None, _c, order_size=500, kelly_p=0.52
 _k0 = compute_quote(0.50, 100, 100, None, None, _c, order_size=500, kelly_p=0.52, net_inv=100)
 check("netting: the Kelly limit applies to the race-netted position too", _k.bid is None and _k0.bid_size > 0, (_k, _k0))
 
-# Age skew: 0.25c per hour beyond 1 h, capped at 2c, toward unloading; never through fair value.
-check("age skew: none up to skew_age_after_hours", age_skew(1.0, 500, _c) == 0.0 and age_skew(0.5, 500, _c) == 0.0)
-check("age skew: 3 h long -> 0.5c lower; short -> 0.5c higher",
-      abs(age_skew(3.0, 500, _c) - 0.005) < 1e-12 and abs(age_skew(3.0, -500, _c) + 0.005) < 1e-12)
-check("age skew: capped at skew_age_max (2c) from 9 h", age_skew(9.0, 1, _c) == 0.02 and age_skew(40.0, 1, _c) == 0.02)
-check("age skew: flat position -> none", age_skew(10.0, 0, _c) == 0.0)
-_q0 = compute_quote(0.50, 50, 50, None, None, _c, order_size=100)
-_q8 = compute_quote(0.50, 50, 50, None, None, _c, order_size=100, age_hours=5.0)
-check("age skew: a 5 h-old long quotes 1c lower on both sides", (round(_q0.bid - _q8.bid, 6), round(_q0.ask - _q8.ask, 6)) == (0.01, 0.01),
-      (_q0, _q8))
-_qb = compute_quote(0.50, 400, 400, None, None, _c, order_size=100, age_hours=30.0)
-check("age skew: added after the inventory cap (2c + 2c = 4c lower bid), ask never below fair value",
-      _qb.bid == 0.42 and _qb.ask == 0.50, _qb)
-_qs = compute_quote(0.50, -400, -400, 0.52, None, _c, order_size=100, age_hours=30.0)
-check("age skew: an old short bids at most fair value (would penny 0.525; the joining reducing side sits 0.5c under fair)",
-      _qs.bid <= 0.50 + 1e-9 and _qs.bid >= 0.495 - 1e-9, _qs)
-_c.skew_age_enabled = False
-check("age skew disabled = today's quote", compute_quote(0.50, 50, 50, None, None, _c, order_size=100, age_hours=30.0) == _q0)
-_c.skew_age_enabled = True
 
 # Capital ceiling in compute_quote: the side growing |race-netted| shrinks by the factor; reduce-only stays stricter.
 _l = compute_quote(0.50, 300, 300, None, None, _c, order_size=100, adding_factor=0.0)

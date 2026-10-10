@@ -26,7 +26,7 @@ sys.path.insert(0, HERE)
 SNAP = os.environ.get("P9_SNAP", "/home/claude/snap04")
 os.environ.setdefault("P9_SNAP", SNAP)
 import test_p14_1_dryrun as DR                                   # noqa: E402  (its helpers: files, status, IOCs)
-RETIRED_KEYS = ("tilt_exit_priority", "tilt_exit_full_size")   # removed from Config; off in every staged file
+RETIRED_KEYS = DR.P.RETIRED_KEYS                  # removed from Config; off in every staged file
 P, T, M = DR.P, DR.T, DR.M
 
 DEPLOY = DR.DEPLOY

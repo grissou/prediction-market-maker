@@ -31,6 +31,21 @@ sys.path.insert(0, HERE)
 from fakes import FakeApi, FakeRefs, lvl, make_bot, market      # noqa: E402
 import mm_bot as M                                                # noqa: E402
 
+# retired on simplify: the old twin's status / health fields a removed feature owned, at the value it reported while
+# the feature was off (the new code drops them); Quote lost its trailing `behind` flag (always False while that sizing
+# was off) and the age skew its switch (skew_age_enabled: the old default True, live False)
+RETIRED_STATUS = {"tilt_s_applied": (0.0, 0), "tilt_s_applied_headline": (0.0, 0), "fast_unload_windows": (0,),
+                  "behind_best_markets": (0,), "mark_frag_total_cap_active": (False,),
+                  "fl_bias_markets": ({"bid": 0, "ask": 0},)}
+RETIRED_FLIPPED = {"skew_age_enabled": False}
+NQ = len(M.Quote.__dataclass_fields__)
+
+
+def retired(new, old):
+    """The old twin's dict less a retired feature's own key at its OFF value when the new one dropped it."""
+    return {k: v for k, v in old.items() if not (k in RETIRED_STATUS and k not in new and v in RETIRED_STATUS[k])}
+
+
 logging.basicConfig(level=logging.CRITICAL)
 RESULTS = []
 ALERTS = []
@@ -158,11 +173,11 @@ def batches(api):
 print("--- settings")
 D = M.Config()
 KEYS = ["alloc_enabled", "alloc_interval_s", "alloc_min_improvement", "alloc_min_edge_buy", "alloc_max_edge_sell",
-        "alloc_pin", "alloc_headline", "alloc_max_turnover_per_hour", "alloc_max_orders_per_cycle", "alloc_writes_frac",
+        "alloc_pin", "alloc_max_turnover_per_hour", "alloc_max_orders_per_cycle", "alloc_writes_frac",
         "alloc_max_contract_usd", "alloc_mm_reserve", "alloc_set_cost_per_usd"]
-check("defaults: off, hourly, 3% improvement, buy >= 5%, sell <= 2%, no pins, no headline",
+check("defaults: off, hourly, 3% improvement, buy >= 5%, sell <= 2%, no pins",
       (D.alloc_enabled, D.alloc_interval_s, D.alloc_min_improvement, D.alloc_min_edge_buy, D.alloc_max_edge_sell,
-       D.alloc_pin, D.alloc_headline) == (False, 3600.0, 0.03, 0.05, 0.02, "", False))
+       D.alloc_pin) == (False, 3600.0, 0.03, 0.05, 0.02, ""))
 check("defaults: turnover 15k/h, 4 orders, 30% of writes, 10k a market, reserve 15k, sets off",
       (D.alloc_max_turnover_per_hour, D.alloc_max_orders_per_cycle, D.alloc_writes_frac, D.alloc_max_contract_usd,
        D.alloc_mm_reserve, D.alloc_set_cost_per_usd) == (15000.0, 4, 0.3, 10000.0, 15000.0, 0.0))
@@ -171,7 +186,7 @@ check("one contiguous block right after Part A's value_mid_inventory_quotes, in 
       _f[_f.index("value_mid_inventory_quotes") + 1:][:len(KEYS)] == KEYS
       and _ov[_ov.index("value_mid_inventory_quotes") + 1:][:len(KEYS)] == KEYS)
 check("ranges as the spec", [M.OVERRIDABLE[k] for k in KEYS if k not in ("alloc_pin", "alloc_max_contract_usd")] == [
-    (False, True), (300.0, 86400.0), (0.005, 0.5), (0.0, 0.5), (0.0, 0.5), (False, True), (0.0, 200000.0), (1, 20),
+    (False, True), (300.0, 86400.0), (0.005, 0.5), (0.0, 0.5), (0.0, 0.5), (0.0, 200000.0), (1, 20),
     (0.0, 1.0), (0.0, 100000.0), (0.0, 0.2)])
 good, bad = M.validate_overrides({k: getattr(D, k) for k in KEYS}, D)
 check("every default inside its range (the file can restore it)", not bad and len(good) == len(KEYS), bad)
@@ -186,8 +201,8 @@ good, bad = M.validate_overrides({"alloc_interval_s": 60.0, "alloc_min_improveme
                                   "alloc_mm_reserve": 200000.0, "alloc_max_turnover_per_hour": -1.0}, D)
 check("out-of-range values refused (7 of 7)", not good and len(bad) == 7, bad)
 good, bad = M.validate_overrides({"alloc_enabled": True, "alloc_interval_s": 300.0, "alloc_max_orders_per_cycle": 20,
-                                  "alloc_set_cost_per_usd": 0.2, "alloc_headline": True}, D)
-check("edge values accepted", len(good) == 5 and not bad, bad)
+                                  "alloc_set_cost_per_usd": 0.2}, D)
+check("edge values accepted", len(good) == 4 and not bad, bad)
 check("wire_order strips _alloc_paired (never sent)",
       M.wire_order({"exchangeId": "1", "action": "sell", "price": 0.5, "quantity": 3, "_alloc_paired": True})
       == {"exchangeId": "1", "action": "sell", "price": 0.5, "quantity": 3})
@@ -252,8 +267,8 @@ if base is not None:
         if sn != sb:
             ok_w = False
             diffs.append(("wire", inv, sn[:2], sb[:2]))
-        if {e: tuple(x.quote.__dict__.values()) for e, x in bn.ex.items()} != \
-                {e: tuple(x.quote.__dict__.values()) for e, x in bb_.ex.items()}:
+        if {e: tuple(x.quote.__dict__.values())[:NQ] for e, x in bn.ex.items()} != \
+                {e: tuple(x.quote.__dict__.values())[:NQ] for e, x in bb_.ex.items()}:
             ok_q = False
             diffs.append(("quote", inv))
         for race, members in bn.groups.items():
@@ -267,8 +282,8 @@ if base is not None:
             kn = (set(json.load(f)) - set(getattr(M.Bot, "EV_KEYS", ())) - {"ev_outcome_history"}
                   - set(getattr(M.Bot, "MM_FUNDING_KEYS", ())))   # (less the later ev / carry / P14 report keys)
         with open(bb_.cfg.status_file) as f:
-            kb = set(json.load(f))
-        if kn != kb or set(bn.health) != set(bb_.health):
+            kb = set(retired(kn, json.load(f)))
+        if kn != kb or set(bn.health) != set(retired(bn.health, bb_.health)):
             ok_s = False
             diffs.append(("status", kn ^ kb))
     check("two full cycles send the same orders (4 books / cash / settings)", ok_w, diffs[:1])
@@ -363,11 +378,9 @@ check("skip: a market another feature traded this cycle is neither sold...", not
 check("...nor bought (its race in skip)", all(p_["buy"]["eid"] != "B1"
                                               for p_ in plan(b, cash=1000.0, skip={"Beta Senate"})[0] if p_["buy"]))
 b.cfg.headline_races = ("Beta Senate",)
-check("headline markets excluded (alloc_headline False)",
+check("headline markets excluded",
       all(p_["buy"]["eid"] != "B1" for p_ in plan(b, cash=1000.0)[0] if p_["buy"]))
-b.cfg.alloc_headline = True
-check("...included with alloc_headline", any(p_["buy"]["eid"] == "B1" for p_ in plan(b, cash=1000.0)[0] if p_["buy"]))
-b.cfg.headline_races, b.cfg.alloc_headline = ("U.S. House", "U.S. Senate"), False
+b.cfg.headline_races = ("U.S. House", "U.S. Senate")
 b.cfg.alloc_max_contract_usd = 100.0
 pairs, _ = plan(b, cash=1000.0)
 check("alloc_max_contract_usd: at most $100 a market (with what is held there)",

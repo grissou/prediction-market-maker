@@ -31,6 +31,21 @@ sys.path.insert(0, HERE)
 from fakes import FakeApi, FakeRefs, lvl, make_bot, market      # noqa: E402
 import mm_bot as M                                                # noqa: E402
 
+# retired on simplify: the old twin's status / health fields a removed feature owned, at the value it reported while
+# the feature was off (the new code drops them); Quote lost its trailing `behind` flag (always False while that sizing
+# was off) and the age skew its switch (skew_age_enabled: the old default True, live False)
+RETIRED_STATUS = {"tilt_s_applied": (0.0, 0), "tilt_s_applied_headline": (0.0, 0), "fast_unload_windows": (0,),
+                  "behind_best_markets": (0,), "mark_frag_total_cap_active": (False,),
+                  "fl_bias_markets": ({"bid": 0, "ask": 0},)}
+RETIRED_FLIPPED = {"skew_age_enabled": False}
+NQ = len(M.Quote.__dataclass_fields__)
+
+
+def retired(new, old):
+    """The old twin's dict less a retired feature's own key at its OFF value when the new one dropped it."""
+    return {k: v for k, v in old.items() if not (k in RETIRED_STATUS and k not in new and v in RETIRED_STATUS[k])}
+
+
 logging.basicConfig(level=logging.CRITICAL)
 RESULTS = []
 M.alert = lambda msg: None
@@ -66,7 +81,7 @@ def cq(inv, fv, bb, ba, ro=False, age=0.0, p=None, eff=None, mod=None, **kw):
     """compute_quote at a 100k account with the live defaults (+ kw); value_p only on the new module."""
     mod = mod or M
     c = mod.Config()
-    for k, v in kw.items():
+    for k, v in dict({} if mod is M else RETIRED_FLIPPED, **kw).items():
         setattr(c, k, v)
     extra = {"value_p": p} if mod is M else {}
     return mod.compute_quote(fv, inv, inv if eff is None else eff, bb, ba, c, reduce_only=ro, bankroll=100000,
@@ -476,10 +491,10 @@ if base is not None:
                         qn = cq(inv, fv, bb, ba, ro=ro, age=age, p=p)
                         qb = cq(inv, fv, bb, ba, ro=ro, age=age, mod=base)
                         n += 1
-                        if astuple(qn) != astuple(qb):    # (every field, keep limits and max sizes too)
+                        if astuple(qn) != astuple(qb)[:NQ]:    # (every field, keep limits and max sizes too)
                             same_q = False
-            if astuple(M.exit_quote(fv, inv, bb, ba, M.Config())) != astuple(base.exit_quote(fv, inv, bb, ba,
-                                                                                              base.Config())):
+            if astuple(M.exit_quote(fv, inv, bb, ba, M.Config())) != astuple(base.exit_quote(
+                    fv, inv, bb, ba, base.Config()))[:NQ]:
                 same_e = False
     check(f"compute_quote (normal + reduce-only, age skew, value_p given, flags off) identical on {n} points", same_q)
     check("exit_quote identical on the grid", same_e)
@@ -491,7 +506,7 @@ if base is not None:
             if mod is base:
                 cfg = base.Config()
                 for k in base.Config.__dataclass_fields__:
-                    setattr(cfg, k, getattr(bn.cfg, k, getattr(cfg, k)))
+                    setattr(cfg, k, getattr(bn.cfg, k, RETIRED_FLIPPED.get(k, getattr(cfg, k))))
                 d = tempfile.mkdtemp()
                 for k in ("fills_csv", "status_file", "order_notes_file", "kill_file", "position_lots_file",
                           "overrides_file", "market_edge_file", "handover_file"):
@@ -526,8 +541,8 @@ if base is not None:
                 if strip(an.wire) != strip(ab.wire):
                     ok_w = False
                     diffs.append(("wire", inv, close_h, reduce))
-                qn = {e: astuple(x.quote) for e, x in bn.ex.items()}
-                qb = {e: astuple(x.quote) for e, x in bb_.ex.items()}
+                qn = {e: astuple(x.quote)[:NQ] for e, x in bn.ex.items()}
+                qb = {e: astuple(x.quote)[:NQ] for e, x in bb_.ex.items()}
                 if qn != qb:
                     ok_q = False
                     diffs.append(("quote", inv, close_h, reduce, qn, qb))
@@ -542,8 +557,9 @@ if base is not None:
                     kn = (set(json.load(f)) - set(getattr(M.Bot, "EV_KEYS", ())) - {"ev_outcome_history"}
                           - set(getattr(M.Bot, "MM_FUNDING_KEYS", ())))   # (and the later P14 report key)
                 with open(bb_.cfg.status_file) as f:
-                    kb = set(json.load(f))
-                if kn != kb or set(bn.health) != set(bb_.health) or bn.status_report() != bb_.status_report():
+                    kb = set(retired(kn, json.load(f)))
+                if (kn != kb or set(bn.health) != set(retired(bn.health, bb_.health))
+                        or bn.status_report() != bb_.status_report()):
                     ok_s = False
                     diffs.append(("status", kn ^ kb, set(bn.health) ^ set(bb_.health)))
     check("two full cycles send the same orders (4 books x close in 1 / 5 / 10 / 700 h x reduce-only)", ok_w, diffs[:1])

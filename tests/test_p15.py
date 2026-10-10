@@ -37,6 +37,21 @@ sys.path.insert(0, HERE)
 from fakes import FakeApi, FakeRefs, lvl, make_bot, market, run_cycles      # noqa: E402
 import mm_bot as M                                                            # noqa: E402
 
+# retired on simplify: the old twin's status / health fields a removed feature owned, at the value it reported while
+# the feature was off (the new code drops them); Quote lost its trailing `behind` flag (always False while that sizing
+# was off) and the age skew its switch (skew_age_enabled: the old default True, live False)
+RETIRED_STATUS = {"tilt_s_applied": (0.0, 0), "tilt_s_applied_headline": (0.0, 0), "fast_unload_windows": (0,),
+                  "behind_best_markets": (0,), "mark_frag_total_cap_active": (False,),
+                  "fl_bias_markets": ({"bid": 0, "ask": 0},)}
+RETIRED_FLIPPED = {"skew_age_enabled": False}
+NQ = len(M.Quote.__dataclass_fields__)
+
+
+def retired(new, old):
+    """The old twin's dict less a retired feature's own key at its OFF value when the new one dropped it."""
+    return {k: v for k, v in old.items() if not (k in RETIRED_STATUS and k not in new and v in RETIRED_STATUS[k])}
+
+
 logging.basicConfig(level=logging.CRITICAL)
 RESULTS = []
 ALERTS = []
@@ -291,7 +306,7 @@ if base is not None:
             if mod is base:
                 cfg = base.Config()
                 for k in base.Config.__dataclass_fields__:
-                    setattr(cfg, k, getattr(bn.cfg, k, getattr(cfg, k)))
+                    setattr(cfg, k, getattr(bn.cfg, k, RETIRED_FLIPPED.get(k, getattr(cfg, k))))
                 d = tempfile.mkdtemp()
                 for k in ("fills_csv", "status_file", "order_notes_file", "kill_file", "position_lots_file",
                           "overrides_file", "market_edge_file", "handover_file"):
@@ -341,7 +356,8 @@ if base is not None:
             if sorted(map(json.dumps, strip(an.wire))) != sorted(map(json.dumps, strip(ab.wire))):
                 ok_w = False
                 diffs.append(("wire", inv, ov))
-            if {e: astuple(x.quote) for e, x in bn.ex.items()} != {e: astuple(x.quote) for e, x in bb_.ex.items()}:
+            if ({e: astuple(x.quote)[:NQ] for e, x in bn.ex.items()}
+                    != {e: astuple(x.quote)[:NQ] for e, x in bb_.ex.items()}):
                 ok_q = False
                 diffs.append(("quote", inv, ov))
             strip_t = lambda m: sorted(json.dumps({a: v for a, v in x.items() if a != "t"}, sort_keys=True)  # noqa
@@ -354,7 +370,7 @@ if base is not None:
             with open(bn.cfg.status_file) as f:
                 sn = json.load(f)
             with open(bb_.cfg.status_file) as f:
-                sb = json.load(f)
+                sb = retired(sn, json.load(f))
             drop = VOLATILE | set(M.Bot.MM_FUNDING_KEYS) | set(M.Bot.HARVEST_KEYS)
             wall = {"last_run_wall", "last_run", "since"}
             cut = lambda s: {k: ({a: ([f[1:] for f in x] if a == "flows" else x) for a, x in v.items()  # noqa
@@ -364,7 +380,7 @@ if base is not None:
                 ok_s = False
                 diffs.append(("status", inv, ov, {k for k in set(cut(sn)) | set(cut(sb))
                                                   if cut(sn).get(k) != cut(sb).get(k)} | (set(sn) ^ set(sb))))
-            if set(bn.health) != set(bb_.health) or bn.status_report() != bb_.status_report():
+            if set(bn.health) != set(retired(bn.health, bb_.health)) or bn.status_report() != bb_.status_report():
                 ok_h = False
                 diffs.append(("health", inv, ov))
             if bn.summary_ops_line(100000.0) != bb_.summary_ops_line(100000.0):
@@ -393,7 +409,7 @@ if base is not None:
         fresh(bn)
         cfg = base.Config()
         for k in base.Config.__dataclass_fields__:
-            setattr(cfg, k, getattr(bn.cfg, k, getattr(cfg, k)))
+            setattr(cfg, k, getattr(bn.cfg, k, RETIRED_FLIPPED.get(k, getattr(cfg, k))))
         bb_ = base.Bot.__new__(base.Bot)
         bb_.__dict__.update(bn.__dict__)
         bb_.basket_legs = {}                # (the base revision's retired long-tilt basket: never any legs)
@@ -1111,7 +1127,8 @@ check("an unrecognised label: no state (st_key None), so no state cap there", b.
 print("--- the staged file")
 if os.path.exists(STAGED):
     raw = json.load(open(STAGED))
-    RETIRED = ("tilt_exit_priority", "tilt_exit_full_size")   # (retired on simplify: the staged files pin tilt_exit_priority / tilt_exit_full_size at their default False)
+    RETIRED = ("tilt_exit_priority", "tilt_exit_full_size", "ref_tilt_enabled", "ref_tilt_headline",
+               "ref_guard_tilted", "ref_guard_exits", "take_tilted_ref", "skew_age_enabled")   # (retired on simplify)
     good, bad = M.validate_overrides({k: v for k, v in raw.items() if k not in RETIRED}, M.Config())
     base142 = json.load(open(LIVE_142))
     p15k = {"tilt_harvest_ladder", "harvest_offsets", "harvest_level_usd", "harvest_min_edge", "harvest_max_markets",

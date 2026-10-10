@@ -34,7 +34,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 import dryrun_harness as P                                      # noqa: E402  (the harness: snapshot, fake, clock)
-RETIRED_KEYS = ("tilt_exit_priority", "tilt_exit_full_size")   # removed from Config; off in every staged file
+RETIRED_KEYS = P.RETIRED_KEYS                     # removed from Config; off in every staged file
 import mm_bot as M                                                # noqa: E402
 
 P.TAGGED = P.TAGGED + ("alloc_tick",)
@@ -193,7 +193,7 @@ def stage0():
               "feature)", same, (len(new), len(old), [x for x in new if x not in old][:3]))
         ev_ign = (set(getattr(M.Bot, "EV_KEYS", ())) | {"ev_outcome_history"}   # later read-only ev / carry report keys
                   | set(getattr(M.Bot, "MM_FUNDING_KEYS", ())))   # (and P14 mm_funding)
-        keys = (set(st_new) ^ set(st_old)) - ev_ign
+        keys = (set(st_new) ^ set(P.retired(st_new, st_old))) - ev_ign
         check("stage0: identical status.json keys (no bloc / alloc section)", not keys, keys)
         out(f"- 12 cycles on the live seed, Package 10 code vs the Package 9 head {BASE_REV}: {len(new)} orders each, "
             f"identical: {same}; status.json keys identical: {not keys}")

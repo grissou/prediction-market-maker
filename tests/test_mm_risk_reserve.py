@@ -26,6 +26,21 @@ sys.path.insert(0, HERE)
 from fakes import FakeApi, FakeRefs, lvl, make_bot, market      # noqa: E402
 import mm_bot as M                                                # noqa: E402
 
+# retired on simplify: the old twin's status / health fields a removed feature owned, at the value it reported while
+# the feature was off (the new code drops them); Quote lost its trailing `behind` flag (always False while that sizing
+# was off) and the age skew its switch (skew_age_enabled: the old default True, live False)
+RETIRED_STATUS = {"tilt_s_applied": (0.0, 0), "tilt_s_applied_headline": (0.0, 0), "fast_unload_windows": (0,),
+                  "behind_best_markets": (0,), "mark_frag_total_cap_active": (False,),
+                  "fl_bias_markets": ({"bid": 0, "ask": 0},)}
+RETIRED_FLIPPED = {"skew_age_enabled": False}
+NQ = len(M.Quote.__dataclass_fields__)
+
+
+def retired(new, old):
+    """The old twin's dict less a retired feature's own key at its OFF value when the new one dropped it."""
+    return {k: v for k, v in old.items() if not (k in RETIRED_STATUS and k not in new and v in RETIRED_STATUS[k])}
+
+
 logging.basicConfig(level=logging.CRITICAL)
 RESULTS = []
 M.alert = lambda msg: None
@@ -221,11 +236,6 @@ check("no value p (illiquid): the fair value decides the tail (Ohio Rep fv ~0.14
 b2.mmr_paused = False
 check("not paused: nothing is a paused tail", not b2.mm_tail_adds_off(b2.ex["11"], 0.14, None, False))
 b.mmr_paused = True
-b.ex["11"].mmr_tail, b.ex["11"].inv, b.ex["11"].eff = True, 0.0, 0.0
-b.lad_liquid, b.lad_party_delta = set(), 0.0
-caps = b.ladder_caps(b.ex["11"], 0.14, 100)
-check("the R3 ladder's caps: a paused tail adds nothing on either side", caps[True](0.10) <= 0 and caps[False](0.20) <= 0,
-      (caps[True](0.10), caps[False](0.20)))
 b.mmr_paused = False
 
 # ============================================================================================ takes
@@ -399,7 +409,7 @@ if base is not None:
             if mod is base:
                 cfg = base.Config()
                 for k in base.Config.__dataclass_fields__:
-                    setattr(cfg, k, getattr(bn.cfg, k, getattr(cfg, k)))
+                    setattr(cfg, k, getattr(bn.cfg, k, RETIRED_FLIPPED.get(k, getattr(cfg, k))))
                 d = tempfile.mkdtemp()
                 for k in ("fills_csv", "status_file", "order_notes_file", "kill_file", "position_lots_file",
                           "overrides_file", "market_edge_file", "handover_file"):
@@ -434,7 +444,8 @@ if base is not None:
             if strip(an.wire) != strip(ab.wire):
                 ok_w = False
                 diffs.append(("wire", inv, ov))
-            if {e: astuple(x.quote) for e, x in bn.ex.items()} != {e: astuple(x.quote) for e, x in bb_.ex.items()}:
+            if ({e: astuple(x.quote)[:NQ] for e, x in bn.ex.items()}
+                    != {e: astuple(x.quote)[:NQ] for e, x in bb_.ex.items()}):
                 ok_q = False
                 diffs.append(("quote", inv, ov))
             bn.write_status(True)
@@ -442,8 +453,9 @@ if base is not None:
             with open(bn.cfg.status_file) as f:
                 kn = set(json.load(f)) - set(getattr(M.Bot, "MM_FUNDING_KEYS", ()))   # (less the later P14 report key)
             with open(bb_.cfg.status_file) as f:
-                kb = set(json.load(f))
-            if kn != kb or set(bn.health) != set(bb_.health) or bn.status_report() != bb_.status_report():
+                kb = set(retired(kn, json.load(f)))
+            if (kn != kb or set(bn.health) != set(retired(bn.health, bb_.health))
+                    or bn.status_report() != bb_.status_report()):
                 ok_s = False
                 diffs.append(("status", inv, ov, kn ^ kb))
     check("two full cycles send the same orders (4 books x plain / value+hurdle / reduce-only / ladder)", ok_w, diffs[:1])
@@ -481,7 +493,7 @@ if base is not None:
         pn = plan(bn, cash)
         cfg = base.Config()
         for k in base.Config.__dataclass_fields__:
-            setattr(cfg, k, getattr(bn.cfg, k, getattr(cfg, k)))
+            setattr(cfg, k, getattr(bn.cfg, k, RETIRED_FLIPPED.get(k, getattr(cfg, k))))
         bb_ = base.Bot.__new__(base.Bot)
         bb_.__dict__.update({k: v for k, v in bn.__dict__.items() if not k.startswith("mmr_")})
         bb_.basket_legs = {}                # (the base revision's retired long-tilt basket: never any legs)
@@ -498,7 +510,8 @@ try:
         ov = json.load(f)
 except (OSError, ValueError) as e:
     ov = {"_error": str(e)}
-RETIRED = ("tilt_exit_priority", "tilt_exit_full_size")   # (retired on simplify: the staged files pin tilt_exit_priority / tilt_exit_full_size at their default False)
+RETIRED = ("tilt_exit_priority", "tilt_exit_full_size", "ref_tilt_enabled", "ref_tilt_headline", "ref_guard_tilted",
+           "ref_guard_exits", "take_tilted_ref", "skew_age_enabled")   # (retired on simplify; staged at default)
 good, bad = M.validate_overrides({k: v for k, v in ov.items() if not k.startswith("_") and k not in RETIRED},
                                  M.Config())
 check("stage1b file: mm_risk_reserve_wc 5000 / _corr 4000, every key valid",

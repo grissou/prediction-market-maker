@@ -220,6 +220,9 @@ def tag_methods(b):
 def build(S, cash=None, overrides="live"):
     api = DryApi(S, cash)
     cfg = M.Config()
+    for k, v in RETIRED_FLIPPED.items():          # (a pinned twin: the removed knob at its live value)
+        if k in cfg.__dataclass_fields__:
+            setattr(cfg, k, v)
     d = tempfile.mkdtemp(prefix="p9dry")
     cfg.fills_csv, cfg.status_file, cfg.order_notes_file, cfg.kill_file = (
         os.path.join(d, n) for n in ("fills.csv", "status.json", "notes.json", "kill.tripped"))
@@ -253,7 +256,19 @@ def build(S, cash=None, overrides="live"):
 
 RETIRED_PREFIXES = ("basket_", "momentum_", "mom_", "value_extreme_p", "value_min_edge", "mm_carry_min",
                     "election_holdback_")          # the momentum sleeve's keys (switched off live 8 Oct)
-RETIRED_KEYS = ("tilt_exit_priority", "tilt_exit_full_size")
+RETIRED_KEYS = ("tilt_exit_priority", "tilt_exit_full_size",   # (and the ref-tilt family / age skew, removed too)
+                "ref_tilt_enabled", "ref_tilt_headline", "ref_guard_tilted", "ref_guard_exits", "take_tilted_ref",
+                "skew_age_enabled")
+RETIRED_FLIPPED = {"skew_age_enabled": False}     # a pinned twin's default differs from the live (removed) value
+# a retired feature's own status / health fields, at the value the OLD code reported while it was off
+RETIRED_STATUS = {"tilt_s_applied": (0.0, 0), "tilt_s_applied_headline": (0.0, 0), "fast_unload_windows": (0,),
+                  "behind_best_markets": (0,), "mark_frag_total_cap_active": (False,),
+                  "fl_bias_markets": ({"bid": 0, "ask": 0},)}
+
+
+def retired(new, old):
+    """The old twin's status / health dict less a retired key at its OFF value when the new one dropped it."""
+    return {k: v for k, v in old.items() if not (k in RETIRED_STATUS and k not in new and v in RETIRED_STATUS[k])}
 
 
 def staged(path):

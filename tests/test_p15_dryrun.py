@@ -38,7 +38,7 @@ sys.path.insert(0, HERE)
 SNAP = os.environ.get("P9_SNAP", "/home/claude/snap04")
 os.environ.setdefault("P9_SNAP", SNAP)
 import dryrun_harness as P                                      # noqa: E402  (the harness: snapshot, fake, clock)
-RETIRED_KEYS = ("tilt_exit_priority", "tilt_exit_full_size")   # removed from Config; off in every staged file
+RETIRED_KEYS = P.RETIRED_KEYS                     # removed from Config; off in every staged file
 import p14_1_state as T                                          # noqa: E402  (the live state)
 import mm_bot as M                                                # noqa: E402
 
@@ -379,10 +379,12 @@ def scenario0():
     strip = lambda xs: [x[:5] for x in xs]          # noqa: E731  (the stage tag differs by name only)
     check("s0: the live file, 12 cycles on the live state: the same orders on 64f27c8 and on this head",
           strip(sn) == strip(sb) and len(sn) > 0, (len(sn), len(sb)))
+    # (the blocked-takes counter once caught a real bug: the take loop pricing every take off the wrong market;
+    #  it stays in the comparison on purpose)
+    nn, nb = norm_status(stn), norm_status(P.retired(stn, stb))
     check("s0: ...and the same status.json (but timings, HARVEST_KEYS and mm_funding)",
-          norm_status(stn) == norm_status(stb) and "harvest" not in stn and "state_caps" not in stn,
-          [k for k in set(norm_status(stn)) | set(norm_status(stb))
-           if norm_status(stn).get(k) != norm_status(stb).get(k)])
+          nn == nb and "harvest" not in stn and "state_caps" not in stn,
+          [(k, nn.get(k), nb.get(k)) for k in set(nn) | set(nb) if nn.get(k) != nb.get(k)])
     off = {**json.load(open(STAGED)), "tilt_harvest_ladder": False, "state_max_usd": 0}
     so, _ = s0_run(M, "s0o", write_file(off, "staged_off.json"))
     check("s0: the staged file with tilt_harvest_ladder false and state_max_usd 0 = the live file (same orders)",

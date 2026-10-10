@@ -38,8 +38,7 @@ check("defaults: 50 markets, 30 min half-life, max 20%, winsor 8c (the estimator
 names = ["ref_tilt_min_markets", "ref_tilt_halflife_min", "ref_tilt_max", "ref_tilt_winsor"]
 _ov = list(M.OVERRIDABLE)
 _i = _ov.index(names[0])
-check("all four live-overridable, one block after the savers",
-      _ov[_i:_i + 4] == names and _i > _ov.index("ttl_expire_grace_seconds"), _ov[_i:_i + 4])
+check("all four live-overridable, one contiguous block", _ov[_i:_i + 4] == names, _ov[_i:_i + 4])
 good, bad = M.validate_overrides({"ref_tilt_enabled": True, "ref_tilt_max": 0.5}, c)
 check("override ranges: the removed flag and ref_tilt_max 0.5 both refused", not good and len(bad) == 2, (good, bad))
 

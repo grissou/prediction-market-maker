@@ -4034,6 +4034,8 @@ class Bot:
         # 4. Fills (every slow_poll_seconds, and straight after a fill) --------------------------------
         if read_fills:
             new_fills = self.log_fills(fvs)
+            if new_fills:
+                self.pos_record_due = True            # recorder: note the positions straight after a fill
         self.note_turnover(new_fills if read_fills else ())
         self.refresh_turnover(now_m)
         self.mm_inv_step(new_fills if read_fills else (), inv)   # P14: MM inventory lots (read-only, never raises)
@@ -7414,6 +7416,7 @@ class Bot:
             except ApiError as e:
                 log.warning("take on %s skipped: book download failed (%s)", ex.label, e)
                 continue
+            p = refs[eid]                                 # THIS market's Polymarket price (not the first loop's last)
             if self.take_direction(ex, p) != ex.take_dir:
                 ex.take_dir = 0                           # the gap has closed: nothing to take
                 continue

@@ -29,6 +29,21 @@ sys.path.insert(0, HERE)
 from fakes import FakeApi, FakeRefs, lvl, make_bot, market      # noqa: E402
 import mm_bot as M                                                # noqa: E402
 
+# retired on simplify: the old twin's status / health fields a removed feature owned, at the value it reported while
+# the feature was off (the new code drops them); Quote lost its trailing `behind` flag (always False while that sizing
+# was off) and the age skew its switch (skew_age_enabled: the old default True, live False)
+RETIRED_STATUS = {"tilt_s_applied": (0.0, 0), "tilt_s_applied_headline": (0.0, 0), "fast_unload_windows": (0,),
+                  "behind_best_markets": (0,), "mark_frag_total_cap_active": (False,),
+                  "fl_bias_markets": ({"bid": 0, "ask": 0},)}
+RETIRED_FLIPPED = {"skew_age_enabled": False}
+NQ = len(M.Quote.__dataclass_fields__)
+
+
+def retired(new, old):
+    """The old twin's dict less a retired feature's own key at its OFF value when the new one dropped it."""
+    return {k: v for k, v in old.items() if not (k in RETIRED_STATUS and k not in new and v in RETIRED_STATUS[k])}
+
+
 logging.basicConfig(level=logging.CRITICAL)
 RESULTS = []
 ALERTS = []
@@ -251,8 +266,8 @@ if base is not None:
         if sorted(map(json.dumps, sn)) != sorted(map(json.dumps, sb)):   # (the writer threads' order may vary)
             ok_w = False
             diffs.append(("wire", inv, sn[:2], sb[:2]))
-        if {e: tuple(x.quote.__dict__.values()) for e, x in bn.ex.items()} != \
-                {e: tuple(x.quote.__dict__.values()) for e, x in bb_.ex.items()}:
+        if {e: tuple(x.quote.__dict__.values())[:NQ] for e, x in bn.ex.items()} != \
+                {e: tuple(x.quote.__dict__.values())[:NQ] for e, x in bb_.ex.items()}:
             ok_q = False
             diffs.append(("quote", inv))
         for race, members in bn.groups.items():
@@ -270,11 +285,11 @@ if base is not None:
         with open(bn.cfg.status_file) as f:
             kn = json.load(f)
         with open(bb_.cfg.status_file) as f:
-            kb = json.load(f)
+            kb = retired(kn, json.load(f))
         ev_ign = (set(getattr(M.Bot, "EV_KEYS", ())) | {"ev_outcome_history"}   # later read-only ev / carry report keys
                   | set(getattr(M.Bot, "MM_FUNDING_KEYS", ())))   # (and P14 mm_funding)
         if set(kn) - ev_ign != set(kb) - ev_ign or set(kn.get("alloc") or {}) != set(kb.get("alloc") or {}) \
-                or set(bn.health) != set(bb_.health):
+                or set(bn.health) != set(retired(bn.health, bb_.health)):
             ok_s = False
             diffs.append(("status", set(kn) ^ set(kb)))
     check("two full cycles send the same orders, any order (5 books / positions / settings)", ok_w, diffs[:1])

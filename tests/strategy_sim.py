@@ -93,7 +93,7 @@ class Order:
     qty: float
     t: float            # time it became live (queue priority)
     fv: float = 0.0     # our fair value when placed (ours only)
-    level: int = 0      # ladder level (ours only)
+    level: int = 0      # order level (ours only; 0 = the resting quote)
 
 
 @dataclass
@@ -154,10 +154,9 @@ class Sim:
         self.side_s, self.best_s = 0, 0          # our quoted side-seconds, and those at/inside the best other price
         self.locked_s = 0.0                      # cash locked in our resting orders, summed over seconds
         # Round 2: the rest of the account (other ~225 markets) holds bg_cap in positions; capital fraction =
-        # (bg_cap + our positions here) / account. Fast unload and the ladder's free-cash gate are prototypes.
-        self.bg_cap, self.cap_frac, self.fast_unload, self.lad_gate = 60_000.0, 0.0, None, 0.0
+        # (bg_cap + our positions here) / account.
+        self.bg_cap, self.cap_frac = 60_000.0, 0.0
         self.age_samples, self.free_cash = [], 1e9
-        self.ladder, self.rival_aware = None, 0.0    # R3 / rival-aware prototypes (see ladder_want)
         self.pnl_curve, self.worst_peak = [], 0.0
         self.mkts, self.paths = [], []
         for kind, k in KINDS.items():
@@ -252,8 +251,6 @@ class Sim:
             if o.owner == "us":
                 side = 1 if o.is_bid else -1
                 add_lot(m.state.setdefault("lots", []), side * q, t)
-                if self.fast_unload and side * (o.fv - o.price) >= self.fast_unload["edge"]:
-                    m.state["fu"] = (t + self.fast_unload["secs"], side, q)
                 m.inv += side * q
                 m.cash -= side * q * o.price
                 self.fills.append((t, m, side, q, o.price, o.fv, o.level, taker))
@@ -357,17 +354,12 @@ class Sim:
         want = [] if t < m.cooldown_until else self.strategy(self, m, t, fv, bfv, ref, book)
         mine = [o for o in m.orders if o.owner == "us"]
         cancels, places = plan_changes(cfg, mine, want, t, m)
-        real = bool(self.ladder and self.ladder.get("real"))
-        if real:
-            cancels, places = real_ladder_rules(want, cancels, places)
         if not cancels and not places:
             return None
         urgent = t - m.state.get("ref_moved_at", -99) < 15
         head = 0 if m.headline else 1
         key = (0 if not places else 0.5 if urgent else 1, head, 1 if cancels else 0,
                -max([w[2] for w in places] or [0]))
-        if real and all(o.level > 0 for o in cancels) and all(w[3] > 0 for w in places):
-            key = (0 if not places and any(ladder_unsafe(o, want) for o in cancels) else 2,) + key[1:]
         return key, m, cancels, places, fv, len(cancels) == len(mine)
 
     def our_cycle(self, t, paths):
@@ -387,9 +379,6 @@ class Sim:
             c += len(places) / bs                    # batches are shared with ~225 other markets: amortised
             if used + c > spare and key[0] != 0:
                 self.deferred += len(plans) - i          # everything after the first misfit waits
-                break
-            if key[0] == 2 and spare - used - c < self.cfg.ladder_min_writes * self.share:
-                self.deferred += len(plans) - i          # R3 (real): the ladder only with ladder_min_writes to spare
                 break
             used, n = used + c, n + len(places)
             lc = self.lat()
@@ -558,17 +547,14 @@ SIM_EPOCH = M.datetime(2026, 10, 1, tzinfo=M.timezone.utc)   # sim second t = SI
 def plan_changes(cfg, mine, want, t, m=None):
     """Reconcile our resting orders with the wanted list [(is_bid, price, size, level)]: same rules as
     Bot.reconcile (keep an order a tick off if still safe, churn control, cancel before placing).
-    Order expiry as live (Round 4): each order expires order_ttl after it was planned (the TTL saver's tier TTL with
-    ttl_tiers_enabled, level 0) and is refreshed refresh_before_expiry before that (or, with ttl_expire_as_cancel,
-    left to expire and its side re-quoted ttl_expire_grace_seconds later, as Bot.expiry_wait); an expired order
-    leaves the book here. No-chase as Bot.side_fix (mm_bot.no_chase_needs_change, level 0).
+    Order expiry as live (Round 4): each order expires order_ttl after it was planned and is refreshed
+    refresh_before_expiry before that; an expired order leaves the book here.
     Returns (cancels, places)."""
     cancels, places = [], []
     st = m.state if m is not None else {}
     now = SIM_EPOCH + M.timedelta(seconds=t)
     # Per order: (order, expiry t, inventory and size when planned). Planned values wait in "pend" for the order.
     pend, known, live, gone = st.setdefault("pend", {}), st.get("exp", {}), {}, set()
-    last_exp = st.setdefault("last_exp", {})
     for o in mine:
         rec = known.get(id(o))
         if rec is None or rec[0] is not o:
@@ -576,7 +562,6 @@ def plan_changes(cfg, mine, want, t, m=None):
             rec = (o, exp_t, inv0, qty0)
         if rec[1] <= t:
             gone.add(id(o))                                  # expired: the engine drops it
-            last_exp[(o.is_bid, o.level)] = rec[1]
         else:
             live[id(o)] = rec
     st["exp"] = live
@@ -591,29 +576,13 @@ def plan_changes(cfg, mine, want, t, m=None):
         price, size, limit = (w[1], w[2], w[4] if len(w) > 4 else None) if w else (None, 0, None)
         rest = [Resting(0, "", o.is_bid, o.price, o.qty, SIM_EPOCH + M.timedelta(seconds=live[id(o)][1]))
                 for o in cur]
-        eac = cfg.ttl_expire_as_cancel and lvl == 0
-        if lvl == 0 and len(cur) == 1:
-            rec = live[id(cur[0])]
-            fix = M.no_chase_needs_change(rest, price, size, cfg, now, limit, is_bid, None, st.get("fv"), cur[0].fv,
-                                          m.inv if m is not None else None, rec[2], rec[3], expire_as_cancel=eac)
-        else:
-            fix = side_needs_change(rest, price, size, cfg, now, limit, is_bid=is_bid, expire_as_cancel=eac)
-        if eac:                                              # Bot.expiry_wait
-            le = last_exp.get((is_bid, lvl))
-            if cur or le is None or t >= le + cfg.ttl_expire_grace_seconds:
-                last_exp.pop((is_bid, lvl), None)
-            elif le <= t:
-                fix = False                                  # just expired: re-quote after the grace
+        fix = side_needs_change(rest, price, size, cfg, now, limit, is_bid=is_bid)
         expiring = any(r.expires and (r.expires - now).total_seconds() < cfg.refresh_before_expiry for r in rest)
         if fix and (expiring or not hold(cfg, m, cur, w, t)):   # (Bot.hold_side never holds an expiring order)
             cancels += cur
             if w is not None:
                 places.append((is_bid, price, size, lvl))
                 ttl = cfg.order_ttl
-                if lvl == 0 and m is not None:
-                    rng = st.get("ttl_rng") or st.setdefault("ttl_rng", random.Random(f"{m.kind}{m.p0:.6f}"))
-                    frac = cfg.size_max_frac if m.kind == "busy" else cfg.size_min_frac
-                    ttl = M.order_ttl_for(cfg, M.ttl_tier(m.headline, frac, 1.0, cfg), rng.random())
                 pend[(is_bid, lvl)] = (m.inv if m is not None else None, size, t + ttl)
     return cancels, places
 
@@ -641,105 +610,14 @@ def baseline_strategy(sim, m, t, fv, bfv, ref, book):
     side, bias_edge, bias_size = M.fl_side(fv, m.state.get("fl"), cfg)     # favourite-longshot side bias
     m.state["fl"] = side
     over = cfg.capital_in_positions_max_frac < 1.0 and sim.cap_frac > cfg.capital_in_positions_max_frac
-    u_side, u_size = unload_window(sim, m, t)
     q = M.compute_quote(fv, m.inv, m.inv, bb, ba, cfg, no_bid=no_bid, no_ask=no_ask,
                         kelly_p=None if m.headline else ref, order_size=size, position_limit=plimit,
                         bias_side="bid" if side == "mid" else side, bias_edge=bias_edge, bias_size=bias_size,
                         net_inv=m.inv, age_hours=lot_age(m.state.get("lots"), t),
-                        adding_factor=cfg.capital_ceiling_adding_size_factor if over else 1.0,
-                        unload_side=u_side, unload_edge=cfg.fast_unload_edge, unload_size=u_size)
-    want = quote_to_want(q)
-    fu = m.state.get("fu")
-    if fu and t < fu[0] and fu[1] * m.inv > 0:
-        # fast unload prototype: the reducing side at fair -/+ offset (never crossing), size = the sweep fill
-        is_bid = fu[1] < 0
-        px = floor_tick(fv - sim.fast_unload["off"]) if is_bid else ceil_tick(fv + sim.fast_unload["off"])
-        px = min(px, floor_tick(ba - TICK)) if is_bid and ba is not None else px
-        px = max(px, ceil_tick(bb + TICK)) if not is_bid and bb is not None else px
-        cur = next((w for w in want if w[0] == is_bid), None)
-        if cur is None or (px > cur[1] if is_bid else px < cur[1]):
-            qty = int(min(abs(m.inv), max(fu[2], cur[2] if cur else 0)))
-            want = [w for w in want if w[0] != is_bid] + ([(is_bid, px, qty, 0, None)] if qty >= 1 else [])
-    if sim.ladder and sim.lad_gate and sim.free_cash < sim.lad_gate * 100_000.0:
-        return want                                   # R3 gate: no ladder while free cash is short
-    if sim.ladder or sim.rival_aware:
-        want = ladder_want(sim, m, t, fv, ref, q, want, bb, ba, size, plimit)
-    return want
+                        adding_factor=cfg.capital_ceiling_adding_size_factor if over else 1.0)
+    return quote_to_want(q)
 
 
-LADDER = dict(offs=(0.02, 0.035, 0.05), mults=(1, 2, 3), head_offs=(0.02, 0.04, 0.06, 0.08),
-              head_mults=(0.25, 0.25, 0.5, 0.5), move=0.01, pull=0.015, cool=30)
-
-
-def ladder_want(sim, m, t, fv, ref, q, want, bb, ba, size, plimit):
-    """R3 prototype: extra resting levels at anchor -/+ offs (sizes mults x the quote size), the anchor being our
-    fair value when last set; held until fair value moves `move` from it; all pulled for `cool` s when
-    Polymarket jumps `pull` from where it was at the anchor. Never at or inside level 0, never crossing.
-    Rival-aware (sim.rival_aware = step): a side where another trader sits inside our floor drops level 0;
-    without a ladder it rests one held order at anchor -/+ step instead."""
-    L, st, cfg = sim.ladder or {}, m.state, sim.cfg
-    if st.get("lad_ref") is not None and abs(ref - st["lad_ref"]) >= L.get("pull", 0.015):
-        st["lad_cool"], st["lad_fv"] = t + L.get("cool", 30), None
-    if t < st.get("lad_cool", -1):
-        return want
-    if st.get("lad_fv") is None or abs(fv - st["lad_fv"]) >= L.get("move", 0.01):
-        st["lad_fv"], st["lad_ref"] = fv, ref
-    a = st["lad_fv"]
-    if sim.rival_aware:
-        inside = {True: q.bid_limit is not None and bb is not None and bb > q.bid_limit + 1e-9,
-                  False: q.ask_limit is not None and ba is not None and ba < q.ask_limit - 1e-9}
-        keep = [w for w in want if not inside[w[0]]]
-        if not sim.ladder:
-            keep += [(w[0], floor_tick(a - sim.rival_aware) if w[0] else ceil_tick(a + sim.rival_aware), w[2], 1, None)
-                     for w in want if inside[w[0]]]
-        want = keep
-    if not sim.ladder:
-        return want
-    offs, mults = (L["head_offs"], L["head_mults"]) if m.headline else (L["offs"], L["mults"])
-    bank = 100_000.0
-    if L.get("real"):
-        # mm_bot's own planner: ladder_levels with the same caps the bot uses (headline flat limit, else Kelly at
-        # the level's price), and ladder_max_inv_quotes (no adding-side ladder beyond 3 quote sizes)
-        def cap(is_bid):
-            def f(px):
-                lim = plimit if plimit is not None else M.kelly_position(ref, px, bank, cfg, yes=is_bid)
-                c = lim - m.inv if is_bid else lim + m.inv
-                if size > 0 and abs(m.inv) > cfg.ladder_max_inv_quotes * size and (m.inv > 0) == is_bid:
-                    c = 0
-                return c
-            return f
-        lw, _ = M.ladder_levels(a, q, bb, ba, offs, mults, size, {True: cap(True), False: cap(False)})
-        return want + [(k[0], px, sz, k[1], None) for k, (px, sz) in sorted(lw.items(), key=lambda kv: kv[0][1])]
-    cum = {True: m.inv + (q.bid_size if q.bid is not None else 0), False: -m.inv + (q.ask_size if q.ask is not None else 0)}
-    for i, (d, k) in enumerate(zip(offs, mults), start=1):
-        for is_bid in (True, False):
-            px = floor_tick(a - d) if is_bid else ceil_tick(a + d)
-            l0 = q.bid if is_bid else q.ask
-            if px < 0.01 or px > 0.99 or (l0 is not None and (px >= l0 - 1e-9 if is_bid else px <= l0 + 1e-9)):
-                continue
-            if (is_bid and ba is not None and px >= ba - 1e-9) or (not is_bid and bb is not None and px <= bb + 1e-9):
-                continue
-            lim = plimit if plimit is not None else M.kelly_position(ref, px, bank, cfg, yes=is_bid)
-            qty = int(min(k * size, lim - cum[is_bid]))
-            if qty >= 1:
-                cum[is_bid] += qty
-                want.append((is_bid, px, qty, i, None))
-    return want
-
-
-def ladder_unsafe(o, want):
-    """R3 (real): a resting ladder order that must go now - level 0 no longer quotes its side, or it sits at or
-    inside level 0's price (mm_bot.plan_exchange's urgent pulls)."""
-    l0 = next((w for w in want if w[0] == o.is_bid and w[3] == 0), None)
-    return l0 is None or (o.price >= l0[1] - 1e-9 if o.is_bid else o.price <= l0[1] + 1e-9)
-
-
-def real_ladder_rules(want, cancels, places):
-    """R3 (real): mm_bot.plan_exchange's ordering - while level 0 changes in a market, only unsafe ladder pulls go
-    with it; other ladder work waits for a cycle where level 0 needs no write."""
-    if any(o.level == 0 for o in cancels) or any(w[3] == 0 for w in places):
-        return ([o for o in cancels if o.level == 0 or ladder_unsafe(o, want)], [w for w in places if w[3] == 0])
-    return cancels, places
 def add_lot(lots, x, t):
     """FIFO lots [signed shares, time]: same sign adds a lot, opposite sign closes the oldest first."""
     while x and lots and lots[0][0] * x < 0:
@@ -751,41 +629,10 @@ def add_lot(lots, x, t):
     if abs(x) > 1e-9:
         lots.append([x, t])
 
-
 def lot_age(lots, t):
     """Share-weighted age of the held lots, hours (Bot.age_hours)."""
     n = sum(abs(x) for x, _ in lots) if lots else 0.0
     return sum(abs(x) * (t - u) for x, u in lots) / n / 3600 if n else 0.0
-
-
-def unload_window(sim, m, t):
-    """Bot.note_unloads + Bot.unload_side for one market: (reducing side or None, shares to unload)."""
-    cfg = sim.cfg
-    if not cfg.fast_unload_enabled:
-        return None, None
-    st = m.state
-    i = st.get("nf", 0)
-    st["nf"] = len(sim.fills)                    # markets run one after another: new fills are this market's
-    w = st.get("unload")
-    for (ft, fm, sgn, q, price, fv, _lvl, _taker) in sim.fills[i:]:
-        if fm is not m:
-            continue
-        side = "bid" if sgn > 0 else "ask"
-        if w and w["side"] == side:
-            w["left"] -= q
-            continue
-        if t - ft > cfg.fast_unload_seconds or (fv - price) * sgn < cfg.fast_unload_min_edge - 1e-9 \
-                or q < cfg.fast_unload_min_shares or m.inv * sgn <= 0:
-            continue                             # (position now: approximates "added" for fills since last step)
-        left = min(q, abs(m.inv)) + (w["left"] if w else 0.0)
-        w = {"until": ft + cfg.fast_unload_seconds, "side": "ask" if side == "bid" else "bid",
-             "left": min(left, abs(m.inv))}
-    if w and (t >= w["until"] or w["left"] < 1 or (m.inv < 1 if w["side"] == "ask" else m.inv > -1)):
-        w = None
-    st["unload"] = w
-    if w:
-        st["unload_s"] = st.get("unload_s", 0) + 1
-    return (w["side"], int(w["left"] * cfg.fast_unload_size_mult)) if w else (None, None)
 
 
 def quote_to_want(q):
@@ -812,19 +659,10 @@ def _one(args):
     share = float(ov.pop("_share", WRITE_SHARE))                # share of writes_per_minute for these markets
     rival_inv = bool(ov.pop("_rival_inv", True))               # rivals with inventory caps and skew
     bias_hl = float(ov.pop("_bias_hl", 0))                     # T1 prototype: fair value = Polymarket + EMA gap
-    ladder = ov.pop("_ladder", None)                           # R3 prototype: 1 = LADDER, or a dict of changes
-    rival_aware = float(ov.pop("_rival_aware", 0))             # rival-aware: step behind (price units) or 0
     ov_bg = ov.pop("_bg_cap", None)                            # positions held in the other markets (default 60k)
-    lad_gate = float(ov.pop("_lad_gate", 0))                   # ladder only while free cash >= this x account
-    fast_unload = ov.pop("_fast_unload", None)                 # 1 or dict(edge, off, secs)
     sim = Sim(s, hours, regime, make_cfg(ov), strategy, share=share, rival_inv=rival_inv)
-    sim.bias_hl, sim.rival_aware = bias_hl, rival_aware
+    sim.bias_hl = bias_hl
     sim.bg_cap = float(ov_bg) if ov_bg is not None else sim.bg_cap
-    sim.lad_gate = lad_gate
-    if fast_unload:
-        sim.fast_unload = {**dict(edge=0.02, off=0.005, secs=300), **(fast_unload if isinstance(fast_unload, dict) else {})}
-    if ladder:
-        sim.ladder = {**LADDER, **(ladder if isinstance(ladder, dict) else {})}
     return sim.run()
 
 

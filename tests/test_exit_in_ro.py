@@ -1,28 +1,21 @@
 """
-Offline tests for the Package 6 candidates "exits keep quoting in reduce-only":
-  exit_quotes_in_reduce_only   reduce_join_best also runs while reduce-only (reducing side only, sized <= the
-                               race-netted position, every other guard kept); the hold target (C) that shared the
-                               flag was removed on simplify (never enabled live);
-  pair_passive_in_reduce_only  T2.5's passive slice may rest on a complete-set leg whose slice side decide() left
-                               empty ONLY because of the reduce-only race-net clip (ex.ro_clip).
-Flags off = unchanged. Fake exchange, no network.
+Offline tests for the reduce-only "why" diagnostics of compute_quote (ex.ro_clip). The Package 6 candidates that
+this file covered - exit_quotes_in_reduce_only and pair_passive_in_reduce_only - were removed on simplify (never
+enabled live), so only the live diagnostics remain. No network.
 
 Run:  python tests/test_exit_in_ro.py      (exit code 0 = all passed)
 """
 import logging
 import os
 import sys
-import time
-from dataclasses import replace
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from fakes import lvl, make_bot                           # noqa: E402
+sys.path.insert(0, os.path.dirname(HERE))
 import mm_bot as M                                        # noqa: E402
 
 logging.basicConfig(level=logging.ERROR, format="    log %(levelname)s %(message)s")
 RESULTS = []
-KEYS = ["exit_quotes_in_reduce_only"]      # (pair_passive_in_reduce_only went with the passive pair unwind)
 
 
 def check(name, cond, extra=""):
@@ -30,113 +23,7 @@ def check(name, cond, extra=""):
     RESULTS.append(bool(cond))
 
 
-print("--- settings")
-c = M.Config()
-check("default off", getattr(c, KEYS[0], None) is False)
-good, bad = M.validate_overrides({k: True for k in KEYS}, c)
-check("live-overridable", len(good) == 1 and not bad, bad)
-_ov, _f = list(M.OVERRIDABLE), list(M.Config.__dataclass_fields__)
-check("in OVERRIDABLE and in Config", KEYS[0] in _ov and KEYS[0] in _f)
-
-_T0 = time.time()                                      # frozen wall clock: ages never drift between two decide calls
-time.time = lambda: _T0                                # (the process ends with the test)
-
-api, b = make_bot()
-b.cycle()
-ex = b.ex["21"]
-BOOK = {"bids": [lvl(0.48, 1000)], "asks": [lvl(0.56, 1000)]}
-
-
-def dec(pos, eff, fv=0.62, book_fv=0.52, reduce=True, ref=None, book=BOOK, eid="21"):
-    x = b.ex[eid]
-    x.book = book
-    x.last_fv, x.cooldown_until = None, -1e9           # (no jump guard between scripted cases)
-    return b.decide(x, fv, {eid: float(pos)}, {eid: float(eff)}, reduce, 0.0, time.monotonic(), ref=ref,
-                    book_fv=book_fv)
-
-
-def flags(**kw):
-    for k, v in {**dict(exit_quotes_in_reduce_only=False, reduce_join_best=False), **kw}.items():
-        setattr(b.cfg, k, v)
-
-
-def no_cross(q):
-    return not (q.bid is not None and q.ask is not None and q.bid >= q.ask - 1e-9)
-
-
-print("--- (1) grid: reduce-only, flag on: never bid >= ask, reducing size <= race-netted position")
-bad, n = [], 0
-for bb, ba in ((0.48, 0.56), (0.45, 0.46), (0.30, 0.35), (None, 0.50), (0.52, 0.53), (0.60, 0.70)):
-    for fv in (0.40, 0.52, 0.62):
-        for bfv in (0.45, 0.52, 0.65):
-            for pos, eff in ((500, 500), (500, 120), (500, 0), (-500, -500), (-500, -80), (500, -200)):
-                for rjb in (False, True):
-                    book = {"bids": [lvl(bb, 1000)] if bb else [], "asks": [lvl(ba, 1000)]}
-                    b.lots["21"] = [[float(pos), _T0 - 9 * 3600]]
-                    flags(exit_quotes_in_reduce_only=True, reduce_join_best=rjb, reduce_join_min_shares=1)
-                    q = dec(pos, eff, fv=fv, book_fv=bfv, book=book)
-                    n += 1
-                    if not no_cross(q):
-                        bad.append(("cross", bb, ba, fv, bfv, pos, eff, q))
-                    if q.ask_size > max(0, eff) or q.bid_size > max(0, -eff):
-                        bad.append(("size", bb, ba, fv, bfv, pos, eff, q))
-                    if q.ask is not None and bb is not None and q.ask <= bb + 1e-9:
-                        bad.append(("crosses best bid", bb, ba, fv, bfv, pos, eff, q))
-                    if q.bid is not None and q.bid >= ba - 1e-9:
-                        bad.append(("crosses best ask", bb, ba, fv, bfv, pos, eff, q))
-check(f"{n} cases", not bad, bad[:2])
-b.cfg.reduce_join_min_shares = M.Config().reduce_join_min_shares
-
-print("--- (1) reduce_join_best in reduce-only (compute_quote; skews off, 2c edge: normal ask 0.52 at fv 0.50)")
-J = dict(bankroll=100000, order_size=100, min_edge=0.02, reduce_only=True)
-c_off = M.Config(reduce_join_best=True, skew_per_quote=0.0, skew_age_enabled=False)
-c_on = replace(c_off, exit_quotes_in_reduce_only=True)
-
-
-def jq(inv, eff, bb, ba, cfg, **k):
-    return M.compute_quote(0.50, inv, eff, bb, ba, cfg, **{**J, **k})
-
-
-q0, q1 = jq(1000, 1000, 0.45, 0.515, c_off), jq(1000, 1000, 0.45, 0.515, c_on)
-check("flag off: the ask stays at fv + edge 0.52 in reduce-only", q0.ask == 0.52 and q0.bid is None, q0)
-check("flag on: joins the rival 0.515, same size, no bid", q1.ask == 0.515 and q1.ask_size == q0.ask_size
-      and q1.bid is None and no_cross(q1), (q0, q1))
-q1 = jq(1000, 60, 0.45, 0.515, replace(c_on, reduce_join_min_shares=1))
-check("race-netted 60: joins with at most 60 shares", q1.ask == 0.515 and 1 <= q1.ask_size <= 60, q1)
-check("never closer than reduce_join_min_edge to fair (rival 0.495 -> 0.51)",
-      jq(1000, 1000, 0.45, 0.495, c_on).ask == 0.51)
-check("needs reduce_join_best itself (flag alone does nothing)",
-      jq(1000, 1000, 0.45, 0.515, replace(c_on, reduce_join_best=False)) == q0)
-check("no_ask (guard) still blocks", jq(1000, 1000, 0.45, 0.515, c_on, no_ask=True).ask is None)
-qs0, qs1 = jq(-1000, -1000, 0.485, 0.60, c_off), jq(-1000, -1000, 0.485, 0.60, c_on)
-check("short mirror: off bid 0.48, on bid joins 0.485, no ask", qs0.bid == 0.48 and qs1.bid == 0.485
-      and qs1.ask is None, (qs0, qs1))
-check("fast unload stays off in reduce-only (flag on)",
-      jq(1000, 1000, 0.45, 0.60, c_on, unload_side="ask", unload_edge=0.0, unload_size=1000)
-      == jq(1000, 1000, 0.45, 0.60, c_on))
-
-# (section 2, the passive pair slice in reduce-only, was removed with the passive pair unwind on simplify)
-
-print("--- flags off = identical: decide grid with only the new flags toggled where they must not act")
-api, b = make_bot()
-b.cycle()
-bad, n = [], 0
-for bb, ba in ((0.48, 0.56), (0.45, 0.46), (None, 0.50), (0.52, 0.53)):
-    for fv in (0.40, 0.52, 0.62):
-        for pos, eff in ((500, 500), (500, 0), (-500, -500), (500, -200), (0, 0)):
-            for reduce in (False, True):
-                b.lots["21"] = [[float(pos), _T0 - 9 * 3600]] if pos else []
-                book = {"bids": [lvl(bb, 1000)] if bb else [], "asks": [lvl(ba, 1000)]}
-                outs = []
-                for fl in (False, True):
-                    # reduce-only: identical while reduce_join_best is off; otherwise identical always
-                    flags(exit_quotes_in_reduce_only=fl, reduce_join_best=not reduce)
-                    q = dec(pos, eff, fv=fv, book_fv=0.52, reduce=reduce, book=book)
-                    outs.append((q, q.bid_limit, q.ask_limit, q.bid_max, q.ask_max))
-                n += 1
-                if outs[0] != outs[1]:
-                    bad.append((bb, ba, fv, pos, eff, reduce, outs))
-check(f"{n} cases identical", not bad, bad[:2])
+print("--- the why dict (reduce-only clip diagnostics)")
 q = M.compute_quote(0.5, 500, 0, 0.45, 0.55, M.Config(), reduce_only=True)
 w = {}
 q2 = M.compute_quote(0.5, 500, 0, 0.45, 0.55, M.Config(), reduce_only=True, why=w)

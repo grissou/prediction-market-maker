@@ -3,10 +3,8 @@ Live-start simulator (SIM_START=live): the strategy simulator's crowded-book wor
 positions (tests/live_start.json, built by tests/live_start_extract.py from status.json + snapshots + fills.csv),
 quoting through the REAL Bot code paths instead of compute_quote alone:
 
-  Bot.decide             (race-netted eff inventory, Kelly/headline limits, age skew from real lot ages, capital
-                          ceiling via Bot.update_capital_ceiling, fast unload window, reduce_join_best, fl bias)
-  Bot.refill_cooling     (sides withheld after a same-side run, fed by Bot.note_refills)
-  Bot.note_unloads       (fills routed as fill dicts with order_meta, as log_fills does)
+  Bot.decide             (race-netted eff inventory, Kelly/headline limits, capital
+                          ceiling via Bot.update_capital_ceiling, reduce_join_best, fl bias)
   Bot.arb_plan           (pair unwind, sell- and buy-side arbitrage) on the simulated other-trader books, executed as
                           immediate-or-cancel takes at those prices; cooldowns as Bot.take_arbitrage
   Bot.update_lots / total_worst_case / effective_inventory
@@ -60,11 +58,8 @@ RHO = float(os.environ.get("SIM_RACE_RHO", "0.95"))   # anti-correlation of a ra
 BIAS_SUM = float(os.environ.get("SIM_BIAS_SUM", "0.25"))   # share of the legs' summed starting gap kept
 LIFT = float(os.environ.get("SIM_LIFT", "0.003"))   # rivals price each race leg this much over Polymarket
 FEATURES = {   # Package 2 switches: name -> {setting: value when OFF}
-    "age_skew": {"skew_age_enabled": False},
     "ceiling": {"capital_in_positions_max_frac": 0.0},
     "race_net": {"limits_use_race_net": False},
-    "refill": {"refill_cooldown_enabled": False},
-    "unload": {"fast_unload_enabled": False},
     "join": {"reduce_join_best": False},
     "unwind": {"pair_unwind_enabled": False},
     "arb": {"arb_enabled": False, "arb_two_sided": False},
@@ -207,20 +202,7 @@ class LiveSim(Sim):
             for t, q in m.row.get("recent_fills", []):
                 bot.turnover.add(m.eid, self.epoch0 + t, q)
         bot.turnover._cover(pts)
-        self.np, self.lad_gate_hits, self.lad_cycles, self.lad_writes_ok = {}, 0, 0, True
-        # Ladder gate counters (lg_*), per market-cycle where level 0 quotes (see bot_strategy), each gate counted
-        # on its own (they overlap): calls; wgate = the write gate (ladder_min_writes) shuts; of the rest, exclusive:
-        # mkt = not a ladder market (ladder_markets), early = pulled / no fair value / ref-only, geo = no level fits
-        # behind level 0 and the book, caps = the position limits leave no level, cash = lad_cash_left drops every
-        # level, ok = some level wanted (ok_w: and the write gate open); cash_lv = levels lad_cash_left drops, cap1 =
-        # levels the per-order cash cap cuts, clip = cash_clip cut the ladder, sh = ladder share-cycles wanted
-        # after every gate (resting ones re-wanted each cycle); cash_avg = lad_cash_left at a cycle's start, average;
-        # free_avg = free cash as Bot.ladder_setup counts it (equity - positions - level-0 locks), average; lv_cash
-        # = the cash the cheapest wanted level needed where lad_cash_left dropped every level, average.
-        self.lg = dict(calls=0, wgate=0, mkt=0, early=0, geo=0, caps=0, cap1=0, cash=0, cash_lv=0, ok=0, ok_w=0,
-                       clip=0, sh=0, lv_cash=0.0, cash_avg=0.0, free_avg=0.0)
-        if getattr(self.cfg, "ladder_enabled", False):   # (R3 ladder: gone from mm_bot)
-            self.ladder = {"real": True}      # strategy_sim: mm_bot.plan_exchange ordering of ladder writes
+        self.np = {}
         bot.age_hours = lambda ex, now=None, b=bot: M.Bot.age_hours(b, ex, self.epoch0 + self.t_now)
         bot.hours_to_close = lambda ex: 800.0
         return bot
@@ -312,19 +294,6 @@ class LiveSim(Sim):
         bot.update_adding_resume(self.cap_frac, cfg)       # Package 8 adding_factor_capital_on (no-op when 0)
         self.party_delta = self.bg_party + sum(M.PARTY_SIGN.get(bot.ex[e].party, 0) * q for e, q in inv.items())
         self.eff = bot.effective_inventory(inv)
-        if getattr(cfg, "ladder_enabled", False):  # (R3 ladder: gone from mm_bot)
-            other = sum(order_lock(o, m.inv, self.free_short()) for m in self.mkts for o in m.orders
-                        if o.owner == "us" and o.level == 0)
-            eq = equity
-            bot.lad_liquid, bot.lad_party_delta = set(bot.cur_refs), self.party_delta
-            bot.lad_cash_left = max(0.0, min(eq - capital - other - cfg.ladder_min_cash_frac * eq,
-                                             cfg.quote_capital_frac * eq - other))
-            self.lad_writes_ok = (self.wcap - sum(c for _, c in self.wlog if t - _ < 60)
-                                  >= cfg.ladder_min_writes * SHARE)
-            self.lad_cycles += 1
-            self.lg["cash_avg"] += bot.lad_cash_left
-            self.lg["free_avg"] += eq - capital - other
-            self.lad_gate_hits += not self.lad_writes_ok
         if t % 10 == 0:
             self.arbitrage(t, inv, fvs)
         if self.bg_wc:                            # the live backstop (mm_bot cycle step 6, sum-of-maxima part only)
@@ -338,7 +307,6 @@ class LiveSim(Sim):
             hyst = min(cfg.reduce_only_hysteresis, cfg.max_worst_case_frac / 2) if self.global_reduce else 0.0
             self.global_reduce = worst > (cfg.worst_case_backstop_frac - hyst) * equity
             bot.global_reduce = self.global_reduce
-            bot.backstop_adding_factor = M.backstop_soft_factor(worst, equity, cfg)   # Package 6 candidate
             self.n_cycles += 1
             self.ro_cycles += self.global_reduce
         if t % 600 == 0:
@@ -350,21 +318,8 @@ class LiveSim(Sim):
         super().our_cycle(t, paths)
 
     def route_fills(self, inv, t):
-        """Our new quote fills -> fill dicts + order_meta -> Bot.note_refills / note_unloads (as log_fills feeds them)."""
-        new = []
-        for k in range(self.nf, len(self.fills)):
-            ft, m, side, q, price, fv, lvl, taker = self.fills[k]
-            oid = f"o{k}"
-            self.bot.order_meta[oid] = {"our_side": "bid" if side > 0 else "ask", "price": price, "fv": fv,
-                                        "t": time.time(), "eid": m.eid}
-            new.append({"orderId": oid, "exchangeId": m.eid, "quantity": q, "filledAt": M.iso(M.utcnow())})
+        """Our new quote fills: advance the fill cursor (the refill cooldown and fast unload they fed are gone)."""
         self.nf = len(self.fills)
-        if new:
-            new.reverse()                         # log_fills hands them newest first
-            for m in self.mkts:
-                self.bot.ex[m.eid].inv = m.inv
-            self.bot.note_refills(new, inv, t)
-            self.bot.note_unloads(new, inv, t)
 
     def arbitrage(self, t, inv, fvs):
         """Bot.take_arbitrage on the simulated books: Bot.arb_plan, then immediate-or-cancel at those prices."""
@@ -596,10 +551,6 @@ class LiveSim(Sim):
                    gross_sh=round(sum(abs(m.inv) for m in self.mkts)), n_mkts=len(self.mkts),
                    free_min=round(getattr(self, "free_min", 0)), clipped=getattr(self, "clipped", 0),
                    writes_pm=round(self.writes / (T / 60), 2), deferred_h=round(self.deferred / (T / 3600)),
-                   lad_gate=round(self.lad_gate_hits / max(1, self.lad_cycles), 3),
-                   **{f"lg_{k}": (round(v / max(1, self.lad_cycles)) if k.endswith("_avg")
-                                         else round(v / max(1, self.lg["cash"])) if k == "lv_cash" else round(v))
-                      for k, v in self.lg.items()},
                    dead=sum(1 for e in self.bot.ex.values() if e.turnover_dead),
                    ro_frac=round(self.ro_cycles / max(1, self.n_cycles), 3), bg_wc_end=round(self.bg_wc),
                    wc_start=round(self.wc_start) if self.wc_start is not None else 0,
@@ -619,64 +570,10 @@ def bot_strategy(sim, m, t, fv, bfv, ref, book):
     bot = sim.bot
     ex = bot.ex[m.eid]
     ex.book = book
-    if sim.cfg.reduce_from_book and m.cooldown_until >= 0:   # A's pause reads ex.ref_jump_at, which only mm_bot's
-        # reference_jump_guard sets: feed it the sim's Polymarket jump (see_ref sets cooldown_until = jump + cooldown)
-        ex.ref_jump_at = max(ex.ref_jump_at, m.cooldown_until - sim.cfg.ref_jump_cooldown_seconds)
     inv = {x.eid: x.inv for x in sim.mkts}
     q = bot.decide(ex, fv, inv, sim.eff, sim.global_reduce, sim.party_delta, t, ref=ref, book_fv=bfv, ref_liquid=True)
     want = S.quote_to_want(q)
-    if getattr(sim.cfg, "ladder_enabled", False):  # (R3 ladder: gone from mm_bot)
-        lg, quoted = sim.lg, q.bid is not None or q.ask is not None
-        lg["calls"] += quoted
-        seen = []                                  # ladder_targets' first ladder_levels call (before the cash)
-        real = M.ladder_levels
-
-        def spy(*a, **k):
-            r = real(*a, **k)
-            if not seen:
-                big = {True: lambda px: 1e12, False: lambda px: 1e12}
-                seen.append((dict(r[0]), real(*a[:7], big)[0],    # (a copy: ladder_targets then drops levels)
-                             real(*a[:8])[0] if len(a) > 8 and a[8] is not None else dict(r[0])))
-            return r
-        M.ladder_levels = spy                      # (as Bot.plan_exchange: ladder_targets runs every cycle - anchor,
-        try:                                       #  cash - and the write gate then only stops new writes)
-            lw, _, _ = bot.ladder_targets(ex, q, fv, t)
-        finally:
-            M.ladder_levels = real
-        if quoted:
-            lg["wgate"] += not sim.lad_writes_ok
-            if bot.ladder_market(ex) is None:
-                lg["mkt"] += 1
-            elif not seen:
-                lg["early"] += 1                   # pulled after a Polymarket jump, no fair value, ref-only
-            else:
-                pre, geo, uncapped = seen[0]
-                lg["geo"] += not geo               # every level at/inside level 0, crossing the book or at the edge
-                lg["caps"] += bool(geo) and not uncapped   # the position limits leave no level
-                lg["cap1"] += sum(1 for kk in pre if pre[kk][1] < uncapped.get(kk, (0, 0))[1])
-                lg["cash"] += bool(pre) and not lw
-                if pre and not lw:                 # the cheapest level it wanted: the cash it would need
-                    lg["lv_cash"] += min(sz * (px if kk[0] else 1 - px) for kk, (px, sz) in pre.items())
-                lg["cash_lv"] += len(pre) - len(lw)
-                lg["ok"] += bool(lw)
-                lg["ok_w"] += bool(lw) and sim.lad_writes_ok
-        if sim.lad_writes_ok:
-            want += [(k[0], px, sz, k[1], None) for k, (px, sz) in sorted(lw.items(), key=lambda kv: kv[0][1])]
-        else:                                      # write gate: what rests stays, nothing new
-            want += [(o.is_bid, o.price, o.qty, o.level, None) for o in m.orders if o.owner == "us" and o.level > 0]
-    n_lad = sum(w[2] for w in want if w[3] > 0)
-    want = cash_clip(sim, m, want)
-    if sim.cfg.ladder_enabled:
-        sim.lg["sh"] += sum(w[2] for w in want if w[3] > 0)
-        sim.lg["clip"] += n_lad > sum(w[2] for w in want if w[3] > 0)
-    out = []
-    for w in want:
-        if bot.refill_cooling(ex, w[0], t):        # withheld: what rests there stays (if any), nothing new
-            cur = [o for o in m.orders if o.owner == "us" and o.is_bid == w[0] and o.level == 0]
-            out += [(o.is_bid, o.price, o.qty, 0, None) for o in cur[:1]]
-        else:
-            out.append(w)
-    return out
+    return cash_clip(sim, m, want)
 
 
 class _Clock:
@@ -770,7 +667,7 @@ def run_many(seeds, hours, regime, ov, first=1):
     return [cache[_key(j)] for j in jobs]
 
 
-KEYS = ("pnl_liq", "pnl_mid", "pnl", "pnl_lag", "exit_ratio", "hold_med", "mk15_mid", "pick_cost", "wc_end", "writes_pm", "deferred_h", "lvl_sh", "lvl_pnl", "lad_gate", "lg_ok_w", "lg_sh", "dead", "free_min", "clipped", "cap_end", "cap_peak", "freed", "age_end", "unwind_sh", "arb_sh", "outsider_arb_sh",
+KEYS = ("pnl_liq", "pnl_mid", "pnl", "pnl_lag", "exit_ratio", "hold_med", "mk15_mid", "pick_cost", "wc_end", "writes_pm", "deferred_h", "lvl_sh", "lvl_pnl", "dead", "free_min", "clipped", "cap_end", "cap_peak", "freed", "age_end", "unwind_sh", "arb_sh", "outsider_arb_sh",
         "arb_pnl", "wc_peak", "shares", "cash_refused_sh", "tilt_exposure_end")
 
 
@@ -787,7 +684,7 @@ def main(argv):
     rb = run_many(seeds, hours, regime, base)
     agg = {k: sum(r[k] for r in rb) / len(rb) for k in rb[0]}
     print(f"BASE {json.dumps(base)[:60]} | " + " ".join(f"{k} {agg[k]:.3g}" for k in
-          KEYS + tuple(k for k in rb[0] if k.startswith("lg_") and k not in KEYS) + ("cap_start", "bidsum_ge1", "bidsum_ge1005", "bidsum_ge103", "sen_bidsum_ge1", "sen_bidsum_max", "asksum_lt098", "outsider_asksum_le0985", "n_mkts")), flush=True)
+          KEYS + ("cap_start", "bidsum_ge1", "bidsum_ge1005", "bidsum_ge103", "sen_bidsum_ge1", "sen_bidsum_max", "asksum_lt098", "outsider_asksum_le0985", "n_mkts")), flush=True)
     for v in variants:
         early = os.environ.get("SIM_EARLY_STOP") == "1" and seeds > 4
         rv = run_many(min(seeds, 4) if early else seeds, hours, regime, {**base, **v})

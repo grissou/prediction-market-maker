@@ -162,14 +162,17 @@ def books():
             "D2": bk(0.11, 0.13), "R1": bk(0.11, 0.12), "R2": bk(0.86, 0.88)}
 
 
-def mk(mod, inv, cash, overrides):
-    """A bot of module `mod` on the shared world, the live file applied, then `overrides` (test knobs)."""
+def mk(mod, inv, cash, overrides, book_edits=None):
+    """A bot of module `mod` on the shared world (books, plus `book_edits` for this world), the live file applied,
+    then `overrides` (test knobs)."""
     mkts = []
     for k, race in RACES.items():
         mkts += [market(f"m{k}1", f"{k}1", "Republican", race), market(f"m{k}2", f"{k}2", "Democratic", race)]
-    api, b = make_bot(live=True, books=books(), extra_markets=tuple(mkts))
-    if mod is not M:                              # the pinned module gets its own Bot on the same fake exchange
-        cfg = mod.Config()
+    bks = books()
+    bks.update(book_edits or {})
+    api, b = make_bot(live=True, books=bks, extra_markets=tuple(mkts))
+    if True:                                      # BOTH modules get a Bot built the same way on a fresh fake exchange
+        cfg = mod.Config()                        # (make_bot's own Bot is only the template for the settings)
         for k in cfg.__dataclass_fields__:
             if k in b.cfg.__dataclass_fields__:
                 setattr(cfg, k, getattr(b.cfg, k))
@@ -203,8 +206,8 @@ def mk(mod, inv, cash, overrides):
     return api, b
 
 
-def run(mod, inv, cash, overrides, fills):
-    api, b = mk(mod, inv, cash, overrides)
+def run(mod, inv, cash, overrides, fills, book_edits=None):
+    api, b = mk(mod, inv, cash, overrides, book_edits)
     for n in range(4):
         if fills and n in (2, 3):
             for e, side in (("21", True), ("22", False), ("B2", False), ("A2", True), ("R1", True)):
@@ -310,11 +313,19 @@ if base is not None:
     WORLDS = (({}, 50000.0, {}, False),
               ({"21": 600, "R1": -900, "G1": 3000}, 20000.0, {}, True),
               ({"22": -800, "12": 2500, "A2": -500, "B2": 300}, 3000.0, {}, True),
-              ({"21": 600, "R1": -900, "G1": 3000, "A2": -2000}, 60000.0, {"alloc_min_edge_buy": 0.02}, True))
+              ({"21": 600, "R1": -900, "G1": 3000, "A2": -2000}, 60000.0, {"alloc_min_edge_buy": 0.02}, True),
+              # stale quotes the takes must hit: A2's bid 9c above p 0.02 (a sell), G1's ask 10c under p 0.80 (a buy);
+              # takes confirm at once; the risk room unpaused in one world and paused (reserve above the room) in the next
+              ({"21": 600}, 40000.0, {"take_confirm_seconds": 0.0, "mm_risk_reserve_wc": 0.0, "mm_risk_reserve_corr": 0.0},
+               True, {"A2": bk(0.09, 0.11), "G1": bk(0.66, 0.70)}),
+              ({"21": 600, "G1": 2000}, 40000.0, {"take_confirm_seconds": 0.0, "mm_risk_reserve_wc": 1e9}, True,
+               {"A2": bk(0.09, 0.11), "G1": bk(0.66, 0.70)}))
     diffs = []
-    for i, (inv, cash, ov, fills) in enumerate(WORLDS):
-        an, bn, sn = run(M, dict(inv), cash, ov, fills)
-        ao, bo, so = run(base, dict(inv), cash, ov, fills)
+    for i, w in enumerate(WORLDS):
+        inv, cash, ov, fills = w[:4]
+        edits = w[4] if len(w) > 4 else None
+        an, bn, sn = run(M, dict(inv), cash, ov, fills, edits)
+        ao, bo, so = run(base, dict(inv), cash, ov, fills, edits)
         what = []
         if strip(an.wire) != strip(ao.wire):
             what.append("orders")

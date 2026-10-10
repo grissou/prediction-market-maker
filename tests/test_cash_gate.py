@@ -26,6 +26,21 @@ sys.path.insert(0, HERE)
 from fakes import FakeApi, lvl, make_bot                  # noqa: E402
 import mm_bot as M                                        # noqa: E402
 
+# retired on simplify: the old twin's status / health fields a removed feature owned, at the value it reported while
+# the feature was off (the new code drops them); Quote lost its trailing `behind` flag (always False while that sizing
+# was off) and the age skew its switch (skew_age_enabled: the old default True, live False)
+RETIRED_STATUS = {"tilt_s_applied": (0.0, 0), "tilt_s_applied_headline": (0.0, 0), "fast_unload_windows": (0,),
+                  "behind_best_markets": (0,), "mark_frag_total_cap_active": (False,),
+                  "fl_bias_markets": ({"bid": 0, "ask": 0},)}
+RETIRED_FLIPPED = {"skew_age_enabled": False}
+NQ = len(M.Quote.__dataclass_fields__)
+
+
+def retired(new, old):
+    """The old twin's dict less a retired feature's own key at its OFF value when the new one dropped it."""
+    return {k: v for k, v in old.items() if not (k in RETIRED_STATUS and k not in new and v in RETIRED_STATUS[k])}
+
+
 logging.basicConfig(level=logging.ERROR, format="    log %(levelname)s %(message)s")
 RESULTS = []
 M.alert = lambda msg: None
@@ -345,6 +360,8 @@ if base is None:
     check(f"base module (git show {BASE_REV}:mm_bot.py) loaded", False)
 else:
     cfg_n, cfg_b = M.Config(), base.Config()
+    for k, v in RETIRED_FLIPPED.items():
+        setattr(cfg_b, k, v)
     same, diffs = True, []
     for inv in (-817, -100, 0, 100, 900):
         for eff in (-400, 0, 158, 500):
@@ -355,7 +372,7 @@ else:
                             kw = dict(reduce_only=ro, net_inv=eff, adding_factor=af, adding_limit_factor=alf)
                             qn = M.compute_quote(0.43, inv, eff, bb, ba, cfg_n, **kw)
                             qb = base.compute_quote(0.43, inv, eff, bb, ba, cfg_b, **kw)
-                            if tuple(qn.__dict__.values()) != tuple(qb.__dict__.values()):
+                            if tuple(qn.__dict__.values()) != tuple(qb.__dict__.values())[:NQ]:
                                 same = False
                                 diffs.append((inv, eff, af, alf, ro, qn, qb))
     check("compute_quote identical with adding_per_market off (5 x 4 x 3 x 2 x 2 x 2 grid)", same, diffs[:2])
@@ -364,7 +381,7 @@ else:
         api_n, bn = bot(inv, cash=cash, factor=0.0)
         cfg = base.Config()
         for k in base.Config.__dataclass_fields__:
-            setattr(cfg, k, getattr(bn.cfg, k, getattr(cfg, k)))
+            setattr(cfg, k, getattr(bn.cfg, k, RETIRED_FLIPPED.get(k, getattr(cfg, k))))
         api_b = FakeApi(True)
         api_b.markets_list = list(api_n.markets_list)
         api_b.books = {e: {"bids": [dict(x) for x in v["bids"]], "asks": [dict(x) for x in v["asks"]]}

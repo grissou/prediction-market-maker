@@ -20,16 +20,17 @@ def check(name, cond):
         print("FAIL", name)
 
 
-# 1. Knobs at 0 = the simulator before Package 5 (numbers recorded at fd28b0a + this file's parent, seed 1/2, 0.05 h)
+# 1. Knobs at 0 = the plain simulator (numbers re-pinned on simplify, 3b5435e + the sims without the removed
+#    prototypes - ladder, fast unload, TTL tiers, no-chase, arb sell/buy branch; seed 1/2, 0.05 h)
 # Package 6: the default world keeps the fixed cash model (a bid buying back a short needs no cash); the pre-fix
 # live world (it locked cash: the 3 Oct deadlock) is "_short_reduce_locks_cash" 1, pinned below.
 r = L._one((1, 0.05, "quiet", {}))
 check("pin quiet", (r["pnl"], r["cap_end"], r["writes_pm"], r["shares"], r["pnl_lag"], r["wc_end"])
-      == (23, 0.878, 37.97, 6024, -341, 43294))
+      == (-34, 0.865, 35.57, 4946, -344, 43127))
 r0 = L._one((1, 0.05, "quiet", {"_rival_anchor": 0, "_world_tilt": 0, "_world_tilt_growth": 0}))
 check("explicit zeros identical", {k: r0[k] for k in r} == r)
 r = L._one((2, 0.05, "news", {}))
-check("pin news", (r["pnl"], r["cap_end"], r["writes_pm"], r["shares"]) == (26, 0.883, 31.87, 2601))
+check("pin news", (r["pnl"], r["cap_end"], r["writes_pm"], r["shares"]) == (-1, 0.876, 35.5, 5160))
 for k in ("pnl_mid", "pnl_liq", "mk15_mid", "exit_ratio", "hold_med", "pick_cost", "wc_end"):
     check(f"key {k} printed", k in L.KEYS and k in r)
 
@@ -59,7 +60,7 @@ check("take charged 3 writes", st0.take_writes_ok(10) and st0.writes == 3 and st
 st0.wlog = [(5, st0.wcap - 2)]
 check("no room: refused", not st0.take_writes_ok(10) and st0.take_refused == 1)
 rp = L._one((1, 0.05, "quiet", {}))
-check("base unchanged by the charge (flags off)", rp["pnl"] == 23 and rp["writes_pm"] == 37.97)
+check("base unchanged by the charge (flags off)", rp["pnl"] == -34 and rp["writes_pm"] == 35.57)
 
 # 2. The tilt world: start consensus unchanged (residual bias), tilt grows, rivals anchored
 cfg = S.make_cfg({})

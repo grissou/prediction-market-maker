@@ -22,6 +22,21 @@ sys.path.insert(0, HERE)
 from fakes import FakeApi, FakeRefs, lvl, make_bot, market, pin_test_sizes, run_cycles   # noqa: E402
 import mm_bot as M                                        # noqa: E402
 
+# retired on simplify: the old twin's status / health fields a removed feature owned, at the value it reported while
+# the feature was off (the new code drops them); Quote lost its trailing `behind` flag (always False while that sizing
+# was off) and the age skew its switch (skew_age_enabled: the old default True, live False)
+RETIRED_STATUS = {"tilt_s_applied": (0.0, 0), "tilt_s_applied_headline": (0.0, 0), "fast_unload_windows": (0,),
+                  "behind_best_markets": (0,), "mark_frag_total_cap_active": (False,),
+                  "fl_bias_markets": ({"bid": 0, "ask": 0},)}
+RETIRED_FLIPPED = {"skew_age_enabled": False}
+NQ = len(M.Quote.__dataclass_fields__)
+
+
+def retired(new, old):
+    """The old twin's dict less a retired feature's own key at its OFF value when the new one dropped it."""
+    return {k: v for k, v in old.items() if not (k in RETIRED_STATUS and k not in new and v in RETIRED_STATUS[k])}
+
+
 logging.basicConfig(level=logging.ERROR, format="    log %(levelname)s %(message)s")
 RESULTS = []
 
@@ -355,6 +370,7 @@ if old_src:
         except Exception as e:                    # a setting this head lacks: report, not crash
             check(f"grid {name}: ran", False, repr(e))
             continue
+        old = (retired(new[0], old[0]),) + old[1:]
         diff = {k for k in set(new[0]) | set(old[0]) if new[0].get(k) != old[0].get(k)}
         check(f"grid {name}: status.json without the new fields equals 859e751's", not diff,
               {k: (new[0].get(k), old[0].get(k)) for k in sorted(diff)})
