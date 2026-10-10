@@ -112,9 +112,9 @@ class Bot:
     def read(self, now, mono):
         """One cycle's View. A full REST reconciliation every full_check_s (the feed is best-effort), otherwise
         only what the feed says changed."""
-        if mono - self.markets_read >= MARKETS_RELOAD_S:
-            self.load_markets(mono)
         dirty, account_changed, resync = self.feed.take() if self.feed else (set(), True, True)
+        if mono - self.markets_read >= MARKETS_RELOAD_S or (resync and self.feed):
+            self.load_markets(mono)             # (the feed flags a resync when a market settles)
         full = resync or not (self.feed and self.feed.healthy()) or mono - self.last_full >= self.s.full_check_s
         if full or account_changed:
             self.read_account(full)
@@ -140,15 +140,15 @@ class Bot:
         """Positions, the account and new fills; on a full check also our open orders (live only)."""
         self.positions = self.client.positions()
         self.marks = dict(self.client.marks)
-        self.account = self.client.account()
-        self.note_fills(self.client.fills(self.last_fill_id))
-        if full:
+        if full:                                # before account(): free cash is net of these orders' locks
             self.account_orders = defaultdict(list)
             for o in self.client.open_orders():
                 self.account_orders[o.eid].append(o)
             if self.live:
                 self.orders = {o.oid: replace(o, tag=self.tags.get(o.oid, ""))
                                for orders in self.account_orders.values() for o in orders}
+        self.account = self.client.account()
+        self.note_fills(self.client.fills(self.last_fill_id))
 
     def read_books(self, dirty, mono):
         """Books the feed flagged, then books whose bulk top moved or that are getting old, within the budget."""
@@ -357,6 +357,8 @@ class Bot:
         return True
 
     def note_placed(self, r):
+        if r.unknown:
+            self.last_full = -1e9               # it may be resting: read our orders before placing it again
         if r.error:
             log.warning("refused %s %s %.3f x%d [%s]: %s", self.label(r.order.eid),
                         "bid" if r.order.is_bid else "ask", r.order.price, r.order.size, r.order.tag, r.error)

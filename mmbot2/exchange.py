@@ -4,7 +4,7 @@ The exchange: the REST client with its request and write budgets, the realtime f
 OWNS     ApiError; Client (one HTTP session, a sliding-minute request budget and a separate write budget, the 429
          pause, retries under one idempotency key, one method per endpoint); Placed (what became of an order we
          sent); Feed (Supabase realtime on its own thread); the YES-terms translation of orders, books and fills;
-         market parsing (race, party, state).
+         market parsing (race, party, state). Single-threaded but for the feed's thread.
 NEVER    decides a price or a size, keeps strategy state, or sends a write in a dry run.
 ORIGIN   Day one: the API's limit measured at about 100 requests a minute, and each 429 cost a silent pause; so every
          request goes through one budget below it (80/min, 28 writes/min since the first penalties), and a 429 stops
@@ -70,7 +70,8 @@ class Placed:
     order: Order              # as sent (a covered NO sale is trimmed to the NO held)
     oid: str | None           # the exchange's id, None if refused or not sent
     traded: float             # shares that traded at once
-    error: str | None         # why it was refused, None if accepted
+    error: str | None         # why it was refused or not sent, None if accepted
+    unknown: bool = False     # the outcome is unknown (timeout, 5xx): it may rest; read the open orders first
 
 
 def iso(dt):
@@ -255,33 +256,35 @@ class Client:
     def pause_left(self):
         return max(0.0, self.paused_until - time.monotonic())
 
-    def start_at(self, write):
+    def start_at(self, write, wait):
         """When the next request may start: after the pause, the gap, and the oldest start that leaves the
-        minute's budget room. A write too far off is refused unsent (WRITE_BUDGET_WAIT) rather than block."""
+        minute's budget room. A write too far off is refused unsent (WRITE_BUDGET_WAIT) unless it may wait: the
+        cycle never blocks on the budget."""
         with self.lock:
             now = time.monotonic()
             start = max(now, self.next_start, self.paused_until)
             if self.used(self.reqs, now) >= int(self.rpm):
                 start = max(start, self.reqs[-int(self.rpm)] + WINDOW_S)
-            if write == "order":
+            if write:
                 if self.used(self.writes, now) >= int(self.wpm):
                     start = max(start, self.writes[-int(self.wpm)] + WINDOW_S)
-                if start - now > MAX_WRITE_WAIT_S:
+                if start - now > MAX_WRITE_WAIT_S and not wait:
                     raise ApiError(429, "WRITE_BUDGET_WAIT", f"a write would wait {start - now:.0f} s: not sent")
                 self.writes.append(start)
             self.reqs.append(start)
             self.next_start = start + MIN_GAP_S
             return start
 
-    def throttle(self, write):
-        start = self.start_at(write)
+    def throttle(self, write, wait):
+        start = self.start_at(write, wait)
         while time.monotonic() < start:
             time.sleep(start - time.monotonic())
             start = max(start, self.paused_until)      # a pause begun while we slept: wait it out too
 
     def note_429(self, retry_after):
-        """Pause every request for Retry-After; the first 429 of a pause cuts both budgets (later ones in the
-        same pause only extend it: on 2 Oct twenty 429s inside one pause had cut the budget twenty times)."""
+        """Pause every request for Retry-After: knocking during the pause only earns more 429s. The first 429 of
+        a pause cuts both budgets; a later one in the same pause extends it to Retry-After from now, never adds up
+        (2 Oct: twenty 429s, each of which had been costing another silent pause)."""
         with self.lock:
             now = time.monotonic()
             new_pause = self.paused_until <= now
@@ -298,19 +301,19 @@ class Client:
         """Each success wins back 1/60 of a request a minute, up to the settings: an hour of calm undoes a cut."""
         with self.lock:
             self.rpm = min(self.rpm_max, self.rpm + 1 / 60)
-            if write == "order":
+            if write:
                 self.wpm = min(self.wpm_max, self.wpm + 1 / 60)
 
     # --- one request ---
-    def call(self, method, path, params=None, body=None, ok=(200, 201, 207), write=None):
-        """One request with budgets and retries. `write` is "order" for order writes (the write budget), None
-        otherwise. A resend carries the same body, so the same idempotency key: the server never places twice.
-        A write that timed out after it was sent is NOT resent (day one: every resend earned 409 REQUEST_IN_FLIGHT,
-        which is never retried either); the caller reads the outcome back from the open orders."""
+    def call(self, method, path, params=None, body=None, ok=(200, 201, 207), write=False, wait=False):
+        """One request with budgets and retries. A write also spends the write budget and is refused rather than
+        wait long, unless `wait`. A resend carries the same body, so the same idempotency key: the server never
+        places twice. A write that timed out after it was sent is NOT resent (day one: every resend earned 409
+        REQUEST_IN_FLIGHT, which is not retried either); the caller reads the outcome from the open orders."""
         delay = 0.25                  # back-off, doubling to 8 s
         for attempt in range(MAX_RETRIES + 1):
             last = attempt == MAX_RETRIES
-            self.throttle(write)
+            self.throttle(write, wait)
             try:
                 r = self.session.request(method, self.base + path, timeout=TIMEOUT_S,
                                          params={k: v for k, v in (params or {}).items() if v is not None},
@@ -438,11 +441,24 @@ class Client:
             return [Placed(o, None, 0.0, "dry run") for o in orders]
         out, covered_left = [], {e: max(0.0, -q) for e, q in positions.items()}
         for i in range(0, len(orders), BATCH_MAX):
-            out += self.place_batch(orders[i:i + BATCH_MAX], covered_left)
+            chunk = orders[i:i + BATCH_MAX]
+            try:
+                out += self.place_batch(chunk, covered_left)
+            except ApiError as e:
+                if e.fatal:
+                    raise
+                unsent = e.code == "WRITE_BUDGET_WAIT" or 400 <= e.status < 500 and e.status != 429
+                out += [Placed(o, None, 0.0, str(e), unknown=not unsent) for o in chunk]
         for p in out:
             if p.order.ioc and p.oid and p.traded < p.order.size:
-                self.cancel(p.oid)
+                self.cancel_rest(p)
         return out
+
+    def cancel_rest(self, placed):
+        try:
+            self.cancel(placed.oid)
+        except ApiError as e:             # it dies on its own within IOC_TTL_S
+            log.warning("ioc rest of %s not cancelled (%s): it expires in %.0f s", placed.oid, e, IOC_TTL_S)
 
     def place_batch(self, orders, covered_left):
         """One POST /orders/batch. A bid while short NO goes out as a covered "sell NO", trimmed to the NO held
@@ -454,19 +470,23 @@ class Client:
             if size < 1:
                 continue
             covered_left[o.eid] = cover - size if cover >= 1 else covered_left.get(o.eid, 0.0)
-            expires = o.expires if o.expires and not o.ioc else now + timedelta(seconds=IOC_TTL_S if o.ioc
-                                                                                 else self.ttl_s)
+            if o.ioc:
+                expires = now + timedelta(seconds=IOC_TTL_S)
+            else:
+                expires = o.expires or now + timedelta(seconds=self.ttl_s)
             sent.append(Order(o.eid, o.is_bid, o.price, size, o.tag, o.ioc, None, expires))
             bodies.append(wire_order(sent[-1], cover >= 1, self.tid, expires))
         if not bodies:
             return []
         body = {"idempotencyKey": str(uuid.uuid4()), "orders": bodies}
-        _, res = self.call("POST", "/orders/batch", body=body, ok=(200, 207, 422), write="order")
+        _, res = self.call("POST", "/orders/batch", body=body, ok=(200, 207, 422), write=True)
         results = {r.get("index"): r for r in res.get("results", [])}
         return [self.placed(o, results.get(k, {})) for k, o in enumerate(sent)]
 
     def placed(self, order, result):
         data = result.get("data") or {}
+        if not result:
+            return Placed(order, None, 0.0, "no result for this order", unknown=True)
         if not result.get("ok"):
             err = data.get("error") or {}
             return Placed(order, None, 0.0, (err.get("message") if isinstance(err, dict) else str(err)) or "refused")
@@ -480,19 +500,19 @@ class Client:
         if not self.live:
             return True
         try:
-            self.call("DELETE", f"/orders/{oid}", ok=(200,), write="order")
+            self.call("DELETE", f"/orders/{oid}", ok=(200,), write=True)
         except ApiError as e:
             if e.status not in (404, 409):
                 raise
         return True
 
     def cancel_all(self, eid=None):
-        """Every order of ours (or on one market) cancelled; True only when confirmed. Uses the general budget
-        only: pulling everything must never be refused for want of writes."""
+        """Every order of ours (or on one market) cancelled; True only when confirmed. It waits for the write
+        budget rather than be refused: pulling everything is the one write that must go out."""
         if not self.live:
             return True
         body = {"tournamentId": self.tid, **({"exchangeId": eid} if eid else {})}
-        status, res = self.call("POST", "/orders/cancel-all", body=body, ok=(200, 207, 422), write="cancel_all")
+        status, res = self.call("POST", "/orders/cancel-all", body=body, ok=(200, 207, 422), write=True, wait=True)
         if status == 200:
             return True
         log.warning("cancel-all partial: %s", res.get("errors"))

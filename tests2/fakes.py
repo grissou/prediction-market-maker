@@ -7,7 +7,8 @@ FakeClient    the exchange as the API behaves, in YES terms: other traders' book
               the NO held and needing no cash; with `cash` set, an order that needs more than the free cash is
               refused "Insufficient available funds" (3 Oct). An order that would cross one of our own resting
               orders is refused and counted in `self_crosses` (the stress test asserts it stays 0). `fill(eid,
-              is_bid, qty)` is another trader hitting us. Faults: `fail_next(n, kind)` and `fail_rate`.
+              is_bid, qty)` is another trader hitting us. Faults: `fail_next(n, kind)` and `fail_rate` make a call raise
+              ApiError (place() reports them as unknown outcomes instead, as Client.place does).
 FakeFeed      push(...) by hand, take() as Feed.take.
 FakeRefs      ref_prices-like: get() -> {key: price}, spreads() -> {key: spread}.
 two_race_world()  Ohio Senate and Utah Senate, Republican and Democratic legs, house quotes 8c wide.
@@ -74,6 +75,7 @@ class FakeClient:
     def set_budgets(self, rpm, wpm): self.calls.append("set_budgets")
     def requests_left(self): return self.req_left
     def writes_left(self): return self.write_left
+    def pause_left(self): return 0.0
 
     # --- reads ---
     def tournament(self):
@@ -135,7 +137,10 @@ class FakeClient:
 
     # --- writes ---
     def place(self, orders, positions):
-        self.call("place", "write")
+        try:
+            self.call("place", "write")
+        except ApiError as e:             # as Client.place: a failed batch comes back as unknown, never raised
+            return [Placed(o, None, 0.0, str(e), unknown=True) for o in orders]
         if not self.live:
             return [Placed(o, None, 0.0, "dry run") for o in orders]
         return [p for p in (self.place_one(o) for o in orders) if p is not None]
@@ -154,7 +159,7 @@ class FakeClient:
         if size < 1:
             return None
         o = Order(o.eid, o.is_bid, o.price, size, o.tag, o.ioc, None,
-                  o.expires or self.clock() + timedelta(seconds=1800))
+                  o.expires or self.clock() + timedelta(seconds=1800))   # Settings.order_ttl_s
         if any(r.eid == o.eid and r.is_bid != o.is_bid and (r.price <= o.price if o.is_bid else r.price >= o.price)
                for r in self.orders.values()):
             self.self_crosses += 1
