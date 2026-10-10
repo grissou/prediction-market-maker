@@ -2,8 +2,7 @@
 Market making: small two-sided quotes in the middle band, and the recycler that works old inventory back out.
 
 OWNS     the quotes in [band_low, band_high] (a tick inside the best other trader, never within mm_min_edge of p,
-         never crossing, quarter-Kelly sized and leaning on size away from inventory), the ref guard on them, the
-         market-making lots (Inventory: what our "mm" fills opened, FIFO) and the recycler (tag "recycle").
+         never crossing, quarter Kelly, leaning on size), the ref guard, the MM lots (Inventory) and the recycler.
 NEVER    checks cash, caps or reduce-only (the Gate does), applies the value floor (value.apply_floor runs after
          us), sells for the reserve (the allocator's refill does), or quotes a market without a p and a fresh book.
 ORIGIN   Finding 3.3: market making earned little against faster bots and was demoted to a small sleeve kept to

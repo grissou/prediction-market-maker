@@ -7,6 +7,7 @@ Run:  python3 tests2/test_mm.py      (exit code 0 = all passed)
 """
 import os
 import sys
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -43,8 +44,8 @@ def sides(orders):
     return bid, ask
 
 
-def quote(p, bk, qty=0.0, inv=None, eid="a"):
-    return sides(mm.quotes(view(p, bk, qty, eid), None, S, inv or mm.Inventory()))
+def quote(p, bk, qty=0.0, inv=None, eid="a", s=S):
+    return sides(mm.quotes(view(p, bk, qty, eid), None, s, inv or mm.Inventory()))
 
 
 def fill(is_bid, price, size, hours_ago, tag="mm", eid="a"):
@@ -182,8 +183,9 @@ check("a pinned label is never recycled", a is not None and a.tag == "mm", a)
 b, a = quote(0.102, book(0.10, 0.12), qty=600, inv=stale_inv(600))
 check("out of the band: only the recycle order", b is None and a is not None and a.tag == "recycle"
       and near(a.price, 0.105), (b, a))
-b, a = quote(0.50, book(0.385, 0.40, depth=300), qty=600, inv=stale_inv(600))
-check("the ref guard blocks the recycle side too", a is None, a)
+inv = stale_inv(600)      # (at the live hurdle a ref-guarded long is always handed over first: raise it)
+b, a = quote(0.50, book(0.385, 0.40), qty=600, inv=inv, s=replace(S, value_quote_hurdle=1.0))
+check("the ref guard blocks the recycle side too", a is None and "a" in inv.lots, (a, inv.lots))
 
 # ---- saved state ----
 inv = stale_inv(600)
