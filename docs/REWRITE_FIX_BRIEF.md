@@ -42,6 +42,22 @@ live bot's fills, but **planned no orders at all**: zero quotes, zero ladder lev
   owner's analyses and paper read that data.
 - Keep the whole bot under 4,000 lines; report the count in `docs/REWRITE_STATUS.md` with what changed.
 
+## The phone summary and alerts: a stripped version
+
+The old bot's 2-hourly summary grew to a dozen lines of per-feature detail. The rewrite sends a SHORT one, every 2
+hours on the hour UTC, in this shape and nothing more (numbers from status.json; omit a line whose figure is unknown):
+
+    Account 104.8k (+4.8%) · EV at settlement 112.7k (+2.0k 24h) · realised +2.3k
+    Rank 156 of 1,396 · Smart Score 25.1 (rank 174)
+    Orders 172 · cash 10.0k · 226/237 priced · tilt 8.2%
+    Last 2h: 41 fills, swaps 0, ladder 2 fills, MM +12
+    OK  (or: REDUCE-ONLY since 13:10 · 3 rate limits · 2 errors)
+
+Alerts (sent at once, one line each, never repeated within 30 minutes for the same cause): the kill switch, a
+crash or restart, reduce-only switching on or off, a rate-limit penalty, the self-test failing, the realtime feed
+down for more than 5 minutes, the watchdog. Everything else goes to the log only. Keep `ALERT_URL` (ntfy) as the
+channel and the `summary` command to send one now.
+
 ## Rules, as before
 
 Opus for you and at most two sub-agents; grep and slices, never whole files over 400 lines; test output
