@@ -213,6 +213,7 @@ class Client:
 
     def __init__(self, env, s, live, session=None):
         self.base, self.slug, self.live = env.base_url, env.slug, live
+        self.covered_no = True            # buy-backs go out as covered "sell NO" (no cash); off if the self-test fails
         self.rpm_max, self.wpm_max = float(s.requests_per_minute), float(s.writes_per_minute)
         self.rpm, self.wpm = self.rpm_max, self.wpm_max
         self.reqs, self.writes = deque(), deque()     # start times inside the last minute
@@ -439,7 +440,7 @@ class Client:
         back the rest). An ioc order's unfilled rest is cancelled at once."""
         if not self.live:
             return [Placed(o, None, 0.0, "dry run") for o in orders]
-        out, covered_left = [], {e: max(0.0, -q) for e, q in positions.items()}
+        out, covered_left = [], ({e: max(0.0, -q) for e, q in positions.items()} if self.covered_no else {})
         for i in range(0, len(orders), BATCH_MAX):
             chunk = orders[i:i + BATCH_MAX]
             try:

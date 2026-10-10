@@ -1,6 +1,6 @@
 # Replay: old vs new bot on the 4 Oct snapshot (6 cycles)
 
-Written by tests2/test_replay.py. {'same': 119, 'old only': 16, 'size': 22, 'new only': 28}
+Written by tests2/test_replay.py. {'same': 118, 'old only': 15, 'size': 24, 'new only': 29}
 
 | Market | Side | Old shares | Old feature | New shares | New tag | Verdict |
 |---|---|---|---|---|---|---|
@@ -10,7 +10,7 @@ Written by tests2/test_replay.py. {'same': 119, 'old only': 16, 'size': 22, 'new
 | Dem AZ-01 House race | bid | 200 | quote | 199 | mm | same |
 | Dem AZ-06 House race | ask | 200 | quote | 199 | mm | same |
 | Dem AZ-06 House race | bid | 200 | quote | 199 | mm | same |
-| Dem Alabama Governor | bid | 100 | quote | 0 |  | old only |
+| Dem Alabama Governor | bid | 100 | quote | 99 | alloc | same |
 | Dem Alaska Governor | ask | 100 | quote | 0 |  | old only |
 | Dem Alaska Governor | bid | 2 | quote | 0 |  | old only |
 | Dem Alaska Senate | ask | 100 | quote | 0 |  | old only |
@@ -57,7 +57,8 @@ Written by tests2/test_replay.py. {'same': 119, 'old only': 16, 'size': 22, 'new
 | Dem MT-01 House race | bid | 2 | quote | 199 | mm | size |
 | Dem Maine Senate | ask | 200 | quote | 199 | mm | same |
 | Dem Maine Senate | bid | 50 | quote | 199 | mm | size |
-| Dem Michigan Senate | bid | 300 | quote | 199 | mm | same |
+| Dem Michigan Senate | ask | 0 |  | 131 | mm | new only |
+| Dem Michigan Senate | bid | 300 | quote | 5516 | alloc,mm | size |
 | Dem NY-17 House race | ask | 200 | quote | 199 | mm | same |
 | Dem NY-17 House race | bid | 200 | quote | 199 | mm | same |
 | Dem Nevada Governor | ask | 298 | quote | 199 | mm | same |
@@ -70,7 +71,7 @@ Written by tests2/test_replay.py. {'same': 119, 'old only': 16, 'size': 22, 'new
 | Dem PA-08 House race | bid | 50 | quote | 199 | mm | size |
 | Dem PA-10 House race | ask | 100 | quote | 199 | mm | same |
 | Dem PA-10 House race | bid | 50 | quote | 199 | mm | size |
-| Dem Rhode Island Senate | bid | 0 |  | 3750 | ladder | new only |
+| Dem Rhode Island Senate | bid | 0 |  | 6657 | ladder | new only |
 | Dem SC-01 House race | ask | 100 | quote | 199 | mm | same |
 | Dem SC-01 House race | bid | 200 | quote | 199 | mm | same |
 | Dem TX-15 House race | ask | 200 | quote | 199 | mm | same |
@@ -130,7 +131,7 @@ Written by tests2/test_replay.py. {'same': 119, 'old only': 16, 'size': 22, 'new
 | Rep IA-03 House race | bid | 0 |  | 199 | mm | new only |
 | Rep Iowa Senate | ask | 200 | quote | 199 | mm | same |
 | Rep Iowa Senate | bid | 200 | quote | 199 | mm | same |
-| Rep Kansas Governor | ask | 206 | quote | 199 | mm | same |
+| Rep Kansas Governor | ask | 206 | quote | 298 | alloc,mm | same |
 | Rep Kansas Governor | bid | 150 | quote | 194 | mm | same |
 | Rep Kansas Senate | ask | 50 | quote | 199 | mm | size |
 | Rep Kansas Senate | bid | 200 | quote | 199 | mm | same |
@@ -164,7 +165,7 @@ Written by tests2/test_replay.py. {'same': 119, 'old only': 16, 'size': 22, 'new
 | Rep PA-08 House race | bid | 200 | quote | 199 | mm | same |
 | Rep PA-10 House race | ask | 0 |  | 199 | mm | new only |
 | Rep PA-10 House race | bid | 0 |  | 199 | mm | new only |
-| Rep Rhode Island Senate | ask | 0 |  | 4621 | ladder | new only |
+| Rep Rhode Island Senate | ask | 0 |  | 6239 | ladder,swap | new only |
 | Rep SC-01 House race | ask | 100 | quote | 199 | mm | same |
 | Rep SC-01 House race | bid | 50 | quote | 199 | mm | size |
 | Rep South Dakota Senate | bid | 14493 | quote | 10057 | ladder | same |
@@ -172,7 +173,7 @@ Written by tests2/test_replay.py. {'same': 119, 'old only': 16, 'size': 22, 'new
 | Rep TX-15 House race | bid | 200 | quote | 199 | mm | same |
 | Rep TX-23 House race | ask | 200 | quote | 199 | mm | same |
 | Rep TX-23 House race | bid | 200 | quote | 199 | mm | same |
-| Rep Texas Senate | ask | 100 | quote | 199 | mm | same |
+| Rep Texas Senate | ask | 100 | quote | 296 | alloc,mm | size |
 | Rep Texas Senate | bid | 200 | quote | 199 | mm | same |
 | Rep U.S. Senate | ask | 7500 | quote | 199 | mm | size |
 | Rep VA-01 House race | ask | 200 | quote | 199 | mm | same |

@@ -100,6 +100,11 @@ vr = View(datetime(2026, 10, 10, tzinfo=timezone.utc), 0.0, {"x": mk("x", "X", N
 s0 = replace(s, mm_risk_reserve_wc=0.0)
 check("pause resumes only at 1.1x the reserve", R.assess(vr, s0, False, was_paused=True).adds_paused
       and not R.assess(vr, s0, False, was_paused=False).adds_paused)
+vm = replace(vr, account=Account(value=20000.0))   # room_corr 0.4 x 20k - 5k = 3k: below the 4k reserve
+check("the book's own risk pauses value adds", R.assess(vm, s0, False).adds_paused)
+check("market making's own inventory is credited back first (mm_room_guard)",
+      not R.assess(vm, s0, False, mm_shares={"x": -10000}).adds_paused)
+check("...but only what market making holds", R.assess(vm, s0, False, mm_shares={"x": -1000}).adds_paused)
 
 # ---- kill switch ----
 check("kill switch at 30% below start", R.kill_switch_hit(Account(value=69999.0, start=100000.0), s))

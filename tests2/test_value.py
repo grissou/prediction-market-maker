@@ -137,9 +137,22 @@ a = V.Allocator()
 o = a.step(view(P, gone, {"rOH": 1000}), risk(), 0.0, s)
 check("no sale when no level pays", o == [], o)
 
+SPARE_BOOKS_P = {"rTX": ([(0.40, 1000)], [(0.50, 20000)])}
 a = V.Allocator()
 o = a.step(view(P, SWAP_BOOKS, {"rOH": 1000}), risk(adds_paused=True), 0.0, s)
-check("no swap sale while adds are paused (the gate would refuse its buy)", o == [], o)
+check("paused: a risk-neutral swap still sells (release 14.1 room netting)", len(o) == 1 and o[0].tag == "alloc", o)
+a.note_fills([fill("rOH", False, 0.49, 1000, "alloc")])
+o = a.step(view(P, SWAP_BOOKS, {"rOH": 0}, cash=10500.0, read_at=130.0, mono=131.0), risk(adds_paused=True), 0.0, s)
+limit = 1000 * P["rOH"] / P["rTX"]
+check("paused: its buy goes out tagged swap, adding no more collateral at p than the sale freed",
+      len(o) == 1 and o[0].tag == "swap" and o[0].size <= limit + 1e-9, (o, limit))
+a = V.Allocator()
+grows = risk(adds_paused=True, bloc_delta=1000.0, bloc_sens={"rOH": 0.3, "rTX": 0.9})
+o = a.step(view(P, SWAP_BOOKS, {"rOH": 1000}), grows, 0.0, s)
+check("paused: no swap that grows the national-swing exposure", o == [], o)
+a = V.Allocator()
+o = a.step(view(P, SPARE_BOOKS_P, {}, cash=40000.0), risk(adds_paused=True), 0.0, s)
+check("paused: no spare-cash buy (it would add risk)", o == [], o)
 
 # ---- spare cash ----
 SPARE_BOOKS = {"rTX": ([(0.40, 1000)], [(0.50, 20000)])}

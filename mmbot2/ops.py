@@ -11,8 +11,8 @@ ORIGIN   The 7 October outage: the exchange went silent for 20 minutes; the watc
          the same day, which spent the whole request budget for two hours, is why every write goes through an
          explicit budget (exchange.py) and a failing cycle is retried on the next one, not in a loop. Exit
          codes tell systemd whether a restart can help: 3 and 4 mean a human must look.
-OPEN     The old self-test also probed a covered "sell NO" and NO+NO pair sales on the live exchange; the
-         rewrite keeps only the two-order round trip. Owner: are the NO probes still needed?
+         The covered "sell NO" is probed too (release 6's fix for the 0-cash deadlock); refused, buy-backs fall
+         back to "buy YES" for the run, as the old bot did. The NO+NO pair probe went with the pair unwinds.
 """
 import json
 import logging
@@ -201,6 +201,23 @@ def self_test(client, markets):
     return "; ".join(problems) or None
 
 
+def covered_no_test(client, positions):
+    """Live start-up check of the covered "sell NO" (release 6, the fix for the 0-cash deadlock): one share of a NO
+    holding offered at a NO price of 0.995, which cannot trade, read back as our bid at 0.005, then cancelled.
+    None if it passed or there is no NO to test with; else the problem."""
+    held = sorted(e for e, q in positions.items() if q <= -1)
+    if not held:
+        return None
+    probe = Order(held[0], True, 0.005, 1, "selftest")
+    placed = client.place([probe], positions)[0]
+    if placed.error:
+        return f"refused: {placed.error}"
+    listed = {o.oid: o for o in client.open_orders()}
+    client.cancel(placed.oid)
+    o = listed.get(placed.oid)
+    return None if o is not None and o.is_bid and abs(o.price - 0.005) < 1e-6 else "not listed as our bid at 0.005"
+
+
 def start(env, live):
     """The Bot wired to the exchange, the feed and Polymarket; None after a fatal start-up problem."""
     s = config.SettingsFile(env.settings_path).load(config.Settings(), notifier(env)) or config.Settings()
@@ -234,6 +251,10 @@ def run(env, live):
         if problem:
             bot.alert(f"SELF-TEST FAILED: {problem}: not trading")
             return EXIT_FATAL
+        no_problem = covered_no_test(bot.client, bot.client.positions())
+        if no_problem:                            # as the old bot: alert, buy back as "buy YES", keep running
+            bot.client.covered_no = False
+            bot.alert(f"covered 'sell NO' {no_problem}: NO holdings are bought back as 'buy YES' this run")
     runner = Runner(bot, env)
     signal.signal(signal.SIGINT, runner.request_stop)
     signal.signal(signal.SIGTERM, runner.request_stop)

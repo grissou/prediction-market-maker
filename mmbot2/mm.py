@@ -40,6 +40,10 @@ class Inventory:
         self.rows = {}               # eid -> the last stale() valuation, for status
         self.recycling = {}          # label -> the last cycle's recycle order, for status
 
+    def shares(self):
+        """{eid: signed shares market making holds}, for risk.assess (its own room comes first)."""
+        return {e: sum(x[0] for x in lots) for e, lots in self.lots.items()}
+
     def note_fills(self, fills):
         for f in fills:
             if f.tag in MM_TAGS:

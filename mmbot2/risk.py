@@ -13,8 +13,8 @@ ORIGIN   Day one the cap was the plain sum of every race's worst outcome (23.3k 
          fully collateralised value. 2 Oct: an unpriced 9,396-share short was risked as a coin flip (20.6k -> 31k,
          reduce-only), hence the fallbacks in risk_prices. The state cap came after three Rhode Island shorts reached
          27k, a quarter of the account, in one night of selling to a persistent longshot buyer.
-OPEN     The old kill switch needed 2 bad readings in a row (the bot should count them; this check is pure). The live
-         mm_room_guard (MM inventory counted against the MM room first) needs mm.py's lots: not applied here yet.
+         Market making's own inventory is credited back against its reserve first (live mm_room_guard, release 14).
+OPEN     The old kill switch needed 2 bad readings in a row (the bot counts them; this check is pure).
          Old stale-cash rule: after 5 minutes without a read the gate stopped gating; here it lets only cash-free orders.
 """
 import math
@@ -158,12 +158,28 @@ def rooms_paused(room_wc, room_corr, s, was_paused):
     return short or (was_paused and not clear)
 
 
-def assess(view, s, was_reduce_only, was_paused=False):
-    """This cycle's RiskState. Without an account value the reduce-only and pause states are kept as they were."""
-    p = risk_prices(view)
+def book_risk(view, p):
+    """(sum of worst cases, correlated risk) of the positions in the view."""
     races = held_races(view, p)
     worst = sum(race_worst_loss(legs) for legs in races.values())
-    corr = correlated_risk(races, view, worst)
+    return worst, correlated_risk(races, view, worst)
+
+
+def mm_share(view, p, mm_shares, worst, corr):
+    """(worst case, correlated risk) market making's own inventory adds: the book's risk with it less without it."""
+    if not mm_shares:
+        return 0.0, 0.0
+    rest = {e: q - mm_shares.get(e, 0.0) for e, q in view.positions.items()}
+    w, c = book_risk(replace(view, positions=rest), p)
+    return max(0.0, worst - w), max(0.0, corr - c)
+
+
+def assess(view, s, was_reduce_only, was_paused=False, mm_shares=None):
+    """This cycle's RiskState. Without an account value the reduce-only and pause states are kept as they were.
+    The pause is judged on the value book's share (live mm_room_guard, release 14): market making's own inventory
+    is credited back up to the size of its reserve, so market making filling its reserve does not stop value buying."""
+    p = risk_prices(view)
+    worst, corr = book_risk(view, p)
     sens = bloc_sensitivities(view, p, s)
     risk = RiskState(worst, corr, sum(q * sens.get(e, 0.0) for e, q in view.positions.items()),
                      was_reduce_only, None, None, was_paused, p=p, bloc_sens=sens)
@@ -180,7 +196,9 @@ def assess(view, s, was_reduce_only, was_paused=False):
                             or worst > (s.worst_case_backstop_frac - hyst) * value)
         risk.room_wc = s.worst_case_backstop_frac * value - worst
         risk.room_corr = s.max_worst_case_frac * value - corr
-        risk.adds_paused = rooms_paused(risk.room_wc, risk.room_corr, s, was_paused)
+        mm_wc, mm_corr = mm_share(view, p, mm_shares, worst, corr)
+        risk.adds_paused = rooms_paused(risk.room_wc + min(mm_wc, s.mm_risk_reserve_wc),
+                                        risk.room_corr + min(mm_corr, s.mm_risk_reserve_corr), s, was_paused)
     return risk
 
 

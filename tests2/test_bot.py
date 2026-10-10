@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from fakes import two_race_world                                     # noqa: E402
 from mmbot2 import config, ops                                       # noqa: E402
 from mmbot2.bot import Bot, KILL_FILE, STATE_FILE, STATUS_FILE       # noqa: E402
+from mmbot2.state import Order                                       # noqa: E402
 
 logging.basicConfig(level=logging.CRITICAL)
 RESULTS, ALERTS = [], []
@@ -130,6 +131,15 @@ def test_ops():
     runner.finish()
     check("a plain stop cancels everything", not client.orders)
     check("the self-test passes on a well-behaved exchange", ops.self_test(client, bot.markets) is None)
+    check("no NO held: the covered 'sell NO' test has nothing to do", ops.covered_no_test(client, {}) is None)
+    client.inv["11"] = -100
+    check("the covered 'sell NO' test passes when the exchange takes it",
+          ops.covered_no_test(client, dict(client.inv)) is None and not client.orders)
+    client.refuse_no_sell = "Invalid side for this order"
+    check("a refused covered 'sell NO' is reported", ops.covered_no_test(client, dict(client.inv)) is not None)
+    client.refuse_no_sell, client.covered_no = None, False
+    placed = client.place([Order("11", True, 0.10, 300, "mm")], dict(client.inv))
+    check("with the fallback a buy-back goes out whole as 'buy YES'", placed and placed[0].order.size == 300, placed)
 
 
 if __name__ == "__main__":

@@ -38,7 +38,7 @@ SIZE_KEEP_FRAC = 0.5          # a resting order at the wanted price is kept whil
 SIZE_TOL = 1.0                # ...and no larger than the gate now allows (a cap that tightened replaces it)
 EXPIRY_MARGIN_S = 120.0       # an order this close to its expiry is replaced, so a quote never lapses
 BATCH_MAX = 20                # orders per batch request (the API's limit)
-PRIORITY = ("alloc", "refill", "recycle", "ladder", "value", "mm")   # who gets cash and writes first
+PRIORITY = ("alloc", "swap", "refill", "recycle", "ladder", "value", "mm")   # who gets cash and writes first
 
 
 def by_priority(orders):
@@ -101,7 +101,7 @@ class Bot:
         state = self.assess(view)
         if state is None:
             return                              # the kill switch fired: everything is cancelled
-        wanted = [covered(o, view.positions.get(o.eid, 0.0))
+        wanted = [covered(o, view.positions.get(o.eid, 0.0) if self.client.covered_no else 0.0)
                   for o in value.apply_floor(self.decide(view, state), view, self.s)]
         gate = risk.Gate(view, state, self.s)          # gate first, so reconcile compares with what may rest
         admitted = [o for o in (gate.admit(o) for o in by_priority(wanted)) if o is not None]
@@ -229,7 +229,7 @@ class Bot:
             self.kill(view.account)
             return None
         was_paused = self.risk.adds_paused if self.risk else False
-        state = risk.assess(view, self.s, self.reduce_only, was_paused)
+        state = risk.assess(view, self.s, self.reduce_only, was_paused, self.inventory.shares())
         if state.reduce_only != self.reduce_only:
             log.warning("%s reduce-only: correlated %.0f, worst case %.0f, account %s",
                         "ENTERING" if state.reduce_only else "leaving", state.correlated, state.worst_case,

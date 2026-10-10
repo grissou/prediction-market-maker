@@ -45,6 +45,8 @@ class FakeClient:
         self.now = None                   # a datetime to run on a simulated clock; None = the real one
         self.faults, self.fail_rate, self.rng = [], 0.0, random.Random(7)
         self.self_crosses, self.next_id = 0, 100
+        self.covered_no = True            # as Client: bids while short go out as covered "sell NO"
+        self.refuse_no_sell = None        # a message: refuse every covered "sell NO" with it (the self-test's fallback)
 
     # --- faults ---
     def fail_next(self, n, kind="any", status=503):
@@ -156,7 +158,10 @@ class FakeClient:
 
     def place_one(self, o):
         held = self.inv.get(o.eid, 0.0)
-        size = min(int(o.size), int(-held)) if o.is_bid and held <= -1 else int(o.size)
+        cover = self.covered_no and o.is_bid and held <= -1
+        if cover and self.refuse_no_sell:
+            return Placed(o, None, 0.0, self.refuse_no_sell)
+        size = min(int(o.size), int(-held)) if cover else int(o.size)
         if size < 1:
             return None
         o = Order(o.eid, o.is_bid, o.price, size, o.tag, o.ioc, None,

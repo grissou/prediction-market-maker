@@ -9,11 +9,11 @@ OWNS     the value floor (apply_floor); the tail quotes behind the hurdle (tail_
 NEVER    sells below the floor (a swap sale below p - alloc_swap_sell_margin), flips a position, sells a pinned
          label, trades the party-control races, or sells for cash no buyer has asked for.
 ORIGIN   The 3.7k morning (selling below value to raise cash) gave the floor. RETURNS_ATTRIBUTION.md gave the rest:
-         the allocator's buys earned ~11% per unit of cash, the refill sold 110k of value for 43k of buying; so
-         here a sale happens only when a buy can use the cash. Old code: mmbot/value.py (alloc_plan, alloc_tick,
-         alloc_buy, alloc_sell), mmbot/mm.py (swap_floor_ok, mm_floor_ok), mmbot/quoting.py (value_side_prices,
-         the hurdle in compute_quote). Left behind: NO+NO set unwinds (the 4 Oct book holds one set, worth 1.0),
-         the set ladder, the momentum sleeve.
+         the allocator's buys earned ~11% per unit of cash, the refill sold 110k of value for 43k of buying; so a
+         sale happens only when a buy can use the cash. While the reserve pauses value adds, only swaps adding no
+         collateral and no national-swing exposure go (release 14.1's room netting; their buys are tagged "swap").
+         Old code: mmbot/value.py (alloc_*), mmbot/mm.py (swap_floor_ok), mmbot/quoting.py (value_side_prices).
+         Left behind: NO+NO set unwinds (the 4 Oct book holds one set, worth 1.0), the set ladder, the momentum sleeve.
 OPEN     A swap in flight is not saved: after a restart its cash waits for the next run. The bot does not say if an
          IOC was sent or deferred, so each is offered once (a deferred one is lost, never sent twice).
 """
@@ -177,7 +177,7 @@ class Level:
 
 @dataclass
 class Pair:
-    tag: str                  # "alloc" (a swap or a spare-cash buy) or "refill" (a sale with no buy)
+    tag: str                  # "alloc" (a swap or a spare-cash buy; a swap's buy goes out as "swap") or "refill"
     sell: Holding
     qty: int                  # shares to sell (0 for spare cash)
     buy: Level | None         # None for a refill
@@ -328,6 +328,22 @@ def plan_swaps(sellers, lvls, view, risk, left, s):
     return out
 
 
+def risk_neutral(swap, view, risk):
+    """The swap trimmed so its buy adds no more collateral (at p) than its sale frees and does not grow the national
+    swing exposure, or None. Collateral at p is the per-position worst case risk.py sums."""
+    h, ns, o, nb, x = swap
+    if h.eid is None:
+        return None
+    p_s, p_b = view.p[h.eid], view.p[o.eid]
+    per_buy = (1 - p_b) if o.short else p_b
+    nb = min(nb, int(ns * (p_s if h.long else 1 - p_s) / max(per_buy, TICK) + EPS))
+    sens = risk.bloc_sens
+    d = sens.get(o.eid, 0.0) * (-nb if o.short else nb) - sens.get(h.eid, 0.0) * (ns if h.long else -ns)
+    if nb < 1 or abs(risk.bloc_delta + d) > abs(risk.bloc_delta) + EPS:
+        return None
+    return h, ns, o, nb, nb * o.unit
+
+
 def level_now(view, lv, s):
     """(touch, edge, depth) of a planned level on the book now, or None if it has moved away by more than a tick
     or no longer pays alloc_min_edge_buy."""
@@ -411,12 +427,15 @@ class Allocator:
             self.last_run, self.sells_stopped = wall, False
             self.totals["runs_total"] += 1
             sold = {p.sell.eid for p in self.pairs}
-            # the gate refuses value adds in reduce-only and while the reserve pauses them: no sale for such a buy
-            lvls = [] if risk.reduce_only or risk.adds_paused else [o for o in levels(view, s) if o.eid not in sold]
-            why = "risk" if risk.reduce_only or risk.adds_paused else why
-            spare = view.account.cash - CASH_MARGIN - s.mm_reserve_usd
+            # reduce-only: no buys at all. Paused: only swaps that leave the risk no larger (release 14.1's room
+            # netting), so a sale never raises cash its buy may not spend; spare cash waits for the room.
+            lvls = [] if risk.reduce_only else [o for o in levels(view, s) if o.eid not in sold]
+            why = "risk" if risk.reduce_only else why
+            spare = 0.0 if risk.adds_paused else view.account.cash - CASH_MARGIN - s.mm_reserve_usd
             swaps = plan_swaps(swap_sellers(held, spare, s), lvls, view, risk,
                                left - sum(p.usd for p in self.pairs), s)
+            if risk.adds_paused:
+                swaps = [x for x in (risk_neutral(sw, view, risk) for sw in swaps) if x is not None]
         for h, ns, o, nb, x in swaps:
             pr = Pair("alloc", h, ns, o, nb, x, mono)
             if h.eid is None:                    # spare cash is already there: the buy may go now
@@ -463,7 +482,8 @@ class Allocator:
             pr.status = "expired"
             return None
         lv = pr.buy
-        if (view.account.read_at <= pr.sent_at or pr.proceeds < lv.unit or risk.reduce_only or risk.adds_paused
+        paused = risk.adds_paused and pr.sell.eid is None     # a real swap was planned risk-neutral: it may go
+        if (view.account.read_at <= pr.sent_at or pr.proceeds < lv.unit or risk.reduce_only or paused
                 or trade_book(view, lv.eid) is None):
             return None                          # not yet: wait for the money, the room and a fresh book
         qty = view.positions.get(lv.eid, 0.0)
@@ -480,7 +500,7 @@ class Allocator:
         if n < 1:
             return None                          # the cash read does not show the money (yet)
         pr.status = "done"
-        return Order(lv.eid, not lv.short, px, n, "alloc", ioc=True)
+        return Order(lv.eid, not lv.short, px, n, "alloc" if pr.sell.eid is None else "swap", ioc=True)
 
     def note_fills(self, fills):
         """Credit the fills of our IOC orders: a swap's sale raises the cash its buy may spend; refill sales are
@@ -491,6 +511,8 @@ class Allocator:
                 self.refills.append((f.at.timestamp(), usd))
                 self.raised += usd
                 self.totals["sold_usd"] += usd
+            elif f.tag == "swap":
+                self.totals["bought_usd"] += f.size * (f.price if f.is_bid else 1 - f.price)
             elif f.tag == "alloc":
                 sale = next((p for p in self.pairs if p.status == "sold" and p.sell.eid == f.eid
                              and f.is_bid != p.sell.long), None)
