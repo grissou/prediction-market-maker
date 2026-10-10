@@ -3,7 +3,7 @@ Offline tests for the Package 5 ops fields (status.json, recorder, phone summary
 realised/unrealised P&L (FIFO over fills.csv), toward_ref_capital_frac, capital_over_6h_frac, exit_ratio_24h,
 the account table's new liquidation_value column (ALTER on an old file), the summary line and None-safety.
 
-Run:  python tests/test_ops_liq.py      (exit code 0 = all passed)
+Run:  python tests/test_liquidation_fields.py      (exit code 0 = all passed)
 """
 import csv
 import json

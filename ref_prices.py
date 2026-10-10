@@ -1,33 +1,36 @@
 #!/usr/bin/env python3
 """
-Reference prices from real-money prediction markets (Polymarket, and optionally Kalshi), used by
-mm_bot.py as an independent sanity check on the tournament's own order books.
+Polymarket prices as the estimate of each tournament contract's probability.
 
-WHY
-    The tournament's books are seeded by a house market maker that follows real-money markets, and
-    anyone can watch Polymarket move before the tournament book catches up. So mm_bot treats
-    Polymarket as the better estimate of the true price (see the REFERENCE PRICES settings there):
-      - fair value leans toward it (ref_weight),
-      - if it disagrees with the tournament book by more than ref_guard_gap, the side it says is
-        mispriced isn't quoted,
-      - if it jumps suddenly (ref_jump_threshold), that market's quotes are pulled for a while, so a
-        real move doesn't catch us with stale quotes and a random spike doesn't drag our prices.
+mm_bot (mmbot/bot.py) reads them through the ReferencePrices class below: the probability p that most of the bot's
+decisions start from (fair value, the edge of a holding, the value floor under a sale, the guards that pull a quote
+when the book and Polymarket disagree or when Polymarket jumps) is the Polymarket price of the matching market,
+scaled within the race by mmbot/pricing.py. Without a mapping file the bot quotes off the tournament book alone.
+
+WHY POLYMARKET
+    The tournament's books are seeded by a house market maker that follows real-money markets, and anyone can
+    watch Polymarket move before the tournament book catches up, so the real-money price is the better estimate of
+    the true probability. Polymarket's public Gamma API needs no account and does not use the tournament's request
+    budget.
 
 HOW mm_bot USES IT (automatic when ref_map.json exists next to the bot)
-    refs = ReferencePrices("ref_map.json"); refs.start()      # refreshes every 30 s in the background
-    refs.get()   ->  {"Ohio Senate|Republican": 0.405, ...}     cached; never waits; never raises
+    refs = ReferencePrices("ref_map.json"); refs.start()      # refreshes in the background (ref_refresh_seconds)
+    refs.get()     ->  {"Ohio Senate|Republican": 0.405, ...}   cached; never waits; never raises
+    refs.spreads(), refs.volumes(), refs.ages()                 per key: the quote's width, all-time $ volume, age
+    refs.on_refresh(moves)                                      callback after every reading (the jump guard)
 
-COMMANDS
-    python ref_prices.py suggest            match every tournament race to a Polymarket "election
-                                            winner" market by name and add it to ref_map.json.
-                                            Existing entries are kept. REVIEW THE RESULT: it's name matching.
-    python ref_prices.py search "Ohio Senate"   list candidate markets (ids, prices) to fix an entry by hand
-    python ref_prices.py check              every mapped market: tournament price vs reference price
-
-MAPPING FILE (ref_map.json): one entry per tournament contract, keyed "<race>|<party>":
-    "Ohio Senate|Republican": {"source": "polymarket", "id": "631058", "note": "Jon Husted (R) - Ohio Senate Election Winner"}
-    "Ohio Senate|Democratic": {"source": "kalshi", "id": "SENATEOHS-26-D", "note": "added by hand"}
+THE RACE MAPPING (ref_map.json): one entry per tournament contract, keyed "<race>|<party>" (ref_key):
+    "Ohio Senate|Republican": {"source": "polymarket", "id": "631058", "note": "Jon Husted (R) - Ohio Senate ..."}
+    The id is the Polymarket market id of that party's candidate in the race's "election winner" event.
     Delete an entry, or set "id" to null, to use no reference for that contract.
+
+COMMANDS (building and checking the mapping)
+    python ref_prices.py suggest                 match every tournament race to a Polymarket "election winner"
+                                                 market by name and add it to ref_map.json. Existing entries are
+                                                 kept. REVIEW THE RESULT: it is name matching.
+    python ref_prices.py search "Ohio Senate"    list candidate markets (ids, prices) to fix an entry by hand
+    python ref_prices.py check                   every mapped market: tournament price vs the Polymarket price
+                                                 (run it when the bot alerts about an unmapped or stale entry)
 """
 
 import json
@@ -63,7 +66,6 @@ class RefConfig:
                                        #   refresh takes one round trip, not five). 1 = one after another
     search_pause: float = 0.3          # pause between searches in `suggest` (be polite to the API)
     polymarket_url: str = "https://gamma-api.polymarket.com"
-    kalshi_url: str = "https://api.elections.kalshi.com/trade-api/v2"
 
 
 REF = RefConfig()
@@ -101,7 +103,7 @@ def session():
         if _session is None:
             _session = requests.Session()
             _session.headers.update({"User-Agent": "mm_bot-reference-prices"})
-            n = max(2, REF.parallel_fetches) + 2   # the pool's threads, plus the calling thread (Kalshi, search) + 1
+            n = max(2, REF.parallel_fetches) + 2   # the pool's threads, plus the calling thread (search) + 1
             _session.mount("https://", requests.adapters.HTTPAdapter(pool_connections=4, pool_maxsize=n))
         return _session
 
@@ -188,20 +190,7 @@ def fetch_polymarket(ids):
     return out
 
 
-def fetch_kalshi(tickers):
-    """{ticker: (probability, spread)} for Kalshi markets (public market data; no account needed)."""
-    out = {}
-    for chunk in chunks(tickers, REF.batch_size):
-        for m in http_get(f"{REF.kalshi_url}/markets", {"tickers": ",".join(chunk)}).get("markets", []):
-            if m.get("status") not in ("active", "open"):
-                continue
-            p, spread = market_quote(m.get("yes_bid_dollars"), m.get("yes_ask_dollars"), m.get("last_price_dollars"))
-            if p is not None:
-                out[m["ticker"]] = (p, spread)
-    return out
-
-
-FETCHERS = {"polymarket": fetch_polymarket, "kalshi": fetch_kalshi}
+FETCHERS = {"polymarket": fetch_polymarket}      # by the mapping entry's "source" (only Polymarket today)
 
 # =============================================================================================
 # THE CLASS mm_bot USES

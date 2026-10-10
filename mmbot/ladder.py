@@ -1,8 +1,15 @@
 """
-LadderMixin: the harvest ladder (hv_*, HARVEST_KEYS), its carve-out of the MM reserve and
-place_orders_keep.
+LadderMixin: the harvest ladder - resting maker levels that sell inventory we hold back to the
+market above fair value, a few shares at each of several prices, re-quoted as the top moves.
 
-Methods only: all state lives on the Bot instance (self); no __init__ here. Never imports bot.py.
+Owns the ladder's plan and placement (hv_plan, hv_tick, hv_orders), its re-quote state and fills,
+the carve-out it takes from the MM cash reserve (hv_carve_used, mm_reserve_effective), the lock
+that keeps the market-making quote a tick clear of our own levels (hv_guard_quote, hv_quote_hold),
+place_orders_keep (orders that survive a cancel-all) and its status.json / summary parts.
+
+The ladder only ever reduces a position: it never adds to one, never takes liquidity and never
+overrides a risk pause or the reduce-only decision. Methods only: all state lives on the Bot
+instance (self); no __init__ here. Never imports bot.py.
 """
 from collections import defaultdict, deque
 from dataclasses import replace
@@ -21,15 +28,15 @@ from mmbot.pricing import others_top
 class LadderMixin:
 
     # ------------------------------------------------------------------------------ fills
-    # ------------------------------------------------------------------------------ P15: harvest ladder, state cap
-    HARVEST_KEYS = ("harvest", "state_caps")   # status.json keys P15 adds (absent while unused; identity checks skip)
+    # ------------------------------------------------------------------------------ Harvest ladder, state cap
+    HARVEST_KEYS = ("harvest", "state_caps")   # status.json keys adds (absent while unused; identity checks skip)
     HV_LONGSHOT, HV_FAVOURITE = 0.10, 0.90   # the harvest ladder's bands: asks where p <= / bids where p >= these
     HV_TOL = 0.01                 # a level more than this off its target, or p moved more since the re-quote: at once
     HV_KEEP_MARGIN = 60.0         # at a re-quote an order exactly at its target stays if it outlives the next by this
     HV_REFUSED_WAIT = 900.0       # the exchange refused a market's levels: not re-sent there before this (s)
 
     def p15_init(self):
-        """P15 state (this run): the harvest ladder's per-market re-quote state, its fills, and the state cap's
+        """State (this run): the harvest ladder's per-market re-quote state, its fills, and the state cap's
         per-cycle collateral and blocked counters."""
         self.hv_state = {}                        # eid -> {"at": monotonic re-quote time, "p": p then, "side"}
         self.hv_plans = {}                        # this cycle's plans {eid: plan}
@@ -97,7 +104,7 @@ class LadderMixin:
                 and (meta.get(o.order_id) or {}).get("harvest")]
 
     def hv_side_qty(self, eid, is_bid):
-        """Shares our resting harvest levels on eid offer on one side (0 without any). P13 RT13-2: the quote's
+        """Shares our resting harvest levels on eid offer on one side (0 without any). the quote's
         reduce-only cap on a laddered market leaves those to the ladder."""
         if not self.hv_sides:
             return 0.0
@@ -161,7 +168,7 @@ class LadderMixin:
             if o.order_id not in hv_ids:
                 own[o.eid].append(o)
         carve_left = float(cfg.harvest_total_usd)
-        paused = bool(getattr(self, "mmr_paused", False))   # P12 ops mm_risk_reserve_*: value adds paused -> the
+        paused = bool(getattr(self, "mmr_paused", False))   # mm_risk_reserve_*: value adds paused -> the
         n = 0                                               #  ladder's levels only sell what is held (covered)
         for e, ex, p, ask_side, book, t, edge0 in sorted(cands, key=lambda c: (c[0] not in laddered, -c[6], c[0])):
             if n >= cfg.harvest_max_markets:
@@ -182,7 +189,7 @@ class LadderMixin:
                     self.order_meta.get(o.order_id) or {}).get("no_sell"))) if q <= -1 else 0.0
                 lim = min([o.price for o in mine if not o.is_bid], default=None)
             free = max(0.0, free)
-            # (P13 C: a quote order of ours resting on the ladder's side at a level's price: that level waits for
+            # (a quote order of ours resting on the ladder's side at a level's price: that level waits for
             #  it to go - never two of our orders at one price)
             same = {round(o.price, 3) for o in mine if o.is_bid != ask_side}
             levels, used, carve, cut = [], 0.0, 0.0, None
@@ -207,7 +214,7 @@ class LadderMixin:
                     qty = cov
                 else:
                     cov = int(min(want, free) + 1e-9) if ask_side else 0
-                    caps = {"mm_risk_reserve": 0.0 if paused else float("inf"),   # (P12 ops: tail adds paused)
+                    caps = {"mm_risk_reserve": 0.0 if paused else float("inf"),   # (tail adds paused)
                             "market_cap": max(0.0, room_m - used) / max(val, TICK),
                             "state_cap": max(0.0, room_s - used) / max(val, TICK),
                             "carve": max(0.0, carve_left - carve) / max(lock, TICK)}
@@ -262,7 +269,7 @@ class LadderMixin:
         return 0.0 if cov >= n else px * n
 
     def hv_tick(self, now, inv, mine_real, now_m=None, skip=()):
-        """P15 cycle step 6e: plan (hv_plan); pull a market's levels when it has no plan (unless only "soft") or an
+        """Cycle step 6e: plan (hv_plan); pull a market's levels when it has no plan (unless only "soft") or an
         order that no longer clears (hv_order_ok); re-quote a market when an order is > HV_TOL off its nearest
         target, p moved > HV_TOL or harvest_requote_s passed (an order exactly at a target with life left keeps its
         queue spot); place a missing level (filled / gone) at once. Placements and re-quotes within
@@ -385,7 +392,7 @@ class LadderMixin:
                     break
                 for e in {c[0] for c in chunk}:
                     self.ex[e].pending_until = now_m + cfg.pending_seconds
-                if err.status in (0, 409, 502, 503, 504):   # (P13 RT13-1: outcome unknown - levels may rest: re-read
+                if err.status in (0, 409, 502, 503, 504):   # (outcome unknown - levels may rest: re-read
                     self.orders_stale = True                 #  the list and adopt them as harvest levels, as
                     if cfg.recover_unconfirmed:              #  apply_batch does; never a second ladder on top)
                         for e, k, edge, plan, o in chunk:
@@ -443,7 +450,7 @@ class LadderMixin:
         return other is None or (o.price > other + 1e-9 if ask else o.price < other - 1e-9)
 
     def hv_guard_quote(self, ex, q, asks):
-        """P15: the quote's bid on a market where our harvest asks rest stays at least a tick below the lowest of
+        """The quote's bid on a market where our harvest asks rest stays at least a tick below the lowest of
         them (a kept resting bid at / above that is replaced): never a self-cross. None if that is off the grid."""
         low = round(min(o.price for o in asks), 3)
         hi = round(low - TICK, 3)

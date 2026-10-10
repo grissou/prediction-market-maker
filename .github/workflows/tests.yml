@@ -1,7 +1,7 @@
 # Runs every offline test suite on each push and pull request (no API key or network needed).
 # A red X on GitHub means a change broke something - fix it before deploying.
-# Python 3.10, the version the live server runs. The dry-run suites (tests/test_p*_dryrun.py) need a recorded
-# snapshot (P9_SNAP) and skip without one.
+# Python 3.10, the version the live server runs. The dry-run suites (tests/test_dryrun_*.py) need a recorded
+# snapshot (P9_SNAP) and skip without one. The loop below runs every tests/test_*.py, so a new suite needs no edit here.
 name: tests
 
 on: [push, pull_request]

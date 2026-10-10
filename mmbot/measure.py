@@ -1,9 +1,12 @@
 """
-Measurement and reporting from fills.csv: FillLogger, read_fills, TurnoverTracker, fill_stats,
-build_summary (the phone summary), the `report` and `analyze` commands and the EV / carry summary
-parts.
+Measurement and reporting from fills.csv and the sqlite recorder: the numbers a human reads.
 
-Never imports the bot or the mixins; never sends orders.
+Owns FillLogger and read_fills (the fills tape), TurnoverTracker (how fast capital turns), fill_stats,
+build_summary (the 2-hourly phone summary and its ops / EV / carry parts), and the `report` and
+`analyze` commands that read the recorded data after the fact.
+
+It only reads and summarises: it never sends orders, never changes bot state and never imports the
+bot or the mixins. Anything here failing must not stop trading, so callers wrap it.
 """
 import csv
 import os
@@ -227,7 +230,7 @@ def fill_stats(rows):
 
       edge     how far on the right side of fair value each fill was, using the fair value at the
                moment we QUOTED. Positive = we earned spread.
-      markout  how fair value moved straight after the fill, measured in our direction. Negative =
+      markout how fair value moved straight after the fill, measured in our direction. Negative =
                the people trading with us knew something (adverse selection).
 
     Profit per share is roughly edge + markout. Our fills are as a maker (or an arbitrage at a
@@ -251,7 +254,7 @@ def fill_stats(rows):
 
 
 def ops_summary_line(ops, account=None, tilt_s=None, tilt_exposure=None):
-    """The phone summary's ops line (Package 5), e.g. "Liquidation 101.1k (account 101.5k), realised +154, 76% of
+    """The phone summary's ops line, e.g. "Liquidation 101.1k (account 101.5k), realised +154, 76% of
     capital toward Polymarket, 69% older than 6 h | tilt 5.1%, exposure +15.1k (-151 per point)". The tilt part only
     when tilt_s is known (a fraction: 0.051 = 5.1%); per point = -exposure x 0.01. Unknown pieces show "?";
     None when there is nothing to show."""
@@ -447,7 +450,7 @@ def analyze(fills_path, db_path, hours=None, top=15):
                                                         *[f"m{x}" for x in MARKOUT_MINUTES], *[f"m{x}_n" for x in MARKOUT_MINUTES])}
     out.append(f"all markets: {tot['shares']:.0f} shares, edge {c(tot, 'edge')}c, markout "
                + " / ".join(f"{x}m {c(tot, f'm{x}')}c" for x in MARKOUT_MINUTES) + f", P&L at latest fair value {tot['pnl']:+.0f}")
-    if any(k > 0 for k in by_level):                         # the R3 ladder filled: touch vs each ladder level
+    if any(k > 0 for k in by_level):                         # the ladder filled: touch vs each ladder level
         out.append("by level: " + " | ".join(f"L{k} {v['fills']} fills {v['shares']:.0f} sh edge {c(v, 'edge').strip()}c"
                                              for k, v in sorted(by_level.items())))
     out.append(f"{'market':26} {'fills':>5} {'shares':>8} {'edge c':>7} " + " ".join(f"{f'mk{x}m':>7}" for x in MARKOUT_MINUTES)

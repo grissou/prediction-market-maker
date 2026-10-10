@@ -2,7 +2,7 @@
 Offline tests for the strategy changes on claude/pr2-strategy (Builder run): pure quoting functions, the
 Bot wiring, and a short run of the strategy simulator (tests/strategy_sim.py).
 
-Run:  python tests/test_strategy.py      (exit code 0 = all passed)
+Run:  python tests/test_quoting.py      (exit code 0 = all passed)
 """
 import json
 import logging

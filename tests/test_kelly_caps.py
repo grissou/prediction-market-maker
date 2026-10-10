@@ -3,7 +3,7 @@ Offline tests for Package 5 B (kelly_edge_cap, kelly_max_market_frac, headline_p
 (reduce_from_book: the reducing side priced from the tournament book) was removed on simplify, never enabled live;
 its checks and the twin against the base commit went with it. No network.
 
-Run:  python tests/test_reduce_book.py      (exit code 0 = all passed)
+Run:  python tests/test_kelly_caps.py      (exit code 0 = all passed)
 """
 import logging
 import os

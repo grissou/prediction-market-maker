@@ -1,6 +1,7 @@
 """Package 14.1: the LIVE state of 5 Oct 10:21 UTC approximated on the snap04 seed (helper, not a test suite; used by
-tests/test_p14_1_dryrun.py and analysis/p14/DIAG_14_1.md). On top of the tests/dryrun_harness.py harness (all 237 markets,
-other traders' books, Polymarket references, positions, marks, lots): the books converged 20% toward Polymarket (tilt 0.137
+tests/test_dryrun_mm_refill.py and analysis/p14/DIAG_14_1.md). On top of the tests/dryrun_harness.py harness (all 237
+markets, other traders' books, Polymarket references, positions, marks, lots): the books converged 20% toward Polymarket
+(tilt 0.137
 on 4 Oct -> 0.109), the account at 102.0k, MM lots of 10.5k (7.9k stale, oldest 23.7 h) on middle-band low-edge holdings
 whose touch is beyond the value floor (the stale MM that "rests" live), the exchange's NO+NO set rule on, and free cash
 ~1.9k after our resting orders' locks (a constant amount "held elsewhere" taken off the P&L cash read)."""

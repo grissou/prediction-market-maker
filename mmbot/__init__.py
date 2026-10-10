@@ -1,6 +1,14 @@
 """
-The mmbot package: the market-making bot split by concern. `from mmbot import *` gives the
-flat namespace mm_bot.py used to have; mm_bot.py is the entry point.
+The mmbot package: the market-making bot for the SIG prediction-market tournament, split by concern.
+
+mm_bot.py is the entry point; it calls mmbot.cli.main(). `from mmbot import *` gives the flat
+namespace mm_bot.py used to have, so the tests and the identity check keep working against one name
+space. Leaf modules (util, exchange, pricing, quoting, measure) hold no bot state; the mixins
+(risk, value, mm, ladder, arb, status, ops) are methods bolted onto the Bot class in bot.py, and all
+state lives on that one instance. A reader who wants the whole picture starts at the HOW THE BOT
+WORKS block in util.py, then Bot.cycle in bot.py.
+
+This file must never hold logic of its own: it only re-exports.
 """
 from mmbot import util  # noqa: F401
 from mmbot import config  # noqa: F401

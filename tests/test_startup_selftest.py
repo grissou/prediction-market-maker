@@ -3,7 +3,7 @@ Start-up self-test at 100% capital (3 Oct live, 08:06 and 08:17 UTC): the second
 with HTTP 400 "Insufficient available funds" and the bot stopped with exit code 3. A funds refusal now counts as
 BUSY (retry selftest_retry_seconds later, quoting meanwhile); any other refusal still stops the bot.
 
-Run:  python tests/test_selftest_funds.py      (exit code 0 = all passed)
+Run:  python tests/test_startup_selftest.py      (exit code 0 = all passed)
 """
 import logging
 import os

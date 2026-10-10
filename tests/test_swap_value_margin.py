@@ -14,7 +14,7 @@ alloc_plan); the floor on paired sales only (refill, quote, reduce-only quote, r
 0.005 and 0.03); the min-gain rule at the boundary, the cost counted once; the re-check before the IOC; a swap whose
 buy fails (the sale stands, nothing repriced; the buy-wait expiry); journal lines and status; no duplicate orders; no p
 / empty books; the warning; the staged file; py_compile.
-Run:  python tests/test_mm_funding_14_2.py      (exit code 0 = all passed)"""
+Run:  python tests/test_swap_value_margin.py      (exit code 0 = all passed)"""
 import importlib.util
 import json
 import logging
@@ -109,7 +109,7 @@ def books(**over):
 
 
 def mk(inv=None, bks=None, refs=None, cash=0.0, **cfg):
-    """Ohio (tails: p 0.12 / 0.88) and Utah (middle: p 0.55 / 0.45), as tests/test_mm_funding_14_1.py."""
+    """Ohio (tails: p 0.12 / 0.88) and Utah (middle: p 0.55 / 0.45), as tests/test_mm_refill_and_swaps.py."""
     api, b = make_bot(books=bks or books())
     for x in b.ex.values():
         x.close = CLOSE

@@ -1,5 +1,5 @@
 """
-Dry-run HARNESS for the tests/test_p*_dryrun.py suites (first built for Package 9, whose own dry run - the tilt exits
+Dry-run HARNESS for the tests/test_dryrun_*.py suites (first built for Package 9, whose own dry run - the tilt exits
 and the long-tilt basket, neither ever enabled live - was removed on simplify with those features): the fake exchange
 seeded with a REAL ops snapshot (extracted to /home/claude/snap03, or $P9_SNAP): all 237 markets, the latest 3-level
 books of other traders, Polymarket references (raw, from the recorder), positions and the exchange's marks, cash, the
@@ -364,5 +364,5 @@ def sample(xs, n=8):
 STATE, WRITES = {}, {}
 
 if __name__ == "__main__":
-    print("tests/dryrun_harness.py is a harness (snapshot, fake exchange, clock) for the test_p*_dryrun.py suites;"
+    print("tests/dryrun_harness.py is a harness (snapshot, fake exchange, clock) for the test_dryrun_*.py suites;"
           " it has no checks of its own")

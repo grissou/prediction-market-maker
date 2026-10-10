@@ -1,8 +1,15 @@
 """
-OpsMixin: handover, the watchdog, the self-tests (selftest_*, nosell_*, pairno_*), the feed start,
-the run loop, close and shutdown.
+OpsMixin: running the process - everything around the cycle rather than inside it.
 
-Methods only: all state lives on the Bot instance (self); no __init__ here. Never imports bot.py.
+Owns the run loop and its pacing (realtime feed or fixed interval), the wait for the open, the
+feed start, the watchdog thread, the start-up self-tests (selftest_*, nosell_*, pairno_*: one
+small real order each to prove the account can trade before the quotes go out), request_stop /
+request_handover (Ctrl+C cancels everything; SIGUSR1 leaves the quotes resting for the next
+version to adopt), adopt_handover, close and shutdown.
+
+It never decides a price, a size or which market to trade; the self-test legs are the only orders
+it sends, and they never stop the bot when they fail. Methods only: all state lives on the Bot
+instance (self); no __init__ here. Never imports bot.py.
 """
 import json
 import logging.handlers
@@ -434,7 +441,7 @@ class OpsMixin:
             self.selftest_eid = self.selftest_start()
             self.selftest_future = self.selftest_pool.submit(self.selftest_run, self.selftest_eid, self.selftest_ttl())
 
-    # --- Package 6: the reduce_no_as_sell self-test leg ---
+    # --- The reduce_no_as_sell self-test leg ---
     def nosell_tick(self):
         """Main loop, after every cycle: with reduce_no_as_sell on (live, self-test on) and not checked yet, once some
         market holds NO, check on a background thread that the exchange takes a covered "sell NO" (nosell_run). Until
@@ -457,11 +464,11 @@ class OpsMixin:
                 or util.time.monotonic() < self.nosell_next):
             return
         held = [e for e in sorted(self.ex) if self.ex[e].inv <= -1]
-        # Note (Package 7): with no_set_aware_bids on, only legs with a LONE NO part are tested. If no market has one
+        # Note: with no_set_aware_bids on, only legs with a LONE NO part are tested. If no market has one
         # (e.g. after a restart every NO is held in NO+NO sets) this check never runs, so it never passes and
         # reduce_no_on() stays False: no_set_aware_bids, pair_no_unwind_max_cost and the follow-up's covered sales
         # stay inert for the run. Logged once (below) when that lasts more than 10 minutes.
-        if getattr(cfg, "no_set_aware_bids", False):   # Package 7: a 1-share sale inside a NO+NO set breaks it and
+        if getattr(cfg, "no_set_aware_bids", False):   # A 1-share sale inside a NO+NO set breaks it and
             lone = [e for e in held if -self.ex[e].inv - self.nono_set_part(e) >= 1]   # is refused: lone parts only
             if held and not lone:
                 now = util.time.monotonic()
@@ -551,7 +558,7 @@ class OpsMixin:
             log.warning("self-test (sell NO): exchange busy (%s) - trying again in %.0f s", msg,
                         self.cfg.selftest_retry_seconds)
 
-    # --- Package 7: the pair_no_unwind_max_cost self-test leg (a paired covered NO sale) ---
+    # --- The pair_no_unwind_max_cost self-test leg (a paired covered NO sale) ---
     PAIRNO_MAX_WAIT = 1800.0                      # busy back-off cap (s)
 
     def pairno_tick(self):
@@ -822,8 +829,8 @@ class OpsMixin:
                     self.cycle()
                     if self.running:
                         self.selftest_tick()      # stops the bot (exit code 3) if the API surprises us
-                        self.nosell_tick()        # Package 6: covered "sell NO" leg (never stops the bot)
-                        self.pairno_tick()        # Package 7: paired NO+NO sale leg (never stops the bot)
+                        self.nosell_tick()        # Covered "sell NO" leg (never stops the bot)
+                        self.pairno_tick()        # Paired NO+NO sale leg (never stops the bot)
                     self.on_cycle_ok()
                     self.write_status(ok=True)
                     self.maybe_summary()
@@ -857,7 +864,7 @@ class OpsMixin:
 
     def shutdown(self):
         """Always runs on exit (Ctrl+C, kill switch, crash): cancel every order we have."""
-        if getattr(self, "pair_owed", None):          # Package 7: in memory only, never carried over
+        if getattr(self, "pair_owed", None):          # In memory only, never carried over
             log.warning("pair unwind follow-up: owed legs dropped at exit (a restart does not resume them): %s",
                         self.pair_owed_status())
         if not self.api.live:

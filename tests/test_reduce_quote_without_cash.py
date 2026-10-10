@@ -9,7 +9,7 @@ bid), and reduce-only switches off the adding sides -> nothing at all. Not the r
 pair is the SAME bet, so the race-netted positions are +/-19,272 (not +480) and the clip leaves the full size.
 The guard on exits is a design choice (documented in Config: "it says the exit is the wrong trade"): not changed.
 
-Run:  python tests/test_house_quote.py      (exit code 0 = all passed)
+Run:  python tests/test_reduce_quote_without_cash.py      (exit code 0 = all passed)
 """
 import logging
 import os

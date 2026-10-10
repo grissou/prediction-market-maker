@@ -5,7 +5,7 @@ ev_outcome_delta_24h (48 h ring in status.json, restored on restart), mm_carry_2
 realised, unmatched, value adds, takes, per-class counts, per_day), the summary and realtime lines, and that nothing
 else changed against 859e751 (status keys / orders with the new fields removed).
 
-Run:  python tests/test_ops_ev.py      (exit code 0 = all passed)
+Run:  python tests/test_expected_value_fields.py      (exit code 0 = all passed)
 """
 import csv
 import importlib.util

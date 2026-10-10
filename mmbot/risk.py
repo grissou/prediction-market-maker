@@ -1,9 +1,15 @@
 """
-RiskMixin: account value and the kill switch, lots and age, the capital ceiling, the mark-noise
-estimator, risk_fv / settlement_risk / total_worst_case, the MM risk room, turnover health, the cash
-gate (cash_*, tier_*) and the per-state caps (st_*).
+RiskMixin: the portfolio-level limits every other part must respect.
 
-Methods only: all state lives on the Bot instance (self); no __init__ here. Never imports bot.py.
+Owns account value and the drawdown kill switch, the inventory lots and their age, the capital
+ceiling and its adding-side factor, the mark-noise estimator, risk_fv / settlement_risk /
+total_worst_case (the worst-case loss across races), the MM risk room and the "value adds paused"
+flag, turnover health, the cash gate (cash_*, tier_*: what this cycle's orders may spend) and the
+per-state collateral caps (st_*).
+
+It decides what is allowed, not what to do: it never prices a quote, never chooses a market and
+never sends an order. Other modules read its flags and caps and shrink to fit. Methods only: all
+state lives on the Bot instance (self); no __init__ here. Never imports bot.py.
 """
 import csv
 import json
@@ -287,7 +293,7 @@ class RiskMixin:
 
     def update_mark_frag(self, inv, cfg):
         """Sum over positions of |pos| x sd (mark noise in $ per 10-min step) and the status.json fields
-        (health mark_frag_*: a diagnostic; the sizing cap this once drove, mark_frag_enabled, is gone)."""
+        (health mark_frag_*). A diagnostic only: nothing sizes from it."""
         steps = {e: abs(q) * self.mark_sd[e] for e, q in inv.items() if q and e in self.mark_sd}
         total = sum(steps.values())
         top = sorted(steps.items(), key=lambda kv: -kv[1])[:10]
@@ -315,7 +321,7 @@ class RiskMixin:
         self.capital_over = on
 
     def update_adding_resume(self, frac, cfg):
-        """Package 8 adding_factor_capital_on (> 0): with the capital ceiling on, capital in positions / account
+        """adding_factor_capital_on (> 0): with the capital ceiling on, capital in positions / account
         below it -> the resume factor is in force (adding_resume); off again at >= it + 0.01, or when the ceiling
         or the setting is off. An unknown account value keeps the current state. Each change logged once."""
         thr = cfg.adding_factor_capital_on
@@ -335,7 +341,7 @@ class RiskMixin:
         self.adding_resume = on
 
     def ceiling_adding_factor(self, cfg):
-        """The capital ceiling's adding-side factor in force: 1 (ceiling off), the configured factor, or (Package 8
+        """The capital ceiling's adding-side factor in force: 1 (ceiling off), the configured factor, or (with
         adding_factor_capital_on) the larger of it and capital_ceiling_adding_size_factor_resume."""
         if not self.capital_over:
             return 1.0
@@ -401,7 +407,7 @@ class RiskMixin:
         return out
 
     def settlement_risk(self, inv, fvs, party_delta):
-        """R7: national swing shock (risk_swing_shock x |net Rep-minus-Dem YES shares|) plus risk_z standard
+        """National swing shock (risk_swing_shock x |net Rep-minus-Dem YES shares|) plus risk_z standard
         deviations of the settlement value of every race, races independent once the swing is taken out.
         The cycle uses min(this, sum of per-race maxima)."""
         stress = 0.0
@@ -413,11 +419,11 @@ class RiskMixin:
         return self.cfg.risk_swing_shock * abs(party_delta) + self.cfg.risk_z * math.sqrt(var) + stress
 
     def mm_risk_room_update(self, worst, risk, equity, mm_part=None):
-        """P12 ops mm_risk_reserve_* (cycle step 6, after the reduce-only decision, which it never touches): this
+        """mm_risk_reserve_* (cycle step 6, after the reduce-only decision, which it never touches): this
         cycle's rooms (room_wc = worst_case_backstop_frac x account - worst, room_corr = max_worst_case_frac x account -
         risk) and the "value adds paused" state with its hysteresis (pause below a reserve, resume once each reserve
         set is covered MM_RISK_HYST times). No account value: the rooms are unknown and the state is kept. Returns
-        self.mmr_paused. P14 mm_room_guard: mm_part = the MM lots' (worst-case, correlated) contribution, counted
+        self.mmr_paused. mm_room_guard: mm_part = the MM lots' (worst-case, correlated) contribution, counted
         against the MM room first: the pause is decided on the value book's share, room + min(contribution, reserve)."""
         cfg = self.cfg
         res_wc, res_corr = max(0.0, cfg.mm_risk_reserve_wc), max(0.0, cfg.mm_risk_reserve_corr)
@@ -428,7 +434,7 @@ class RiskMixin:
         room_corr = cfg.max_worst_case_frac * equity - risk
         self.mmr_room = (room_wc, room_corr)
         v_wc, v_corr, guard = room_wc, room_corr, ""
-        if mm_part is not None:                   # P14 3: the value book's share of each room
+        if mm_part is not None:                   # The value book's share of each room
             v_wc, v_corr = room_wc + min(mm_part[0], res_wc), room_corr + min(mm_part[1], res_corr)
             self.mmf_room_mm, self.mmf_room_value = tuple(mm_part), (v_wc, v_corr)
             guard = (f" [mm_room_guard: MM inventory {mm_part[0]:.0f} wc / {mm_part[1]:.0f} corr counted against "
@@ -449,7 +455,7 @@ class RiskMixin:
         return paused
 
     def mm_risk_status(self):
-        """P12 ops: status.json mm_risk_room (None while both settings are 0 and it never paused: the key absent)."""
+        """Status.json mm_risk_room (None while both settings are 0 and it never paused: the key absent)."""
         cfg = self.cfg
         if not (cfg.mm_risk_reserve_wc > 0 or cfg.mm_risk_reserve_corr > 0 or self.mmr_paused or self.mmr_since):
             return None
@@ -462,16 +468,16 @@ class RiskMixin:
                 "blocked": {**self.mmr_blocked, "tail_quotes": self.mmr_tail_now},
                 **({"value_share_wc": None if self.mmf_room_value[0] is None else round(self.mmf_room_value[0], 2),
                     "value_share_corr": None if self.mmf_room_value[1] is None else round(self.mmf_room_value[1], 2)}
-                   if getattr(cfg, "mm_room_guard", False) else {})}   # P14 3 (absent while off)
+                   if getattr(cfg, "mm_room_guard", False) else {})}   # (absent while off)
 
     def mm_risk_count(self, path, n=1):
-        """P12 ops: count n value adds held back on path (takes / alloc) for status.json mm_risk_room."""
+        """Count n value adds held back on path (takes / alloc) for status.json mm_risk_room."""
         if n:
             blocked = self.__dict__.setdefault("mmr_blocked", {"takes": 0, "alloc": 0, "basket": 0, "tail_quotes": 0})
             blocked[path] = blocked.get(path, 0) + n
 
     def mm_risk_summary(self):
-        """P12 ops: "risk room wc Xk corr Yk (paused)" for the 2-hourly summary while a setting is on; "" otherwise."""
+        """"risk room wc Xk corr Yk (paused)" for the 2-hourly summary while a setting is on; "" otherwise."""
         cfg = self.cfg
         if not (cfg.mm_risk_reserve_wc > 0 or cfg.mm_risk_reserve_corr > 0):
             return ""
@@ -480,7 +486,7 @@ class RiskMixin:
         return f"risk room wc {k(rw)} corr {k(rc)}" + (" (paused)" if self.mmr_paused else "")
 
     def mm_tail_adds_off(self, ex, fv, ref, ref_liquid):
-        """P12 ops: True while value adds are paused and this market is in a TAIL: its liquid race-scaled p (value_p),
+        """True while value adds are paused and this market is in a TAIL: its liquid race-scaled p (value_p),
         else its fair value, outside [value_mid_low, value_mid_high]. The middle band keeps two-way quoting."""
         if not self.mmr_paused:
             return False
@@ -572,7 +578,7 @@ class RiskMixin:
                 "turnover_dead_top": {lab: [round(c), round(f or 0.0, 1)] for c, lab, f in rows[:8]},
                 "turnover_judged": self.turnover.judged(util.time.time(), self.cfg.turnover_window_hours)}
 
-    # --- Package 8: cash gate (cash_gate_enabled) ---
+    # --- Cash gate (cash_gate_enabled) ---
     CASH_KEYS_NET = ("availableBalance", "availableCash", "availableFunds", "available")   # already net of locks
     CASH_KEYS = ("cashBalance", "cash", "balance", "myBalance")                            # locks still in them
     CASH_LOG_SECONDS = 600.0
@@ -597,7 +603,7 @@ class RiskMixin:
         return None if t is None else max(0.0, util.time.monotonic() - t)
 
     def cash_gate_log(self, eid, msg, *args):
-        """Package 8: a "cash gated" info log on the take / follow-up paths, at most once per market per
+        """A "cash gated" info log on the take / follow-up paths, at most once per market per
         CASH_LOG_SECONDS (as the quote path)."""
         now_m, seen = util.time.monotonic(), self.__dict__.setdefault("cg_logged_take", {})
         if now_m - seen.get(eid, -1e18) >= self.CASH_LOG_SECONDS:
@@ -801,7 +807,7 @@ class RiskMixin:
         return keep, need
 
     def cash_refund(self, orders):
-        """Package 8: give back to the gate the cash need counted as spent when these orders were sent, as they were
+        """Give back to the gate the cash need counted as spent when these orders were sent, as they were
         not placed (batch failed / refused / never sent). Each order's need is given back once."""
         back = sum(float(o.pop("_cash_need", 0.0) or 0.0) for o in orders if isinstance(o, dict))
         if back > 0 and getattr(self, "cg_cash", None) is not None:
@@ -821,7 +827,7 @@ class RiskMixin:
         return False
 
     def take_blocked_by_reserve(self, order):
-        """P10 take_respect_reserve: True if this take order (YES terms, possibly marked _no_sell) would leave less than
+        """take_respect_reserve: True if this take order (YES terms, possibly marked _no_sell) would leave less than
         alloc_mm_reserve of cash free: cash_left() - its gate need < reserve. False with the flag off, the gate off, or
         no reserve. A covered sale / a cash-free order (need 0) is never blocked."""
         cfg = self.cfg
@@ -835,7 +841,7 @@ class RiskMixin:
                               float(order["quantity"]))
         if need <= 1e-9:
             return False
-        if self.cash_left() + self.hv_carve_used() - need < reserve - 1e-9:   # (P15: the carve-out counts)
+        if self.cash_left() + self.hv_carve_used() - need < reserve - 1e-9:   # (the carve-out counts)
             self.take_reserve_blocked = getattr(self, "take_reserve_blocked", 0) + 1
             return True
         return False

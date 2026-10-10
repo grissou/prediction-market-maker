@@ -591,7 +591,8 @@ check("RT-3 flags off: the settings unchanged (2 / 12 / 6 h, all above the stop 
        b.close_window("flatten_per_market_hours")) == (2.0, 12.0, 6.0))
 
 print("--- red team: a reducing quote never flips the position at a price the adding rule refuses (RT-7)")
-# Found by the dry run (tests/test_p10_dryrun.py, stage 3): a short of 41 Rep Nebraska Governor (p 0.91) bid 120 @ 0.89:
+# Found by the dry run (tests/test_dryrun_value_mode.py, stage 3): a short of 41 Rep Nebraska Governor (p 0.91) bid 120
+# @ 0.89:
 # 41 buy back the short, the other 79 open a long at 2% edge, under the 8% hurdle (and, with value_mode alone, a long's
 # ask floored at p - 0.5c sold the shares beyond the position short below p).
 for mod_, tag in ((M, "now"),):

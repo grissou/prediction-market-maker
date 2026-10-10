@@ -1,8 +1,16 @@
 """
-ArbMixin: arbitrage (arb_*, execute_arbitrage), the pair unwinds and follow-ups (pair_*,
-nono_unwind_gated) and the stale-quote takes (take_*, execute_take).
+ArbMixin: the liquidity-taking side of the bot inside one race.
 
-Methods only: all state lives on the Bot instance (self); no __init__ here. Never imports bot.py.
+Owns the guaranteed arbitrage (take_arbitrage, arb_plan, execute_arbitrage: when other traders'
+bids on every party in a race sum to more than 1, sell them all at once), the NO+NO set unwinds
+and their follow-ups (pair_*, nono_unwind_gated: a set is only ever unwound as a whole, and a leg
+left behind is evened up first), and the stale-quote takes (take_*, execute_take: a tournament
+quote that Polymarket says is clearly wrong, confirmed over two readings).
+
+Every order here is immediate-or-cancel: this module never rests a quote, never changes the market-
+making quotes (those are quoting.py / mm.py) and never bypasses the cash gate or the risk pause,
+which it reads but does not set. Methods only: all state lives on the Bot instance (self); no
+__init__ here. Never imports bot.py.
 """
 from datetime import timedelta
 
@@ -44,11 +52,11 @@ class ArbMixin:
         done = set()
         if not (cfg.arb_enabled or cfg.pair_unwind_enabled):
             return done
-        b_left = int(getattr(cfg, "pair_no_unwind_max_per_cycle", 2))   # Package 7: B-only short-set unwinds
+        b_left = int(getattr(cfg, "pair_no_unwind_max_per_cycle", 2))   # B-only short-set unwinds
         b_waiting = 0
         for race, members in self.arb_race_order(inv):
             if (len(members) < 2 or not self.running or now_m < self.arb_cooldown.get(race, 0)
-                    or race in getattr(self, "pair_owed", ())  # Package 7: its owed legs are evened up first
+                    or race in getattr(self, "pair_owed", ())  # Its owed legs are evened up first
                     or any(busy(self.ex[e], now_m) for e in members)):
                 continue
             # pre-close window: arbitrage would open positions the per-market flatten then pays to unwind;
@@ -58,7 +66,7 @@ class ArbMixin:
             plan = self.arb_plan(members, inv, fvs, closing)      # quick check on the cached books
             if plan is None:
                 continue
-            if getattr(self, "arb_plan_b", False) and b_left < 1:     # Package 7: B's per-cycle cap: waits
+            if getattr(self, "arb_plan_b", False) and b_left < 1:     # B's per-cycle cap: waits
                 b_waiting += 1
                 continue
             # Write budget: cancel our quotes on each leg, one batch, cancel the leftovers on each leg.
@@ -96,7 +104,7 @@ class ArbMixin:
 
     def arb_race_order(self, inv):
         """The order take_arbitrage visits races in. Unchanged (self.groups order) unless pair_no_unwind_max_cost is in
-        effect; then (Package 8) the races not held NO on every leg keep their order and come first (they are not
+        effect; then the races not held NO on every leg keep their order and come first (they are not
         under pair_no_unwind_max_per_cycle), and the NO+NO races follow, cheapest first: the cached YES asks' sum
         ascending (no full ask book last), then the capital the sets lock descending (sets x (legs - 1)), then the
         race name - deterministic, so with the per-cycle cap the cheapest sets go first and the rest wait."""
@@ -138,7 +146,7 @@ class ArbMixin:
         cfg = self.cfg
         bank = self.bankroll()
         bids, asks = self.top_levels(members, "bids"), self.top_levels(members, "asks")
-        self.arb_plan_b = False           # Package 7: True = the plan is a short-set unwind only B's threshold allows
+        self.arb_plan_b = False           # True = the plan is a short-set unwind only B's threshold allows
         if cfg.pair_unwind_enabled:
             held = [inv.get(e, 0.0) for e in members]
             for sign, levels, action in ((+1, bids, "sell"), (-1, asks, "buy")):
@@ -151,27 +159,27 @@ class ArbMixin:
                 nono = sign < 0 and self.pair_no_unwind_on()
                 alloc_cost = None
                 if nono:
-                    # Package 7: a NO+NO set is unwound as a pair even at a small cost (asks <= 1 + max_cost): the
+                    # A NO+NO set is unwound as a pair even at a small cost (asks <= 1 + max_cost): the
                     # only way to free it without cash (selling one leg breaks the set's collateral)
                     floor = min(floor, -cfg.pair_no_unwind_max_cost)
                     alloc_cost = (getattr(self, "alloc_set_races", None) or {}).get(self.ex[members[0]].group)
-                    if alloc_cost is not None:    # Package 10 B3: a set race the allocator registered, at its cost
+                    if alloc_cost is not None:    # A set race the allocator registered, at its cost
                         floor = min(floor, -alloc_cost["cost"])
                 if edge < floor - 1e-9:   # (buying back a short set below 0.90 only cuts risk)
                     continue
                 if nono and getattr(cfg, "pair_no_unwind_asks_le1", False) and self.nono_unwind_gated(
                         members, total, alloc_cost):
-                    continue              # Package 12 L3: not while the bids sum > 1 (or the asks above the cost)
+                    continue              # Not while the bids sum > 1 (or the asks above the cost)
                 max_sets = int(getattr(cfg, "pair_no_unwind_max_sets", 0) or 0)
                 if nono and max_sets > 0:
-                    # Package 8: every leg is a covered "sell NO" (no cash locked, 1 - ask received), so the cap is in
+                    # Every leg is a covered "sell NO" (no cash locked, 1 - ask received), so the cap is in
                     # SETS per race, not cash per order at the YES ask (0 = off: the old cash cap)
                     caps = [max_sets]
                 else:
                     caps = [cfg.pair_unwind_max_frac * bank / max(p, TICK) for p, _ in levels.values()]
                 if (alloc_cost is not None and edge < -cfg.pair_no_unwind_max_cost - 1e-9
                         and edge < cfg.pair_unwind_min_profit - 1e-9):
-                    caps.append(alloc_cost.get("sets", float("inf")))   # (P10 B3: only the sets the allocator needs)
+                    caps.append(alloc_cost.get("sets", float("inf")))   # (only the sets the allocator needs)
                 qty = int(min([sets] + [size for _, size in levels.values()] + caps))
                 slack_kw = {"set_slack": True} if nono and getattr(cfg, "pair_unwind_race_order", False) else {}
                 if qty >= 1 and self.unwind_is_safe(inv, fvs, members, -sign * qty, **slack_kw):
@@ -180,11 +188,11 @@ class ArbMixin:
         return None      # (the arb_enabled sell-all / buy-set branch that followed was removed on simplify: off live)
 
     def nono_unwind_gated(self, members, asks_sum, alloc_cost=None):
-        """Package 12 L3 (pair_no_unwind_asks_le1): True = a NO+NO set race's pair unwind waits - its best asks sum
-        above 1 + pair_no_unwind_max_cost (an allocator B3 registration: its own cost, already arb_plan's floor), or
+        """(pair_no_unwind_asks_le1): True = a NO+NO set race's pair unwind waits - its best asks sum
+        above 1 + pair_no_unwind_max_cost (an allocator set registration: its own cost, already arb_plan's floor), or
         its best bids (other traders' levels only, arb_levels: a price we bid at is skipped whole) sum above 1 (the
         set is worth more sold leg by leg, L1). A leg with no other trader's bid: the bids do not sum above 1.
-        P12 red team RT12-6: also waits (at a cost, asks sum > 1) while our L1 set ladder rests on a leg - it sells
+        Also waits (at a cost, asks sum > 1) while our L1 set ladder rests on a leg - it sells
         this set leg by leg, and arb_levels skips its levels (at the best bid) whole, so the bids sum would read low."""
         cfg = self.cfg
         if alloc_cost is None and asks_sum > 1 + max(0.0, cfg.pair_no_unwind_max_cost) + 1e-9:
@@ -230,7 +238,7 @@ class ArbMixin:
         """Would adding `delta` YES shares on every leg of a race leave the party delta within its cap (or no
         further past it) and the settlement risk and the worst case no higher? A complete set is riskless,
         so this holds by construction; it guards against the set being part of a hedge the risk logic relies on.
-        set_slack (Package 8, a NO+NO buy-back with pair_no_unwind_max_cost in effect and pair_unwind_race_order
+        set_slack (a NO+NO buy-back with pair_no_unwind_max_cost in effect and pair_unwind_race_order
         on; arb_plan passes it only then): the worst case is a MARK, so
         when the legs' risk fair values add up to s > 1 buying back d short sets raises it by d x (s - 1) although
         the set pays the same in every outcome; that mark artefact is allowed (the party delta and the settlement
@@ -271,7 +279,7 @@ class ArbMixin:
                      else "arbitrage", race)
             return
         followup = kind == "unwind" and getattr(cfg, "pair_unwind_followup", False)
-        if followup:                              # Package 7: every leg sized to what can fill together
+        if followup:                              # Every leg sized to what can fill together
             joint = self.joint_unwind_qty(members, levels, qty, action)
             if joint < 1:
                 log.info("pair unwind on %s not sent: the legs' depth at the planned prices does not fill one set "
@@ -281,7 +289,7 @@ class ArbMixin:
                 log.info("pair unwind on %s: sized %d -> %d sets (joint depth at the planned prices)", race, qty, joint)
             qty = joint
         # The legs (the batch), built first: a short-set unwind whose legs cannot ALL go out as covered "sell NO"
-        # is not sent at all (Package 7: a half-converted batch breaks the NO+NO set and needs cash). The expiry is
+        # is not sent at all (a half-converted batch breaks the NO+NO set and needs cash). The expiry is
         # set after our quotes are pulled (below).
         orders = [{"exchangeId": e, "side": "yes", "action": action, "quantity": qty, "price": p,
                    "tournamentId": self.tid} for e, (p, _) in levels.items()]
@@ -295,7 +303,7 @@ class ArbMixin:
                         race, ", ".join(f"{self.ex[o['exchangeId']].label} x{o['quantity']} NO held "
                                         f"{-self.ex[o['exchangeId']].inv:.0f}" for o in orders))
             return
-        if self.cash_gate_blocks(orders, joint=True):   # Package 8: not one set fits the cash (gate on only)
+        if self.cash_gate_blocks(orders, joint=True):   # Not one set fits the cash (gate on only)
             self.cash_gate_log(f"race:{race}", "%s on %s not sent: not enough available cash for one set (cash gate)",
                                "pair unwind" if kind == "unwind" else "arbitrage", race)
             return
@@ -355,7 +363,7 @@ class ArbMixin:
                                                     "eid": o["exchangeId"],
                                                     **({"no_sell": True} if o.get("_no_sell") else {})}
                 self.notes_dirty = True
-        if len(set(traded)) > 1 and followup:     # Package 7: the lagging leg(s) owe the difference
+        if len(set(traded)) > 1 and followup:     # The lagging leg(s) owe the difference
             self.pair_owe(race, orders, traded, action, now_m)
         elif len(set(traded)) > 1:
             util.alert(f"arbitrage on {race} only partly filled {traded}: the difference is now ordinary "
@@ -364,7 +372,7 @@ class ArbMixin:
             log.info("arbitrage on %s: every leg filled %.0f", race, traded[0] if traded else 0)
         return traded
 
-    # --- Package 7: pair unwind follow-up (pair_unwind_followup) ---
+    # --- Pair unwind follow-up (pair_unwind_followup) ---
     @staticmethod
     def depth_within(book, key, limit):
         """Shares on one side of a book ("bids"/"asks", several levels) at or better than limit: asks at <= limit,
@@ -606,7 +614,7 @@ class ArbMixin:
         leg (pair_followup_take). The owed shares shrink by what fills; the state is dropped once even, or after
         pair_unwind_followup_tries cycles that sent (or tried to send) the follow-up, with one alert of what is left.
         A cycle the write budget defers is not a try. Returns the races acted on (not quoted this cycle).
-        Package 9 F5: an arbitrage's owed record (kind "arb") goes to arb_followup (inv: this cycle's positions)."""
+        An arbitrage's owed record (kind "arb") goes to arb_followup (inv: this cycle's positions)."""
         cfg, acted = self.cfg, set()
         for race in list(self.pair_owed):
             st = self.pair_owed[race]
@@ -621,7 +629,7 @@ class ArbMixin:
                 del self.pair_owed[race]
                 continue
             max_age = float(getattr(cfg, "pair_unwind_followup_max_age", 0.0) or 0.0)
-            if max_age > 0 and now_m - st.get("t", now_m) >= max_age:   # Package 8 (0 = off): never blocks for ever
+            if max_age > 0 and now_m - st.get("t", now_m) >= max_age:   # (0 = off): never blocks for ever
                 owed = ", ".join(f"{self.ex[e].label} {st['legs'][e]}" for e in lag)
                 util.alert(f"pair unwind on {race}: owed legs not evened up within {max_age:.0f} s ({st['tries']} tries; "
                       f"{owed}): owed state cleared, now ordinary inventory, which the quoting will work off")
@@ -709,7 +717,7 @@ class ArbMixin:
                     st.setdefault("cleared", []).append(e)
                     continue
             orders.append(order)
-        if orders and self.cash_gate_on():        # Package 8: a leg none of which fits the cash waits (a try)
+        if orders and self.cash_gate_on():        # A leg none of which fits the cash waits (a try)
             fits = [o for o in orders if not self.cash_gate_blocks([o])]
             for o in orders:
                 if o not in fits:
@@ -841,13 +849,13 @@ class ArbMixin:
             room = min(room, max(0.0, -inv) if buy else max(0.0, inv))
         cost = price if buy else 1 - price
         qty = int(min(level["quantity"], room, cfg.max_order_cash_frac * bank / max(cost, TICK)))
-        if getattr(self, "mmr_paused", False) and qty >= 1:   # P12 ops mm_risk_reserve_*: value adds paused -
+        if getattr(self, "mmr_paused", False) and qty >= 1:   # mm_risk_reserve_*: value adds paused -
             cut = int(min(qty, max(0.0, -inv) if buy else max(0.0, inv)))   # only what shrinks the position here
             if cut < 1:
                 self.mm_risk_count("takes")
                 log.info("take on %s skipped: value adds paused (mm_risk_reserve)", ex.label)
             qty = cut
-        if self.st_on() and qty >= 1:             # P15 state_max_usd: the adding part only within the state's room
+        if self.st_on() and qty >= 1:             # state_max_usd: the adding part only within the state's room
             red = int(min(qty, max(0.0, -inv) if buy else max(0.0, inv)))
             add = self.st_add_room(ex, buy, qty - red)
             if red + add < qty:
@@ -865,10 +873,10 @@ class ArbMixin:
         ex.take_dir = 0                                                  # a new gap must be confirmed afresh
         if qty < 1:
             return False
-        if buy and self.set_blocked(ex.eid, ex.inv):       # Package 7: all NO here in a NO+NO set: nothing to send
+        if buy and self.set_blocked(ex.eid, ex.inv):       # All NO here in a NO+NO set: nothing to send
             log.info("take on %s skipped: all its NO is in a NO+NO set (no_set_aware_bids)", ex.label)
             return False
-        if self.cash_gate_on():                   # Package 8: nothing of it fits the cash -> our quote stays put
+        if self.cash_gate_on():                   # Nothing of it fits the cash -> our quote stays put
             prov = self.no_sell_order({"exchangeId": ex.eid, "side": "yes", "action": "buy" if buy else "sell",
                                        "quantity": qty, "price": price, "tournamentId": self.tid}, ex.inv)
             if prov is not None and self.cash_gate_blocks([prov]):
@@ -891,7 +899,7 @@ class ArbMixin:
                                     "quantity": qty, "price": price, "tournamentId": self.tid,
                                     "expirationDate": iso(util.utcnow() + timedelta(seconds=cfg.take_order_ttl))}, ex.inv)
         self.orders_stale = True
-        if order is None:                         # Package 7: all NO here is in a NO+NO set (no_set_aware_bids)
+        if order is None:                         # All NO here is in a NO+NO set (no_set_aware_bids)
             self.takes_total -= 1
             log.warning("take on %s not sent: all its NO is in a NO+NO set (our quote there is re-placed next cycle)",
                         ex.label)

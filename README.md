@@ -307,7 +307,7 @@ for t in tests/test_*.py; do python "$t" | tail -1; done      # the suites
 STRESS_LADDER=1 python tests/test_stress.py                    # the stress test
 ```
 
-The dry-run suites (`tests/test_p*_dryrun.py`) replay a recorded snapshot. Point `P9_SNAP` at a folder
+The dry-run suites (`tests/test_dryrun_*.py`) replay a recorded snapshot. Point `P9_SNAP` at a folder
 holding `md.sqlite` (built from an `ops-snapshot-*` branch's `market_data.sql.gz`) and the snapshot's
 `status.json`, `order_notes.json`, `position_lots.json` and `settings_override.json`; without it they
 skip.

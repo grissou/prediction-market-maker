@@ -8,7 +8,7 @@ RT12-3 a ladder the EXCHANGE refuses (not the cash gate) was re-sent every cycle
 RT12-4 skew_target_inventory removed the inventory skew in reduce-only (global_reduce / flatten window).
 RT12-5 (alloc_set_rich_leg with tilt_exit_take_split_sets warned): gone with the tilt exits, removed on simplify.
 
-Run:  python tests/test_p12_redteam.py      (exit code 0 = all passed)
+Run:  python tests/test_allocator_quote_regressions.py      (exit code 0 = all passed)
 """
 import logging
 import os

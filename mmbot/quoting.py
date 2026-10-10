@@ -1,8 +1,14 @@
 """
-What we want resting on one exchange: Quote, Kelly sizing, plan_sizes, compute_quote, the value-
-floor quotes, exit_quote, side_needs_change and the mark-fragility helpers.
+What we want resting on one exchange: the quote maths, given a fair value and a position.
 
-Pure functions only: no I/O, no bot state, never imports the bot or the mixins.
+Owns Quote (the desired bid / ask, sizes and keep limits), Kelly sizing and plan_sizes, compute_quote
+(one tick better than the best other trader but never closer to fair value than min_edge, skewed
+toward the target holding, one-sided or reduce-only where a guard says so), the value-floor prices,
+exit_quote, side_needs_change (is the resting order close enough to keep its place in line?) and the
+mark-fragility helpers.
+
+Pure functions only: no I/O, no bot state. It never sends an order and never imports the bot or the
+mixins; bot.decide gathers the inputs, calls here, and acts on the Quote.
 """
 import math
 from dataclasses import dataclass, field, replace
@@ -132,24 +138,6 @@ def plan_sizes(activity, headline, bankroll, cfg=CFG, prev=None, lock=None, prev
     return out
 
 
-def fl_side(fv, prev, cfg=CFG):
-    """Favourite-longshot bias: which side of a market priced at fv is the "bad" one -> (side, extra edge,
-    size factor), side None = no bias. Below fl_low our bid buys the longshot students overpay for; above
-    fl_high our ask sells the favourite they undersell. prev = last cycle's side for this market: once on, a
-    bias holds until fv is fl_hysteresis back across the line, so a market sitting at 20c doesn't flip
-    (and get re-quoted) every cycle. Mid-band bids get fl_mid_bid_extra_edge (default 0 = no bias)."""
-    if not cfg.fl_bias_enabled or fv is None:
-        return None, 0.0, 1.0
-    h = cfg.fl_hysteresis
-    if fv < cfg.fl_low or (prev == "bid" and fv < cfg.fl_low + h):
-        return "bid", cfg.fl_bad_side_extra_edge, cfg.fl_bad_side_size_factor
-    if fv > cfg.fl_high or (prev == "ask" and fv > cfg.fl_high - h):
-        return "ask", cfg.fl_bad_side_extra_edge, cfg.fl_bad_side_size_factor
-    if cfg.fl_mid_bid_extra_edge > 0:
-        return "mid", cfg.fl_mid_bid_extra_edge, 1.0
-    return None, 0.0, 1.0
-
-
 MARK_FRAG_STEP_SECONDS = 600.0       # the mark-fragility step: 10 minutes
 MARK_FRAG_MAX_STEP_FACTOR = 1.5      # two snapshots further apart than 15 min are a gap, not a step
 
@@ -181,7 +169,7 @@ def mark_step_sd(series, min_samples=60, floor=0.002, step=MARK_FRAG_STEP_SECOND
 def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=False, no_bid=False, no_ask=False,
                   bid_cap=None, ask_cap=None, kelly_p=None, bankroll=None, shift=0.0, order_size=None,
                   position_limit=None, min_edge=None, reduce_size=None, net_inv=None, age_hours=0.0,
-                  adding_factor=1.0, bias_side=None, bias_edge=0.0, bias_size=1.0, adding_limit_factor=1.0, frag_limit=None,
+                  adding_factor=1.0, adding_limit_factor=1.0, frag_limit=None,
                   why=None, adding_per_market=False, value_p=None, skew_inv=None, age_off=False,
                   skew_add_flat=False):
     """
@@ -192,7 +180,7 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
     best_ask   best ask from OTHER traders, or None
     reduce_only        only trade toward flat (market about to close, or worst-case-loss cap hit)
     no_bid / no_ask    block one side (national-swing cap, reference-price guard)
-    bid_cap / ask_cap  max shares on one side, None = no cap (tail guard)
+    bid_cap / ask_cap max shares on one side, None = no cap (tail guard)
     kelly_p            a liquid Polymarket probability: position limits then come from Kelly sizing
                        instead of max_position_frac
     bankroll           account value; every size is a fraction of it (None = DEFAULT_BANKROLL)
@@ -206,38 +194,28 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
                        applies to it on the side that grows it; it also decides which side is "adding"
     age_hours          share-weighted age of this market's position: adds the age skew (skew_age_*)
     adding_factor      size factor for the side that grows |net_inv| (capital ceiling; 1 = no change)
-    bias_side          "bid" / "ask" / None: the side that quotes bias_edge further from r (capped at
-                       max_half_spread) and at bias_size times its size (favourite-longshot bias, see fl_side).
-                       Ignored on a side that shrinks this exchange's position: that side quotes normally
-                       (its size beyond the position itself still gets bias_size)
-    adding_limit_factor  the side that grows |net_inv| WANTS at most this fraction of the normal position limit
+    adding_limit_factor the side that grows |net_inv| WANTS at most this fraction of the normal position limit
                        (turnover control: a market whose position cannot turn), at least 1 share while the normal
                        limits would quote it; bid_max / ask_max keep the normal limits. 1 = no change
     frag_limit         a cap (today only the mid limit, below) on |this exchange's position| on the side
                        that GROWS it only (bid when inv >= 0, ask when inv <= 0); the shrinking side is untouched
     behind_best        False = no behind-the-best sizing here (ref-only markets: already small); see
                        cfg.behind_best_size_enabled
-    reduce_fv          reduce_from_book (A): the tournament book's own price, or None = off. The side that shrinks
-                       THIS exchange's position (long -> ask, short -> bid) measures its band from it (same skew and
-                       shift) when that is more aggressive than fv, never less; that side then quotes at most the
-                       position. The adding side is capped 2 x min_edge behind the lowest reducing price that may
-                       rest (bid <= ask keep limit - 2 x min_edge when long, mirror when short), so we never meet
-                       our own order
     why                optional dict, filled with why["ro_clip"] = "", "bid", "ask" or "bid ask": the side(s) that
                        ONLY the reduce-only race-net clip emptied (no no_bid / no_ask block, no zero cap on it)
-    adding_per_market  Package 8 (adding_factor_per_market): adding_factor and adding_limit_factor pick the adding side
+    adding_per_market adding_factor_per_market: adding_factor and adding_limit_factor pick the adding side
                        by THIS exchange's position inv (the side growing |inv|; of a side that shrinks it, the part
                        beyond the position is adding too), not by net_inv. False = race-netted, as before
-    value_p            Package 10 A: this market's liquid, race-scaled Polymarket probability (Bot.value_p), or None.
+    value_p            this market's liquid, race-scaled Polymarket probability (Bot.value_p), or None.
                        With cfg.value_mode the side reducing THIS exchange's position never rests beyond
                        p -+ value_sell_margin (value_side_prices); with cfg.value_quote_hurdle > 0 the adding side
-                       follows the hurdle / middle-band rule (A4). None = neither (and value_mode alone still runs
+                       follows the hurdle / middle-band rule. None = neither (and value_mode alone still runs
                        the max_skew_through clamp in reduce-only)
-    skew_inv           Package 12 M2 (skew_target_inventory): the inventory the skew is measured from, i.e. the
+    skew_inv           skew_target_inventory: the inventory the skew is measured from, i.e. the
                        race-netted (inv - target) (Bot.skew_target_inputs); None = eff_inv (as before). Only the
-                       reservation-price skew changes: limits, reduce-only and reduce_join_best still use inv / eff_inv
-    age_off            Package 12 M2: no age skew (a +EV holding in value_mode); False = age_skew as before
-    skew_add_flat      P12 red team RT12-7: with skew_inv, the side that ADDS to the (race-netted) position keeps the
+                       reservation-price skew changes: limits, reduce-only still use inv / eff_inv
+    age_off            no age skew (a +EV holding in value_mode); False = age_skew as before
+    skew_add_flat      with skew_inv, the side that ADDS to the (race-netted) position keeps the
                        skew from flat when that is the more cautious price (a target that is just the current holding
                        must not unbrake buying more of it); False = skew_inv on both sides
     """
@@ -247,15 +225,15 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
         order_size = cfg.order_size_frac * bankroll
     else:
         max_order_cash = max(max_order_cash, order_size)   # a planned size has already been capital-checked
-    vmode = bool(getattr(cfg, "value_mode", False))         # Package 10 A1
-    hurdle = getattr(cfg, "value_quote_hurdle", 0.0) if value_p is not None else 0.0   # Package 10 A4
+    vmode = bool(getattr(cfg, "value_mode", False))
+    hurdle = getattr(cfg, "value_quote_hurdle", 0.0) if value_p is not None else 0.0
     v_mid = hurdle > 0 and cfg.value_mid_low <= value_p <= cfg.value_mid_high
-    if v_mid:                                 # A4 middle band: the side growing |inv| stops at N quote sizes
+    if v_mid:                                 # middle band: the side growing |inv| stops at N quote sizes
         mid_limit = max(0.0, cfg.value_mid_inventory_quotes) * order_size
         frag_limit = mid_limit if frag_limit is None else min(frag_limit, mid_limit)
     # 1. Reservation price = fair value shifted against our inventory. Long -> lower r -> we bid
     #    less eagerly and offer more eagerly, which pushes the position back toward flat.
-    #    Package 12 M2: from the distance to a target holding instead (skew_inv), the informed market maker.
+    #    From the distance to a target holding instead (skew_inv), the informed market maker.
     s_inv = eff_inv if skew_inv is None else skew_inv
     if cfg.skew_mode == "quote" and order_size > 0:
         skew = cfg.skew_per_quote * s_inv / order_size
@@ -263,9 +241,9 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
         skew = cfg.skew_per_share * s_inv
     skew = max(-cfg.skew_max, min(cfg.skew_max, skew))
     r = fv - skew - shift
-    # (1a: the reduce_from_book reservation price that was computed here was removed on simplify: off live)
+    # (1a: one reservation price for both sides; the book-price variant that once sat here is gone)
     r_bid = r_ask = r
-    if skew_add_flat and skew_inv is not None and abs(eff_inv) >= 1:   # (P12 red team RT12-7: adding side braked)
+    if skew_add_flat and skew_inv is not None and abs(eff_inv) >= 1:   # (adding side braked)
         flat = (cfg.skew_per_quote * eff_inv / order_size if cfg.skew_mode == "quote" and order_size > 0
                 else cfg.skew_per_share * eff_inv)
         flat = max(-cfg.skew_max, min(cfg.skew_max, flat))
@@ -278,29 +256,25 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
     # 2. Allowed band for each side: at least min_edge, at most max_half_spread away from r.
     edge = cfg.min_edge if min_edge is None else min_edge
     widest = max(cfg.max_half_spread, edge)
-    bias_bid = bias_side == "bid" and inv > -1         # (a side that shrinks a position quotes normally)
-    bias_ask = bias_side == "ask" and inv < 1
-    bid_edge = min(widest, edge + bias_edge) if bias_bid else edge
-    ask_edge = min(widest, edge + bias_edge) if bias_ask else edge
-    bid_lo, bid_hi = floor_tick(r_bid - widest), floor_tick(r_bid - bid_edge)
-    ask_lo, ask_hi = ceil_tick(r_ask + ask_edge), ceil_tick(r_ask + widest)
+    bid_lo, bid_hi = floor_tick(r_bid - widest), floor_tick(r_bid - edge)
+    ask_lo, ask_hi = ceil_tick(r_ask + edge), ceil_tick(r_ask + widest)
 
     # 3. Penny: one tick better than the best other trader, so we're first in the queue while
     #    keeping the widest spread possible. Then clamp into the band. That clamp is what stops a
     #    penny war with another bot from pushing us below min_edge. No other quote -> band edge.
-    #    R4: improve_ticks = 0 joins the best price instead; undercut_step_back > 0 quotes that far from r
+    #    Improve_ticks = 0 joins the best price instead; undercut_step_back > 0 quotes that far from r
     #    (not at min_edge) when another trader already sits inside our min_edge band.
     imp = cfg.improve_ticks * TICK
     bid = floor_tick(best_bid + imp) if best_bid is not None else bid_lo
     ask = ceil_tick(best_ask - imp) if best_ask is not None else ask_hi
     if cfg.undercut_step_back > 0:
         if best_bid is not None and best_bid > bid_hi + 1e-9:
-            bid = floor_tick(r_bid - max(bid_edge, cfg.undercut_step_back))
+            bid = floor_tick(r_bid - max(edge, cfg.undercut_step_back))
         if best_ask is not None and best_ask < ask_lo - 1e-9:
-            ask = ceil_tick(r_ask + max(ask_edge, cfg.undercut_step_back))
+            ask = ceil_tick(r_ask + max(edge, cfg.undercut_step_back))
     bid = min(max(bid, bid_lo), bid_hi)
     ask = max(min(ask, ask_hi), ask_lo)
-    if (not reduce_only or vmode) and cfg.max_skew_through < 1.0:   # (P10 A1: in reduce-only too)
+    if (not reduce_only or vmode) and cfg.max_skew_through < 1.0:   # (in reduce-only too)
         # Skew sheds inventory by quoting less greedily, never by paying through our own fair value
         # (day one: fills at <= -1c edge lost -804 at the 60-min mid; rival bots pick those quotes off).
         bid_hi = min(bid_hi, floor_tick(fv_bid + cfg.max_skew_through))   # (fv_bid / fv_ask = fv unless A)
@@ -313,22 +287,7 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
     if best_bid is not None:
         ask = max(ask, ceil_tick(best_bid + TICK))
 
-    # 4a. Reducing side joins the best other price on its side (reduce_join_best): never through fair, never crossing.
-    if (cfg.reduce_join_best and not reduce_only
-            and abs(eff_inv) >= max(1, cfg.reduce_join_min_shares)):
-        if eff_inv > 0 and best_ask is not None:
-            ask = min(ask, max(ceil_tick(best_ask), ceil_tick(fv + cfg.reduce_join_min_edge)))   # never moves out
-            if best_bid is not None:
-                ask = max(ask, ceil_tick(best_bid + TICK))
-            ask_lo = min(ask_lo, ask)
-            bid = min(bid, floor_tick(ask - TICK))
-        elif eff_inv < 0 and best_bid is not None:
-            bid = max(bid, min(floor_tick(best_bid), floor_tick(fv - cfg.reduce_join_min_edge)))
-            if best_ask is not None:
-                bid = min(bid, floor_tick(best_ask - TICK))
-            bid_hi = max(bid_hi, bid)
-            ask = max(ask, ceil_tick(bid + TICK))
-    # 4d. Package 10: A4 the adding side's hurdle price (tails), A1 the reducing side's value floor. Each only moves a
+    # 4d. Value mode: the adding side's hurdle price (tails), the reducing side's value floor. Each only moves a
     #     price AWAY from the other side (and the keep limits with it); step 4 runs again after them.
     if hurdle > 0 and not v_mid:
         if inv > -1:                              # the bid adds (not buying back a short)
@@ -408,16 +367,12 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
     bid_size = min(order_size, long_limit - inv)
     ask_size = min(order_size, short_limit + inv)
     bid_max, ask_max = limited(bid_size, ask_size)     # the sizes no factor shrank: the most that may stay
-    if bias_side == "bid" and bias_size != 1.0:        # bad side: smaller, except the part that only unloads
-        bid_size = min(bid_size, max(order_size * bias_size, -inv))
-    if bias_side == "ask" and bias_size != 1.0:
-        ask_size = min(ask_size, max(order_size * bias_size, inv))
     bid_size, ask_size = limited(bid_size, ask_size)
     # Turnover control: the side growing |net| WANTS no more than the smaller limit allows, like a size factor (the
     # bid_max / ask_max above keep the normal limits, so an order already resting within them stays). A side the
     # normal limits would quote keeps at least 1 share, so its resting order is not pulled when a market turns dead.
     hold_bid = hold_ask = False
-    sel = inv if adding_per_market else net       # Package 8: which position decides the adding side
+    sel = inv if adding_per_market else net       # Which position decides the adding side
     if adding_limit_factor < 1.0:
         f = max(0.0, adding_limit_factor)
         if sel > 0 and bid_size >= 1:
@@ -430,7 +385,7 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
             if cfg.limits_use_race_net:
                 room = min(room, short_limit * f + net)
             ask_size, hold_ask = max(1, min(ask_size, room)), True
-    if adding_factor < 1.0 and adding_per_market:   # Package 8: by this market's own position; the part of a
+    if adding_factor < 1.0 and adding_per_market:   # By this market's own position; the part of a
         f = max(0.0, adding_factor)                 # reducing side beyond the position (it flips it) shrinks too
         red_bid, red_ask = max(0.0, -inv), max(0.0, inv)
         bid_size = min(bid_size, red_bid + max(0.0, bid_size - red_bid) * f)
@@ -447,8 +402,8 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
         ask_size = max(1, ask_size)
     bid_max, ask_max = max(bid_size, int(bid_max)), max(ask_size, int(ask_max))
     if (hurdle > 0 and not v_mid) or (vmode and value_p is not None):
-        # Package 10 (red team RT-7): the part of a REDUCING quote beyond this exchange's position opens the other
-        # side, i.e. it adds: never at a price the adding rule refuses (A4: the hurdle price in the tails; A1: p, so
+        # The part of a REDUCING quote beyond this exchange's position opens the other
+        # side, i.e. it adds: never at a price the adding rule refuses (the hurdle price in the tails; p, so
         # the flip never sells below / buys above value). Such a quote stops at the position.
         tail = hurdle > 0 and not v_mid
         if inv <= -1 and bid > (value_p / (1 + hurdle) if tail else value_p) + 1e-9:
@@ -472,7 +427,7 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
 
 
 def value_side_prices(p, inv, cfg=CFG):
-    """Package 10 A1: (highest bid, lowest ask) the side REDUCING this exchange's position inv may rest at, given the
+    """(highest bid, lowest ask) the side REDUCING this exchange's position inv may rest at, given the
     market's liquid race-scaled Polymarket p: long (inv >= 1) -> (None, ceil_tick(p - value_sell_margin)); short
     (inv <= -1) -> (p + margin without the grid clamp, floored to the tick (< PMIN = no bid), None); flat -> (None,
     None). Selling below p (buying back above p) gives value away at the outcome."""
@@ -486,7 +441,7 @@ def value_side_prices(p, inv, cfg=CFG):
 
 
 def value_floor_quote(q, p, inv, cfg=CFG):
-    """Package 10 A1 on a finished Quote (decide): the reducing side moved back to the value floor
+    """On a finished Quote (decide): the reducing side moved back to the value floor
     (value_side_prices) if anything priced it beyond; its keep limit too. Only moves away from the other side; sizes
     unchanged. A bid that would have to go below the grid is dropped."""
     if p is None or q is NO_QUOTE:
@@ -509,7 +464,7 @@ def exit_quote(fv, inv, best_bid, best_ask, cfg=CFG, bankroll=None, max_size=Non
     if the best bid is worse than that, the order rests at that floor instead. Short -> the mirror
     image. Only the side that reduces the position is quoted. Sized to the whole position, capped at
     max_order_cash_frac of the account per order (the rest goes on later cycles).
-    value_floor (Package 10 A1 iii): a liquid Polymarket p -> never sell below p - value_sell_margin (buy back above
+    value_floor (iii): a liquid Polymarket p -> never sell below p - value_sell_margin (buy back above
     p + margin) either; None = unchanged.
     """
     bankroll = bankroll or DEFAULT_BANKROLL

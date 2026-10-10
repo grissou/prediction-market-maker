@@ -1,9 +1,14 @@
 """
-Pure pricing maths: our resting orders (Resting, parse_order, wire_order), clean books (strip_own,
-predicted_top, others_top, depth_price), fair_value, tilted_ref / blend_fv, TiltEstimator and the
-race / bloc risk maths (bloc_slope, race_variance, worst_case_loss).
+Pure pricing maths: from raw books and reference prices to a fair value and the risk measures.
 
-Pure functions only: no I/O, no bot state, never imports the bot or the mixins.
+Owns the shape of our resting orders (Resting, parse_order, wire_order), clean books (strip_own,
+predicted_top, others_top, depth_price: our own orders removed, small orders ignored so nobody
+moves the price with one share), fair_value, tilted_ref / blend_fv (leaning toward Polymarket),
+TiltEstimator (the tournament's systematic lean against Polymarket) and the race / bloc risk maths
+(bloc_slope, race_variance, worst_case_loss).
+
+Pure functions only: no I/O, no clock, no bot state. It never sends an order, never decides a size
+and never imports the bot or the mixins; everything it needs comes in as arguments.
 """
 import math
 import statistics
@@ -58,13 +63,13 @@ WIRE_PRIVATE = ("_no_sell", "_cash_need", "_alloc_paired")   # never sent
 
 
 def wire_order(o):
-    """Package 6 (reduce_no_as_sell): an order as the bot builds and tracks it (YES terms: "buy"/"sell" YES at a YES
+    """reduce_no_as_sell: an order as the bot builds and tracks it (YES terms: "buy"/"sell" YES at a YES
     price) -> the request body actually sent. Only an order marked "_no_sell" (a bid that buys back NO we hold, see
     Bot.cover_no_qty) changes: "buy YES @ p" goes out as the covered sale "sell NO @ 1-p", which needs no cash. It
     reads back through parse_order as our bid at p, so everything after the send keeps working in YES terms."""
     if not any(k in o for k in WIRE_PRIVATE):
         return o
-    w = {k: v for k, v in o.items()                  # _cash_need: Package 8 gate's note; _alloc_paired: Package 10 B
+    w = {k: v for k, v in o.items()                  # _cash_need: the cash gate's note; _alloc_paired: the allocator's
          if k not in WIRE_PRIVATE}
     if o.get("_no_sell"):
         w.update(side="no", action="sell", price=round(1 - o["price"], 3))
@@ -164,7 +169,7 @@ def blend_fv(book_fv, r, cfg):
     return (1 - cfg.ref_weight) * book_fv + cfg.ref_weight * r
 
 
-TILT_RATIO_MIN_X = 0.1   # T2.1 "median"/"wls" estimators: only markets with |r - c| above this give a ratio g / x
+TILT_RATIO_MIN_X = 0.1   # "median"/"wls" estimators: only markets with |r - c| above this give a ratio g / x
 
 
 class TiltEstimator:
@@ -258,7 +263,7 @@ _STD_NORMAL = statistics.NormalDist()
 
 
 def bloc_slope(p_dem, rho, p_ind=0.0):
-    """Package 10 A2 (ideas_H.md H-2): d E[payout of one Dem-win share] / d F is -sqrt(rho) x phi(Phi^-1(p_dem)) x
+    """(ideas_H.md H-2): d E[payout of one Dem-win share] / d F is -sqrt(rho) x phi(Phi^-1(p_dem)) x
     (1 - p_ind) under the Gaussian copula (F = the national factor, + = Republican; p_dem conditional on no
     independent winning). Returns the magnitude sqrt(rho) x phi(Phi^-1(p_dem)) x (1 - p_ind)."""
     x = min(max(p_dem, 1e-5), 1 - 1e-5)
@@ -266,7 +271,7 @@ def bloc_slope(p_dem, rho, p_ind=0.0):
 
 
 def bloc_sensitivities(races, cfg=CFG):
-    """Package 10 A2: {eid: $ per sd of the national factor per YES share} (+ Rep YES, - Dem YES, so a Republican-
+    """{eid: $ per sd of the national factor per YES share} (+ Rep YES, - Dem YES, so a Republican-
     leaning book is +, like party_delta). races = {race: [(eid, label, p or None, liquid), ...]}, p race-scaled.
     A race needs a "Dem " and a "Rep " leg (labels), or is one partisan market alone; p_ind = the other legs' p;
     p_dem = the Dem leg's p (else 1 - Rep p - p_ind) / (1 - p_ind). Only contracts with a liquid p get one; the

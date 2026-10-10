@@ -3,7 +3,7 @@ Offline tests for the reduce-only "why" diagnostics of compute_quote (ex.ro_clip
 this file covered - exit_quotes_in_reduce_only and pair_passive_in_reduce_only - were removed on simplify (never
 enabled live), so only the live diagnostics remain. No network.
 
-Run:  python tests/test_exit_in_ro.py      (exit code 0 = all passed)
+Run:  python tests/test_reduce_only_diagnostics.py      (exit code 0 = all passed)
 """
 import logging
 import os

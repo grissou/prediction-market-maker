@@ -1,8 +1,16 @@
 """
-ValueMixin: the allocator (alloc_*: plan, buy, sell, tick, journal), the set ladder (sl_*) and the
-value-floor helpers.
+ValueMixin: the capital allocator - which markets get the money.
 
-Methods only: all state lives on the Bot instance (self); no __init__ here. Never imports bot.py.
+Owns alloc_plan (rank every holding and every candidate by edge against the race-scaled Polymarket
+price, pick the sales and the buys they fund), alloc_sell / alloc_buy / alloc_tick (sell, read the
+cash back, buy; immediate-or-cancel, once an hour and whenever the MM reserve runs short), the swap
+and refill variants, the journal and the status.json "alloc" report, the rich-leg set ladder (sl_*:
+resting sales of the over-priced leg of a race) and the value-floor helpers the quotes share.
+
+It respects, never sets, the risk flags: it buys nothing in reduce-only or while value adds are
+paused, and every order passes the cash gate. It never changes the market-making quotes directly;
+it hands them targets (alloc_targets) and cancels them where a sale needs the way clear. Methods
+only: all state lives on the Bot instance (self); no __init__ here. Never imports bot.py.
 """
 import json
 import math
@@ -31,7 +39,7 @@ class ValueMixin:
     ALLOC_DONE = ("bought", "done", "gone", "dropped", "expired", "skipped")
 
     def load_status_key(self, key):
-        """Package 10 B: status.json[key] the previous run left ({} if none)."""
+        """Status.json[key] the previous run left ({} if none)."""
         try:
             with open(bot_path(self.cfg.status_file)) as f:
                 d = json.load(f).get(key)
@@ -40,7 +48,7 @@ class ValueMixin:
             return {}
 
     def alloc_init(self, d=None):
-        """Package 10 B state, restored from status.json "alloc" (d): the last run's wall time (the hourly clock) and
+        """State, restored from status.json "alloc" (d): the last run's wall time (the hourly clock) and
         the $ rotated in the last hour (turnover cap). Pairs in flight are NOT restored: after a restart their cash
         simply stays (never a buy without its own fresh sale and cash read)."""
         d = d if isinstance(d, dict) else {}
@@ -54,19 +62,19 @@ class ValueMixin:
                 self.alloc_flows.append((num(x[0]), num(x[1])))
         self.alloc_totals = {k: num(d.get(k), 0.0) for k in ("sold_total", "bought_total", "runs_total")}
         self.alloc_pairs = []                     # this run's pairs (dicts, see alloc_plan), until each is finished
-        self.alloc_set_races = {}                 # race -> {"cost", "until", "sets_before", "free"} (B3; arb_plan)
+        self.alloc_set_races = {}                 # race -> {"cost", "until", "sets_before", "free"} (arb_plan)
         self.alloc_sells_stopped = False          # a sold pair's level was gone: no more sales this run
         self.alloc_state = "off"
         self.alloc_info = {}                      # the latest tick's figures (status.json "alloc")
         self.alloc_run = {}                       # this run's tallies
         self.alloc_bloc_logged = False
         self.alloc_ages = {}
-        self.alloc_ladder = {}                    # Package 12 L1: race -> the resting rich-leg ladder's state
+        self.alloc_ladder = {}                    # Race -> the resting rich-leg ladder's state
         self.alloc_ladder_info = {}               # its status (alloc.set_ladder), absent while never used
-        self.alloc_ladder_refused = {}            # race -> when the exchange last refused its whole ladder (RT12-3)
-        self.alloc_targets = {}                   # Package 12 M2: the latest plan's intended holdings {eid: shares}
-        self.p142_last_run = []                   # P14.2: the latest run's swap records (alloc.swaps.last_run)
-        self.p142_events = deque()                # P14.2: (wall, kind, $, est, realised) of the last 24 h
+        self.alloc_ladder_refused = {}            # race -> when the exchange last refused its whole ladder
+        self.alloc_targets = {}                   # The latest plan's intended holdings {eid: shares}
+        self.p142_last_run = []                   # The latest run's swap records (alloc.swaps.last_run)
+        self.p142_events = deque()                # (wall, kind, $, est, realised) of the last 24 h
         sw = d.get("swaps") if isinstance(d.get("swaps"), dict) else {}
         for x in (sw.get("events") if isinstance(sw.get("events"), list) else ()):   # (restored after a restart)
             if (isinstance(x, (list, tuple)) and len(x) == 5 and isinstance(x[1], str)
@@ -77,7 +85,7 @@ class ValueMixin:
         return bool(self.alloc_info) or bool(self.alloc_pairs) or self.alloc_last_run_wall is not None
 
     def p141_alloc_report(self, now_w=None):
-        """P14.1 7: the allocator's swap report (absent while every P14.1 setting is off): swaps planned / done in the
+        """The allocator's swap report (absent while every refill setting is off): swaps planned / done in the
         last 24 h, the $ moved, the EV gain estimated when planned vs realised from the IOC fills (a sale's (price - p)
         given up counts against the buy's (p - price) gained), and the latest run's refill blockers."""
         if not self.p141_on():
@@ -92,15 +100,15 @@ class ValueMixin:
                 "refill_blocked_by": dict(self.mmf_refill.get("blocked_by") or {})}
 
     def alloc_status(self):
-        """status.json "alloc": the latest figures plus what a restart restores (last_run_wall, flows). P14.1: the
-        swap report (p141_alloc_report) while a P14.1 setting is on."""
+        """status.json "alloc": the latest figures plus what a restart restores (last_run_wall, flows). The
+        swap report (p141_alloc_report) while a refill setting is on."""
         now_w = util.time.time()
         return {**self.alloc_info, **self.p141_alloc_report(now_w),
                 **({"swaps": self.swap_report(now_w)} if self.p142_on() else {}),   # P14.2
                 "state": self.alloc_state, "last_run_wall": self.alloc_last_run_wall,
                 "last_run": (iso(datetime.fromtimestamp(self.alloc_last_run_wall, timezone.utc))
                              if self.alloc_last_run_wall is not None else None),
-                **({"set_ladder": dict(self.alloc_ladder_info)} if self.alloc_ladder_info else {}),   # P12 L1
+                **({"set_ladder": dict(self.alloc_ladder_info)} if self.alloc_ladder_info else {}),   # the rich-leg ladder
                 "pending": len(self.alloc_pairs), "turnover_hour": round(self.alloc_turnover(now_w), 2),
                 "flows": [list(x) for x in self.alloc_flows if now_w - x[0] < 3600],
                 **{k: round(v, 2) for k, v in self.alloc_totals.items()}}
@@ -127,7 +135,7 @@ class ValueMixin:
     def alloc_market_ok(self, ex, skip=()):
         """A market the allocator may trade at all: not headline (unless alloc_headline), not one
         another feature traded this cycle (skip: exchanges and races), not inside the pre-close window that stops
-        takes and arbitrage (close_window: at least the stop window, P10 red team RT-3)."""
+        takes and arbitrage (close_window: at least the stop window)."""
         return not (ex.eid in skip or ex.group in skip
                     or ex.group in self.cfg.headline_races
                     or self.hours_to_close(ex) <= self.close_window("flatten_hours_before_close"))
@@ -143,7 +151,7 @@ class ValueMixin:
 
     def alloc_lone_no(self, e, q):
         """NO shares a short's buy-back may sell as a covered "sell NO": the NO held less its NO+NO set part (always:
-        a set is only ever unwound whole, B3), within cover_no_qty (0 when covered NO sales are not in effect)."""
+        a set is only ever unwound whole), within cover_no_qty (0 when covered NO sales are not in effect)."""
         if q > -1:
             return 0
         return int(max(0.0, min(-q - self.nono_set_part(e, q), self.cover_no_qty(e, q, sets_ok=True))) + 1e-9)
@@ -156,7 +164,7 @@ class ValueMixin:
                      if (True, rnd(x["price"])) not in mine), None)
 
     def alloc_prefer_short_legs(self, inv, now_m, skip=()):
-        """Package 12 L2 (alloc_prefer_short): {eid: the other leg} - the 2-leg races' legs whose YES the allocator
+        """alloc_prefer_short: {eid: the other leg} - the 2-leg races' legs whose YES the allocator
         does not BUY because the race's best bids (fresh books, other traders only) sum above 1 and the other leg can
         be shorted instead at an edge >= alloc_min_edge_buy (we hold no YES there, it may be traded, p liquid, room
         under alloc_max_contract_usd): 1 - bid_other < bid_this <= ask_this, the same exposure for less cash."""
@@ -180,7 +188,7 @@ class ValueMixin:
 
     @staticmethod
     def alloc_plan_targets(inv, pairs):
-        """Package 12 M2: {eid: the holding the plan intends} for every market a planned pair sells or buys (a long
+        """{eid: the holding the plan intends} for every market a planned pair sells or buys (a long
         sale lowers it, a short's buy-back / a set unwind raises it, a buy raises it, a short sale lowers it)."""
         out = {}
         for pr in pairs:
@@ -197,7 +205,7 @@ class ValueMixin:
         return out
 
     def alloc_edge_held(self, ex, q, now_m=None):
-        """Package 12 M2: the edge-held of a holding of q shares here, alloc_plan's own measure - a long (p - bid) /
+        """The edge-held of a holding of q shares here, alloc_plan's own measure - a long (p - bid) /
         bid at the best bid, a short (ask - p) / (1 - ask) at the best ask (p = alloc_p, the book fresh, our own
         orders stripped) - or None (no position, no liquid p, no fresh book or no level on that side)."""
         now_m = util.time.monotonic() if now_m is None else now_m
@@ -213,7 +221,7 @@ class ValueMixin:
         return None if lv is None else (lv["price"] - p) / max(1 - lv["price"], TICK)
 
     def alloc_target_for(self, eid, inv=None, now_m=None):
-        """Package 12 M2: the holding (signed YES shares) the bot WANTS in this market, for the target-inventory
+        """The holding (signed YES shares) the bot WANTS in this market, for the target-inventory
         skew: the allocator's latest plan's intended holding (alloc_enabled and the plan touched the market), else
         the current holding when its edge-held > 0 in value_mode (a +EV position held to the outcome), else 0.
         None = no such market. inv = the positions dict (None: the market's last known ex.inv)."""
@@ -231,7 +239,7 @@ class ValueMixin:
         return 0.0
 
     def skew_target_inputs(self, ex, inv, inv_for_quote, per_market, cfg=None, now_m=None):
-        """Package 12 M2 (skew_target_inventory): compute_quote's (skew_inv, age_off). skew_inv = the quoted
+        """skew_target_inventory: compute_quote's (skew_inv, age_off). skew_inv = the quoted
         inventory less the target netted the same way: per market (flatten_per_market window) inv - target, else
         eff_inv - (target - mean of the race's other targets), i.e. effective_inventory of (inv - target). age_off =
         value_mode on and this holding's edge-held > 0 (no age skew on a +EV holding)."""
@@ -255,27 +263,27 @@ class ValueMixin:
         Reserve refills first (cash below alloc_mm_reserve: sales with no buy, lowest edge first), then pairs: lowest
         edge-held with highest-edge level while the gain >= alloc_min_improvement, inside alloc_max_contract_usd per
         market, the turnover left and (bloc_delta_enabled) the bloc cap.
-        P14 mm_refill_fast: the refills sell the stale MM inventory first (mm_refill_held; its legs carry "mm"),
+        Mm_refill_fast: the refills sell the stale MM inventory first (mm_refill_held; its legs carry "mm"),
         then the lowest edge-held, every refill sale at or beyond the value floor (mm_floor_ok); a market a refill
-        IOC sold whose sale the positions read does not show yet is skipped (RT13-3). refill_only: no pairs."""
+        IOC sold whose sale the positions read does not show yet is skipped. refill_only: no pairs."""
         cfg = self.cfg
         blocked = defaultdict(int)
         pins = self.alloc_pins()
-        cash = cash + self.hv_carve_used()        # P15: the ladder's resting carve-out is part of the reserve
+        cash = cash + self.hv_carve_used()        # The ladder's resting carve-out is part of the reserve
         fast = bool(getattr(cfg, "mm_refill_fast", False))
-        rank_all = self.p141("alloc_rank_all_markets")   # P14.1 2: every holding ranked for the refill
-        swap_m = self.p142_on()                   # P14.2: swaps have their own floor and the stricter hurdle
+        rank_all = self.p141("alloc_rank_all_markets")   # Every holding ranked for the refill
+        swap_m = self.p142_on()                   # Swaps have their own floor and the stricter hurdle
         held, levels = [], []
         for e, q in sorted(inv.items()):
             ex = self.ex.get(e)
             if ex is None or abs(q) < 1 or not self.alloc_market_ok(ex, skip) or ex.label in pins:
                 continue
-            if fast and self.mm_sale_lagging(e, q, now_m):   # P14 (RT13-3): its sale not in the positions read yet
+            if fast and self.mm_sale_lagging(e, q, now_m):   # Its sale not in the positions read yet
                 blocked["in_flight"] += 1
                 continue
             p = self.alloc_p(ex, now_m)
             book = self.alloc_fresh_book(ex, now_m)
-            if book is None and rank_all:         # P14.1 2: the cached book ranks it (alloc_sell downloads a fresh
+            if book is None and rank_all:         # The cached book ranks it (alloc_sell downloads a fresh
                 book = ex.book                    #  one before the sale anyway); None = never downloaded
             if p is None or book is None:
                 continue
@@ -288,7 +296,7 @@ class ValueMixin:
             else:
                 continue
             qty = int(qty + 1e-9)
-            rich = edge > cfg.alloc_max_edge_sell + 1e-9   # P14.1 2: a REFILL may sell it, a swap may not
+            rich = edge > cfg.alloc_max_edge_sell + 1e-9   # A REFILL may sell it, a swap may not
             if qty >= 1 and (not rich or rank_all) and qty * unit >= self.ALLOC_MIN_USD:
                 held.append({"kind": "long" if q > 0 else "short", "eid": e, "label": ex.label, "px": px, "edge": edge,
                              "unit": unit, "avail": qty * unit,
@@ -304,7 +312,7 @@ class ValueMixin:
                 books = [self.alloc_fresh_book(x, now_m) for x in exs]
                 if (sets < 1 or race in skip or any(not self.alloc_market_ok(x, skip) or x.label in pins for x in exs)
                         or any(b is None or not b.get("asks") for b in books)
-                        or (cfg.alloc_set_rich_leg and race in self.alloc_ladder)):   # (P12 L1: laddered instead)
+                        or (cfg.alloc_set_rich_leg and race in self.alloc_ladder)):   # (laddered instead)
                     continue
                 asks = [b["asks"][0]["price"] for b in books]
                 free = len(members) - sum(asks)           # cash freed per set (covered NO sales at 1 - ask)
@@ -312,7 +320,7 @@ class ValueMixin:
                     continue
                 if getattr(cfg, "pair_no_unwind_asks_le1", False) and self.nono_unwind_gated(members, sum(asks),
                                                                                            sum(asks) - 1):
-                    blocked["set_bids_gt_1"] += 1         # (red team RT12-2: arb_plan's L3 gate would refuse it,
+                    blocked["set_bids_gt_1"] += 1         # (arb_plan's L3 gate would refuse it,
                     continue                              #  the pair waiting ALLOC_SET_WAIT with the allocator stalled)
                 cpu = (sum(asks) - 1) / free             # the set's EV given up per $ freed
                 n = int(min([sets] + [b["asks"][0]["quantity"] for b in books]) + 1e-9)
@@ -322,7 +330,7 @@ class ValueMixin:
         spare = cash - cfg.alloc_mm_reserve
         if spare >= self.ALLOC_MIN_USD:
             held.append({"kind": "cash", "label": "spare cash", "px": 1.0, "edge": 0.0, "unit": 1.0, "avail": spare})
-        if fast:                                  # P14 2: the stale MM inventory is sold first (its value entry out)
+        if fast:                                  # The stale MM inventory is sold first (its value entry out)
             mm = self.mm_refill_held(inv, now_m, skip, pins, blocked)
             mm_e = {h["eid"] for h in mm}
             held = mm + [h for h in held if h.get("eid") not in mm_e]
@@ -330,7 +338,7 @@ class ValueMixin:
         else:
             held.sort(key=lambda h: (h["edge"], h.get("eid") or h.get("race") or ""))
         room = {}
-        # P14.1 4: a refill plan while cash is below half the target does not scan buy levels at all (nothing it
+        # A refill plan while cash is below half the target does not scan buy levels at all (nothing it
         # plans has a buy): the L2 prefer-short count and the pause count then stay out of the refill's blocked_by.
         no_levels = refill_only and self.p141("alloc_refill_ignore_prefer_short") and self.mm_cash_low()
         no_buy = ({} if no_levels or not getattr(cfg, "alloc_prefer_short", False)
@@ -343,9 +351,9 @@ class ValueMixin:
                 continue
             q = float(inv.get(e, 0.0))
             room[e] = max(0.0, cfg.alloc_max_contract_usd - self.alloc_held_usd(q, p))
-            if no_levels:                         # P14.1 4: a short-cash refill plan needs no buy level
+            if no_levels:                         # A short-cash refill plan needs no buy level
                 continue
-            if q >= 0 and e in no_buy:            # Package 12 L2: the other leg is shorted instead (bids sum > 1)
+            if q >= 0 and e in no_buy:            # The other leg is shorted instead (bids sum > 1)
                 blocked["prefer_short"] += 1
             elif q >= 0:                          # (buying YES on a short would be a close: the held list's job)
                 for lv in (book.get("asks") or [])[:3]:
@@ -363,15 +371,15 @@ class ValueMixin:
                                        "unit": 1 - px, "avail": lv["quantity"] * (1 - px),
                                        **({"p": p} if swap_m else {}), "pv": p})
         levels.sort(key=lambda o: (-o["edge"], o["eid"], o["px"]))
-        if getattr(self, "global_reduce", False) and levels:   # (red team RT-2: no buy while in reduce-only;
+        if getattr(self, "global_reduce", False) and levels:   # (no buy while in reduce-only;
             blocked["risk"] += 1                                #  reserve refills, which only reduce, still run)
             levels = []
-        net = self.alloc_netting()                             # P14.1 5: swaps go on, each checked against the rooms
-        if getattr(self, "mmr_paused", False) and levels and not net:   # P12 ops mm_risk_reserve_*: value adds paused
+        net = self.alloc_netting()                             # Swaps go on, each checked against the rooms
+        if getattr(self, "mmr_paused", False) and levels and not net:   # mm_risk_reserve_*: value adds paused
             blocked["mm_risk_reserve"] += 1                     #  (the same: no buy; reserve refills still run)
             levels = []
         rfloor = self.alloc_room_floor() if net else None       # a swap may not take a room below this
-        st_room = self.st_rooms(inv, now_m) if self.st_on() else None   # P15 state_max_usd: {state: $ room}
+        st_room = self.st_rooms(inv, now_m) if self.st_on() else None   # state_max_usd: {state: $ room}
         left = float("inf") if turnover_left is None else max(0.0, turnover_left)
         pairs, gain = [], 0.0
         hyp = {e: float(q) for e, q in inv.items()}
@@ -391,7 +399,7 @@ class ValueMixin:
             else:
                 leg["eid"] = h["eid"]
             if h.get("mm"):
-                leg["mm"] = True                  # P14 2: stale MM inventory (alloc_sell checks fair / floor instead)
+                leg["mm"] = True                  # Stale MM inventory (alloc_sell checks fair / floor instead)
             return leg
 
         def apply(inv_, s, b, sign=1):
@@ -402,13 +410,13 @@ class ValueMixin:
                     inv_[m] = inv_.get(m, 0.0) + sign * s["qty"]
             if b is not None:
                 inv_[b["eid"]] = inv_.get(b["eid"], 0.0) + sign * (-b["qty"] if b["short"] else b["qty"])
-        # B2: refill the reserve first (sales with no buy; the bloc check as the pairs', red team RT-5)
+        # Refill the reserve first (sales with no buy; the bloc check as the pairs')
         deficit = cfg.alloc_mm_reserve - cash
         hi = 0
         bloc = bloc_fn(hyp) if bloc_fn is not None else 0.0
         while deficit >= self.ALLOC_MIN_USD and hi < len(held) and left >= self.ALLOC_MIN_USD:
             h = held[hi]
-            if not h.get("floor_ok", True):       # P14 mm_refill_fast: no refill sale below the value floor
+            if not h.get("floor_ok", True):       # mm_refill_fast: no refill sale below the value floor
                 blocked["floor"] += 1
                 hi += 1
                 continue
@@ -434,12 +442,12 @@ class ValueMixin:
                 hi += 1
         bloc = bloc_fn(hyp) if bloc_fn is not None else 0.0
         # B1: pairs (sell lowest edge-held, buy highest edge)
-        sq = [h for h in held if h["avail"] >= self.ALLOC_MIN_USD and not h.get("mm")   # (P14: MM legs refill only;
-              and not h.get("refill_only")]                                             # P14.1: and edge-rich ones)
-        if refill_only:                           # P14 mm_refill_fast: the fast refill plans no pairs
+        sq = [h for h in held if h["avail"] >= self.ALLOC_MIN_USD and not h.get("mm")   # (MM legs refill only;
+              and not h.get("refill_only")]                                             # And edge-rich ones)
+        if refill_only:                           # mm_refill_fast: the fast refill plans no pairs
             sq = []
         hurdle = cfg.alloc_min_improvement
-        if swap_m:                                # P14.2: a long / short beyond p -+ alloc_swap_sell_margin is no swap
+        if swap_m:                                # A long / short beyond p -+ alloc_swap_sell_margin is no swap
             hurdle = self.swap_hurdle()           #  candidate; swaps need the stricter of the two hurdles
             keep = [h for h in sq if h["kind"] not in ("long", "short")
                     or self.swap_floor_ok(h["kind"] == "long", h["px"], h["p"])]
@@ -452,13 +460,13 @@ class ValueMixin:
             if o["edge"] - h["edge"] < cfg.alloc_min_improvement - 1e-9:
                 break
             swap = swap_m and h["kind"] in ("long", "short")
-            if swap and o["edge"] - h["edge"] < hurdle - 1e-9:   # P14.2: below the swap hurdle against the best
+            if swap and o["edge"] - h["edge"] < hurdle - 1e-9:   # Below the swap hurdle against the best
                 blocked["swap_gain"] += 1                         #  level left - so against every level left
                 si += 1
                 continue
             x = min(h["avail"], o["avail"], room.get(o["eid"], 0.0), left)
             sk = per = None
-            if st_room is not None:               # P15 state_max_usd: the buy's collateral at p within its state's room
+            if st_room is not None:               # state_max_usd: the buy's collateral at p within its state's room
                 sk = self.st_key(o["eid"])
                 if sk is not None:
                     per = ((1 - o["pv"]) / max(1 - o["px"], TICK)) if o["short"] else o["pv"] / max(o["px"], TICK)
@@ -485,7 +493,7 @@ class ValueMixin:
             b = {"eid": o["eid"], "label": o["label"], "short": o["short"], "px": o["px"], "qty": nb,
                  "edge": o["edge"], "usd": x}
             apply(hyp, s, b)
-            if net:                               # P14.1 5: ~risk-neutral, but never a room below its own floor
+            if net:                               # ~risk-neutral, but never a room below its own floor
                 after = self.alloc_rooms(hyp)
                 if after is None or not self.alloc_room_ok(after, rfloor):
                     apply(hyp, s, b, sign=-1)
@@ -504,11 +512,11 @@ class ValueMixin:
             cash_sell = h["kind"] == "cash"
             pairs.append({"sell": s, "buy": b, "usd": x, "status": "sold" if cash_sell else "pending",
                           "proceeds": x if cash_sell else 0.0, "sold_at": -1e18 if cash_sell else None,
-                          **({"netting": True, "rfloor": tuple(rfloor)} if net else {}),   # P14.1 5 (re-checked
+                          **({"netting": True, "rfloor": tuple(rfloor)} if net else {}),   # (re-checked
                           #                                                                  before each leg)
                           **({"swap": self.swap_record(s, h["p"], b, o["p"], x)} if swap else {})})   # P14.2
             gain += x * (o["edge"] - h["edge"])
-            if sk is not None:                    # P15: the state's room shrinks by this buy's collateral at p
+            if sk is not None:                    # The state's room shrinks by this buy's collateral at p
                 st_room[sk] = st_room.get(sk, cfg.state_max_usd) - x * per
             h["avail"] -= x if cash_sell else s["usd"]
             o["avail"] -= x
@@ -533,7 +541,7 @@ class ValueMixin:
             left = f"spare cash ${pr['usd']:.0f}"
         elif s["kind"] == "set":
             left = f"unwind {s['label']} {s['qty']} sets @ asks sum {s['px']:.3f} (cost {100 * s['edge']:.1f}% per $)"
-        elif s.get("mm"):                         # P14 2: stale market-making inventory
+        elif s.get("mm"):                         # Stale market-making inventory
             left = (f"sell {s['label']} {'NO ' if s['kind'] == 'short' else ''}{s['qty']} @ {s['px']:.3f} "
                     f"(stale MM inventory, edge-held {100 * s['edge']:.1f}%)")
         else:
@@ -548,7 +556,7 @@ class ValueMixin:
         bb[why] = bb.get(why, 0) + 1
 
     def alloc_tick(self, now, inv, mine_real, now_m=None, skip=()):
-        """Package 10 B, once a cycle (see Config): finish the run in flight (set unwinds seen, buys after a cash
+        """B, once a cycle (see Config): finish the run in flight (set unwinds seen, buys after a cash
         read, sales), or start a new run once alloc_interval_s has passed since the last. Returns the exchanges
         traded (not quoted this cycle)."""
         cfg = self.cfg
@@ -556,9 +564,9 @@ class ValueMixin:
         now_m = util.time.monotonic() if now_m is None else now_m
         if not cfg.alloc_enabled:
             touched = set()
-            if self.alloc_ladder or (self.api.live and self.sl_orders()):   # Package 12 L1: every ladder pulled
+            if self.alloc_ladder or (self.api.live and self.sl_orders()):   # Every ladder pulled
                 touched = self.alloc_ladder_tick(inv, now_m, now, skip)
-            for pr in self.alloc_pairs:           # P14.2: swaps in flight end here (the cash stays)
+            for pr in self.alloc_pairs:           # Swaps in flight end here (the cash stays)
                 if pr.get("swap") is not None:
                     self.swap_close(pr, now_w, "allocator off")
             if self.alloc_pairs or self.alloc_set_races:
@@ -575,7 +583,7 @@ class ValueMixin:
         due = not self.alloc_pairs and (self.alloc_last_run_wall is None
                                          or now_w - self.alloc_last_run_wall >= cfg.alloc_interval_s)
         lad_touched = set()
-        if cfg.alloc_set_rich_leg or self.alloc_ladder or (self.api.live and self.sl_orders()):   # Package 12 L1
+        if cfg.alloc_set_rich_leg or self.alloc_ladder or (self.api.live and self.sl_orders()):   # the rich-leg ladder
             fresh = (not self.api.live or (self.cash_gate_on() and getattr(self, "cg_cash", None) is not None
                                            and self.cash_read_age() is not None
                                            and self.cash_read_age() < self.ALLOC_CASH_FRESH))
@@ -585,11 +593,11 @@ class ValueMixin:
                 pairs, info = self.alloc_plan(inv, now_m, cfg.alloc_mm_reserve, skip,
                                               cfg.alloc_max_turnover_per_hour - turnover)
                 self.alloc_last_run_wall = now_w
-                self.alloc_targets = self.alloc_plan_targets(inv, pairs)   # Package 12 M2
-                self.mm_risk_count("alloc", info["blocked_by"].get("mm_risk_reserve", 0))   # P12 ops
+                self.alloc_targets = self.alloc_plan_targets(inv, pairs)   # the target holdings
+                self.mm_risk_count("alloc", info["blocked_by"].get("mm_risk_reserve", 0))   # Ops
                 for pr in pairs:
                     log.info("[dry] %s", self.alloc_journal(pr))
-                if self.p142_on():                # P14.2: the swaps planned, one line each
+                if self.p142_on():                # The swaps planned, one line each
                     self.swap_plan_log(pairs, now_w)
                 self.alloc_state = "dry run"
                 self.alloc_info = {"pairs_planned": len(pairs), **info, "reserve": cfg.alloc_mm_reserve}
@@ -609,13 +617,13 @@ class ValueMixin:
             self.alloc_last_run_wall = now_w
             self.alloc_totals["runs_total"] += 1
             self.alloc_pairs, self.alloc_sells_stopped = pairs, False
-            self.alloc_targets = self.alloc_plan_targets(inv, pairs)       # Package 12 M2
-            self.mm_risk_count("alloc", info["blocked_by"].get("mm_risk_reserve", 0))   # P12 ops
+            self.alloc_targets = self.alloc_plan_targets(inv, pairs)       # the target holdings
+            self.mm_risk_count("alloc", info["blocked_by"].get("mm_risk_reserve", 0))   # Ops
             for pr in pairs:
                 pr["planned_at"] = now_m
             self.alloc_run = {"blocked_by": dict(info["blocked_by"]), "pairs_planned": len(pairs), "sold": 0.0,
                               "bought": 0.0, "cash_before": round(cash, 2), "ev_gain_est": info["ev_gain_est"]}
-            for pr in (pairs if self.p141_on() else ()):   # P14.1 7: the swaps planned this run (the 24-h report)
+            for pr in (pairs if self.p141_on() else ()):   # The swaps planned this run (the 24-h report)
                 if pr.get("buy") is not None:
                     self.alloc_run["swaps_planned"] = self.alloc_run.get("swaps_planned", 0) + 1
                     self.p141_log("swap_plan", pr["usd"],
@@ -625,10 +633,10 @@ class ValueMixin:
                         info["ev_gain_est"])
             for pr in pairs:
                 log.warning("%s", self.alloc_journal(pr))
-            if self.p142_on():                    # P14.2: the swaps planned, one line each
+            if self.p142_on():                    # The swaps planned, one line each
                 self.swap_plan_log(pairs, now_w)
-        elif (getattr(cfg, "mm_refill_fast", False)                            # P14 2: the reserve refilled NOW
-              # P14.1 2: every cycle while the cash is short, and also while an hourly run's pairs are still in
+        elif (getattr(cfg, "mm_refill_fast", False)                            # The reserve refilled NOW
+              # Every cycle while the cash is short, and also while an hourly run's pairs are still in
               # flight (their markets are skipped); 4ff7d91: only with no pairs in flight, at most every 60 s
               and (self.p141("alloc_rank_all_markets")
                    or (not self.alloc_pairs and now_m - self.mmf_refill_last_m >= self.MM_REFILL_GAP))
@@ -636,7 +644,7 @@ class ValueMixin:
             self.mm_refill_tick(inv, now_m, now, skip, turnover)
         writes = getattr(self.api, "writes_left", lambda: 10 ** 6)()
         n_left = int(min(cfg.alloc_max_orders_per_cycle, math.floor(cfg.alloc_writes_frac * max(0, writes) / 3 + 1e-9)))
-        # 1. registered NO+NO set unwinds (B3): done by take_arbitrage, or expired
+        # 1. registered NO+NO set unwinds: done by take_arbitrage, or expired
         for pr in self.alloc_pairs:
             if pr["status"] == "set_wait":
                 self.alloc_set_check(pr, inv, now_m, now_w)
@@ -660,7 +668,7 @@ class ValueMixin:
         for pr in self.alloc_pairs:
             if pr["status"] != "pending":
                 continue
-            if self.alloc_sells_stopped and not (pr.get("fast")       # P14.1 2: a paired level gone stops the PAIRED
+            if self.alloc_sells_stopped and not (pr.get("fast")       # A paired level gone stops the PAIRED
                                                  and self.p141("alloc_rank_all_markets")):   # sales, not the refills
                 pr["status"] = "skipped"
                 continue
@@ -676,7 +684,7 @@ class ValueMixin:
         for pr in self.alloc_pairs:               # a refill (no buy) is finished once sold
             if pr["status"] == "sold" and pr["buy"] is None:
                 pr["status"] = "done"
-        for pr in self.alloc_pairs:               # P14.2: a finished swap's outcome (done / buy failed / not sold)
+        for pr in self.alloc_pairs:               # A finished swap's outcome (done / buy failed / not sold)
             if pr.get("swap") is not None and pr["status"] in self.ALLOC_DONE:
                 self.swap_close(pr, now_w)
         self.alloc_pairs = [pr for pr in self.alloc_pairs if pr["status"] not in self.ALLOC_DONE]
@@ -715,11 +723,11 @@ class ValueMixin:
         sent. The level gone -> the pair ends, its cash stays, no more sales this run."""
         cfg, b = self.cfg, pr["buy"]
         ex = self.ex.get(b["eid"])
-        if getattr(self, "global_reduce", False):     # (red team RT-2: no buy in reduce-only; the pair waits, then
+        if getattr(self, "global_reduce", False):     # (no buy in reduce-only; the pair waits, then
             self.alloc_block("risk")                  #  expires after ALLOC_BUY_WAIT with its cash kept)
             return False
-        if getattr(self, "mmr_paused", False) and not pr.get("netting"):   # P12 ops: value adds paused (as RT-2;
-            self.alloc_block("mm_risk_reserve")                             #  P14.1 5: a netted swap goes on)
+        if getattr(self, "mmr_paused", False) and not pr.get("netting"):   # Value adds paused (as RT-2;
+            self.alloc_block("mm_risk_reserve")                             #  A netted swap goes on)
             self.mm_risk_count("alloc")
             return False
         if ex is None or not self.alloc_market_ok(ex, skip) or busy(ex, now_m):
@@ -728,11 +736,11 @@ class ValueMixin:
         if (q < 0 and not b["short"]) or (q > 0 and b["short"]):
             pr["status"] = "dropped"              # never flip a position: the cash stays
             return False
-        if pr.get("netting") and not self.alloc_buy_room_ok(b, q, inv, pr):   # P14.1 5: re-checked before the buy
+        if pr.get("netting") and not self.alloc_buy_room_ok(b, q, inv, pr):   # Re-checked before the buy
             return False
-        # P14.1 5: a netted swap's buy may spend the proceeds of its OWN sale even below the reserve (the cash the MM
+        # A netted swap's buy may spend the proceeds of its OWN sale even below the reserve (the cash the MM
         # reserve held before that sale is never touched); every other buy keeps to the cash above alloc_mm_reserve.
-        avail = self.cash_left() + self.hv_carve_used() - cfg.alloc_mm_reserve   # (P15: the ladder's carve-out
+        avail = self.cash_left() + self.hv_carve_used() - cfg.alloc_mm_reserve   # (the ladder's carve-out
         if pr.get("netting"):                                                    #  resting counts as reserve)
             avail = max(avail, min(pr.get("proceeds", 0.0), self.cash_left()))
         if avail < (b["px"] if not b["short"] else 1 - b["px"]):
@@ -761,7 +769,7 @@ class ValueMixin:
         if qty < 1:
             pr["status"] = "dropped"
             return False
-        if self.st_on():                          # P15 state_max_usd: the buy only within its state's room (it waits,
+        if self.st_on():                          # state_max_usd: the buy only within its state's room (it waits,
             n_ok = self.st_add_room(ex, not b["short"], qty, p=p, commit=False)   # then expires: the cash stays)
             if n_ok < qty:
                 self.alloc_block("state_cap")
@@ -784,13 +792,13 @@ class ValueMixin:
         if pr["sell"]["kind"] == "cash" and usd > 0:
             self.alloc_flows.append((now_w, usd))
         inv[b["eid"]] = q + (-done if b["short"] else done)
-        if done >= 1 and self.st_on():            # P15: the state's collateral grows by this buy (this cycle)
+        if done >= 1 and self.st_on():            # The state's collateral grows by this buy (this cycle)
             self.st_add_room(ex, not b["short"], done, p=p, commit=True, force=True)
         if done >= 1:
             pr["status"] = "bought"
-            got = done * ((p - best) if not b["short"] else (best - p))   # P14.1 7: EV bought (realised, at p)
+            got = done * ((p - best) if not b["short"] else (best - p))   # EV bought (realised, at p)
             self.p141_log("swap_buy", usd, real=got, now_w=now_w)
-            if pr.get("swap") is not None:        # P14.2: the swap complete, journaled realised at p
+            if pr.get("swap") is not None:        # The swap complete, journaled realised at p
                 self.swap_bought(pr["swap"], done, best, p, edge, usd, now_w)
             log.warning("ALLOC bought %s %s%.0f @ %.3f (edge %.1f%%, $%.0f)", b["label"],
                         "short YES " if b["short"] else "", done, best, 100 * edge, usd)
@@ -801,7 +809,7 @@ class ValueMixin:
         return True
 
     def alloc_sell(self, pr, inv, mine_real, now_m, now_w, skip):
-        """A pending pair's sale (or B3 set registration): True if an order was sent. Paired: only while a fresh book
+        """A pending pair's sale (or set registration): True if an order was sent. Paired: only while a fresh book
         of the buy market still shows its level, and the edges still pass on both fresh books."""
         cfg, s, b = self.cfg, pr["sell"], pr["buy"]
         pins = self.alloc_pins()
@@ -827,14 +835,14 @@ class ValueMixin:
             self.alloc_block("writes")
             return False
         bedge = None
-        if b is not None and getattr(self, "global_reduce", False):   # (red team RT-2: its buy could not follow)
+        if b is not None and getattr(self, "global_reduce", False):   # (its buy could not follow)
             self.alloc_block("risk")
             return False
-        if b is not None and getattr(self, "mmr_paused", False) and not pr.get("netting"):   # P12 ops: nor while
-            self.alloc_block("mm_risk_reserve")                      #  paused (P14.1 5: a netted swap goes on)
+        if b is not None and getattr(self, "mmr_paused", False) and not pr.get("netting"):   # Nor while
+            self.alloc_block("mm_risk_reserve")                      #  paused (a netted swap goes on)
             self.mm_risk_count("alloc")
             return False
-        if b is not None and pr.get("netting"):   # P14.1 5: the rooms the whole pair would leave, re-checked now
+        if b is not None and pr.get("netting"):   # The rooms the whole pair would leave, re-checked now
             hyp = {e: float(v) for e, v in inv.items()}
             if s["kind"] in ("long", "short"):
                 hyp[s["eid"]] = float(inv.get(s["eid"], 0.0)) + (-s["qty"] if s["kind"] == "long" else s["qty"])
@@ -864,7 +872,7 @@ class ValueMixin:
             if sets < 1:
                 pr["status"] = "dropped"
                 return False
-            # "sets": what the plan needs - take_arbitrage unwinds no more at the allocator's cost (red team RT-1;
+            # "sets": what the plan needs - take_arbitrage unwinds no more at the allocator's cost (
             # several pairs of one race add up)
             reg = self.alloc_set_races.get(s["race"]) or {}
             self.alloc_set_races[s["race"]] = {"cost": max(s["px"] - 1 + 1e-9, reg.get("cost", -1.0)),
@@ -888,7 +896,7 @@ class ValueMixin:
         best = lv[0]["price"]
         edge = (p - best) / best if s["kind"] == "long" else (best - p) / max(1 - best, TICK)
         fast = bool(getattr(cfg, "mm_refill_fast", False))
-        if s.get("mm"):                           # P14 2: stale MM inventory - near fair and the floor, not the edge
+        if s.get("mm"):                           # Stale MM inventory - near fair and the floor, not the edge
             fair = ex.last_fv if ex.last_fv is not None else p
             gap = fair - best if s["kind"] == "long" else best - fair
             conc_ok = gap <= cfg.mm_recycle_concession + 1e-9 or self.p141("alloc_cancel_mm_first")   # P14.1 1
@@ -903,7 +911,7 @@ class ValueMixin:
             log.info("ALLOC %s not sold: edge-held now %.1f%% at %.3f (the pair no longer pays)", s["label"],
                      100 * edge, best)
             return False
-        if (pr.get("swap") is not None and b is not None and self.p142_on()   # P14.2: the swap's own floor and
+        if (pr.get("swap") is not None and b is not None and self.p142_on()   # The swap's own floor and
                 and s["kind"] in ("long", "short")):                          #  hurdle, on the fresh book (the IOC
             why = None                                                        #  goes out at this very touch)
             if not self.swap_floor_ok(s["kind"] == "long", best, p):
@@ -917,13 +925,13 @@ class ValueMixin:
                 self.alloc_block(why[0])
                 log.info("ALLOC %s not sold (swap): %s", s["label"], why[1])
                 return False
-        if fast and b is None and not self.mm_floor_ok(s["kind"] == "long", best, p):   # P14 2: refills >= floor
+        if fast and b is None and not self.mm_floor_ok(s["kind"] == "long", best, p):   # Refills >= floor
             pr["status"] = "gone"
             self.alloc_block("floor")
             log.info("ALLOC %s not sold: %.3f is past the value floor (p %.3f -+ %.3f)", s["label"], best, p,
                      cfg.value_sell_margin)
             return False
-        if fast and self.mm_sale_lagging(s["eid"], q, now_m):   # P14 (RT13-3): an earlier IOC's sale not read yet
+        if fast and self.mm_sale_lagging(s["eid"], q, now_m):   # An earlier IOC's sale not read yet
             self.alloc_block("in_flight")
             return False
         unit = best if s["kind"] == "long" else 1 - best
@@ -943,7 +951,7 @@ class ValueMixin:
                 return False
             order["quantity"] = min(int(order["quantity"]), qty)
         if b is not None:
-            order["_alloc_paired"] = True          # (Part A1 v: an allocator sale, never a resting quote)
+            order["_alloc_paired"] = True          # (an allocator sale, never a resting quote)
         if self.cash_gate_blocks([order]):
             self.alloc_block("cash")
             return False
@@ -962,13 +970,13 @@ class ValueMixin:
         log.warning("ALLOC sold %s %.0f @ %.3f (edge-held %.1f%%, $%.0f freed)%s", s["label"], done, best, 100 * edge,
                     usd, f" -> buy {b['label']} after the next cash read" if b else
                     " (reserve refill)")
-        if self.p141("alloc_cancel_mm_first"):    # P14.1 1: the sale cancelled our quotes there (alloc_send) - the
+        if self.p141("alloc_cancel_mm_first"):    # The sale cancelled our quotes there (alloc_send) - the
             self.mmf_hold[s["eid"]] = now_m       #  REDUCING side stays off until the positions read shows the sale
-        gave = done * ((p - best) if s["kind"] == "long" else (best - p))   # P14.1 7: EV given up (< 0: above p)
+        gave = done * ((p - best) if s["kind"] == "long" else (best - p))   # EV given up (< 0: above p)
         self.p141_log("swap_sell" if b is not None else "refill", usd, real=-gave, now_w=now_w)
-        if pr.get("swap") is not None:            # P14.2: the sale as traded (realised at p)
+        if pr.get("swap") is not None:            # The sale as traded (realised at p)
             self.swap_sold(pr["swap"], done, best, p, usd)
-        if fast or self.p141("alloc_cancel_mm_first"):   # P14: not planned / sold again until the read shows it
+        if fast or self.p141("alloc_cancel_mm_first"):   # Not planned / sold again until the read shows it
             self.mmf_sent[s["eid"]] = (now_m, abs(q), float(done))
             if pr.get("fast"):
                 self.mmf_refill["sold_usd"] = round(self.mmf_refill["sold_usd"] + usd, 2)
@@ -979,7 +987,7 @@ class ValueMixin:
         return True
 
     def alloc_set_check(self, pr, inv, now_m, now_w):
-        """B3: a registered set race - its sets fell (take_arbitrage unwound some) -> sold (cash freed at the planned
+        """A registered set race - its sets fell (take_arbitrage unwound some) -> sold (cash freed at the planned
         asks sum); past ALLOC_SET_WAIT -> withdrawn, expired."""
         s = pr["sell"]
         reg = self.alloc_set_races.get(s["race"])
@@ -1033,13 +1041,13 @@ class ValueMixin:
             return 0.0
         return float(data.get("quantityTraded") or 0)
 
-    # ------------------------------------------------------------------------------ Package 12 L1: rich-leg ladder
+    # ------------------------------------------------------------------------------ Rich-leg ladder
     ALLOC_LADDER_REQUOTE = 3600.0  # a race's resting rich-leg ladder is re-quoted at most this often (s)
     ALLOC_LADDER_KEEP = 3000.0     # at a re-quote, an order exactly at its target stays with at least this life left (s)
     ALLOC_LADDER_REFUSED_WAIT = 900.0   # the exchange refused a race's whole ladder: not re-sent before this (s)
 
     def sl_orders(self, eid=None):
-        """Package 12 L1: our resting rich-leg ladder orders (order_meta "set_ladder"), on eid or everywhere."""
+        """Our resting rich-leg ladder orders (order_meta "set_ladder"), on eid or everywhere."""
         meta = self.order_meta
         return [o for o in list(self.my_orders.values()) if (eid is None or o.eid == eid)
                 and (meta.get(o.order_id) or {}).get("set_ladder")]
@@ -1134,7 +1142,7 @@ class ValueMixin:
                 bad = list(os_)
                 if why.get(race) == "soft" and race in self.alloc_ladder:
                     e = os_[0].eid
-                    p_e = self.alloc_p(self.ex[e], now_m) if e in self.ex else None   # (red team RT12-1: the
+                    p_e = self.alloc_p(self.ex[e], now_m) if e in self.ex else None   # (the
                     if (all(o.eid == e for o in os_) and p_e is not None              #  ladder's own p known, every
                             and all(o.price <= p_e + cfg.value_sell_margin + 1e-9 for o in os_)   # bid within it)
                             and sum(o.qty for o in os_) <= self.nono_set_part(e, float(inv.get(e, 0.0))) + 1e-9):
@@ -1166,7 +1174,7 @@ class ValueMixin:
                 continue
             refused = getattr(self, "alloc_ladder_refused", {})
             if st is None and now_m - refused.get(race, -1e18) < self.ALLOC_LADDER_REFUSED_WAIT:
-                continue                          # (red team RT12-3: never one batch write a cycle into refusals)
+                continue                          # (never one batch write a cycle into refusals)
             e = plan["eid"]
             ex = self.ex[e]
             cur = [o for o in self.sl_orders(e) if (self.order_meta.get(o.order_id) or {}).get("sl_race") == race]

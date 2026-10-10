@@ -1,10 +1,15 @@
 """
-StatusMixin: status.json (write_status, status_report), the recorder (sqlite), the phone summary,
-ops / EV / carry fields, the overrides file reader (check_overrides), warn_settings and the market-
-edge file.
+StatusMixin: what the bot tells the outside world about itself.
 
-Methods only: all state lives on the Bot instance (self); no __init__ here. Never imports bot.py.
-Reporting only: never sends orders.
+Owns status.json (write_status, status_report, and the keys a restart restores from), the sqlite
+recorder, the 2-hourly phone summary, the ops / EV / carry fields, the settings_override.json
+reader (check_overrides: the few settings an operator may change on a running bot), warn_settings
+(flags that cannot act with the current settings) and the market-edge file.
+
+Reporting only: it never sends orders and never changes trading state - check_overrides is the one
+exception, and it only applies the whitelisted override keys. Every writer here is wrapped so a
+reporting failure never stops a cycle. Methods only: all state lives on the Bot instance (self);
+no __init__ here. Never imports bot.py.
 """
 import csv
 import json
@@ -205,8 +210,8 @@ class StatusMixin:
                                        "errors": self.errors_total, "rate_limits": getattr(self.api, "rate_limited", 0)}
 
     def summary_ops_line(self, value):
-        """ops_summary_line for this bot (latest ops fields; tilt_s / tilt_exposure when T2.1 set them), plus
-        " | NO+NO sets N (cap X)" (Package 7: N races held NO on every leg) when any is held. Never raises."""
+        """ops_summary_line for this bot (latest ops fields; tilt_s / tilt_exposure when the tilt estimator set them), plus
+        " | NO+NO sets N (cap X)" (N races held NO on every leg) when any is held. Never raises."""
         try:
             line = ops_summary_line(self.ops_last or self.safe_ops_fields(), value,
                                     getattr(self, "tilt_s", None), getattr(self, "tilt_exposure", None))
@@ -217,16 +222,16 @@ class StatusMixin:
         if nn and nn.get("races"):
             part = f"NO+NO sets {nn['races']} (cap {nn['capital'] / 1000:.1f}k)"
             line = f"{line} | {part}" if line else part
-        if getattr(self.cfg, "bloc_delta_enabled", False):   # Package 10 A2: " | bloc delta X/sd"
+        if getattr(self.cfg, "bloc_delta_enabled", False):   # " | bloc delta X/sd"
             part = f"bloc delta {self.bloc_delta:+,.0f}/sd"
             line = f"{line} | {part}" if line else part
-        part = self.mm_risk_summary()                 # P12 ops: " | risk room wc Xk corr Yk (paused)"
+        part = self.mm_risk_summary()                 # " | risk room wc Xk corr Yk (paused)"
         if part:
             line = f"{line} | {part}" if line else part
-        part = self.mm_funding_summary()              # P14: " | MM funding cash Xk/Yk, ..." (a P14 flag on)
+        part = self.mm_funding_summary()              # " | MM funding cash Xk/Yk, ..." (a funding flag on)
         if part:
             line = f"{line} | {part}" if line else part
-        part = self.hv_summary()                      # P15: " | harvest ... | state caps ..." (while in use)
+        part = self.hv_summary()                      # " | harvest ... | state caps ..." (while in use)
         if part:
             line = f"{line} | {part}" if line else part
         for fn in (ev_outcome_part, mm_carry_part):   # " | EV outcome X (+Y 24h, N unpriced) | MM carry 24h ..."
@@ -284,7 +289,7 @@ class StatusMixin:
                 phase += ", self-test passed"
         return ("Status: " + ("OK" if not problems else "ISSUES - " + "; ".join(problems)) + f" | {phase}"), problems
 
-    # ------------------------------------------------------------------------------ ops fields (Package 5, 3.3)
+    # ------------------------------------------------------------------------------ ops fields (3.3)
     OPS_KEYS = ("liquidation_value", "liquidation_unpriced", "realised_pnl", "unrealised_pnl", "pnl_unreconciled",
                 "toward_ref_capital_frac", "capital_over_6h_frac", "exit_ratio_24h")
     OPS_FILLS_MIN_SECONDS = 60.0          # fills.csv is re-read at most this often (and only when it changed)
@@ -483,7 +488,7 @@ class StatusMixin:
                                 EV_SCOPE); cash = the cash gate's cg_cash when read, else account value - positions
                                 at marks (exchange mark, else book fair value)
           ev_outcome_unpriced   held markets without a liquid Polymarket price (valued at the mark / book, or out)
-          ev_outcome_delta_24h  ev now - ev 24 h ago from a 48 h ring of (wall, ev) samples (status.json
+          ev_outcome_delta_24h ev now - ev 24 h ago from a 48 h ring of (wall, ev) samples (status.json
                                 ev_outcome_history, EV_HIST_SECONDS apart; record=True adds one); None before 24 h
           mm_carry_24h          mm_carry (the market maker's realised middle-band spread, value adds, takes)"""
         cfg = self.cfg
@@ -537,7 +542,7 @@ class StatusMixin:
         order, realised = sum matched qty x (sell - buy); what stays unmatched is unmatched_shares, valued at p -
         price (unmatched_ev, not realised). value_adds_ev = tail maker fills' edge to p at fill (buy q x (p - price),
         sell q x (price - p)); takes_ev the same for take fills. per_day = realised x 24 / hours covered.
-        P14: a fill of a side the recycler priced (note "recycle") counts as fills.recycle (not maker_mid) and its edge
+        A fill of a side the recycler priced (note "recycle") counts as fills.recycle (not maker_mid) and its edge
         to p in recycle_ev - both keys only once such a fill exists; in the band it still closes the FIFO lots."""
         cfg = self.cfg
         c = self.ops_fills(now)
@@ -546,7 +551,7 @@ class StatusMixin:
         counts = dict.fromkeys(("maker_mid", "maker_tail", "maker_unpriced", "take", "arb", "alloc", "basket"), 0)
         book, realised, adds, takes = defaultdict(deque), 0.0, 0.0, 0.0
         p_fill = p_now = missing = take_unpriced = 0
-        recycle_ev = None                         # P14: recycled fills' edge to p (None: none seen)
+        recycle_ev = None                         # Recycled fills' edge to p (None: none seen)
         for ts, fid, oid, e, buy, qty, price in sorted(c.get("rows") or (), key=lambda r: r[0]):
             if ts < now - 24 * 3600:
                 continue
@@ -554,7 +559,7 @@ class StatusMixin:
             if meta is None:
                 missing += 1
                 meta = {}
-            if meta.get("harvest"):               # P15: its own class (the key absent until such a fill exists)
+            if meta.get("harvest"):               # Its own class (the key absent until such a fill exists)
                 cls = "harvest"
                 counts[cls] = counts.get(cls, 0)
             elif meta.get("alloc") or meta.get("set_ladder"):
@@ -575,7 +580,7 @@ class StatusMixin:
                 p = self.ev_p(e)
                 p_now += 1
             edge = None if p is None else qty * ((p - price) if buy else (price - p))
-            if cls == "maker" and meta.get("recycle"):   # P14 1: a recycled MM side (keys only once one exists);
+            if cls == "maker" and meta.get("recycle"):   # A recycled MM side (keys only once one exists);
                 counts["recycle"] = counts.get("recycle", 0) + 1   # it still closes middle-band lots below
                 recycle_ev = (recycle_ev or 0.0) + (edge or 0.0)
                 if p is None or not lo <= p <= hi:
@@ -658,20 +663,20 @@ class StatusMixin:
                 "quotes_pulled_after_errors": self.pulled_after_errors, **self.health, **self.ops_last,
                 "realised_pnl_scope": "maker fills only",   # arb / take fills (our_side '?') are not in realised_pnl
                 **(self.api.pause_state() if hasattr(self.api, "pause_state") else {}),
-                # T2.1: the tilt estimate (also restored from here at start) and the position's exposure to it
+                # The tilt estimate (also restored from here at start) and the position's exposure to it
                 "tilt_s": round(self.tilt_s, 4),
                 "tilt_exposure": round(self.tilt_exposure),
                 "tilt_state": self.tilt_state_dict(),
                 "tilt_diag": {**getattr(self.tilt, "diag", {}),
                               "estimator": getattr(self.cfg, "ref_tilt_estimator", "slope")},
-                # Package 7: NO+NO sets held (races, sets, capital at k - 1 per set) and the paired-unwind check
+                # NO+NO sets held (races, sets, capital at k - 1 per set) and the paired-unwind check
                 "nono_sets": self.safe_nono_sets(), "pairno_state": getattr(self, "pairno_state", None),
-                **owed,                                   # Package 7: pair unwind legs still owed {race: shares}
-                # Package 10 B: the allocator (also what a restart restores; absent while never used)
+                **owed,                                   # Pair unwind legs still owed {race: shares}
+                # The allocator (also what a restart restores; absent while never used)
                 **({"alloc": self.alloc_status()} if self.alloc_persist_needed() else {}),
-                # P14: market-making funding (read-only; MM_FUNDING_KEYS; also what a restart restores: the MM lots)
+                # Market-making funding (read-only; MM_FUNDING_KEYS; also what a restart restores: the MM lots)
                 "mm_funding": self.safe_mm_funding(),
-                # P15: the harvest ladder, the state cap (HARVEST_KEYS; absent while unused)
+                # The harvest ladder, the state cap (HARVEST_KEYS; absent while unused)
                 **({"harvest": self.hv_info} if getattr(self, "hv_info", None) else {}),
                 **({"state_caps": self.st_status()} if self.st_on() else {}),
                 # ev_outcome_delta_24h's ring of (wall, ev) samples (also what a restart restores)
@@ -729,7 +734,7 @@ class StatusMixin:
                 setattr(cfg, k, v)
                 if k == "requests_per_minute":
                     self.api.budget = min(getattr(self.api, "budget", v), v)
-                if k == "writes_per_minute":          # the owner asked for this rate: start from it now
+                if k == "writes_per_minute":          # the operator asked for this rate: start from it now
                     self.api.wbudget = float(v)
                 if k == "writes_per_minute_max":      # a lower ceiling applies at once; a higher one is grown into
                     self.api.wbudget = min(getattr(self.api, "wbudget", v), max(v, cfg.writes_per_minute))
@@ -742,20 +747,20 @@ class StatusMixin:
     def warn_settings(self):
         """One-line warnings for setting combinations that work against each other (once per time they turn on)."""
         bad = bool(getattr(self.cfg, "alloc_enabled", False)) and not getattr(self.cfg, "cash_gate_enabled", False)
-        if bad and not getattr(self, "warned_alloc_cash", False):   # Package 10 B
+        if bad and not getattr(self, "warned_alloc_cash", False):
             log.warning("alloc_enabled is on without cash_gate_enabled: the allocator does nothing without the gate's "
                         "fresh cash read - turn cash_gate_enabled on")
         self.warned_alloc_cash = bad
         unknown = tuple(sorted(self.alloc_pins() - {x.label for x in self.ex.values()})) if self.ex else ()
-        if unknown and unknown != getattr(self, "warned_alloc_pin", ()):   # (P10 red team RT-6: a typo pins nothing)
+        if unknown and unknown != getattr(self, "warned_alloc_pin", ()):   # (a typo pins nothing)
             log.warning("alloc_pin names no market: %s - those labels pin nothing (labels are matched exactly, e.g. "
                         "'Rep Ohio Senate')", ", ".join(unknown))
         self.warned_alloc_pin = unknown
-        c = self.cfg                          # P14: a funding flag that cannot act with these settings
+        c = self.cfg                          # A funding flag that cannot act with these settings
         bad = tuple(n for n, hit in (
             ("mm_refill_fast without alloc_enabled (the fast refill is the allocator's B2 refill)",
              getattr(c, "mm_refill_fast", False) and not getattr(c, "alloc_enabled", False)),
-            # P14.1: a refill flag does nothing without the fast refill, the netting nothing without a reserve
+            # A refill flag does nothing without the fast refill, the netting nothing without a reserve
             (f"{', '.join(k for k in P141_REFILL if getattr(c, k, False))} without mm_refill_fast (they change "
              "the fast refill)",
              any(getattr(c, k, False) for k in P141_REFILL) and not getattr(c, "mm_refill_fast", False)),
@@ -770,15 +775,15 @@ class StatusMixin:
         if bad and bad != getattr(self, "warned_mmf", ()):
             log.warning("MM funding: %s", "; ".join(bad))
         self.warned_mmf = bad
-        bad = self.p142_on() and float(getattr(c, "value_sell_margin", 0.0)) > 0.01   # P14.2: a raised margin left on
+        bad = self.p142_on() and float(getattr(c, "value_sell_margin", 0.0)) > 0.01   # A raised margin left on
         if bad and not getattr(self, "warned_swap_margin", False):
             log.warning("WARNING alloc_swap_sell_margin %.3f is on while value_sell_margin is %.3f (> 0.01): every "
                         "resting reducing quote, the recycler and the refills may still sell that far below p - the "
                         "swaps no longer need it (they have their own floor): return value_sell_margin to 0.005",
                         c.alloc_swap_sell_margin, c.value_sell_margin)
         self.warned_swap_margin = bad
-        on = ()                               # Package 10 A1 (iv): the mark-driven selling paths it once listed
-        if getattr(self.cfg, "value_mode", False):   # (reduce_from_book, fast_unload_enabled) were removed on simplify
+        on = ()                               # the mark-driven selling paths this once warned about
+        if getattr(self.cfg, "value_mode", False):   # (those paths are gone; nothing to list)
             c = self.cfg
             closing = [n for n in ("exit_hours_before_close", "flatten_hours_before_close", "flatten_per_market_hours")
                        if getattr(c, n) > 0]

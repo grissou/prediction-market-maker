@@ -1,9 +1,14 @@
 """
-The exchange: ApiError, Api (HTTP, retries, rate limiting, one method per endpoint),
-_SocketErrorWatch and RealtimeFeed (the push feed on a background thread), plus the per-market state
-record Ex, the order-change records Change / Write, state_of and busy.
+The exchange: everything that touches the tournament API over the wire.
 
-Must never decide prices or sizes and must never import the bot or the mixins.
+Owns ApiError, Api (HTTP with retries and the request budget below the rate limit, one method per
+endpoint: books, positions, orders, fills, order placement and cancellation), _SocketErrorWatch and
+RealtimeFeed (the push feed on a background thread that says which books changed), the per-market
+state record Ex, the order-change records Change / Write, and the small helpers state_of and busy.
+
+It is plumbing: it must never decide a price or a size, never choose whether an order goes out,
+never read or change bot state, and never import the bot or the mixins. Anything above it that
+wants the exchange goes through Api; nothing else opens a socket.
 """
 import asyncio
 import bisect
@@ -24,7 +29,7 @@ from mmbot import pricing
 from mmbot import quoting
 from mmbot.util import iso, log, parse_ts, rnd
 from mmbot.pricing import _num
-from mmbot.quoting import NO_QUOTE, Quote, fl_side
+from mmbot.quoting import NO_QUOTE, Quote
 
 
 # =============================================================================================
@@ -584,7 +589,7 @@ class Ex:
     reprices: dict = field(default_factory=dict)   # side -> times we repriced it lately (churn control)
     ref_moved_at: float = -1e9            # last time its Polymarket price moved >= urgent_ref_move
     ref_jump_at: float = -1e9             # last time its Polymarket price moved >= ref_jump_threshold (monotonic;
-                                          #   reduce_from_book pauses after it)
+                                          #   the jump guard runs after it)
     cancelling: bool = False              # ...one of them is a cancel
     inv: float = 0.0                      # for logging / recording
     eff: float = 0.0                      # for logging
@@ -594,13 +599,11 @@ class Ex:
     take_dir: int = 0                     # +1 = Polymarket above the best ask, -1 = below the best bid, 0 = neither
     take_since: float = 0.0               # since when every Polymarket reading has shown that same gap
     take_until: float = 0.0               # after taking here, leave it alone until this time
-    fl_side: str | None = None            # favourite-longshot bias side last cycle (for its hysteresis)
-    fl_tag: str = ""                      # that bias for the quote log line ("" = none active)
     turnover_dead: bool = False           # holding a position in a market with too little flow (health only)
     ro_clip: str = ""                     # "bid" / "ask" / "bid ask": side(s) decide() left empty ONLY by the reduce-only
                                           #   race-net clip this cycle (diagnostic)
-    mmr_tail: bool = False                # P12 ops: value adds paused and a tail market (decide; the ladder too)
-    st_caps: tuple | None = None          # P15 state_max_usd: decide's (bid, ask) adding caps in shares (the ladder)
+    mmr_tail: bool = False                # Value adds paused and a tail market (decide; the ladder too)
+    st_caps: tuple | None = None          # state_max_usd: decide's (bid, ask) adding caps in shares (the ladder)
 
 
 US_STATES = {
@@ -619,7 +622,7 @@ _STATE_CODE_RE = re.compile(r"^([A-Z]{2})(?:-(?:\d{1,2}|AL))?(?=\s|$)")
 
 
 def state_of(label):
-    """P15: the US state a market belongs to, as its postal code ("Rep Rhode Island Senate", "Dem Rhode Island
+    """The US state a market belongs to, as its postal code ("Rep Rhode Island Senate", "Dem Rhode Island
     Governor", "Ind RI Governor", "Dem RI-01 House race" -> "RI"), or None (the headline "U.S. House" / "U.S. Senate"
     markets, anything unrecognised). The label's first word (the party: "Rep", "Dem", "Ind", ...) is skipped when the
     whole label does not start with a state."""
@@ -673,7 +676,7 @@ class Write:
     def __init__(self, kind, eids, payload, sent, change=None):
         self.kind, self.eids, self.payload, self.sent, self.change = kind, eids, payload, sent, change
         self.future, self.payload_ok, self.done_at = None, False, None   # payload_ok: a cancel confirmed
-        self.cash_need = 0.0          # Package 8 cash gate: what this batch's orders need (counted as sent)
+        self.cash_need = 0.0          # Cash gate: what this batch's orders need (counted as sent)
 
 
 def fmt(price, size):

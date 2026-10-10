@@ -10,7 +10,7 @@ L3 pair_no_unwind_asks_le1: the NO+NO pair unwind only while the asks sum <= 1 +
 Also: settings (defaults, ranges, one block), flags off identical to the branch head (a1b3eea) on a grid (wire orders,
 quotes, allocator plan, arb_plan, status keys), py_compile.
 
-Run:  python tests/test_p12_alloc.py      (exit code 0 = all passed)
+Run:  python tests/test_allocator_rich_leg.py      (exit code 0 = all passed)
 """
 import importlib.util
 import json

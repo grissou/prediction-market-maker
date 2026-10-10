@@ -13,7 +13,7 @@ sale), the reserve (refill sales, buys only above it, spare cash), turnover / or
 check hook, IOC and leftover cancel with our own quotes pulled first, cash gate interplay, never a flip, B3 set unwind
 registration and expiry, status.json / journal, switch-off, dry run, py_compile under Python 3.10.
 
-Run:  python tests/test_alloc.py      (exit code 0 = all passed)
+Run:  python tests/test_allocator.py      (exit code 0 = all passed)
 """
 import importlib.util
 import json
@@ -832,7 +832,7 @@ if py310:
                        capture_output=True, text=True)
     check("mm_bot.py compiles under Python 3.10", r.returncode == 0, r.stderr[-300:])
     r = subprocess.run([py310, "-m", "py_compile", os.path.abspath(__file__)], capture_output=True, text=True)
-    check("tests/test_alloc.py compiles under Python 3.10", r.returncode == 0, r.stderr[-300:])
+    check("tests/test_allocator.py compiles under Python 3.10", r.returncode == 0, r.stderr[-300:])
 else:
     check("python3.10 available for the compile check", False)
 

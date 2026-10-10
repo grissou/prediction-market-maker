@@ -16,7 +16,7 @@ health, summary, alloc_plan); state_of on all 237 live labels; ladder levels / e
 the caps (market, state, carve-out) and the MM effective reserve at the gate; carve-out accounting; the state cap on
 the allocator / takes / quotes; re-quotes and pulls; adoption after a timeout; the quoter and the ladder; fills;
 no duplicates; robustness; the staged file; py_compile.
-Run:  python tests/test_p15.py      (exit code 0 = all passed)
+Run:  python tests/test_harvest_ladder.py      (exit code 0 = all passed)
 """
 import importlib.util
 import json

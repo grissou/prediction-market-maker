@@ -1,10 +1,16 @@
 """
-The Bot: state (__init__), the clock, reference prices and tilt, markets and close times, the cycle
-(cycle / cycle_body), books and priming, decide and its blocks, reconcile / plan_change,
-plan_exchange and the write queue, order sync / place / cancel / apply_batch, the NO-as-sell sets
-and log_fills. Everything else is a mixin in its own module.
+The Bot class: the one object every mixin hangs off, and the cycle that drives it.
 
-Never imported by the mixins or the leaf modules.
+Owns the state (__init__), the clock, reference prices and the tilt estimate, the market list and
+close times, the cycle itself (cycle / cycle_body: read state, fair values, fills, arbitrage, risk,
+allocator, harvest ladder, quotes, reconcile, snapshot), book priming, `decide` (the per-market
+quote and every guard that shapes it), reconcile / plan_change (the desired orders against the
+resting ones), plan_exchange and the write queue, order sync / place / cancel / apply_batch, the
+covered "sell NO" conversion and log_fills.
+
+It never computes a price itself (pricing.py / quoting.py do) and never talks HTTP directly
+(exchange.py does). Never imported by the mixins or the leaf modules: they are mixed into Bot, so
+anything they need of it is already on self.
 """
 import email.utils
 import json
@@ -30,7 +36,7 @@ from mmbot.pricing import (
     predicted_top, reserved_cash, strip_own, tilted_ref, wire_order,
 )
 from mmbot.quoting import (
-    DEFAULT_BANKROLL, NO_QUOTE, exit_quote, fl_side, plan_sizes, quote_lock, side_needs_change, unsafe_order,
+    DEFAULT_BANKROLL, NO_QUOTE, exit_quote, plan_sizes, quote_lock, side_needs_change, unsafe_order,
     value_floor_quote,
 )
 from mmbot.measure import FillLogger, TurnoverTracker, read_fills
@@ -61,14 +67,14 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
         self.lots_seeded = False          # first reconcile rebuilds missing ones from fills.csv
         self.lots_dirty = False
         self.capital_over = False         # capital ceiling active (capital_in_positions_max_frac)
-        self.adding_resume = False        # Package 8 adding_factor_capital_on: the resume factor is in force
+        self.adding_resume = False        # adding_factor_capital_on: the resume factor is in force
         self.cur_refs, self.cur_liquid = {}, set()   # this cycle's Polymarket prices (for risk_fv)
         _tilt_saved = self.load_tilt()
-        self.tilt = TiltEstimator(cfg).from_dict(_tilt_saved)   # T2.1: tournament tilt s (see update_tilt)
+        self.tilt = TiltEstimator(cfg).from_dict(_tilt_saved)   # Tournament tilt s (see update_tilt)
         self.tilt_s, self.tilt_exposure = self.tilt.s, 0.0
-        self.alloc_init(self.load_status_key("alloc"))   # Package 10 B: the allocator (last run, turnover)
-        self.mmf_init(self.load_status_key("mm_funding"))   # P14: MM inventory lots, alert state (status.json)
-        self.p15_init()                                     # P15: the harvest ladder, the state cap (this run)
+        self.alloc_init(self.load_status_key("alloc"))   # The allocator (last run, turnover)
+        self.mmf_init(self.load_status_key("mm_funding"))   # MM inventory lots, alert state (status.json)
+        self.p15_init()                                     # The harvest ladder, the state cap (this run)
         self.pos_marks = {}             # {eid: the exchange's own valuation price of the position (currentPrice)}
         self.fv_fallback_logged = {}      # {eid: source} - which fallback risk_fv used for a held position (logged once)
         self.mark_sd = {}                 # eid -> sd of the 10-min mid change (mark_frag_*; from the recorder)
@@ -110,9 +116,9 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
         self.placed_qty = {}              # orderId -> shares we placed, and...
         self.filled_qty = defaultdict(float)   # ...shares filled so far (each fill counted once, from fills)
         self.ref_rejected = set()         # Polymarket keys currently ignored as implausible (alerted once)
-        self.ref_only = set()             # eids priced from Polymarket alone this cycle (thin book, R5)
-        self.bloc_sens, self.bloc_delta, self.bloc_inv = {}, 0.0, {}   # Package 10 A2 (bloc_refresh)
-        self.warned_value = ()                    # Package 10 A1 (iv): the value_mode warnings last logged
+        self.ref_only = set()             # eids priced from Polymarket alone this cycle (thin book, ref-only)
+        self.bloc_sens, self.bloc_delta, self.bloc_inv = {}, 0.0, {}   # (bloc_refresh)
+        self.warned_value = ()                    # the value_mode warnings last logged
         # Threads for sending several HTTP requests at once (downloads mostly wait on the network).
         self.pool = ThreadPoolExecutor(max_workers=max(1, cfg.parallel_requests), thread_name_prefix="http")
         # ...and for order writes, so a slow one never holds up the others or the cycle (see send_changes).
@@ -124,7 +130,7 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
         self.burst, self.burst_calm_since, self.burst_set = False, 0.0, set()
         self.trading_since = None         # monotonic time the trading loop started (burst_startup_grace_seconds)
         self.global_reduce = False
-        # P12 ops mm_risk_reserve_*: "value adds paused" (cycle step 6, mm_risk_room_update), when it started (wall
+        # mm_risk_reserve_*: "value adds paused" (cycle step 6, mm_risk_room_update), when it started (wall
         # time), the latest rooms, and what it held back (cumulative; tail_quotes: sides in the latest cycle)
         self.mmr_paused, self.mmr_since, self.mmr_room = False, None, (None, None)
         self.mmr_blocked = {"takes": 0, "alloc": 0, "basket": 0, "tail_quotes": 0}   # (basket: retired, 0)
@@ -134,9 +140,9 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
         self.refs = self.load_reference_prices()
         self.ref_version_seen = 0         # last Polymarket reading the jump guard has looked at
         self.last_tops = {}               # latest bulk best bid/ask per exchange (for recording)
-        self.last_tops_at = {}            # (when each was read, monotonic: P15 hv_top_moved)
+        self.last_tops_at = {}            # (when each was read, monotonic: hv_top_moved)
         self.other_tops = {}              # eid -> (other traders' best bid, best ask, time read) from bulk prices
-        self.ref_tops = {}                # eid -> (best bid, best ask): R5 priced it from other_tops this cycle
+        self.ref_tops = {}                # eid -> (best bid, best ask): ref-only priced it from other_tops this cycle
         self.trading_since = None         # util.time.monotonic() when the trading loop started (startup priming)
         self.book_reqs = deque()          # times of recent book downloads (startup priming's per-minute cap)
         self.held = {}                    # eid -> signed shares held (latest positions read; books_to_fetch, priming)
@@ -145,7 +151,7 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
         self.arb_cooldown = {}            # race -> util.time.monotonic() until which we leave it alone
         self.arbs_total = 0               # arbitrages / takes since start (summaries report the change)
         self.unwinds_total = 0            # pair unwinds since start (status.json pair_unwinds_total)
-        self.pair_owed = {}               # Package 7 pair_unwind_followup: race -> owed legs (pair_followup_step)
+        self.pair_owed = {}               # pair_unwind_followup: race -> owed legs (pair_followup_step)
         self.ops_last = {}                # ops fields of the latest status write (ops_fields): recorder, summary
         self.ops_cache = {}               # ops_fields: fills.csv-derived numbers, recomputed when the file changes
         self.ops_warned = False           # ops_fields failed once (logged once)
@@ -190,11 +196,11 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
         self.selftest_alerted = False
         self.selftest_funds_wait = 0.0    # current funds-refusal back-off (s); 0 = not waiting for cash
         self.selftest_hold = 0.0          # the test exchange's pending_until before the test
-        # Package 6 reduce_no_as_sell: its start-up self-test leg (None = not run yet, "ok", "off" = refused: today's
+        # reduce_no_as_sell: its start-up self-test leg (None = not run yet, "ok", "off" = refused: today's
         # behaviour for this run), the background run, when to retry it, and this plan's covered NO per exchange/level
         self.nosell_state, self.nosell_future, self.nosell_next, self.cover_planned = None, None, 0.0, {}
         self.nosell_eid, self.nosell_hold = None, 0.0
-        # Package 7 pair_no_unwind_max_cost: its start-up check leg (a paired covered NO sale), state as nosell's
+        # pair_no_unwind_max_cost: its start-up check leg (a paired covered NO sale), state as nosell's
         self.pairno_state, self.pairno_future, self.pairno_next, self.pairno_wait = None, None, 0.0, 0.0
         self.pairno_race, self.pairno_holds = None, {}
         self.selftest_gen = 0             # cancel_gen when the test started
@@ -295,7 +301,7 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
         return (close - util.utcnow()).total_seconds() / 3600 if close else float("inf")
 
     def close_override(self):
-        """Package 12 M1: close_override_utc as an aware datetime, or None (off, or invalid: unparseable, no time
+        """close_override_utc as an aware datetime, or None (off, or invalid: unparseable, no time
         zone, outside its OVERRIDABLE range - ignored, with one alert per bad value)."""
         v = getattr(self.cfg, "close_override_utc", "")
         if not isinstance(v, str) or not v.strip():
@@ -315,7 +321,7 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
         return dt
 
     def effective_close(self, ex):
-        """Package 12 M1: the close every pre-close rule uses = max(the API close, close_override_utc): an override
+        """The close every pre-close rule uses = max(the API close, close_override_utc): an override
         only ever EXTENDS a close. No API close -> None (never closes), whatever the override."""
         if not ex.close:
             return ex.close
@@ -471,7 +477,7 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
             for r in filter(None, map(parse_order, raw_orders)):
                 mine_real[r.eid].append(r)
         resting = mine_real if self.api.live else self.sim_by_eid()
-        if getattr(cfg, "cash_gate_enabled", False) and self.api.live:   # Package 8: this cycle's cash budget
+        if getattr(cfg, "cash_gate_enabled", False) and self.api.live:   # This cycle's cash budget
             self.cash_gate_cycle(f_pnl, pos, raw_orders)     # (also while stale: a good read resumes the gate)
 
         # 2. Order books (only the ones that changed) ------------------------------------------
@@ -502,7 +508,7 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
         fvs = dict(book_fvs)
         self.ref_only = self.thin_book_prices(fvs, refs, liquid, now_m) if cfg.ref_only_enabled else set()
         self.warn_unpriced_held(fvs, book_fvs, refs, liquid, now_m)
-        self.update_tilt(book_fvs, refs, liquid, inv, now_m)      # T2.1: runs (read-only) with the flag off too
+        self.update_tilt(book_fvs, refs, liquid, inv, now_m)      # Runs (read-only) with the flag off too
         if cfg.ref_weight > 0 and refs:
             for eid, r in refs.items():
                 if fvs.get(eid) is not None and eid in liquid and eid not in self.ref_only:   # liquid only
@@ -523,10 +529,10 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
                 self.pos_record_due = True            # recorder: note the positions straight after a fill
         self.note_turnover(new_fills if read_fills else ())
         self.refresh_turnover(now_m)
-        self.mm_inv_step(new_fills if read_fills else (), inv)   # P14: MM inventory lots (read-only, never raises)
+        self.mm_inv_step(new_fills if read_fills else (), inv)   # MM inventory lots (read-only, never raises)
 
         # 5. Guaranteed arbitrage inside races (takes liquidity; our quotes there are pulled first) --
-        # Package 7 pair_unwind_followup: legs an earlier pair unwind left unequal are evened up first
+        # pair_unwind_followup: legs an earlier pair unwind left unequal are evened up first
         owed_races = (self.pair_followup_step(fvs, now_m, mine_real, inv=inv) if getattr(self, "pair_owed", None)
                       else set())
         arb_races = self.take_arbitrage(inv, fvs, mine_real, now_m) if self.running else set()
@@ -536,7 +542,7 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
         eff = self.effective_inventory(inv)
         worst = self.total_worst_case(inv, fvs)
         party_delta = sum(PARTY_SIGN.get(ex.party, 0) * inv.get(eid, 0.0) for eid, ex in self.ex.items())
-        if cfg.bloc_delta_enabled:                # Package 10 A2: the bloc delta the party cap uses this cycle
+        if cfg.bloc_delta_enabled:                # The bloc delta the party cap uses this cycle
             self.bloc_refresh(inv)
         # Hysteresis: once in reduce-only, both caps are reduce_only_hysteresis lower until it has been left.
         hyst = min(cfg.reduce_only_hysteresis, cfg.max_worst_case_frac / 2) if self.global_reduce else 0.0
@@ -552,11 +558,11 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
             log.warning("%s reduce-only: risk %.0f, worst case %.0f, account %s", "ENTERING" if global_reduce
                         else "leaving", risk, worst, f"{equity:.0f}" if equity is not None else "?")
         self.global_reduce = global_reduce
-        if getattr(cfg, "alloc_swap_room_netting", False):   # P14.1 5: the room a swap's own legs would leave
+        if getattr(cfg, "alloc_swap_room_netting", False):   # The room a swap's own legs would leave
             self.alloc_fvs = dict(fvs)
-        if cfg.mm_risk_reserve_wc > 0 or cfg.mm_risk_reserve_corr > 0 or self.mmr_paused:   # P12 ops (after it:
+        if cfg.mm_risk_reserve_wc > 0 or cfg.mm_risk_reserve_corr > 0 or self.mmr_paused:   # (after it:
             self.mm_risk_room_update(worst, risk, equity,                                   #  never changes it)
-                                     self.mm_room_part(inv, fvs, worst, risk)               # P14 3 mm_room_guard
+                                     self.mm_room_part(inv, fvs, worst, risk)               # mm_room_guard
                                      if getattr(cfg, "mm_room_guard", False) else None)
         capital = self.capital_in_positions(pos, inv, fvs)
         cap_frac = capital / equity if equity else None
@@ -609,18 +615,18 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
                        "positions": {self.ex[e].label: q for e, q in inv.items() if q and e in self.ex}}
 
         self.health.update(books_loaded=self.books_loaded(), markets_priced_from_tops=len(self.ref_tops))
-        if getattr(cfg, "take_respect_reserve", False) or getattr(self, "take_reserve_blocked", 0):   # P10 (absent while off)
+        if getattr(cfg, "take_respect_reserve", False) or getattr(self, "take_reserve_blocked", 0):   # (absent while off)
             self.health["take_reserve_blocked"] = getattr(self, "take_reserve_blocked", 0)
-        if cfg.bloc_delta_enabled:                # Package 10 A2 (absent while off)
+        if cfg.bloc_delta_enabled:                # (absent while off)
             self.health["bloc_delta"] = round(self.bloc_delta, 2)
             self.health["bloc_delta_frac"] = round(self.bloc_delta / equity, 4) if equity else None
 
-        if self.st_on():                          # P15 state_max_usd: each state's collateral this cycle
+        if self.st_on():                          # state_max_usd: each state's collateral this cycle
             self.st_refresh(inv, now_m)
         # 6b. Take tournament quotes that Polymarket says are clearly stale (confirmed over 2 readings) ---
         taken = (self.take_stale_quotes(refs, liquid, fvs, inv, mine_real, global_reduce, party_delta, now_m)
                  if self.running else set())
-        # 6d. Package 10 B: the capital allocator (sell -> cash read -> buy, immediate-or-cancel; see Config)
+        # 6d. The capital allocator (sell -> cash read -> buy, immediate-or-cancel; see Config)
         if self.running and (cfg.alloc_enabled or self.alloc_pairs or self.alloc_set_races or self.alloc_ladder
                              or (self.api.live and self.sl_orders())):
             try:
@@ -630,7 +636,7 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
             except Exception:                         # an allocator bug must never stop the market maker
                 self.orders_stale = True
                 log.exception("allocator tick failed - skipped this cycle")
-        # 6e. P15: the harvest ladder (resting maker levels; pulls)
+        # 6e. The harvest ladder (resting maker levels; pulls)
         if self.running and self.hv_on():
             try:
                 taken |= self.hv_tick(now, inv, mine_real, now_m, skip=taken | arb_races)
@@ -644,12 +650,12 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
         # 7. Decide + reconcile each exchange. One write at a time (parallel_writes = 1): cancels happen now,
         #    new orders are batched after. Otherwise every change is planned first, then sent in parallel.
         new_orders, changes = [], []
-        self.mmr_tail_now = 0                     # P12 ops: tail adding sides held back this cycle (decide counts)
-        if self.mmf_recycling:                    # P14 1: this cycle's recycler overrides (decide fills it again)
+        self.mmr_tail_now = 0                     # Tail adding sides held back this cycle (decide counts)
+        if self.mmf_recycling:                    # This cycle's recycler overrides (decide fills it again)
             self.mmf_recycling = {}
-        if self.cash_gate_on():                   # Package 8: the quotes' plan budget, after this cycle's takes
+        if self.cash_gate_on():                   # The quotes' plan budget, after this cycle's takes
             self.cg_plan_left, self.cg_capped_now = self.cash_left(), 0
-            if self.hv_plans:                     # P15: the quotes leave the ladder the part of its carve-out it
+            if self.hv_plans:                     # The quotes leave the ladder the part of its carve-out it
                 self.cg_plan_left = max(0.0, self.cg_plan_left - self.hv_quote_hold())   # still waits to place
         for eid, ex in list(self.ex.items()):
             if not self.running:          # Ctrl+C: stop touching the book immediately
@@ -678,22 +684,20 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
         # Orders resting NOW, after this cycle's changes (the health snapshot above was taken before them).
         self.health["orders_resting"] = len(self.my_orders) if self.api.live else len(self.sim)
         self.health["selftest_state"] = self.selftest_state()
-        mmr = self.mm_risk_status()               # P12 ops mm_risk_reserve_* (absent while off and never paused)
+        mmr = self.mm_risk_status()               # mm_risk_reserve_* (absent while off and never paused)
         if mmr is not None:
             self.health["mm_risk_room"] = mmr
-        if getattr(cfg, "cash_gate_enabled", False):   # Package 8 (absent while the gate is off)
+        if getattr(cfg, "cash_gate_enabled", False):   # (absent while the gate is off)
             self.health["cash_gated"] = getattr(self, "cash_gated", 0)
             self.health["cash_trimmed"] = getattr(self, "cash_trimmed", 0)
             self.health["cash_capped_quotes"] = getattr(self, "cg_capped_now", 0)
             self.health["cash_gate_left"] = round(self.cash_left(), 2) if getattr(self, "cg_cash", None) is not None else None
             age = self.cash_read_age()
             self.health["cash_gate_read_age"] = round(age, 1) if age is not None else None   # s since a good read
-        self.health["fl_bias_markets"] = {k: sum(1 for x in self.ex.values() if x.fl_tag.startswith(f" fl:{k}"))
-                                          for k in ("bid", "ask")}
         self.health["market_edge_markets"] = len(self.market_edge) if self.cfg.market_edge_enabled else 0
         self.health.update(self.turnover_health(inv, fvs))
 
-        self.mm_funding_tick()                    # P14 4: the below-half clock and its alert (never raises)
+        self.mm_funding_tick()                    # The below-half clock and its alert (never raises)
 
         # 8. Snapshot for later analysis (every record_seconds) -------------------------------------
         self.record(fvs, now_m)
@@ -752,7 +756,7 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
             raise e
 
     def thin_book_prices(self, fvs, refs, liquid, now_m):
-        """R5: markets whose book is too thin for a depth-checked price (fair_value None) but that have a
+        """Markets whose book is too thin for a depth-checked price (fair_value None) but that have a
         liquid Polymarket price get fv = Polymarket, if the tournament's raw best bid/ask (other traders,
         any size, verified recently) are two-sided, not wider than max_spread_for_fv, and their mid is
         within ref_only_max_gap of Polymarket. Fills fvs in place; returns the set of those eids.
@@ -827,7 +831,7 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
         return f"mid {(bb + ba) / 2:.3f} more than ref_only_max_gap (Polymarket {refs[eid]:.3f})"
 
     def r5_top(self, ex, now_m):
-        """(other traders' best bid, best ask, from_tops) for R5, or None (one-sided, or nothing current).
+        """(other traders' best bid, best ask, from_tops) for ref-only, or None (one-sided, or nothing current).
         A book confirmed within book_stale is used as before. Without one (after a restart every book is None;
         downloading 237 takes minutes of request budget) and with ref_only_use_tops: the bulk best bid/ask, if
         read within tops_max_age and two-sided once our own orders are discounted (see others_top)."""
@@ -880,7 +884,7 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
         return max(1, len(self.groups.get(ex.group) or ()))
 
     def load_tilt(self):
-        """T2.1: the tilt estimate the previous run left in status.json ({} if none: the estimate starts at 0).
+        """The tilt estimate the previous run left in status.json ({} if none: the estimate starts at 0).
         The dict also carries "saved_wall": tilt_state's own save time, else the file's mtime."""
         try:
             path = bot_path(self.cfg.status_file)
@@ -899,8 +903,8 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
         return {**self.tilt.to_dict(), "saved_wall": round(util.time.time(), 3)}
 
     def update_tilt(self, book_fvs, refs, liquid, inv, now_m):
-        """T2.1, every cycle (read-only): feed the tilt estimator from the markets that are
-        liquid, not R5 (ref_only), not headline, with a book price and Polymarket, and not under a jump guard; and
+        """Every cycle (read-only): feed the tilt estimator from the markets that are
+        liquid, not ref_only, not headline, with a book price and Polymarket, and not under a jump guard; and
         tilt_exposure = sum over held markets of position x (raw Polymarket - c), c = 1/legs."""
         cfg, samples = self.cfg, []
         for eid, r in refs.items():
@@ -1012,7 +1016,7 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
         budget_reserve back for orders. The rest wait for a later cycle (reported books stay pending)."""
         candidates = [(0, self.ex[e].book_time, e) for e in self.pending_dirty if e in self.ex]
         # Never-downloaded books of markets we HOLD a position in come before everything (even feed-reported
-        # changes): without a book a held market can go unpriced (R5 can't see the side our own reducing order
+        # changes): without a book a held market can go unpriced (ref-only can't see the side our own reducing order
         # tops, see others_top), and then it is neither quoted nor reduced. Biggest exposure first (held_weights).
         # Then never-downloaded books where we have orders resting (e.g. adopted at a handover restart), then
         # the ones we quote from the bulk tops, then the rest, busiest (Polymarket volume) first.
@@ -1157,7 +1161,7 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
         fv is what we quote around; book_fv is the tournament book's own price (for the Polymarket guard);
         ref_liquid says whether the Polymarket price is reliable enough to size positions with Kelly."""
         cfg = self.burst_cfg if self.burst else self.cfg
-        ex.fl_tag, ex.turnover_dead = "", False
+        ex.turnover_dead = False
         ex.ro_clip = ""
         ex.inv, ex.eff, ex.ref = inv.get(ex.eid, 0.0), eff.get(ex.eid, 0.0), ref
         hrs = self.hours_to_close(ex)
@@ -1166,14 +1170,14 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
         b = ex.book or {}
         best_bid = b["bids"][0]["price"] if b.get("bids") else None
         best_ask = b["asks"][0]["price"] if b.get("asks") else None
-        if ex.eid in self.ref_only and ex.eid in self.ref_tops:   # R5 from bulk tops: no current book
+        if ex.eid in self.ref_only and ex.eid in self.ref_tops:   # ref-only from bulk tops: no current book
             best_bid, best_ask = self.ref_tops[ex.eid]           # (other traders' best prices, see r5_top)
 
         # Election night, final hours: only get flat, even by trading against other orders (exit_quote).
         # This comes before every other guard on purpose: getting out must never be blocked. If the book
         # has gone too thin for a fair value (likely on election night), exit around our last known fair
         # value, or failing that Polymarket's price, instead of holding the position into settlement.
-        # Package 10 A1: the value-mode p (liquid, race-scaled Polymarket) and no pre-close windows (close_window)
+        # The value-mode p (liquid, race-scaled Polymarket) and no pre-close windows (close_window)
         vp = (self.value_p(ex, ref, ref_liquid)
               if getattr(cfg, "value_mode", False) or getattr(cfg, "value_quote_hurdle", 0.0) > 0 else None)
         if hrs <= self.close_window("exit_hours_before_close", cfg):
@@ -1213,7 +1217,7 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
             ask_cap = max(0, int(ex.inv))         # selling YES near 0 = buying NO near 1
         if fv > cfg.tail_high:
             bid_cap = max(0, int(-ex.inv))        # buying YES near 1
-        # P12 ops mm_risk_reserve_*: value adds paused -> in the tails only what shrinks this exchange's position
+        # mm_risk_reserve_*: value adds paused -> in the tails only what shrinks this exchange's position
         ex.mmr_tail = (self.mm_tail_adds_off(ex, fv, ref, ref_liquid) if getattr(self, "mmr_paused", False)
                        else False)
         if ex.mmr_tail:
@@ -1222,8 +1226,8 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
             self.mmr_tail_now = getattr(self, "mmr_tail_now", 0) + held
             bid_cap = red_bid if bid_cap is None else min(bid_cap, red_bid)
             ask_cap = red_ask if ask_cap is None else min(ask_cap, red_ask)
-        # P15: the harvest ladder's side quotes only what reduces this position (the ladder is that side), less what
-        # our harvest levels there already offer (P13 RT13-2)
+        # The harvest ladder's side quotes only what reduces this position (the ladder is that side), less what
+        # our harvest levels there already offer
         hv_s = (getattr(self, "hv_sides", None) or {}).get(ex.eid)
         if hv_s == "bid":
             red = max(0, int(-ex.inv - self.hv_side_qty(ex.eid, True)))
@@ -1231,7 +1235,7 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
         if hv_s == "ask":
             red = max(0, int(ex.inv - self.hv_side_qty(ex.eid, False)))
             ask_cap = red if ask_cap is None else min(ask_cap, red)
-        # P15 state_max_usd: in the tails the side ADDING to this position stops at the state's collateral cap
+        # state_max_usd: in the tails the side ADDING to this position stops at the state's collateral cap
         ex.st_caps = self.st_quote_caps(ex, fv, ref, ref_liquid) if self.st_on() else None
         if ex.st_caps is not None:
             sb, sa = ex.st_caps
@@ -1253,7 +1257,7 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
         headline_limit = (cfg.headline_position_frac * self.bankroll()
                           if cfg.size_by_activity and ex.group in cfg.headline_races else None)
         edge = reduce_size = None
-        if ex.eid in self.ref_only:               # R5: priced from Polymarket alone -> wider and small
+        if ex.eid in self.ref_only:               # Priced from Polymarket alone -> wider and small
             edge = max(cfg.min_edge, cfg.ref_only_min_edge)
             full = planned if planned is not None else cfg.order_size_frac * self.bankroll()
             planned = min(full, max(1.0, cfg.ref_only_size_frac * self.bankroll()))
@@ -1264,20 +1268,15 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
             edge = own if edge is None else max(edge, own)
         ex.age = self.age_hours(ex)
         adding = cfg.capital_ceiling_adding_size_factor if self.capital_over else 1.0
-        if self.adding_resume:                    # Package 8 adding_factor_capital_on: the resume factor
+        if self.adding_resume:                    # adding_factor_capital_on: the resume factor
             adding = self.ceiling_adding_factor(cfg)
         adding_limit = 1.0
         ex.turnover_dead = self.turnover_dead(ex, planned if planned is not None
                                               else cfg.order_size_frac * self.bankroll(), cfg)
-        side, bias_edge, bias_size = fl_side(fv, ex.fl_side, cfg)
-        ex.fl_side, tag = side, side
-        side = "bid" if side == "mid" else side       # mid band: an optional extra edge on bids, full size
-        ex.fl_tag = (f" fl:{tag}+{100 * bias_edge:g}c" if side and (ex.inv > -1 if side == "bid" else ex.inv < 1)
-                     else "")                         # (shown only while it changes the quote: not when unloading)
         why = {}
         skew_inv, age_off = None, False
-        # Package 12 M2: skew from the target holding - never in reduce-only (global_reduce: the risk cap is over, or
-        # the flatten window): there the skew is from flat as before (red team RT12-4)
+        # Skew from the target holding - never in reduce-only (global_reduce: the risk cap is over, or
+        # the flatten window): there the skew is from flat as before
         if getattr(cfg, "skew_target_inventory", False) and not reduce_only:
             skew_inv, age_off = self.skew_target_inputs(ex, inv, inv_for_quote,
                                                         hrs <= self.close_window("flatten_per_market_hours", cfg),
@@ -1286,7 +1285,7 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
                              bid_cap, ask_cap, kelly_p=kelly_p, bankroll=self.bankroll(),
                              shift=self.party_shift(ex, party_delta), order_size=planned, position_limit=headline_limit,
                              min_edge=edge, reduce_size=reduce_size, net_inv=ex.eff, age_hours=ex.age,
-                             adding_factor=adding, bias_side=side, bias_edge=bias_edge, bias_size=bias_size,
+                             adding_factor=adding,
                              adding_limit_factor=adding_limit,
                              why=why,
                              adding_per_market=bool(getattr(cfg, "adding_factor_per_market", False)),
@@ -1294,11 +1293,11 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
                              skew_add_flat=skew_inv is not None and not (cfg.alloc_enabled and ex.eid in
                                                                          (getattr(self, "alloc_targets", None) or {})))
         ex.ro_clip = why.get("ro_clip", "")
-        if getattr(cfg, "mm_recycle_enabled", False):   # P14 1: stale MM inventory out through the reducing side
+        if getattr(cfg, "mm_recycle_enabled", False):   # Stale MM inventory out through the reducing side
             q = self.mm_recycle_quote(ex, q, fv, best_bid, best_ask, vp, cfg, now_m)
-        if self.p141("alloc_cancel_mm_first"):     # P14.1 1: a "refill pending" hold - an allocator sale here
+        if self.p141("alloc_cancel_mm_first"):     # A "refill pending" hold - an allocator sale here
             q = self.mm_hold_quote(ex, q, now_m)   #  cancelled our quotes; the reducing side waits for the read
-        if getattr(cfg, "value_mode", False) and vp is not None:   # Package 10 A1: the final quote, value floor
+        if getattr(cfg, "value_mode", False) and vp is not None:   # The final quote, value floor
             q = value_floor_quote(q, vp, ex.inv, cfg)
         return q
 
@@ -1348,17 +1347,17 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
 
     def party_measure(self, party_delta):
         """(net exposure, cap) for the national-swing cap: the share-count party_delta and max_party_delta_frac x
-        account; Package 10 A2 bloc_delta_enabled: the bloc delta ($ per sd, + = Republican) and max_bloc_delta_frac
+        account; bloc_delta_enabled: the bloc delta ($ per sd, + = Republican) and max_bloc_delta_frac
         x account instead."""
         if getattr(self.cfg, "bloc_delta_enabled", False):
             return self.bloc_delta, self.cfg.max_bloc_delta_frac * self.bankroll()
         return party_delta, self.cfg.max_party_delta_frac * self.bankroll()
 
     def bloc_refresh(self, inv):
-        """Package 10 A2 (cycle step 6, flag on): this cycle's per-share sensitivities (liquid race-scaled
+        """(cycle step 6, flag on): this cycle's per-share sensitivities (liquid race-scaled
         Polymarket) and the bloc delta of inv. Returns the bloc delta. A contract with no liquid price this cycle
         keeps its last sensitivity (a Polymarket outage must not zero the bloc delta and open the party cap, which
-        the share count it replaces never needed Polymarket for; P10 red team RT-4)."""
+        the share count it replaces never needed Polymarket for)."""
         races = defaultdict(list)
         for eid, ex in self.ex.items():
             races[ex.group].append((eid, ex.label, self.scaled_ref(ex), eid in (self.cur_liquid or ())))
@@ -1371,18 +1370,18 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
         return self.bloc_delta
 
     def bloc_delta_now(self, inv=None):
-        """Package 10 A2: sum position x sensitivity ($ per sd of the national factor; + = Republican-leaning) for a
+        """Sum position x sensitivity ($ per sd of the national factor; + = Republican-leaning) for a
         position map {eid: YES shares} (None = the last positions read), with this cycle's sensitivities. Part B's
         allocator calls it on a hypothetical book to check a pair against the cap (bloc_cap)."""
         inv = self.bloc_inv if inv is None else inv
         return sum(q * self.bloc_sens.get(e, 0.0) for e, q in (inv or {}).items())
 
     def bloc_cap(self):
-        """Package 10 A2: the |bloc_delta| cap in $ per sd (max_bloc_delta_frac x account)."""
+        """The |bloc_delta| cap in $ per sd (max_bloc_delta_frac x account)."""
         return self.cfg.max_bloc_delta_frac * self.bankroll()
 
     def scaled_ref(self, ex):
-        """Package 10: this cycle's raw Polymarket price for ex scaled to sum to 1 over its race when every leg has
+        """This cycle's raw Polymarket price for ex scaled to sum to 1 over its race when every leg has
         one (else the raw price; None without one). Liquidity is the caller's check."""
         refs = self.cur_refs or {}
         r = refs.get(ex.eid)
@@ -1396,7 +1395,7 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
         return r
 
     def value_p(self, ex, ref, ref_liquid):
-        """Package 10 A1 / A4: the outcome value of one YES share here = the race-scaled Polymarket price, only when
+        """Value mode: the outcome value of one YES share here = the race-scaled Polymarket price, only when
         liquid (ref_liquid); None otherwise (the value rules then leave this market alone)."""
         if ref is None or not ref_liquid:
             return None
@@ -1405,11 +1404,11 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
         return self.scaled_ref(ex)
 
     def close_window(self, name, cfg=None):
-        """Package 10 A1 (ii): the pre-close window setting `name` (exit_hours_before_close, flatten_hours_before_close,
+        """: the pre-close window setting `name` (exit_hours_before_close, flatten_hours_before_close,
         flatten_per_market_hours) as the code should apply it: the setting, or no window in value_mode - but never
         less than the stop window (stop_minutes_before_close): there "nothing at all" holds for every check keyed on
         a pre-close window too (stale-quote / hold takes, arbitrage's "closing", the allocator), in value_mode or
-        with the windows set to 0 (P10 red team RT-3; the defaults 2 / 12 / 6 h are above it: unchanged)."""
+        with the windows set to 0 (the defaults 2 / 12 / 6 h are above it: unchanged)."""
         cfg = cfg or self.cfg
         w = float("-inf") if getattr(cfg, "value_mode", False) else getattr(cfg, name)
         return max(w, cfg.stop_minutes_before_close / 60.0)
@@ -1419,7 +1418,7 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
         Republican-minus-Democrat delta up, on a Democratic market down; selling does the opposite.
         Beyond the cap, block whichever side would make it worse."""
         sign = PARTY_SIGN.get(ex.party, 0)
-        party_delta, party_cap = self.party_measure(party_delta)   # (Package 10 A2: the bloc delta with the flag)
+        party_delta, party_cap = self.party_measure(party_delta)   # (the bloc delta with the flag)
         too_red, too_blue = party_delta > party_cap, party_delta < -party_cap
         return (sign > 0 and too_red) or (sign < 0 and too_blue), (sign > 0 and too_blue) or (sign < 0 and too_red)
 
@@ -1463,7 +1462,7 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
             q = replace(q, bid_size=max(1, int(q.bid_size * k)) if q.bid_size else 0,
                         ask_size=max(1, int(q.ask_size * k)) if q.ask_size else 0)
         if q.bid is not None and q.bid_size > 0 and ex.inv <= -1:
-            # Package 6 reduce_no_as_sell: a bid buying back NO we hold goes out as a covered "sell NO", capped at
+            # reduce_no_as_sell: a bid buying back NO we hold goes out as a covered "sell NO", capped at
             # the NO free to sell; the part beyond it (going long) waits until the short is gone. Capping the WANTED
             # size (not only the order) keeps a resting capped order from looking too small and churning.
             cover = self.cover_no_qty(ex.eid, ex.inv, 0)
@@ -1519,7 +1518,7 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
                  ex.label, f"{fv:.3f}" if fv is not None else "  -  ",
                  f" (ref {ex.ref:.3f})" if ex.ref is not None else "", ex.inv, ex.eff,
                  f" age {ex.age:.0f}h" if ex.inv and ex.age > self.cfg.skew_age_after_hours else "",
-                 fmt(q.bid, q.bid_size), fmt(q.ask, q.ask_size) + ex.fl_tag)
+                 fmt(q.bid, q.bid_size), fmt(q.ask, q.ask_size))
         if not doomed and not new:
             return None
         # An order that must not stay (unsafe: beyond its limit price, a side we no longer want, or above the
@@ -1566,7 +1565,7 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
         urgent = ex.eid in self.ref_moved
         head = 0 if ex.group in self.cfg.headline_races else 1
         rec = ()
-        if getattr(self.cfg, "mm_recycle_sell_first", False):   # P14.1 3: recycled SALES (the ask on a long: they
+        if getattr(self.cfg, "mm_recycle_sell_first", False):   # Recycled SALES (the ask on a long: they
             r = (self.mmf_recycling or {}).get(ex.eid)          #  free cash) before the rest, BUY-BACKS after them
             if r is None or r.get("blocked"):                   #  (one extra slot, absent while the flag is off: the
                 rec = (0,)                                      #  key's shape is then exactly 4ff7d91's)
@@ -1589,8 +1588,8 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
         return ch.new
 
     def plan_exchange(self, ex, q, resting, fv, now, now_m):
-        """plan_exchange_core, except (Package 12 L1) that our rich-leg set ladder's orders resting here are left
-        alone: not seen by the quote's plan, never in a cancel-all, and the quote's ask kept above them. P15: the
+        """plan_exchange_core, except that our rich-leg set ladder's orders resting here are left
+        alone: not seen by the quote's plan, never in a cancel-all, and the quote's ask kept above them. the
         harvest ladder's orders too (its bids as the set ladder's; the quote's bid kept below its asks)."""
         meta = self.order_meta
         lad = [o for o in resting if (meta.get(o.order_id) or {}).get("set_ladder")
@@ -1608,12 +1607,12 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
     def plan_exchange_core(self, ex, q, resting, fv, now, now_m):
         """The level-0 quote plan for this exchange (plan_change after the cash gate): a Change, or None."""
         cfg = self.cfg
-        self.__dict__.setdefault("cover_planned", {}).pop(ex.eid, None)   # Package 6: this plan's covered NO afresh
+        self.__dict__.setdefault("cover_planned", {}).pop(ex.eid, None)   # This plan's covered NO afresh
         if q.bid is not None and q.bid_size > 0 and self.set_blocked(ex.eid, ex.inv, 0):
-            # Package 7 no_set_aware_bids: every NO share here is in a NO+NO set - a bid would be a covered sale that
+            # no_set_aware_bids: every NO share here is in a NO+NO set - a bid would be a covered sale that
             # breaks the set (or a cash purchase): refused at 0 cash.
             q = replace(q, bid=None, bid_size=0, bid_limit=None, bid_max=None)
-        if self.cash_gate_on():                   # Package 8: each side at most what the cash allows (planned so)
+        if self.cash_gate_on():                   # Each side at most what the cash allows (planned so)
             q = self.cash_gate_quote(ex, q, resting)
         return self.plan_change(ex, q, resting, fv, now, now_m)
 
@@ -1787,7 +1786,7 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
             if whole and eid == self.selftest_eid:
                 self.cancel_gen += 1      # also removes any self-test orders there (see selftest_finish)
             w.future = self.writer.submit(self.cancel_request, eid, orders, whole)
-        elif self.cash_gate_on():             # Package 8: the gate runs here, on the main thread (its budget)
+        elif self.cash_gate_on():             # The gate runs here, on the main thread (its budget)
             orders = [o for o, _ in payload]
             gate, w.cash_need = self.cash_gate_orders(orders)
             w.future = self.writer.submit(self.place_orders, orders, gate=gate)
@@ -1826,7 +1825,7 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
         for w in done:
             if w.future.cancelled():      # never sent (dropped from the queue by stop_queued_writes)
                 if w.kind != "cancel":
-                    self.cash_refund([o for o, _ in w.payload])   # Package 8: its cash need back to the gate
+                    self.cash_refund([o for o, _ in w.payload])   # Its cash need back to the gate
                 continue
             try:
                 self.apply_write(w, now_m)
@@ -1849,7 +1848,7 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
                     for o in orders:
                         self.sim.pop(o.order_id, None)
                 self.cash_credit([o for o in self.my_orders.values() if o.eid == eid] if whole else
-                                 [o for o in orders if o.order_id in self.my_orders])   # Package 8 (gate on only)
+                                 [o for o in orders if o.order_id in self.my_orders])   # (gate on only)
                 self.forget_orders([oid for oid, o in self.my_orders.items() if o.eid == eid] if whole
                                    else [o.order_id for o in orders])
             else:
@@ -1877,7 +1876,7 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
     def new_order(self, ex, is_bid, price, size, fv, now, level=0):
         """One order for POST /orders/batch, plus notes about why we placed it (level 0 = the touch quote)."""
         cover = self.cover_no_qty(ex.eid, ex.inv, level) if is_bid else 0
-        if cover >= 1:                    # Package 6: a covered NO sale, capped at the NO free to sell (the add waits)
+        if cover >= 1:                    # A covered NO sale, capped at the NO free to sell (the add waits)
             size = min(int(size), cover)
             self.__dict__.setdefault("cover_planned", {}).setdefault(ex.eid, {})[level] = size
         order = {"exchangeId": ex.eid, "side": "yes", "action": "buy" if is_bid else "sell",
@@ -1889,10 +1888,10 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
             order["_no_sell"] = meta["no_sell"] = True   # sent as "sell NO @ 1-p" (wire_order)
         rec = self.mmf_recycling.get(ex.eid) if not level and getattr(self, "mmf_recycling", None) else None
         if rec is not None and rec.get("price") is not None and rec["side"] == ("bid" if is_bid else "ask"):
-            meta["recycle"] = True                # P14 1: this side carries the recycler (fills class "recycle")
+            meta["recycle"] = True                # This side carries the recycler (fills class "recycle")
         return order, meta
 
-    # --- Package 6: reduce NO holdings as covered NO sales (reduce_no_as_sell) ---
+    # --- Reduce NO holdings as covered NO sales (reduce_no_as_sell) ---
     def reduce_no_on(self):
         """reduce_no_as_sell in effect: the setting, and live with the self-test on, its own start-up leg passed
         (nosell_state "ok"; "off" = the exchange refused it: today's behaviour for the rest of this run)."""
@@ -1908,7 +1907,7 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
         never race-netted) less what our OTHER resting / just-planned bids there may already be selling (other ladder
         levels; the order a re-quote replaces is cancelled first, so the same level never counts). level None = a
         take, sent after every order of ours there was cancelled: all the NO held. 0 = not in effect / no NO held.
-        Package 7 no_set_aware_bids: less the part locked in NO+NO sets (nono_set_part), unless sets_ok (a batch
+        No_set_aware_bids: less the part locked in NO+NO sets (nono_set_part), unless sets_ok (a batch
         that sells NO on every leg of the race at once: arbitrage / short-set unwind legs)."""
         if not self.reduce_no_on() or inv is None or inv > -1:
             return 0
@@ -1917,8 +1916,8 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
             held -= self.nono_set_part(eid, inv)
         if level is not None:
             if level == 0 and not (getattr(self.cfg, "no_set_aware_bids", False) and not sets_ok):
-                held -= sum(o.qty for o in self.sl_orders(eid))   # Package 12 L1: what our set ladder sells there
-            if level == 0 and getattr(self, "hv_sides", None):   # P15: what our harvest bids there buy back
+                held -= sum(o.qty for o in self.sl_orders(eid))   # What our set ladder sells there
+            if level == 0 and getattr(self, "hv_sides", None):   # What our harvest bids there buy back
                 held -= sum(o.qty for o in self.hv_orders(eid) if o.is_bid)
             held -= sum(q for lv, q in (getattr(self, "cover_planned", {}).get(eid) or {}).items() if lv != level)
         return max(0, int(held + 1e-9))
@@ -1926,7 +1925,7 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
     def no_sell_order(self, order, inv, whole=False):
         """A take / arbitrage order (YES terms) that buys back a short: marked to go out as a covered "sell NO",
         capped at the NO held (whole=True: only if ALL of it fits, else unchanged - arbitrage legs must stay equal).
-        Returns the order (changed in place), or None (Package 7 no_set_aware_bids, not whole): all the NO held
+        Returns the order (changed in place), or None (no_set_aware_bids, not whole): all the NO held
         there is in a NO+NO set, so the buy-back can be neither a covered sale nor (at 0 cash) a purchase - not sent."""
         if order["action"] != "buy":
             return order
@@ -1939,7 +1938,7 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
         order["_no_sell"] = True
         return order
 
-    # --- Package 7: NO+NO sets ---
+    # --- NO+NO sets ---
     def nono_set_part(self, eid, inv=None):
         """NO shares of eid locked in NO+NO sets, worst-case collateral model (the exchange collateralises a race's NO
         at sum - max): eid's NO held n_i less its LONE part, lone_i = max(0, n_i - max over the race's OTHER legs of
@@ -1988,7 +1987,7 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
 
     def place_orders(self, orders, joint=False, gate=None):
         """POST /orders/batch with each order in its wire form (wire_order): every placement goes through here.
-        Package 8 cash gate (live, cash_gate_enabled): orders are capped / dropped first (gate: the keep flags if
+        Cash gate (live, cash_gate_enabled): orders are capped / dropped first (gate: the keep flags if
         the main thread already ran it, see submit_write); a dropped order gets a result {"ok": False,
         "cash_gated": True} in its place, and a batch dropped whole sends no request.
         When the gate runs HERE (the main thread's takes / arbitrage / follow-ups), the cash need of an order not
@@ -2069,7 +2068,7 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
         exchange, side and price (and expiry when known: every batch has its own). Adopts it: its notes go to
         order_meta (fills get attributed), and the exchange's 'outcome unknown' hold lifts once every order
         sent there is accounted for. Returns the order we sent, or None. no_sell True: only an order sent as a covered
-        "sell NO" (Package 6; orders are kept in YES terms, so side and price compare as for any other)."""
+        "sell NO" (orders are kept in YES terms, so side and price compare as for any other)."""
         cands = self.unconfirmed.get(eid) or []
         for k, (o, meta, _t) in enumerate(cands):
             if (o["action"] == "buy") != is_bid or abs(o["price"] - price) > 1e-6:
@@ -2182,7 +2181,7 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
             ok = False
         if ok:                                # gone: update our record of what's resting
             self.cash_credit([o for o in self.my_orders.values() if o.eid == eid] if whole_exchange else
-                             [o for o in orders if o.order_id in self.my_orders])   # Package 8 (gate on only)
+                             [o for o in orders if o.order_id in self.my_orders])   # (gate on only)
             self.forget_orders([oid for oid, o in self.my_orders.items() if o.eid == eid] if whole_exchange
                                else [o.order_id for o in orders])
         else:
@@ -2205,7 +2204,7 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
         order was for (fill attribution), our record of resting orders, and back-offs."""
         cfg = self.cfg
         if isinstance(results, Exception):
-            self.cash_refund([o for o, _ in chunk])   # Package 8: their cash need back (WRITE_BUDGET_WAIT, errors)
+            self.cash_refund([o for o, _ in chunk])   # Their cash need back (WRITE_BUDGET_WAIT, errors)
             e = results if isinstance(results, ApiError) else ApiError(0, "NETWORK", str(results))
             # Unknown outcome (network, 409 in flight, 502/503 after retries): some orders may
             # exist, so leave these exchanges alone until they show up. Clear rejection: back off.
@@ -2244,8 +2243,8 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
                     log.info("order on %s traded %s immediately", order["exchangeId"], data["quantityTraded"])
                     self.orders_stale = True          # positions changed: re-read them next cycle
                 continue
-            self.cash_refund([order])                 # Package 8: not placed: its cash need back to the gate
-            if r.get("cash_gated"):                   # Package 8: never sent (cash gate, logged there): no back-off
+            self.cash_refund([order])                 # Not placed: its cash need back to the gate
+            if r.get("cash_gated"):                   # Never sent (cash gate, logged there): no back-off
                 continue
             err = data.get("error") or {}
             if not isinstance(err, dict):             # plain-text error: {"error": "Not found"}
@@ -2284,7 +2283,7 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
                 # YES price too.
                 qty, p = float(f.get("quantity") or 0), float(f.get("price") or 0)
                 eid = str(f.get("exchangeId"))
-                # Package 6: a covered "sell NO @ 1-b" (our bid at b) is a NO-side fill too, at the NO price: tried
+                # A covered "sell NO @ 1-b" (our bid at b) is a NO-side fill too, at the NO price: tried
                 # (only against orders sent that way) before the YES-price fallback for asks.
                 # With the flag on, the covered-bid reading of a YES-side fill goes before the ask one: in a lost batch
                 # holding a covered sale at b and an ask at 1-b, a covered-sale fill must not be adopted as the ask.
@@ -2298,7 +2297,7 @@ class Bot(RiskMixin, ValueMixin, MarketMakingMixin, LadderMixin, ArbMixin, Statu
             self.fills.record(new, self.order_meta, fvs)
             self.note_fill_p(new)                             # (mm_carry_24h: Polymarket p at fill time)
             try:
-                self.hv_note_fills(new)                       # P15: "HARVEST fill ..." and its tallies
+                self.hv_note_fills(new)                       # "HARVEST fill ..." and its tallies
             except Exception as e:                            # reporting must never disturb trading
                 log.warning("harvest fill note failed: %s", e)
         for f in reversed(new):                               # oldest first

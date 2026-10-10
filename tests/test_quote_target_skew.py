@@ -10,7 +10,7 @@ M2 skew_target_inventory: compute_quote's inventory skew from (inv - target), ta
 Also: flags off identical to the branch head (12e84c8) on a grid (compute_quote incl. reduce-only, hours_to_close,
 the stop, close_window, full cycles: wire orders, quotes, status keys).
 
-Run:  python tests/test_p12_quote.py      (exit code 0 = all passed)
+Run:  python tests/test_quote_target_skew.py      (exit code 0 = all passed)
 """
 import importlib.util
 import json

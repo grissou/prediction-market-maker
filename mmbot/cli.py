@@ -1,8 +1,12 @@
 """
-The command line: setup_logging and main (tournaments, markets, status, run [--live], cancel,
-report, analyze, summary). mm_bot.py is the entry point that calls main().
+The command line: argument parsing, logging set-up and the sub-commands (tournaments, markets,
+status, run [--live], cancel, report, analyze, summary).
 
-Never imported by any other mmbot module.
+setup_logging configures the root logger once; main() builds the Api and the Bot and dispatches on
+the sub-command. mm_bot.py is the one-line entry point that calls main().
+
+This module only wires things together: it holds no trading logic, decides nothing about prices or
+sizes, and is never imported by any other mmbot module.
 """
 import json
 import logging.handlers

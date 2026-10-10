@@ -22,7 +22,7 @@ health, summary, alloc_plan, change_key); the refill with MM resting (cancel fir
 cross-market ranking; the every-cycle refill under the caps; the recycler's order and the buy-back net cash; the
 prefer-short skip; the swaps under the reserve; alloc_max_edge_sell / the min-gain hurdle; the reports; no duplicate
 orders; empty books / no reference / unknown markets; the staged file; py_compile on 3.10.
-Run:  python tests/test_mm_funding_14_1.py      (exit code 0 = all passed)"""
+Run:  python tests/test_mm_refill_and_swaps.py      (exit code 0 = all passed)"""
 import importlib.util
 import json
 import logging

@@ -10,7 +10,7 @@ collateralises NO+NO as a set, so selling NO on ONE leg breaks the set and needs
   E status.json nono_sets and the summary part;
   the fake exchange's set-collateral rule; flags off identical to the Package 6 code (706e763) on a grid.
 
-Run:  python tests/test_nono_sets.py      (exit code 0 = all passed)
+Run:  python tests/test_no_no_sets.py      (exit code 0 = all passed)
 """
 import importlib.util
 import json

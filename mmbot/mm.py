@@ -1,8 +1,16 @@
 """
-MarketMakingMixin: MM funding (mmf_*, mm_*: lots, hurdle, recycler, hand-over, refill), the swaps
-(swap_*), P141 / P142 reporting and the MM rooms (alloc_room*, buyback_net).
+MarketMakingMixin: the funding side of market making - how much cash the quotes may tie up, and
+what happens to the inventory they accumulate.
 
-Methods only: all state lives on the Bot instance (self); no __init__ here. Never imports bot.py.
+Owns the MM lots (mmf_*, mm_*: which held shares came from quotes, at what price, how old), the
+hurdle that turns a stale MM holding into a value holding, the recycler (stale MM inventory out
+through the reducing side of the quote), the hand-over of lots to the allocator's fast refill,
+the swaps (swap_*: sell an edge-poor holding to buy an edge-rich one), the MM rooms the risk caps
+leave (alloc_room*, buyback_net), the below-half alert and the refill / swap reporting.
+
+It never sends an order itself: it prices and flags, and the allocator (value.py) or the quote
+(bot.decide) acts. Methods only: all state lives on the Bot instance (self); no __init__ here.
+Never imports bot.py.
 """
 import csv
 import math
@@ -21,18 +29,18 @@ from mmbot.quoting import value_side_prices
 
 class MarketMakingMixin:
 
-    # ------------------------------------------------------------------------------ P14: market-making funding
+    # ------------------------------------------------------------------------------ Market-making funding
     MM_FUNDING_KEYS = ("mm_funding",)   # read-only status.json key(s): identity checks ignore them (as EV_KEYS)
     MM_LOTS_MAX = 20              # MM lots kept per market (beyond it the two oldest merge: older time, mean price)
     MM_SEED_HOURS = 24.0          # no status.json mm_funding at start: fills.csv this far back (order notes: 1 day)
     MM_REFILL_GAP = 60.0          # mm_refill_fast: a refill is planned at most this often (s)
     MM_FAST_EXPIRE = 300.0        # ...a fast refill sale still not sent after this long is dropped (re-planned) (s)
     MM_SENT_LAG = 120.0           # ...a market a refill IOC sold is not planned again until the positions read
-                                  #    shows the sale, or this long after it (red team RT13-3: a lagging read) (s)
+                                  #    shows the sale, or this long after it (a lagging read) (s)
     MM_MAKER_SKIP = ("alloc", "set_ladder", "arb", "take", "harvest")   # notes that are not resting quotes
 
     def mmf_init(self, d=None):
-        """P14 state, restored from status.json "mm_funding" (d): the MM lots {eid: [[signed shares, YES price, wall
+        """State, restored from status.json "mm_funding" (d): the MM lots {eid: [[signed shares, YES price, wall
         time], ...]} oldest first, the hand-over tally, the alert clock. With no "lots" there, the first cycle seeds
         the lots from fills.csv (mm_lots_seed)."""
         d = d if isinstance(d, dict) else {}
@@ -61,12 +69,12 @@ class MarketMakingMixin:
         self.mmf_refill_last_m = -1e18            # monotonic time of the latest fast refill plan
         self.mmf_recycling = {}                   # eid -> {"side", "qty", "price", "why"}: this cycle's recycler
         self.mmf_logged = {}                      # eid -> the latest "MM RECYCLE" line's (side, price, qty)
-        self.mmf_sent = {}                        # eid -> (now_m, |q| before, shares sold): refill IOC sales (RT13-3)
-        self.mmf_deferred = 0                     # P14.1 3: buy-back shares deferred below half the cash target
-        self.mmf_hold = {}                        # P14.1 1: eid -> when an allocator sale there cancelled our quotes
+        self.mmf_sent = {}                        # eid -> (now_m, |q| before, shares sold): refill IOC sales
+        self.mmf_deferred = 0                     # Buy-back shares deferred below half the cash target
+        self.mmf_hold = {}                        # Eid -> when an allocator sale there cancelled our quotes
         #                                           (the reducing side stays off until the positions read shows it)
-        self.alloc_fvs = None                     # P14.1 5: this cycle's fair values (the swap room check)
-        self.p141_events = deque()                # P14.1 7: the 24-h report log (p141_log), restored at start
+        self.alloc_fvs = None                     # This cycle's fair values (the swap room check)
+        self.p141_events = deque()                # The 24-h report log (p141_log), restored at start
         cut = util.time.time() - self.P141_LOG_H * 3600
         for x in (d.get("events") if isinstance(d.get("events"), list) else ()):
             if (isinstance(x, (list, tuple)) and len(x) == 5 and num(x[0]) is not None and num(x[0]) >= cut
@@ -77,7 +85,7 @@ class MarketMakingMixin:
         self.mmf_warned = False
 
     def mmf_on(self, cfg=None):
-        """Any P14 flag on (the alert and the summary piece follow them; the status key is always written)."""
+        """Any funding flag on (the alert and the summary piece follow them; the status key is always written)."""
         cfg = cfg or self.cfg
         return bool(getattr(cfg, "mm_recycle_enabled", False) or getattr(cfg, "mm_refill_fast", False)
                     or getattr(cfg, "mm_room_guard", False))
@@ -184,7 +192,7 @@ class MarketMakingMixin:
 
     def mm_inv_step(self, new, inv):
         """P14, cycle step 4 (always; read-only): the MM lots kept in step with this cycle's new fills and the
-        positions read (see Config, P14). Never raises."""
+        positions read (see Config). Never raises."""
         try:
             now = util.time.time()
             if not self.mm_lots_seeded:
@@ -246,7 +254,7 @@ class MarketMakingMixin:
         return cfg.value_quote_hurdle if cfg.value_quote_hurdle > 0 else cfg.alloc_min_edge_buy
 
     def mm_hand_over(self, ex, edge, v):
-        """P14 1: market ex's MM inventory is value (edge-held >= the hurdle): its lots leave the MM book (no longer
+        """Market ex's MM inventory is value (edge-held >= the hurdle): its lots leave the MM book (no longer
         recycled; the reserve refill sells the lowest-edge value positions instead)."""
         lots = self.mm_lots.pop(ex.eid, [])
         sh = sum(abs(x[0]) for x in lots)
@@ -260,7 +268,7 @@ class MarketMakingMixin:
                     100 * self.mm_hurdle())
 
     def mm_recycle_quote(self, ex, q, fv, best_bid, best_ask, vp, cfg, now_m):
-        """P14 1 (mm_recycle_enabled; decide, before the value floor): a market with stale MM
+        """(mm_recycle_enabled; decide, before the value floor): a market with stale MM
         inventory gets its REDUCING side moved in to fair -+ mm_recycle_concession (never crossing the best other
         bid / ask; at or beyond the value floor in value mode), sized max(the quoter's size, the stale shares) within
         the position; our adding side a tick behind it. A side the quoter left out stays out (recorded as blocked).
@@ -305,7 +313,7 @@ class MarketMakingMixin:
             if q.bid is None or q.bid_size < 1:
                 self.mmf_recycling[ex.eid] = {**rec, "blocked": "no reducing side"}
                 return q
-            if getattr(cfg, "mm_recycle_sell_first", False) and self.mm_cash_low():   # P14.1 3: below half the cash
+            if getattr(cfg, "mm_recycle_sell_first", False) and self.mm_cash_low():   # Below half the cash
                 px0 = floor_tick(fv + conc)                                           #  target a buy-back that locks
                 ok, need, frees = self.buyback_net(ex.eid, ex.inv, px0, n)            #  more than it frees waits
                 if ok < 1:
@@ -352,7 +360,7 @@ class MarketMakingMixin:
         return q
 
     def mm_hold_quote(self, ex, q, now_m):
-        """P14.1 1 (alloc_cancel_mm_first; decide, after the recycler): while an allocator sale in this market is not
+        """(alloc_cancel_mm_first; decide, after the recycler): while an allocator sale in this market is not
         in the positions read yet (mm_sale_lagging: the same guard the planner uses), the side that REDUCES the
         position stays off - the quoter must not re-offer shares the IOC just sold (an ask beyond the YES held is a NO
         purchase; a bid on a short re-buys what was bought back). The adding side is untouched."""
@@ -367,7 +375,7 @@ class MarketMakingMixin:
         return q
 
     def mm_sale_lagging(self, e, q, now_m):
-        """RT13-3: a refill IOC sold in e and the positions read q does not show it yet (within MM_SENT_LAG)."""
+        """A refill IOC sold in e and the positions read q does not show it yet (within MM_SENT_LAG)."""
         x = self.mmf_sent.get(e)
         if x is None:
             return False
@@ -379,7 +387,7 @@ class MarketMakingMixin:
 
     def mm_floor_ok(self, long, px, p):
         """A refill sale at px at or beyond the value floor: a long's >= p - value_sell_margin, a short's buy-back
-        <= p + margin. P14.1 alloc_refill_max_cost > 0: while free cash is below half alloc_mm_reserve, the margin is
+        <= p + margin. alloc_refill_max_cost > 0: while free cash is below half alloc_mm_reserve, the margin is
         max(value_sell_margin, alloc_refill_max_cost) (refill sales only: this check is theirs alone)."""
         m = self.cfg.value_sell_margin
         cost = float(getattr(self.cfg, "alloc_refill_max_cost", 0.0) or 0.0)
@@ -387,23 +395,23 @@ class MarketMakingMixin:
             m = cost
         return px >= p - m - 1e-9 if long else px <= p + m + 1e-9
 
-    # ------------------------------------------------------------------------------ P14.2 helpers
+    # ------------------------------------------------------------------------------ Helpers
     P142_LOG_H = 24.0             # the 24-h window of alloc.swaps (counts, $ and EV)
     P142_FINAL = ("done", "buy_failed", "not_sold")
 
     def p142_on(self, cfg=None):
-        """P14.2 in effect: alloc_swap_sell_margin > 0 (the swap floor, the swap hurdle and the alloc.swaps report)."""
+        """Swaps in effect: alloc_swap_sell_margin > 0 (the swap floor, the swap hurdle and the alloc.swaps report)."""
         cfg = cfg or self.cfg
         return float(getattr(cfg, "alloc_swap_sell_margin", 0.0) or 0.0) > 0
 
     def swap_floor_ok(self, long, px, p):
-        """P14.2: a SWAP sale at px within alloc_swap_sell_margin of p - a long's >= p - it, a short's buy-back <= p +
+        """A SWAP sale at px within alloc_swap_sell_margin of p - a long's >= p - it, a short's buy-back <= p +
         it (the swaps' own floor; every other reducing path keeps value_sell_margin)."""
         m = float(getattr(self.cfg, "alloc_swap_sell_margin", 0.0) or 0.0)
         return px >= p - m - 1e-9 if long else px <= p + m + 1e-9
 
     def swap_hurdle(self):
-        """P14.2: a swap's min gain per $ (buy edge - sale edge-held, both at the touch): the stricter of
+        """A swap's min gain per $ (buy edge - sale edge-held, both at the touch): the stricter of
         alloc_min_improvement and alloc_swap_min_gain. The sale's cost IS its edge-held at the sale price: not added
         again."""
         cfg = self.cfg
@@ -418,7 +426,7 @@ class MarketMakingMixin:
         return (px - p) / max(1 - px, TICK), qty * (px - p)
 
     def swap_record(self, s, p_s, b, p_b, usd):
-        """P14.2: the record of a planned swap (alloc.swaps.last_run, the journal): sold {label, kind, qty, price, p,
+        """The record of a planned swap (alloc.swaps.last_run, the journal): sold {label, kind, qty, price, p,
         edge, cost, cost_usd}, bought {label, short, qty, price, p, edge, usd}, gain_est (= usd x (buy edge - sale
         edge-held), net of both touches), gain_realised (None until the legs trade), status."""
         c, cu = self.swap_cost(s["kind"], s["qty"], s["px"], p_s)
@@ -451,14 +459,14 @@ class MarketMakingMixin:
             lg.popleft()
 
     def swap_plan_log(self, pairs, now_w):
-        """P14.2 (alloc_tick, a new run): this run's swaps become alloc.swaps.last_run, each journaled."""
+        """(alloc_tick, a new run): this run's swaps become alloc.swaps.last_run, each journaled."""
         self.p142_last_run = [pr["swap"] for pr in pairs if pr.get("swap") is not None]
         for r in self.p142_last_run:
             log.warning("%s", self.swap_line(r, "planned"))
             self.swap_log("plan", r["bought"]["usd"], est=r["gain_est"], now_w=now_w)
 
     def swap_sold(self, r, done, px, p, usd):
-        """P14.2: the swap's sale traded (done shares at px; p at the fill): the record holds the sale as traded."""
+        """The swap's sale traded (done shares at px; p at the fill): the record holds the sale as traded."""
         c, cu = self.swap_cost(r["sold"]["kind"], done, px, p)
         r["sold"].update(qty=float(done), price=round(px, 3), p=round(p, 4), cost=round(c, 4), cost_usd=round(cu, 2),
                          edge=round(c, 4), usd=round(usd, 2))
@@ -466,7 +474,7 @@ class MarketMakingMixin:
         r["status"] = "sold"
 
     def swap_bought(self, r, done, px, p, edge, usd, now_w):
-        """P14.2: the swap's buy traded: realised gain = the buy's (p - price) x shares less the sale's given-up EV,
+        """The swap's buy traded: realised gain = the buy's (p - price) x shares less the sale's given-up EV,
         both at p at their fills; journaled again."""
         short = r["bought"]["short"]
         got = done * ((px - p) if short else (p - px))
@@ -477,7 +485,7 @@ class MarketMakingMixin:
         self.swap_log("done", usd, real=r["gain_realised"], now_w=now_w)
 
     def swap_close(self, pr, now_w, why=None):
-        """P14.2: a swap's pair has finished: its buy not done after its sale -> "buy_failed" (the sale stands as
+        """A swap's pair has finished: its buy not done after its sale -> "buy_failed" (the sale stands as
         traded: an IOC leaves nothing to reprice, the cash stays in the reserve, the quotes keep value_sell_margin);
         never sold -> "not_sold"."""
         r = pr.get("swap")
@@ -498,7 +506,7 @@ class MarketMakingMixin:
         r["why"] = why
 
     def swap_report(self, now_w=None):
-        """status.json alloc.swaps (P14.2 on): the latest run's swaps, the 24-h counts, $ moved and EV gain estimated
+        """status.json alloc.swaps (swaps in effect): the latest run's swaps, the 24-h counts, $ moved and EV gain estimated
         (planned) vs realised (done + buy-failed legs, at p), and the restart log."""
         now_w = util.time.time() if now_w is None else now_w
         ev = [x for x in getattr(self, "p142_events", ()) if x[0] >= now_w - self.P142_LOG_H * 3600]
@@ -512,31 +520,31 @@ class MarketMakingMixin:
                 "margin": self.cfg.alloc_swap_sell_margin, "hurdle": round(self.swap_hurdle(), 4),
                 "events": [list(x) for x in ev]}
 
-    # ------------------------------------------------------------------------------ P14.1 helpers
+    # ------------------------------------------------------------------------------ Helpers
     P141_FLAGS = ("alloc_cancel_mm_first", "alloc_rank_all_markets", "mm_recycle_sell_first",
                   "alloc_refill_ignore_prefer_short", "alloc_swap_room_netting")
     P141_LOG_H = 24.0             # the 24-h report window (refill $ / EV given up, swaps planned / done / EV gain)
 
     def p141_on(self, cfg=None):
-        """Any P14.1 setting on (the alloc report keys and the summary piece follow it)."""
+        """Any refill setting on (the alloc report keys and the summary piece follow it)."""
         cfg = cfg or self.cfg
         return (any(bool(getattr(cfg, k, False)) for k in self.P141_FLAGS)
                 or float(getattr(cfg, "alloc_refill_max_cost", 0.0) or 0.0) > 0)
 
     def p141(self, name):
-        """A P14.1 refill flag in effect: the flag AND mm_refill_fast (they change the fast refill; alone: nothing)."""
+        """A refill refill flag in effect: the flag AND mm_refill_fast (they change the fast refill; alone: nothing)."""
         return bool(getattr(self.cfg, name, False)) and bool(getattr(self.cfg, "mm_refill_fast", False))
 
     def mm_cash_low(self):
         """Free cash (the gate's, read) below half of alloc_mm_reserve (> 0)."""
         res = float(getattr(self.cfg, "alloc_mm_reserve", 0.0) or 0.0)
         return (res > 0 and getattr(self, "cg_cash", None) is not None
-                and self.cash_left() + self.hv_carve_used() < 0.5 * res - 1e-9)   # (P15: the carve-out counts)
+                and self.cash_left() + self.hv_carve_used() < 0.5 * res - 1e-9)   # (the carve-out counts)
 
     def p141_log(self, kind, usd, est=0.0, real=0.0, now_w=None):
         """One event in the 24-h report log: kind "refill" (a refill sale: usd, real = the EV given up, <= 0 when below
         p), "swap_plan" (a planned pair: usd, est), "swap_sell" / "swap_buy" (a pair's legs filled: usd, real).
-        Nothing is logged while every P14.1 setting is off (the report keys are absent then)."""
+        Nothing is logged while every refill setting is off (the report keys are absent then)."""
         if not self.p141_on():
             return
         now_w = util.time.time() if now_w is None else now_w
@@ -556,7 +564,7 @@ class MarketMakingMixin:
         return out
 
     def alloc_rooms(self, inv):
-        """P14.1 alloc_swap_room_netting: (room_wc, room_corr) the positions inv would leave, measured as the cycle
+        """alloc_swap_room_netting: (room_wc, room_corr) the positions inv would leave, measured as the cycle
         measures them (mm_risk_room_update; this cycle's fair values alloc_fvs and account), or None if unknown."""
         fvs, eq = getattr(self, "alloc_fvs", None), getattr(self, "last_equity", None)
         if fvs is None:                           # before this cycle's step 6 (the file just landed): last values
@@ -586,7 +594,7 @@ class MarketMakingMixin:
                 min(rc if rc is not None else 0.0, cfg.mm_risk_reserve_corr))
 
     def alloc_buy_room_ok(self, b, q, inv, pr):
-        """P14.1 5: the rooms this netted swap's buy would leave are still at or above the pair's floor."""
+        """The rooms this netted swap's buy would leave are still at or above the pair's floor."""
         hyp = {e: float(v) for e, v in inv.items()}
         hyp[b["eid"]] = q + (-b["qty"] if b["short"] else b["qty"])
         after = self.alloc_rooms(hyp)
@@ -599,13 +607,13 @@ class MarketMakingMixin:
         return False
 
     def alloc_netting(self):
-        """P14.1 5 in effect now: the flag, value adds paused, rooms measurable, not in reduce-only."""
+        """Swap room netting in effect now: the flag, value adds paused, rooms measurable, not in reduce-only."""
         return (bool(getattr(self.cfg, "alloc_swap_room_netting", False)) and getattr(self, "mmr_paused", False)
                 and not getattr(self, "global_reduce", False)
                 and bool(getattr(self, "last_equity", None)) and None not in tuple(self.mmr_room))
 
     def buyback_net(self, e, q, px, n):
-        """P14.1 3: (shares of a buy-back of n at YES px on a short q whose gate need is <= the cash its fill frees,
+        """(shares of a buy-back of n at YES px on a short q whose gate need is <= the cash its fill frees,
         gross need of all n, cash all n free). Need per share by the gate's own tiers (covered lone NO 0, NO+NO set
         part 1.0, an uncovered YES bid px), freed (1 - px) a share."""
         free = self.cash_free(e, skip=lambda o: True)           # (the recycler's bid replaces ours there)
@@ -623,11 +631,11 @@ class MarketMakingMixin:
         return int(ok + 1e-9), self.tier_need(tiers, n), n * (1 - px)
 
     def mm_refill_held(self, inv, now_m, skip, pins, blocked):
-        """P14 2 (mm_refill_fast, alloc_plan): the stale MM inventory as refill holdings sold FIRST ("mm": True):
+        """(mm_refill_fast, alloc_plan): the stale MM inventory as refill holdings sold FIRST ("mm": True):
         an IOC at the best bid (a short: the best ask, as a covered NO sale) when the gap to fair (ex.last_fv, else
         p) is <= mm_recycle_concession and the price is at or beyond the value floor; else it rests through the
         recycler (blocked_by "mm_resting"). Value inventory (edge-held >= mm_hurdle) is not MM here.
-        P14.1 1 (alloc_cancel_mm_first): the concession gate goes - a stale MM holding is a candidate whenever the
+        alloc_cancel_mm_first: the concession gate goes - a stale MM holding is a candidate whenever the
         refill's own price rule (mm_floor_ok) allows it, since the sale cancels our quotes there first (alloc_send) and
         the quoting side is then held until the positions read shows it (mm_hold_side); a refused one counts "floor"."""
         cfg, out = self.cfg, []
@@ -657,7 +665,7 @@ class MarketMakingMixin:
                 if gap > cfg.mm_recycle_concession + 1e-9 or not self.mm_floor_ok(q > 0, px, p):
                     blocked["mm_resting"] += 1
                     continue
-            elif not self.mm_floor_ok(q > 0, px, p):  # P14.1 1: the refill's own price rule alone
+            elif not self.mm_floor_ok(q > 0, px, p):  # The refill's own price rule alone
                 blocked["floor"] += 1
                 continue
             n = min(v["stale"], depth, abs(q) if q > 0 else self.alloc_lone_no(e, q))
@@ -671,14 +679,14 @@ class MarketMakingMixin:
         return out
 
     def mm_refill_tick(self, inv, now_m, now, skip, turnover):
-        """P14 2 (alloc_tick, live, no run in flight, cash read fresh): free cash below alloc_mm_reserve -> a
+        """(alloc_tick, live, no run in flight, cash read fresh): free cash below alloc_mm_reserve -> a
         refill-only plan now (alloc_plan refill_only: MM inventory first, then the lowest edge-held, the floor),
         executed by alloc_tick's own sale step this cycle (writes / turnover as any run). The hourly clock is not
         moved; the plan's pairs expire after MM_FAST_EXPIRE if never sent."""
         cfg = self.cfg
         cash = self.cash_left()
         self.mmf_refill_last_m = now_m
-        more = self.p141("alloc_rank_all_markets") and bool(self.alloc_pairs)   # P14.1 2: added to a run in flight
+        more = self.p141("alloc_rank_all_markets") and bool(self.alloc_pairs)   # Added to a run in flight
         if more:                                  # (never a second order in a market a pending pair already uses)
             skip = set(skip) | {pr["sell"].get("eid") for pr in self.alloc_pairs if pr["sell"].get("eid")}
             skip |= {pr["buy"]["eid"] for pr in self.alloc_pairs if pr.get("buy")}
@@ -707,7 +715,7 @@ class MarketMakingMixin:
             log.warning("%s", self.alloc_journal(pr))
 
     def mm_room_part(self, inv, fvs, worst, risk):
-        """P14 3 (mm_room_guard): (worst-case, correlated) contribution of the MM lots = the cycle's risk measures
+        """mm_room_guard: (worst-case, correlated) contribution of the MM lots = the cycle's risk measures
         minus the same measures on the positions without the MM shares (>= 0), or None on an error."""
         try:
             mmq = {e: sum(x[0] for x in lots) for e, lots in self.mm_lots.items()}
@@ -730,7 +738,7 @@ class MarketMakingMixin:
         cfg, out = self.cfg, []
         cash = self.cash_left() if getattr(self, "cg_cash", None) is not None else None
         if cash is not None:
-            cash += self.hv_carve_used()          # P15: the ladder's resting carve-out is part of the reserve
+            cash += self.hv_carve_used()          # The ladder's resting carve-out is part of the reserve
         if cfg.alloc_mm_reserve > 0 and cash is not None and cash < 0.5 * cfg.alloc_mm_reserve - 1e-9:
             out.append(f"cash {cash:,.0f} of {cfg.alloc_mm_reserve:,.0f}")
         rw, rc = self.mmr_room
@@ -740,8 +748,8 @@ class MarketMakingMixin:
         return out
 
     def mm_funding_tick(self):
-        """P14 4 (end of every cycle): the below-half clock (since when cash or a room has been below half its
-        target; cleared, and the alert re-armed, once all are back) and, with a P14 flag on, ONE alert after
+        """(end of every cycle): the below-half clock (since when cash or a room has been below half its
+        target; cleared, and the alert re-armed, once all are back) and, with a funding flag on, ONE alert after
         mm_funding_alert_h hours below. Never raises."""
         try:
             now, below = util.time.time(), self.mm_funding_below()
@@ -783,7 +791,7 @@ class MarketMakingMixin:
                                     if self.mmf_below_since is not None else None),
                "below_half_since_wall": self.mmf_below_since, "alerted": self.mmf_alerted,
                "refill": dict(self.mmf_refill),
-               # P14.1 7: the refill report (flat keys beside "refill", which a restart restores)
+               # The refill report (flat keys beside "refill", which a restart restores)
                "refill_runs": self.mmf_refill["runs"], "refill_last": self.mmf_refill["last"],
                "refill_sales_24h": (self.p141_sums(now).get("refill") or [0])[0],   # (hourly refills too)
                "refill_sold_usd": round((self.p141_sums(now).get("refill") or [0, 0.0])[1], 2),
@@ -794,12 +802,12 @@ class MarketMakingMixin:
                "flags": {"recycle": bool(getattr(cfg, "mm_recycle_enabled", False)),
                          "refill_fast": bool(getattr(cfg, "mm_refill_fast", False)),
                          "room_guard": bool(getattr(cfg, "mm_room_guard", False)),
-                         **({k: bool(getattr(cfg, k, False)) for k in self.P141_FLAGS}   # P14.1 (absent while off)
+                         **({k: bool(getattr(cfg, k, False)) for k in self.P141_FLAGS}   # (absent while off)
                             if self.p141_on() else {})},
                "lots_source": self.mmf_seed,
                "lots": {e: [[round(x[0], 2), round(x[1], 4), round(x[2], 1)] for x in v]
                         for e, v in sorted(self.mm_lots.items())}}
-        if getattr(cfg, "tilt_harvest_ladder", False):   # P15: the reserve's split (absent while the ladder is off)
+        if getattr(cfg, "tilt_harvest_ladder", False):   # The reserve's split (absent while the ladder is off)
             out["mm_reserve_effective"] = round(self.mm_reserve_effective(), 2)
             out["harvest_carve"] = self.hv_carve_fields()
             out["reserve_cash"] = rnd2(None if cash is None else cash + self.hv_carve_used())
@@ -820,8 +828,8 @@ class MarketMakingMixin:
                     "lots_source": getattr(self, "mmf_seed", None)}
 
     def mm_funding_summary(self):
-        """P14: "MM funding cash Xk/Yk, room wc ..., inventory Zk (N stale, oldest H h)" for the 2-hourly summary
-        while a P14 flag is on (P14.1 adds the refill / swap figures); "" otherwise. Never raises."""
+        """"MM funding cash Xk/Yk, room wc ..., inventory Zk (N stale, oldest H h)" for the 2-hourly summary
+        while a funding flag is on (adds the refill / swap figures); "" otherwise. Never raises."""
         if not (self.mmf_on() or self.p141_on()):
             return ""
         try:
@@ -836,7 +844,7 @@ class MarketMakingMixin:
                          + (f", oldest {oldest:.1f} h" if oldest is not None else "") + ")")
             if f["handed_to_value"]["count"]:
                 parts.append(f"{f['handed_to_value']['count']} handed to value")
-            if self.p141_on():                    # P14.1 7: the refill / swap work of the last 24 h, one piece
+            if self.p141_on():                    # The refill / swap work of the last 24 h, one piece
                 r = self.p141_alloc_report()
                 parts.append(f"refill {f['refill_runs']} runs, {k(f['refill_sold_usd'])} sold"
                              + (f" ({f['refill_ev_given_24h']:.0f} EV given up)" if f["refill_ev_given_24h"] else "")
