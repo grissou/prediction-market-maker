@@ -79,6 +79,7 @@ class Fill:
     oid: str | None           # our order that filled, if known
     at: datetime              # when it traded
     tag: str = ""             # the strategy whose order filled ("" if the order is not ours or unknown)
+    fid: str | None = None    # the exchange's fill id: fills are read "after the last one seen"
 
 
 @dataclass
