@@ -77,8 +77,7 @@ say so), the momentum sleeve, anything that was never switched on.
    never crashes, never crosses itself, keeps caps), and a replay of a recorded snapshot: build it from the
    `ops-snapshot-2026-10-04` branch (`market_data.sql.gz` → `md.sqlite` with sqlite3, plus the branch's
    `status.json`, `order_notes.json`, `position_lots.json`, `settings_override.json`) and show the orders the
-   new bot plans on that state next to what `tests/test_dryrun_harvest_ladder.py` (old name
-   `test_p15_dryrun.py`) shows the old bot planned: same markets, same sides, sizes within a factor of two;
+   new bot plans on that state next to what `tests/test_p15_dryrun.py` shows the old bot planned: same markets, same sides, sizes within a factor of two;
    explain each difference in one line in `docs/REWRITE_STATUS.md`.
 3. A `deploy/settings_override.rewrite.json` with the new settings at the live strategy's values, and a
    10-line section in `deploy/RUNBOOK.md` for running the shadow and switching over.
