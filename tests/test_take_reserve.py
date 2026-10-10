@@ -13,7 +13,7 @@ import mm_bot as M                                         # noqa: E402
 
 logging.basicConfig(level=logging.ERROR)
 RESULTS = []
-M.alert = lambda msg: None
+M.util.alert = lambda msg: None
 
 
 def check(name, cond, extra=""):
@@ -89,7 +89,7 @@ ex = bt.ex["11"]
 ex.book = api.full_book("11")
 ex.take_dir = 1
 check("respect on, 40k cash: the take goes ahead", bt.execute_take(ex, 0.40, 0.0, 0.14, time.monotonic()) is not False)
-src = open(os.path.join(HERE, "..", "mm_bot.py")).read()
+src = "".join(open(p).read() for p in sorted(__import__("glob").glob(os.path.join(HERE, "..", "mmbot", "*.py"))))
 check("status.json carries take_reserve_blocked only when the flag is on or it fired",
       'self.health["take_reserve_blocked"] = getattr(self, "take_reserve_blocked", 0)' in src)
 

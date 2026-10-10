@@ -28,13 +28,28 @@ sys.path.insert(0, HERE)
 from fakes import FakeApi, FakeRefs, lvl, make_bot      # noqa: E402
 import mm_bot as M                                        # noqa: E402
 
+# retired on simplify: the old twin's status / health fields a removed feature owned, at the value it reported while
+# the feature was off (the new code drops them); Quote lost its trailing `behind` flag (always False while that sizing
+# was off) and the age skew its switch (skew_age_enabled: the old default True, live False)
+RETIRED_STATUS = {"tilt_s_applied": (0.0, 0), "tilt_s_applied_headline": (0.0, 0), "fast_unload_windows": (0,),
+                  "behind_best_markets": (0,), "mark_frag_total_cap_active": (False,),
+                  "fl_bias_markets": ({"bid": 0, "ask": 0},)}
+RETIRED_FLIPPED = {"skew_age_enabled": False}
+NQ = len(M.Quote.__dataclass_fields__)
+
+
+def retired(new, old):
+    """The old twin's dict less a retired feature's own key at its OFF value when the new one dropped it."""
+    return {k: v for k, v in old.items() if not (k in RETIRED_STATUS and k not in new and v in RETIRED_STATUS[k])}
+
+
 logging.basicConfig(level=logging.CRITICAL)
 RESULTS = []
 ALERTS = []
-M.alert = lambda msg: ALERTS.append(msg)
-M.notify = lambda *a, **k: False
+M.util.alert = lambda msg: ALERTS.append(msg)
+M.util.notify = lambda *a, **k: False
 BASE_REV = "12e84c8"                              # the branch head before Part M
-REAL_UTCNOW = M.utcnow
+REAL_UTCNOW = M.util.utcnow
 
 
 def check(name, cond, extra=""):
@@ -59,12 +74,12 @@ def set_clock(s, mods=(M,)):
     """Shift the bot's wall clock (module utcnow) so that 'now' is s (time keeps flowing)."""
     off = utc(s) - REAL_UTCNOW()
     for mod in mods:
-        mod.utcnow = lambda off=off: REAL_UTCNOW() + off
+        getattr(mod, "util", mod).utcnow = lambda off=off: REAL_UTCNOW() + off
 
 
 def reset_clock(mods=(M,)):
     for mod in mods:
-        mod.utcnow = REAL_UTCNOW
+        getattr(mod, "util", mod).utcnow = REAL_UTCNOW
 
 
 REFS = {"Ohio Senate|Republican": 0.12, "Ohio Senate|Democratic": 0.88,
@@ -88,7 +103,7 @@ def cq(inv, fv, bb, ba, ro=False, age=0.0, p=None, eff=None, mod=None, extra=Non
     c = mod.Config()
     for k, v in kw.items():
         setattr(c, k, v)
-    return mod.compute_quote(fv, inv, inv if eff is None else eff, bb, ba, c, reduce_only=ro, bankroll=100000,
+    return getattr(mod, "quoting", mod).compute_quote(fv, inv, inv if eff is None else eff, bb, ba, c, reduce_only=ro, bankroll=100000,
                              age_hours=age, value_p=p, **(extra or {}))
 
 
@@ -116,8 +131,6 @@ for v in ("tomorrow", "2026-11-04T17:00:00", "2026-10-31T23:00:00Z", "2026-11-08
 for v in (-1, 121, True, "15"):
     good, bad = M.validate_overrides({"stop_minutes_before_close": v}, c)
     check(f"validate: stop_minutes_before_close {v!r} refused", not good and len(bad) == 1, (good, bad))
-good, bad = M.validate_overrides({"basket_exit_utc": ""}, c)
-check("basket_exit_utc still refuses '' (only close_override_utc takes it)", not good and len(bad) == 1)
 
 # ============================================================================================ M1
 print("--- M1 close_override_utc: hours_to_close, the stop, the windows")
@@ -203,9 +216,6 @@ try:
     quiet_cycle(b)
     check("stop 60: 90 min before the close -> quoting again (the exit window, 2 h: long 600 -> an exit ask)",
           b.ex["21"].quote.ask is not None, b.ex["21"].quote)
-    a, b = plain_bot({}, close_override_utc=OVR)
-    check("nothing else changes: the basket schedule still uses the API close",
-          b.basket_schedule()["close"] == plain_bot({})[1].basket_schedule()["close"])
 finally:
     reset_clock()
 
@@ -226,10 +236,6 @@ check(f"below target (skew_inv -2000): the bid moves UP ({q_under.bid} > {q_flat
 q_over = cq(3000, 0.60, 0.50, 0.70, extra={"skew_inv": 1000.0})
 check("above target by 1000: a smaller skew than from flat (ask between the two)",
       q_long.ask <= q_over.ask <= q_flat.ask and q_over.ask < q_flat.ask, (q_long.ask, q_over.ask, q_flat.ask))
-qa = cq(3000, 0.60, 0.50, 0.70, age=200.0, extra={"skew_inv": 0.0})
-qa_off = cq(3000, 0.60, 0.50, 0.70, age=200.0, extra={"skew_inv": 0.0, "age_off": True})
-check(f"age 200 h: age skew lowers the ask ({qa.ask}); age_off removes it ({qa_off.ask} = flat {q_flat.ask})",
-      qa.ask < qa_off.ask and qa_off.ask == q_flat.ask, (qa, qa_off))
 check("age_off alone (skew_inv None) = no age skew, inventory skew unchanged",
       cq(3000, 0.60, 0.50, 0.70, age=200.0, extra={"age_off": True}).ask == q_long.ask)
 rng = random.Random(12)
@@ -331,11 +337,11 @@ b.alloc_plan = lambda inv_, now_m, cash, skip=(), turnover_left=None: (
     [{"sell": {"kind": "long", "eid": "12", "qty": 700, "label": "x", "px": 0.8, "edge": 0.0, "usd": 1},
       "buy": None, "usd": 1, "status": "pending"}], {"blocked_by": {}, "ev_gain_est": 0.0})
 b.alloc_journal = lambda pr: "pair"
-b.alloc_tick(M.utcnow(), {"12": 2500}, {})
+b.alloc_tick(M.util.utcnow(), {"12": 2500}, {})
 check("alloc_tick (dry run): the plan's intended holding recorded (2500 - 700 = 1800)", b.alloc_targets == {"12": 1800.0},
       b.alloc_targets)
 b.cfg.alloc_enabled = False
-b.alloc_tick(M.utcnow(), {"12": 2500}, {})
+b.alloc_tick(M.util.utcnow(), {"12": 2500}, {})
 check("allocator off: the targets cleared", b.alloc_targets == {})
 
 # ============================================================================================ M2 decide
@@ -359,18 +365,13 @@ check("...flag on: the ask still keeps the value floor (>= p - margin)",
 check("...flag on: never crossing (bid < best ask, ask > best bid, bid < ask)",
       (q_on.bid is None or q_on.bid < 0.90) and (q_on.ask is None or q_on.ask > 0.82)
       and (q_on.bid is None or q_on.ask is None or q_on.bid < q_on.ask), q_on)
-q_age_off, _ = ask_of(False, age=500.0, skew_age_enabled=True)
-q_age_on, _ = ask_of(True, age=500.0, skew_age_enabled=True)
-check(f"age 500 h, +EV holding: flag off the age skew lowers the ask ({q_age_off.ask}), on it does not "
-      f"({q_age_on.ask})", q_age_on.ask is not None and q_age_off.ask is not None and q_age_on.ask >= q_age_off.ask,
-      (q_age_off, q_age_on))
-# -EV holding (p 0.80 below the best bid 0.82): the age skew stays on with the flag
+# -EV holding (p 0.80 below the best bid 0.82): age_off stays False with the flag
 refs_neg = {**REFS, "Ohio Senate|Democratic": 0.80, "Ohio Senate|Republican": 0.20}
-a1, b1 = plain_bot({"12": 2500}, refs=refs_neg, value_mode=True, skew_target_inventory=True, skew_age_enabled=True)
+a1, b1 = plain_bot({"12": 2500}, refs=refs_neg, value_mode=True, skew_target_inventory=True)
 inv1 = {"12": 2500}
 quiet_cycle(b1)
 _, ao = b1.skew_target_inputs(b1.ex["12"], inv1, b1.effective_inventory(inv1)["12"], False)
-check("-EV holding (edge-held < 0): age skew NOT switched off, target 0", not ao and b1.alloc_target_for("12", inv1)
+check("-EV holding (edge-held < 0): age_off NOT set, target 0", not ao and b1.alloc_target_for("12", inv1)
       == 0.0)
 # flag on, no target anywhere (value_mode off, allocator off): identical to flag off
 for inv_ in ({"12": 2500}, {"21": 600, "22": -900}, {}):
@@ -379,7 +380,7 @@ for inv_ in ({"12": 2500}, {"21": 600, "22": -900}, {}):
     quiet_cycle(b2, 2)
     quiet_cycle(b3, 2)
     check(f"flag on but no target (value_mode / allocator off), positions {inv_}: quotes identical to flag off",
-          {e: astuple(x.quote) for e, x in b2.ex.items()} == {e: astuple(x.quote) for e, x in b3.ex.items()})
+          {e: astuple(x.quote)[:NQ] for e, x in b2.ex.items()} == {e: astuple(x.quote)[:NQ] for e, x in b3.ex.items()})
 
 # ============================================================================================ flags off identical
 print(f"--- flags off identical to the branch head ({BASE_REV}) on a grid")
@@ -393,7 +394,7 @@ try:
     spec = importlib.util.spec_from_file_location("mm_bot_p12m_base", path)
     base = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(base)
-    base.alert, base.notify = M.alert, (lambda *a_, **k: False)
+    base.alert, base.notify = M.util.alert, (lambda *a_, **k: False)
 except Exception as e:                            # no git here: reported as a failure
     print("    (base module unavailable:", e, ")")
 check(f"base module (git show {BASE_REV}:mm_bot.py) loaded", base is not None)
@@ -408,11 +409,11 @@ if base is not None:
                     for p in (None, fv - 0.04, fv + 0.04):
                         for vm in (False, True):
                             n += 1
-                            if astuple(cq(inv, fv, bb, ba, ro=ro, age=age, p=p, value_mode=vm, skew_age_enabled=True)) \
+                            if astuple(cq(inv, fv, bb, ba, ro=ro, age=age, p=p, value_mode=vm)) \
                                     != astuple(cq(inv, fv, bb, ba, ro=ro, age=age, p=p, mod=base, value_mode=vm,
-                                                  skew_age_enabled=True)):
+                                                  **RETIRED_FLIPPED))[:NQ]:
                                 same = False
-    check(f"compute_quote (normal + reduce-only, age skew, value_mode, value_p) identical on {n} points", same)
+    check(f"compute_quote (normal + reduce-only, age, value_mode, value_p) identical on {n} points", same)
 
     def twin(inv, clock, reduce, overrides=None):
         out = []
@@ -423,7 +424,7 @@ if base is not None:
                 if mod is base:
                     cfg = base.Config()
                     for k in base.Config.__dataclass_fields__:
-                        setattr(cfg, k, getattr(bn.cfg, k))
+                        setattr(cfg, k, getattr(bn.cfg, k, RETIRED_FLIPPED.get(k, getattr(cfg, k))))
                     d = tempfile.mkdtemp()
                     for k in ("fills_csv", "status_file", "order_notes_file", "kill_file", "position_lots_file",
                               "overrides_file", "market_edge_file", "handover_file"):
@@ -457,7 +458,7 @@ if base is not None:
     for inv in ({}, {"11": 300, "21": 3000, "22": -3000}, {"12": 2500}):
         for clock in clocks:
             for reduce in (False, True):
-                for ovr in ({}, {"value_mode": True, "skew_age_enabled": True}):
+                for ovr in ({}, {"value_mode": True}):
                     ((an, bn), (ab, bb_)), (hn, hb) = twin(inv, clock, reduce, ovr)
                     if hn != hb:
                         ok_h = False
@@ -465,7 +466,7 @@ if base is not None:
                     if strip(an.wire) != strip(ab.wire):
                         ok_w = False
                         diffs.append(("wire", inv, clock, reduce, ovr))
-                    if {e: astuple(x.quote) for e, x in bn.ex.items()} != {e: astuple(x.quote)
+                    if {e: astuple(x.quote)[:NQ] for e, x in bn.ex.items()} != {e: astuple(x.quote)[:NQ]
                                                                           for e, x in bb_.ex.items()}:
                         ok_q = False
                         diffs.append(("quote", inv, clock, reduce, ovr))
@@ -475,8 +476,8 @@ if base is not None:
                         kn = (set(json.load(f)) - set(getattr(M.Bot, "EV_KEYS", ())) - {"ev_outcome_history"}
                               - set(getattr(M.Bot, "MM_FUNDING_KEYS", ())))   # (less later ev / carry / P14 keys)
                     with open(bb_.cfg.status_file) as f:
-                        kb = set(json.load(f))
-                    if kn != kb or set(bn.health) != set(bb_.health):
+                        kb = set(retired(kn, json.load(f)))
+                    if kn != kb or set(bn.health) != set(retired(bn.health, bb_.health)):
                         ok_s = False
                         diffs.append(("status", kn ^ kb))
     check("hours_to_close / close_window identical (4 clocks incl. 90 and 10 min before the close)", ok_h, diffs[:1])

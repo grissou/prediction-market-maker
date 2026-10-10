@@ -29,11 +29,26 @@ sys.path.insert(0, HERE)
 from fakes import FakeApi, FakeRefs, lvl, make_bot, market      # noqa: E402
 import mm_bot as M                                                # noqa: E402
 
+# retired on simplify: the old twin's status / health fields a removed feature owned, at the value it reported while
+# the feature was off (the new code drops them); Quote lost its trailing `behind` flag (always False while that sizing
+# was off) and the age skew its switch (skew_age_enabled: the old default True, live False)
+RETIRED_STATUS = {"tilt_s_applied": (0.0, 0), "tilt_s_applied_headline": (0.0, 0), "fast_unload_windows": (0,),
+                  "behind_best_markets": (0,), "mark_frag_total_cap_active": (False,),
+                  "fl_bias_markets": ({"bid": 0, "ask": 0},)}
+RETIRED_FLIPPED = {"skew_age_enabled": False}
+NQ = len(M.Quote.__dataclass_fields__)
+
+
+def retired(new, old):
+    """The old twin's dict less a retired feature's own key at its OFF value when the new one dropped it."""
+    return {k: v for k, v in old.items() if not (k in RETIRED_STATUS and k not in new and v in RETIRED_STATUS[k])}
+
+
 logging.basicConfig(level=logging.CRITICAL)
 RESULTS = []
 ALERTS = []
-M.alert = lambda msg: ALERTS.append(msg)
-M.notify = lambda *a, **k: False
+M.util.alert = lambda msg: ALERTS.append(msg)
+M.util.notify = lambda *a, **k: False
 BASE_REV = "a1b3eea"                              # the branch head before Part L
 
 
@@ -42,7 +57,7 @@ def check(name, cond, extra=""):
     RESULTS.append(bool(cond))
 
 
-NOW = M.utcnow()
+NOW = M.util.utcnow()
 CLOSE = NOW + timedelta(days=30)
 
 
@@ -150,7 +165,7 @@ def tick(b, skip=()):
     time.sleep(0.002)
     for x in b.ex.values():
         x.inv = float(b.api.inv.get(x.eid, 0.0))
-    return quiet(b.alloc_tick, M.utcnow(), dict(b.api.inv), b.orders_by_eid(M.utcnow()), None, set(skip))
+    return quiet(b.alloc_tick, M.util.utcnow(), dict(b.api.inv), b.orders_by_eid(M.util.utcnow()), None, set(skip))
 
 
 def ladder(api, eid="A1"):
@@ -203,7 +218,7 @@ try:
         spec = importlib.util.spec_from_file_location("mm_bot_base", path)
         base = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(base)
-        base.alert, base.notify = M.alert, (lambda *a_, **k: False)
+        base.alert, base.notify = M.util.alert, (lambda *a_, **k: False)
 except Exception as e:
     print("    (base module unavailable:", e, ")")
 check(f"base module (git show {BASE_REV}:mm_bot.py) loaded", base is not None)
@@ -213,7 +228,7 @@ def twin(inv, cash, books=None, **cfg):
     api_n, bn = mk_bot(inv=inv, cash=cash, books=books, **cfg)
     c = base.Config()
     for k in base.Config.__dataclass_fields__:
-        setattr(c, k, getattr(bn.cfg, k))
+        setattr(c, k, getattr(bn.cfg, k, getattr(c, k)))
     api_b = FakeApi(True)
     api_b.markets_list = list(api_n.markets_list)
     api_b.books = {e: {"bids": [dict(x) for x in v["bids"]], "asks": [dict(x) for x in v["asks"]]}
@@ -251,8 +266,8 @@ if base is not None:
         if sorted(map(json.dumps, sn)) != sorted(map(json.dumps, sb)):   # (the writer threads' order may vary)
             ok_w = False
             diffs.append(("wire", inv, sn[:2], sb[:2]))
-        if {e: tuple(x.quote.__dict__.values()) for e, x in bn.ex.items()} != \
-                {e: tuple(x.quote.__dict__.values()) for e, x in bb_.ex.items()}:
+        if {e: tuple(x.quote.__dict__.values())[:NQ] for e, x in bn.ex.items()} != \
+                {e: tuple(x.quote.__dict__.values())[:NQ] for e, x in bb_.ex.items()}:
             ok_q = False
             diffs.append(("quote", inv))
         for race, members in bn.groups.items():
@@ -270,11 +285,11 @@ if base is not None:
         with open(bn.cfg.status_file) as f:
             kn = json.load(f)
         with open(bb_.cfg.status_file) as f:
-            kb = json.load(f)
+            kb = retired(kn, json.load(f))
         ev_ign = (set(getattr(M.Bot, "EV_KEYS", ())) | {"ev_outcome_history"}   # later read-only ev / carry report keys
                   | set(getattr(M.Bot, "MM_FUNDING_KEYS", ())))   # (and P14 mm_funding)
         if set(kn) - ev_ign != set(kb) - ev_ign or set(kn.get("alloc") or {}) != set(kb.get("alloc") or {}) \
-                or set(bn.health) != set(bb_.health):
+                or set(bn.health) != set(retired(bn.health, bb_.health)):
             ok_s = False
             diffs.append(("status", set(kn) ^ set(kb)))
     check("two full cycles send the same orders, any order (5 books / positions / settings)", ok_w, diffs[:1])
@@ -307,7 +322,7 @@ metas = sorted((b.order_meta[o.order_id]["set_ladder"], b.order_meta[o.order_id]
                for o in b.sl_orders())
 check("tagged set_ladder 1 / 2 / 3, race Alpha", metas == [(1, "Alpha Senate"), (2, "Alpha Senate"),
                                                           (3, "Alpha Senate")], metas)
-check("expires after MAX_ORDER_TTL (2 h)", all(abs((o.expires - M.utcnow()).total_seconds() - M.MAX_ORDER_TTL) < 60
+check("expires after MAX_ORDER_TTL (2 h)", all(abs((o.expires - M.util.utcnow()).total_seconds() - M.MAX_ORDER_TTL) < 60
                                                for o in b.sl_orders()))
 check("status alloc.set_ladder {races 1, shares_resting 999, filled 0}",
       b.alloc_status().get("set_ladder") == {"races": 1, "shares_resting": 999, "filled": 0},
@@ -334,7 +349,7 @@ check("...the position fell (A1 -900): no flip", api.inv["A1"] == -900)
 # the hour passes, the best bid moved down -> re-quoted
 api.books["A1"] = bk(0.915, 0.93)
 b.ex["A1"].book = api.full_book("A1")
-b.ex["A1"].book = M.strip_own(b.ex["A1"].book, b.orders_by_eid(M.utcnow()).get("A1", []))
+b.ex["A1"].book = M.strip_own(b.ex["A1"].book, b.orders_by_eid(M.util.utcnow()).get("A1", []))
 fresh(b)
 b.alloc_ladder["Alpha Senate"]["at"] -= 3600
 n_c, n_a = len(api.sent("cancel_order")), len(api.sent("cancel_all"))
@@ -354,7 +369,7 @@ api, b = mk_bot(alloc_set_rich_leg=True)
 warm(b)
 tick(b)
 # (our ask at 0.905 resting: injected into our record - on these books it would trade with the other traders' 0.92)
-b.my_orders[9999] = M.Resting(9999, "A1", False, 0.905, 10, M.utcnow() + timedelta(hours=1))
+b.my_orders[9999] = M.Resting(9999, "A1", False, 0.905, 10, M.util.utcnow() + timedelta(hours=1))
 n_c = len(api.sent("cancel_order"))
 read(b)
 tick(b)
@@ -452,7 +467,7 @@ no_plan("the favourite pinned: nothing", alloc_pin="Rep Alpha Senate",
 no_plan("covered NO sales not in effect (reduce_no_as_sell off): nothing", reduce_no_as_sell=False)
 no_plan("too small (2 sets: < 1 share a level): nothing", inv={"A1": -2, "A2": -2})
 no_plan("inside the pre-close window: nothing",
-        after=lambda b_: [setattr(x, "close", M.utcnow() + timedelta(minutes=5)) for x in b_.ex.values()])
+        after=lambda b_: [setattr(x, "close", M.util.utcnow() + timedelta(minutes=5)) for x in b_.ex.values()])
 api, b = mk_bot(alloc_set_rich_leg=True)
 warm(b)
 b.api.live = False
@@ -522,7 +537,7 @@ check("no write budget: waits", not ladder(api))
 api, b = mk_bot(alloc_set_rich_leg=True)
 warm(b)
 qb = {"exchangeId": "A1", "side": "yes", "action": "buy", "quantity": 400, "price": 0.85, "tournamentId": "T",
-      "expirationDate": M.iso(M.utcnow() + timedelta(hours=1)), "_no_sell": True}
+      "expirationDate": M.iso(M.util.utcnow() + timedelta(hours=1)), "_no_sell": True}
 res = quiet(b.place_orders, [qb])
 b.remember_order(qb, res[0]["data"], time.monotonic())
 b.order_meta[res[0]["data"]["orderId"]] = {"our_side": "bid", "no_sell": True}
@@ -593,7 +608,7 @@ check("no room left on Beta Dem (alloc_max_contract_usd): not preferred",
       b.alloc_prefer_short_legs({}, time.monotonic()) == {})
 api, b, _ = plan2(alloc_prefer_short=True)
 own = {"exchangeId": "B2", "side": "yes", "action": "buy", "quantity": 5, "price": 0.48, "tournamentId": "T",
-       "expirationDate": M.iso(M.utcnow() + timedelta(hours=1))}
+       "expirationDate": M.iso(M.util.utcnow() + timedelta(hours=1))}
 res = quiet(b.place_orders, [own])
 b.remember_order(own, res[0]["data"], time.monotonic())
 check("own quotes excluded: our bid at 0.48 is not counted (bids sum 0.55 + no other bid)",
@@ -637,10 +652,10 @@ _, r = arb({**books_default(), "A1": bk(0.55, 0.57), "A2": bk(0.38, 0.40)}, pair
 check("a profitable unwind (asks 0.97) still fires", r is not None and r[0] == "unwind", r)
 b, _ = arb(BID_OVER, pair_no_unwind_asks_le1=True)
 own = {"exchangeId": "A1", "side": "yes", "action": "buy", "quantity": 5, "price": 0.61, "tournamentId": "T",
-       "expirationDate": M.iso(M.utcnow() + timedelta(hours=1))}
+       "expirationDate": M.iso(M.util.utcnow() + timedelta(hours=1))}
 res = quiet(b.place_orders, [own])
 b.remember_order(own, res[0]["data"], time.monotonic())
-b.ex["A1"].book = M.strip_own(b.api.full_book("A1"), b.orders_by_eid(M.utcnow()).get("A1", []))
+b.ex["A1"].book = M.strip_own(b.api.full_book("A1"), b.orders_by_eid(M.util.utcnow()).get("A1", []))
 check("own quotes excluded: our bid at 0.61 is not counted (no other bid there: bids not > 1)",
       not b.nono_unwind_gated(b.groups["Alpha Senate"], 1.03))
 LONG = {**books_default(), "A1": bk(0.61, 0.62), "A2": bk(0.40, 0.41)}

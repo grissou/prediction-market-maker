@@ -26,9 +26,24 @@ sys.path.insert(0, HERE)
 from fakes import FakeApi, lvl, make_bot                  # noqa: E402
 import mm_bot as M                                        # noqa: E402
 
+# retired on simplify: the old twin's status / health fields a removed feature owned, at the value it reported while
+# the feature was off (the new code drops them); Quote lost its trailing `behind` flag (always False while that sizing
+# was off) and the age skew its switch (skew_age_enabled: the old default True, live False)
+RETIRED_STATUS = {"tilt_s_applied": (0.0, 0), "tilt_s_applied_headline": (0.0, 0), "fast_unload_windows": (0,),
+                  "behind_best_markets": (0,), "mark_frag_total_cap_active": (False,),
+                  "fl_bias_markets": ({"bid": 0, "ask": 0},)}
+RETIRED_FLIPPED = {"skew_age_enabled": False}
+NQ = len(M.Quote.__dataclass_fields__)
+
+
+def retired(new, old):
+    """The old twin's dict less a retired feature's own key at its OFF value when the new one dropped it."""
+    return {k: v for k, v in old.items() if not (k in RETIRED_STATUS and k not in new and v in RETIRED_STATUS[k])}
+
+
 logging.basicConfig(level=logging.ERROR, format="    log %(levelname)s %(message)s")
 RESULTS = []
-M.alert = lambda msg: None
+M.util.alert = lambda msg: None
 G, R, P = "cash_gate_enabled", "cash_gate_reserve", "adding_factor_per_market"
 BASE_REV = "2ef6d12"                                       # Package 7 (START_HERE), the code before this package
 
@@ -156,20 +171,20 @@ cyc(bt2)
 q = bt2.ex["11"].quote
 check("small YES holding: ask sells the holding, no bid", q.bid is None and q.ask_size == 100, q)
 check("compute_quote: a reducing side beyond the position is adding (factor 0 -> capped at the position)",
-      M.compute_quote(0.5, 50, -400, None, None, bt.cfg, adding_factor=0.0, adding_per_market=True).ask_size == 50)
+      M.quoting.compute_quote(0.5, 50, -400, None, None, bt.cfg, adding_factor=0.0, adding_per_market=True).ask_size == 50)
 check("compute_quote: factor 0.5 per market -> half of the part beyond the position (50 + 150 / 2 of 200)",
-      M.compute_quote(0.5, 50, -400, None, None, bt.cfg, adding_factor=0.5, adding_per_market=True).ask_size == 125)
-q_net = M.compute_quote(0.5, -817, 158, None, None, bt.cfg, adding_factor=0.0, net_inv=158)
-q_pm = M.compute_quote(0.5, -817, 158, None, None, bt.cfg, adding_factor=0.0, net_inv=158, adding_per_market=True)
+      M.quoting.compute_quote(0.5, 50, -400, None, None, bt.cfg, adding_factor=0.5, adding_per_market=True).ask_size == 125)
+q_net = M.quoting.compute_quote(0.5, -817, 158, None, None, bt.cfg, adding_factor=0.0, net_inv=158)
+q_pm = M.quoting.compute_quote(0.5, -817, 158, None, None, bt.cfg, adding_factor=0.0, net_inv=158, adding_per_market=True)
 check("compute_quote NO+NO leg: race-net -> ask out, bid 0; per market -> bid out, ask 0",
       q_net.ask_size > 0 and q_net.bid_size == 0 and q_pm.bid_size > 0 and q_pm.ask_size == 0, (q_net, q_pm))
-q_ro = M.compute_quote(0.5, -817, 158, None, None, bt.cfg, reduce_only=True, net_inv=158)
+q_ro = M.quoting.compute_quote(0.5, -817, 158, None, None, bt.cfg, reduce_only=True, net_inv=158)
 check("(report) the reduce-only race-net clip alone also leaves the cash-needing ask on that leg",
       q_ro.ask_size == 158 and q_ro.bid_size == 0, q_ro)
-q_ro2 = M.compute_quote(0.5, -817, 158, None, None, bt.cfg, reduce_only=True, net_inv=158, adding_factor=0.0,
+q_ro2 = M.quoting.compute_quote(0.5, -817, 158, None, None, bt.cfg, reduce_only=True, net_inv=158, adding_factor=0.0,
                         adding_per_market=True)
 check("...which the per-market factor 0 removes (no quote at all on that leg)", q_ro2.ask_size == 0 and q_ro2.bid_size == 0, q_ro2)
-q_t = M.compute_quote(0.5, -817, 158, None, None, bt.cfg, adding_limit_factor=0.0, net_inv=158, adding_per_market=True)
+q_t = M.quoting.compute_quote(0.5, -817, 158, None, None, bt.cfg, adding_limit_factor=0.0, net_inv=158, adding_per_market=True)
 check("turnover-dead limit factor picks the side by the market's own position too (ask held at 1 share)",
       q_t.ask_size == 1, q_t)
 
@@ -228,7 +243,7 @@ check("else account value - market value", bt.cash_figure({"totalAccountValue": 
 check("nothing usable -> None", bt.cash_figure({"foo": 1}, {}) == (None, False))
 api, bt = bot({}, gate=True, cash=500.0)
 api.orders[1] = {"id": 1, "exchangeId": "21", "quantity": 100, "open": True, "side": "yes", "action": "buy",
-                 "priceLimit": 0.5, "expirationDate": M.iso(M.utcnow() + M.timedelta(hours=1))}
+                 "priceLimit": 0.5, "expirationDate": M.iso(M.util.utcnow() + M.timedelta(hours=1))}
 bt.cfg.capital_in_positions_max_frac = 0.0
 bt.cycle()
 bt.drain_writes(5)
@@ -253,13 +268,13 @@ api, bt = bot({"11": 100}, gate=True, cash=None)
 bt.cg_cash, bt.cg_reserved, bt.cg_spent = 25.0, 0.0, 0.0      # 0 left after the reserve
 n0 = len(api.sent("batch"))
 res = bt.place_orders([{"exchangeId": "12", "side": "yes", "action": "buy", "quantity": 5, "price": 0.5,
-                        "tournamentId": "T", "expirationDate": M.iso(M.utcnow() + M.timedelta(minutes=5))}])
+                        "tournamentId": "T", "expirationDate": M.iso(M.util.utcnow() + M.timedelta(minutes=5))}])
 check("a batch dropped whole sends no request", len(api.sent("batch")) == n0 and res[0].get("cash_gated")
       and not res[0].get("ok"), res)
 orders = [{"exchangeId": "12", "side": "yes", "action": "buy", "quantity": 5, "price": 0.5, "tournamentId": "T",
-           "expirationDate": M.iso(M.utcnow() + M.timedelta(minutes=5))},
+           "expirationDate": M.iso(M.util.utcnow() + M.timedelta(minutes=5))},
           {"exchangeId": "11", "side": "yes", "action": "sell", "quantity": 50, "price": 0.2, "tournamentId": "T",
-           "expirationDate": M.iso(M.utcnow() + M.timedelta(minutes=5))}]
+           "expirationDate": M.iso(M.util.utcnow() + M.timedelta(minutes=5))}]
 res = bt.place_orders(orders)
 check("mixed batch: the covered ask goes (its result at its own index), the bid is gated",
       len(res) == 2 and res[0].get("cash_gated") and res[1].get("ok") and res[1]["index"] == 1
@@ -336,7 +351,7 @@ try:
         spec = importlib.util.spec_from_file_location("mm_bot_p7", path)
         base = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(base)
-        base.alert = M.alert
+        base.alert = M.util.alert
         base.notify = lambda *a_, **k: False
 except Exception as e:                            # no git here: the pin is skipped (reported)
     print("    (base module unavailable:", e, ")")
@@ -345,6 +360,8 @@ if base is None:
     check(f"base module (git show {BASE_REV}:mm_bot.py) loaded", False)
 else:
     cfg_n, cfg_b = M.Config(), base.Config()
+    for k, v in RETIRED_FLIPPED.items():
+        setattr(cfg_b, k, v)
     same, diffs = True, []
     for inv in (-817, -100, 0, 100, 900):
         for eff in (-400, 0, 158, 500):
@@ -353,9 +370,9 @@ else:
                     for ro in (False, True):
                         for bb, ba in ((0.40, 0.46), (None, None)):
                             kw = dict(reduce_only=ro, net_inv=eff, adding_factor=af, adding_limit_factor=alf)
-                            qn = M.compute_quote(0.43, inv, eff, bb, ba, cfg_n, **kw)
+                            qn = M.quoting.compute_quote(0.43, inv, eff, bb, ba, cfg_n, **kw)
                             qb = base.compute_quote(0.43, inv, eff, bb, ba, cfg_b, **kw)
-                            if tuple(qn.__dict__.values()) != tuple(qb.__dict__.values()):
+                            if tuple(qn.__dict__.values()) != tuple(qb.__dict__.values())[:NQ]:
                                 same = False
                                 diffs.append((inv, eff, af, alf, ro, qn, qb))
     check("compute_quote identical with adding_per_market off (5 x 4 x 3 x 2 x 2 x 2 grid)", same, diffs[:2])
@@ -364,7 +381,7 @@ else:
         api_n, bn = bot(inv, cash=cash, factor=0.0)
         cfg = base.Config()
         for k in base.Config.__dataclass_fields__:
-            setattr(cfg, k, getattr(bn.cfg, k))
+            setattr(cfg, k, getattr(bn.cfg, k, RETIRED_FLIPPED.get(k, getattr(cfg, k))))
         api_b = FakeApi(True)
         api_b.markets_list = list(api_n.markets_list)
         api_b.books = {e: {"bids": [dict(x) for x in v["bids"]], "asks": [dict(x) for x in v["asks"]]}
@@ -397,7 +414,7 @@ from concurrent.futures import Future                      # noqa: E402
 
 def bid(eid="12", q=100, p=0.5):
     return {"exchangeId": eid, "side": "yes", "action": "buy", "quantity": q, "price": p, "tournamentId": "T",
-            "expirationDate": M.iso(M.utcnow() + M.timedelta(minutes=5))}
+            "expirationDate": M.iso(M.util.utcnow() + M.timedelta(minutes=5))}
 
 
 def fresh(cash=1000.0):
@@ -457,7 +474,7 @@ check("main-thread place_orders, first order refused: only its need back", abs(b
 
 print("--- red team: a failed / missing cash read")
 ALERTS = []
-M.alert = lambda msg: ALERTS.append(msg)
+M.util.alert = lambda msg: ALERTS.append(msg)
 
 
 def fut(value=None, exc=None):
@@ -497,7 +514,7 @@ bt.cycle()
 bt.drain_writes(5)
 check("cycle with no cash figure for > 5 min: status age > 300 and the bot is not gating", bt.health.get(
     "cash_gate_read_age", 0) > 300 and not bt.cash_gate_on(), bt.health.get("cash_gate_read_age"))
-M.alert = lambda msg: None
+M.util.alert = lambda msg: None
 
 print("--- red team: take / follow-up 'cash gated' logs throttled per market")
 

@@ -37,11 +37,26 @@ sys.path.insert(0, HERE)
 from fakes import FakeApi, FakeRefs, lvl, make_bot, market, run_cycles      # noqa: E402
 import mm_bot as M                                                            # noqa: E402
 
+# retired on simplify: the old twin's status / health fields a removed feature owned, at the value it reported while
+# the feature was off (the new code drops them); Quote lost its trailing `behind` flag (always False while that sizing
+# was off) and the age skew its switch (skew_age_enabled: the old default True, live False)
+RETIRED_STATUS = {"tilt_s_applied": (0.0, 0), "tilt_s_applied_headline": (0.0, 0), "fast_unload_windows": (0,),
+                  "behind_best_markets": (0,), "mark_frag_total_cap_active": (False,),
+                  "fl_bias_markets": ({"bid": 0, "ask": 0},)}
+RETIRED_FLIPPED = {"skew_age_enabled": False}
+NQ = len(M.Quote.__dataclass_fields__)
+
+
+def retired(new, old):
+    """The old twin's dict less a retired feature's own key at its OFF value when the new one dropped it."""
+    return {k: v for k, v in old.items() if not (k in RETIRED_STATUS and k not in new and v in RETIRED_STATUS[k])}
+
+
 logging.basicConfig(level=logging.CRITICAL)
 RESULTS = []
 ALERTS = []
-M.alert = lambda msg: ALERTS.append(msg)
-M.notify = lambda *a, **k: False
+M.util.alert = lambda msg: ALERTS.append(msg)
+M.util.notify = lambda *a, **k: False
 BASE_REV = "64f27c8"                              # Package 14.2 (READY, live), the head this package is built on
 SNAP = os.environ.get("P9_SNAP", "/home/claude/snap04")
 STAGED = os.path.join(ROOT, "deploy", "package15", "settings_override.harvest.json")
@@ -53,7 +68,7 @@ def check(name, cond, extra=""):
     RESULTS.append(bool(cond))
 
 
-NOW = M.utcnow()
+NOW = M.util.utcnow()
 CLOSE = NOW + timedelta(days=30)
 
 
@@ -152,7 +167,7 @@ def agg(book):
 
 def fresh(b):
     now_m = time.monotonic()
-    mine = b.orders_by_eid(M.utcnow())
+    mine = b.orders_by_eid(M.util.utcnow())
     for x in b.ex.values():
         x.book = M.strip_own(agg(b.api.full_book(x.eid)), mine.get(x.eid, [])) if x.eid in b.api.books else x.book
         x.verified = now_m
@@ -181,7 +196,7 @@ def hv(b, skip=(), at=None):
     fresh(b)
     for x in b.ex.values():
         x.inv = float(b.api.inv.get(x.eid, 0.0))
-    return quiet(b.hv_tick, at or M.utcnow(), dict(b.api.inv), b.orders_by_eid(M.utcnow()), None, set(skip))
+    return quiet(b.hv_tick, at or M.util.utcnow(), dict(b.api.inv), b.orders_by_eid(M.util.utcnow()), None, set(skip))
 
 
 def plan(b):
@@ -246,7 +261,7 @@ _f, _ov = list(M.Config.__dataclass_fields__), list(M.OVERRIDABLE)
 check("one contiguous block right after alloc_swap_min_gain, in Config and OVERRIDABLE",
       _f[_f.index("alloc_swap_min_gain") + 1:][:len(SPEC)] == list(SPEC)
       and _ov[_ov.index("alloc_swap_min_gain") + 1:][:len(SPEC)] == list(SPEC))
-src = open(os.path.join(ROOT, "mm_bot.py")).read()
+src = "".join(open(p).read() for p in sorted(__import__("glob").glob(os.path.join(ROOT, "mmbot", "*.py"))))
 check("Config comment block '# --- P15: the harvest ladder alone + a per-state collateral cap'",
       "# --- P15: the harvest ladder alone + a per-state collateral cap" in src)
 check("Bot.HARVEST_KEYS names the status keys P15 adds (harvest, state_caps)",
@@ -291,7 +306,7 @@ if base is not None:
             if mod is base:
                 cfg = base.Config()
                 for k in base.Config.__dataclass_fields__:
-                    setattr(cfg, k, getattr(bn.cfg, k))
+                    setattr(cfg, k, getattr(bn.cfg, k, RETIRED_FLIPPED.get(k, getattr(cfg, k))))
                 d = tempfile.mkdtemp()
                 for k in ("fills_csv", "status_file", "order_notes_file", "kill_file", "position_lots_file",
                           "overrides_file", "market_edge_file", "handover_file"):
@@ -341,7 +356,8 @@ if base is not None:
             if sorted(map(json.dumps, strip(an.wire))) != sorted(map(json.dumps, strip(ab.wire))):
                 ok_w = False
                 diffs.append(("wire", inv, ov))
-            if {e: astuple(x.quote) for e, x in bn.ex.items()} != {e: astuple(x.quote) for e, x in bb_.ex.items()}:
+            if ({e: astuple(x.quote)[:NQ] for e, x in bn.ex.items()}
+                    != {e: astuple(x.quote)[:NQ] for e, x in bb_.ex.items()}):
                 ok_q = False
                 diffs.append(("quote", inv, ov))
             strip_t = lambda m: sorted(json.dumps({a: v for a, v in x.items() if a != "t"}, sort_keys=True)  # noqa
@@ -354,7 +370,7 @@ if base is not None:
             with open(bn.cfg.status_file) as f:
                 sn = json.load(f)
             with open(bb_.cfg.status_file) as f:
-                sb = json.load(f)
+                sb = retired(sn, json.load(f))
             drop = VOLATILE | set(M.Bot.MM_FUNDING_KEYS) | set(M.Bot.HARVEST_KEYS)
             wall = {"last_run_wall", "last_run", "since"}
             cut = lambda s: {k: ({a: ([f[1:] for f in x] if a == "flows" else x) for a, x in v.items()  # noqa
@@ -364,7 +380,7 @@ if base is not None:
                 ok_s = False
                 diffs.append(("status", inv, ov, {k for k in set(cut(sn)) | set(cut(sb))
                                                   if cut(sn).get(k) != cut(sb).get(k)} | (set(sn) ^ set(sb))))
-            if set(bn.health) != set(bb_.health) or bn.status_report() != bb_.status_report():
+            if set(bn.health) != set(retired(bn.health, bb_.health)) or bn.status_report() != bb_.status_report():
                 ok_h = False
                 diffs.append(("health", inv, ov))
             if bn.summary_ops_line(100000.0) != bb_.summary_ops_line(100000.0):
@@ -393,9 +409,10 @@ if base is not None:
         fresh(bn)
         cfg = base.Config()
         for k in base.Config.__dataclass_fields__:
-            setattr(cfg, k, getattr(bn.cfg, k))
+            setattr(cfg, k, getattr(bn.cfg, k, RETIRED_FLIPPED.get(k, getattr(cfg, k))))
         bb_ = base.Bot.__new__(base.Bot)
         bb_.__dict__.update(bn.__dict__)
+        bb_.basket_legs = {}                # (the base revision's retired long-tilt basket: never any legs)
         bb_.cfg = cfg
         now_m = time.monotonic()
         pn = quiet(bn.alloc_plan, dict(api_n.inv), now_m, cash, set(), None)
@@ -481,16 +498,16 @@ check("a level at / through the other side of the book is skipped, not clipped (
       [px for _, px, _, _, _ in plans["A2"]["levels"]] == [0.14], plans["A2"]["levels"])
 api, b = mk_bot(tilt_harvest_ladder=True, refs=ALPHA, **BIG)
 warm(b)
-b.my_orders[901] = M.Resting(901, "A2", True, 0.10, 50, M.utcnow() + timedelta(seconds=600))
-b.my_orders[902] = M.Resting(902, "A1", False, 0.88, 50, M.utcnow() + timedelta(seconds=600))
+b.my_orders[901] = M.Resting(901, "A2", True, 0.10, 50, M.util.utcnow() + timedelta(seconds=600))
+b.my_orders[902] = M.Resting(902, "A1", False, 0.88, 50, M.util.utcnow() + timedelta(seconds=600))
 plans, _ = plan(b)
 check("never at / through our own orders: our bid at 0.10 on A2 -> asks 0.12 / 0.14; our ask 0.88 on A1 -> bid 0.86",
       [px for _, px, _, _, _ in plans["A2"]["levels"]] == [0.12, 0.14]
       and [px for _, px, _, _, _ in plans["A1"]["levels"]] == [0.86], (plans["A2"]["levels"], plans["A1"]["levels"]))
 b.my_orders.pop(901)
 b.my_orders.pop(902)
-b.my_orders[903] = M.Resting(903, "A2", False, 0.12, 50, M.utcnow() + timedelta(seconds=600))
-b.my_orders[904] = M.Resting(904, "A1", True, 0.88, 50, M.utcnow() + timedelta(seconds=600))
+b.my_orders[903] = M.Resting(903, "A2", False, 0.12, 50, M.util.utcnow() + timedelta(seconds=600))
+b.my_orders[904] = M.Resting(904, "A1", True, 0.88, 50, M.util.utcnow() + timedelta(seconds=600))
 plans, _ = plan(b)
 check("P13 C: never at the price of our own resting quote on that side (our ask 0.12 on A2: 0.10 / 0.14 only; our "
       "bid 0.88 on A1: 0.90 / 0.86 only)", [px for _, px, _, _, _ in plans["A2"]["levels"]] == [0.10, 0.14]
@@ -709,7 +726,7 @@ pr = {"sell": {"kind": "cash", "label": "spare cash", "usd": 1000.0, "edge": 0.0
               "usd": 1000.0}, "usd": 1000.0, "status": "sold", "proceeds": 1000.0, "sold_at": -1e18}
 b.alloc_run = {}
 n0 = len(api.wire)
-sent = quiet(b.alloc_buy, pr, dict(api.inv), b.orders_by_eid(M.utcnow()), time.monotonic(), time.time(), set())
+sent = quiet(b.alloc_buy, pr, dict(api.inv), b.orders_by_eid(M.util.utcnow()), time.monotonic(), time.time(), set())
 check("alloc_buy re-checks the state cap before the IOC: RI over the cap -> no order (blocked_by state_cap)",
       not sent and len(api.wire) == n0 and b.alloc_run.get("blocked_by", {}).get("state_cap", 0) == 1,
       (sent, b.alloc_run))
@@ -809,7 +826,7 @@ check("...both markets' six levels in ONE batch write (batch_size 10)", api.sent
       api.sent("batch")[n_b:])
 check("...tagged harvest 2..4 in the notes, alive MAX_ORDER_TTL", sorted(b.order_meta[o.order_id]["harvest"]
                                                                           for o in b.hv_orders("A2")) == [2, 3, 4]
-      and all(abs((o.expires - M.utcnow()).total_seconds() - M.MAX_ORDER_TTL) < 60 for o in b.hv_orders()))
+      and all(abs((o.expires - M.util.utcnow()).total_seconds() - M.MAX_ORDER_TTL) < 60 for o in b.hv_orders()))
 check("...the markets are not quoted this cycle (touched)", touched == {"A1", "A2"}, touched)
 api, b = mk_bot(tilt_harvest_ladder=True, refs=ALPHA, harvest_writes_frac=0.0, **BIG)
 warm(b)
@@ -872,7 +889,7 @@ def fill_at(api_, eid, price, qty):
             api_.inv[eid] = api_.inv.get(eid, 0) + (qty if is_bid else -qty)
             api_.fills.append({"id": len(api_.fills) + 1, "orderId": oid, "exchangeId": eid, "price": p_,
                                "quantity": qty if is_bid else -qty, "side": "yes" if is_bid else "no",
-                               "filledAt": M.iso(M.utcnow())})
+                               "filledAt": M.iso(M.util.utcnow())})
             if o["quantity"] <= 0:
                 del api_.orders[oid]
             return
@@ -911,7 +928,7 @@ b.global_reduce = True
 hv(b)
 check("reduce-only (the backstop tripwire): every level pulled", not b.hv_orders() and not api.orders)
 api, b = laddered()
-b.ex["A2"].close = M.utcnow() + timedelta(minutes=5)
+b.ex["A2"].close = M.util.utcnow() + timedelta(minutes=5)
 hv(b)
 check("the pre-close stop (5 min to close < stop_minutes_before_close 15): pulled", not b.hv_orders("A2")
       and b.hv_orders("A1"))
@@ -1097,7 +1114,7 @@ for _ in range(2):
     b.drain_writes(5)
 check("no Polymarket references at all: cycles run, no ladder (why 'no p')", b.failed_cycles == 0 and not b.hv_plans
       and b.hv_why.get("A2") == "no p", b.hv_why.get("A2"))
-t1 = quiet(b.hv_tick, M.utcnow(), {"NOPE": 10.0}, {}, None, set())
+t1 = quiet(b.hv_tick, M.util.utcnow(), {"NOPE": 10.0}, {}, None, set())
 coll, own = b.st_snapshot({"NOPE": 10.0, "R1": 5.0})
 check("hv_tick / st_snapshot with an unknown market in the positions: no crash (an unknown market has no state; "
       "R1's 5 YES count in RI)", isinstance(t1, set) and "NOPE" not in coll and coll.get("RI", 0) > 0
@@ -1110,7 +1127,9 @@ check("an unrecognised label: no state (st_key None), so no state cap there", b.
 print("--- the staged file")
 if os.path.exists(STAGED):
     raw = json.load(open(STAGED))
-    good, bad = M.validate_overrides(raw, M.Config())
+    RETIRED = ("tilt_exit_priority", "tilt_exit_full_size", "ref_tilt_enabled", "ref_tilt_headline",
+               "ref_guard_tilted", "ref_guard_exits", "take_tilted_ref", "skew_age_enabled")   # (retired on simplify)
+    good, bad = M.validate_overrides({k: v for k, v in raw.items() if k not in RETIRED}, M.Config())
     base142 = json.load(open(LIVE_142))
     p15k = {"tilt_harvest_ladder", "harvest_offsets", "harvest_level_usd", "harvest_min_edge", "harvest_max_markets",
             "harvest_writes_frac", "harvest_requote_s", "harvest_total_usd", "state_max_usd"}

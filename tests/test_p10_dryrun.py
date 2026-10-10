@@ -1,6 +1,6 @@
 """
 Package 10 END-TO-END DRY RUN on the fake exchange, seeded with the REAL live state of 3 Oct 22:47 UTC (the ops snapshot
-in /home/claude/snap03, or $P9_SNAP; the tests/test_p9_dryrun.py harness: all 237 markets, other traders' 3-level books,
+in /home/claude/snap03, or $P9_SNAP; the tests/dryrun_harness.py harness: all 237 markets, other traders' 3-level books,
 raw Polymarket references, positions, the exchange's marks, cash ~0, position lots). The base is the owner's LIVE
 value-mode file (Package 8 in value mode, deploy/package10/settings_override.stage0_code_only.json); each staged file of
 deploy/package10/ is applied with the bot's own override path (check_overrides), then full cycles (Bot.cycle) run on a
@@ -33,7 +33,8 @@ from datetime import datetime, timezone
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
-import test_p9_dryrun as P                                       # noqa: E402  (the harness: snapshot, fake, clock)
+import dryrun_harness as P                                      # noqa: E402  (the harness: snapshot, fake, clock)
+RETIRED_KEYS = P.RETIRED_KEYS                     # removed from Config; off in every staged file
 import mm_bot as M                                                # noqa: E402
 
 P.TAGGED = P.TAGGED + ("alloc_tick",)
@@ -46,8 +47,8 @@ LIVE = {"arb_two_sided": False, "worst_case_backstop_frac": 0.8, "capital_ceilin
         "ref_tilt_max": 0.11, "ref_tilt_headline": True, "reduce_no_as_sell": True, "no_set_aware_bids": True,
         "pair_unwind_followup": True, "pair_no_unwind_max_cost": 0.003, "arb_enabled": False, "cash_gate_enabled": True,
         "adding_factor_per_market": True, "pair_no_unwind_max_per_cycle": 1, "pair_unwind_race_order": True,
-        "pair_no_unwind_max_sets": 1000, "pair_unwind_followup_max_age": 600, "tilt_exit_priority": False,
-        "tilt_exit_full_size": False, "ref_guard_tilted": False, "ref_guard_exits": False, "take_tilted_ref": False}
+        "pair_no_unwind_max_sets": 1000, "pair_unwind_followup_max_age": 600,
+        "ref_guard_tilted": False, "ref_guard_exits": False, "take_tilted_ref": False}
 STAGES = ("stage0_code_only", "stage1_value_guard", "stage2_allocator", "stage3_value_mm")
 FILES = {k: os.path.join(DEPLOY, f"settings_override.{k}.json") for k in STAGES}
 OUT = []
@@ -154,8 +155,8 @@ def base_module():
         spec = importlib.util.spec_from_file_location("mm_bot_p9head", path)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        mod.alert, mod.notify, mod.time = P.M.alert, (lambda *a, **k: False), P.CLK
-        mod.utcnow = P.M.utcnow
+        getattr(mod, "util", mod).alert, getattr(mod, "util", mod).notify, getattr(mod, "util", mod).time = P.M.util.alert, (lambda *a, **k: False), P.CLK
+        getattr(mod, "util", mod).utcnow = P.M.util.utcnow
         mod.log.addHandler(P.CAP)
         mod.log.propagate = False
         return mod
@@ -192,7 +193,7 @@ def stage0():
               "feature)", same, (len(new), len(old), [x for x in new if x not in old][:3]))
         ev_ign = (set(getattr(M.Bot, "EV_KEYS", ())) | {"ev_outcome_history"}   # later read-only ev / carry report keys
                   | set(getattr(M.Bot, "MM_FUNDING_KEYS", ())))   # (and P14 mm_funding)
-        keys = (set(st_new) ^ set(st_old)) - ev_ign
+        keys = (set(st_new) ^ set(P.retired(st_new, st_old))) - ev_ign
         check("stage0: identical status.json keys (no bloc / alloc section)", not keys, keys)
         out(f"- 12 cycles on the live seed, Package 10 code vs the Package 9 head {BASE_REV}: {len(new)} orders each, "
             f"identical: {same}; status.json keys identical: {not keys}")
@@ -657,8 +658,8 @@ def main():
     S = P.load_snapshot()
     for k, path in FILES.items():
         raw = json.load(open(path))
-        good, bad = M.validate_overrides(raw, M.Config())
-        check(f"files: {k} validates (no refused key)", not bad and len(good) == len(raw), bad)
+        good, bad = M.validate_overrides({k: v for k, v in raw.items() if k not in RETIRED_KEYS}, M.Config())
+        check(f"files: {k} validates (no refused key)", not bad and len(good) == len(raw) - sum(x in raw for x in RETIRED_KEYS), bad)
         check(f"files: {k} keeps arb_enabled false and ref_tilt_headline true, never resets the adding factor below "
               "the live 0", raw.get("arb_enabled") is False and raw.get("ref_tilt_headline") is True
               and raw.get("capital_ceiling_adding_size_factor", -1) >= 0)
@@ -666,12 +667,14 @@ def main():
         diff = {x for x in LIVE if x not in raw}
         check(f"files: {k} carries every key of the live file", not diff, diff)
         if k == "stage0_code_only":
-            check("files: stage0 == the live value-mode file", raw == LIVE)
+            check("files: stage0 == the live value-mode file (less the keys retired on simplify)",
+                  {k: v for k, v in raw.items() if k not in RETIRED_KEYS}
+                  == {k: v for k, v in LIVE.items() if k not in RETIRED_KEYS})
         _ = base_keys
     out("# Package 10 dry run on the fake exchange, seeded with the live state of 3 Oct 22:47 UTC")
     out()
     out(f"Generated by `tests/test_p10_dryrun.py` ({datetime.now(timezone.utc):%Y-%m-%d %H:%M} UTC) from {P.SNAP} with the "
-        "tests/test_p9_dryrun.py harness. Base = the owner's live value-mode file (stage 0); each staged file of "
+        "tests/dryrun_harness.py harness. Base = the owner's live value-mode file (stage 0); each staged file of "
         "deploy/package10/ applied through `check_overrides`; full `Bot.cycle`s on a simulated clock; every order the "
         "fake receives logged with the feature that sent it.")
     out()

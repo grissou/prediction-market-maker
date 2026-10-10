@@ -2,10 +2,10 @@
 just cash. Twice on 4 Oct value buying filled the worst-case backstop and the bot went reduce-only with the 15k cash
 reserve idle. With a reserve set, once room_wc = worst_case_backstop_frac x account - worst case or room_corr =
 max_worst_case_frac x account - settlement risk falls below it, value adds pause (takes that grow a position,
-allocator buys, basket buys, tail adding quotes) while middle-band two-way quoting and every reducing side go on;
+allocator buys, tail adding quotes) while middle-band two-way quoting and every reducing side go on;
 it lifts at 1.1 x the reserve. Reduce-only itself is never changed.
   settings / ranges; room math on the fake exchange; pause / resume with hysteresis; takes; allocator (buys blocked,
-  refills allowed); basket; tail adds dropped, middle two-way kept, reducing sides unchanged; the ladder's caps;
+  refills allowed); tail adds dropped, middle two-way kept, reducing sides unchanged; the ladder's caps;
   reduce-only unchanged; status.json / journal / summary; flags off identical to the branch head (git show
   34f5503:mm_bot.py) on a grid (quotes, wire orders, takes, allocator plan, status keys); py_compile on 3.10.
 Run:  python tests/test_mm_risk_reserve.py      (exit code 0 = all passed)"""
@@ -26,10 +26,25 @@ sys.path.insert(0, HERE)
 from fakes import FakeApi, FakeRefs, lvl, make_bot, market      # noqa: E402
 import mm_bot as M                                                # noqa: E402
 
+# retired on simplify: the old twin's status / health fields a removed feature owned, at the value it reported while
+# the feature was off (the new code drops them); Quote lost its trailing `behind` flag (always False while that sizing
+# was off) and the age skew its switch (skew_age_enabled: the old default True, live False)
+RETIRED_STATUS = {"tilt_s_applied": (0.0, 0), "tilt_s_applied_headline": (0.0, 0), "fast_unload_windows": (0,),
+                  "behind_best_markets": (0,), "mark_frag_total_cap_active": (False,),
+                  "fl_bias_markets": ({"bid": 0, "ask": 0},)}
+RETIRED_FLIPPED = {"skew_age_enabled": False}
+NQ = len(M.Quote.__dataclass_fields__)
+
+
+def retired(new, old):
+    """The old twin's dict less a retired feature's own key at its OFF value when the new one dropped it."""
+    return {k: v for k, v in old.items() if not (k in RETIRED_STATUS and k not in new and v in RETIRED_STATUS[k])}
+
+
 logging.basicConfig(level=logging.CRITICAL)
 RESULTS = []
-M.alert = lambda msg: None
-M.notify = lambda *a, **k: False
+M.util.alert = lambda msg: None
+M.util.notify = lambda *a, **k: False
 BASE_REV = "34f5503"                              # the branch head before this change (Z_board20)
 
 
@@ -55,7 +70,7 @@ class Grab(logging.Handler):
         self.lines.append(record.getMessage())
 
 
-NOW = M.utcnow()
+NOW = M.util.utcnow()
 CLOSE = NOW + timedelta(days=30)
 REFS = {"Ohio Senate|Republican": 0.12, "Ohio Senate|Democratic": 0.88,
         "Utah Senate|Republican": 0.55, "Utah Senate|Democratic": 0.45}
@@ -84,7 +99,7 @@ check("5000 / 4000 accepted", not bad and good == {"mm_risk_reserve_wc": 5000.0,
       (good, bad))
 good, bad = M.validate_overrides({"mm_risk_reserve_wc": 60000.0, "mm_risk_reserve_corr": -1.0}, c)
 check("60000 / -1 refused", len(bad) == 2 and not good, (good, bad))
-src = open(os.path.join(HERE, "..", "mm_bot.py")).read()
+src = "".join(open(p).read() for p in sorted(__import__("glob").glob(os.path.join(HERE, "..", "mmbot", "*.py"))))
 check("Config block '# --- P12 ops: market-making risk reserve ---' after skew_target_inventory",
       src.index("# --- P12 ops: market-making risk reserve ---") > src.index("    skew_target_inventory: bool = False"))
 check("hysteresis 1.1", M.MM_RISK_HYST == 1.1)
@@ -221,11 +236,6 @@ check("no value p (illiquid): the fair value decides the tail (Ohio Rep fv ~0.14
 b2.mmr_paused = False
 check("not paused: nothing is a paused tail", not b2.mm_tail_adds_off(b2.ex["11"], 0.14, None, False))
 b.mmr_paused = True
-b.ex["11"].mmr_tail, b.ex["11"].inv, b.ex["11"].eff = True, 0.0, 0.0
-b.lad_liquid, b.lad_party_delta = set(), 0.0
-caps = b.ladder_caps(b.ex["11"], 0.14, 100)
-check("the R3 ladder's caps: a paused tail adds nothing on either side", caps[True](0.10) <= 0 and caps[False](0.20) <= 0,
-      (caps[True](0.10), caps[False](0.20)))
 b.mmr_paused = False
 
 # ============================================================================================ takes
@@ -268,9 +278,6 @@ did = quiet(b.execute_take, ex, 0.40, -200.0, 0.14, time.monotonic())
 sent = api.wire[n0:]
 check("paused: buying back a short of 200 goes ahead with at most 200",
       did and sent and sent[-1]["quantity"] <= 200, sent)
-check("take_aged is untouched (always reducing: no mmr check in it)",
-      "mmr" not in src[src.index("    def take_aged("):src.index("    def take_aged(") + 6000].split("    def ")[1])
-
 # ============================================================================================ allocator
 print("--- allocator: buys blocked, sales / refills allowed")
 RACES = {"A": "Alpha Senate", "B": "Beta Senate", "G": "Gamma Senate"}
@@ -345,28 +352,6 @@ check("paused: a refill sale (no buy) is sent",
       quiet(b.alloc_sell, pr3, dict(api.inv), {}, time.monotonic(), time.time(), set()) is True and len(api.wire) > n0)
 check("allocator blocks counted in mm_risk_room", b.mmr_blocked["alloc"] >= 2, b.mmr_blocked)
 
-# ============================================================================================ basket
-print("--- basket: buys refused while paused")
-check("basket_tick refuses adds with 'mm risk reserve' while paused (sales go on)",
-      'refuse = "mm risk reserve"' in src and src.index('refuse = "mm risk reserve"') > src.index(
-          'refuse = "worst-case backstop"'))
-api, b = plain_bot()
-b.basket_info = {}
-b.mmr_paused = True
-fv = {e: x.last_fv for e, x in b.ex.items()}
-b.cfg.basket_enabled = True
-b.cfg.cash_gate_enabled = True
-b.cfg.basket_exit_utc = M.iso(NOW + timedelta(days=20))
-b.basket_state, b.basket_on_wall, b.basket_peak = "building", time.time() - 5 * 3600, 100000.0
-b.cg_cash, b.cg_reserved, b.cg_spent, b.cg_read_at = 50000.0, 0.0, 0.0, time.monotonic()
-quiet(b.basket_tick, M.utcnow(), {}, fv, fv, 100000.0, {})
-check("basket building, paused: refused 'mm risk reserve', counted", (b.basket_info or {}).get("refused")
-      == "mm risk reserve" and b.mmr_blocked["basket"] == 1, (b.basket_info or {}).get("refused"))
-b.mmr_paused = False
-quiet(b.basket_tick, M.utcnow(), {}, fv, fv, 100000.0, {})
-check("not paused: no such refusal", (b.basket_info or {}).get("refused") != "mm risk reserve",
-      (b.basket_info or {}).get("refused"))
-
 # ============================================================================================ status / summary
 print("--- status.json, summary")
 api, b = plain_bot({"11": 3000}, mm_risk_reserve_wc=50000.0, mm_risk_reserve_corr=4000.0)
@@ -411,7 +396,7 @@ try:
         spec = importlib.util.spec_from_file_location("mm_bot_mmrbase", path)
         base = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(base)
-        base.alert, base.notify = M.alert, (lambda *a_, **k: False)
+        base.alert, base.notify = M.util.alert, (lambda *a_, **k: False)
 except Exception as e:                            # no git here: reported as a failure
     print("    (base module unavailable:", e, ")")
 check(f"base module (git show {BASE_REV}:mm_bot.py) loaded", base is not None)
@@ -424,7 +409,7 @@ if base is not None:
             if mod is base:
                 cfg = base.Config()
                 for k in base.Config.__dataclass_fields__:
-                    setattr(cfg, k, getattr(bn.cfg, k))
+                    setattr(cfg, k, getattr(bn.cfg, k, RETIRED_FLIPPED.get(k, getattr(cfg, k))))
                 d = tempfile.mkdtemp()
                 for k in ("fills_csv", "status_file", "order_notes_file", "kill_file", "position_lots_file",
                           "overrides_file", "market_edge_file", "handover_file"):
@@ -452,15 +437,15 @@ if base is not None:
     ok_w = ok_q = ok_s = True
     diffs = []
     grids = ({}, {"value_mode": True, "value_quote_hurdle": 0.08}, {"max_worst_case_frac": 0.001,
-                                                                   "worst_case_backstop_frac": 0.002},
-             {"ladder_enabled": True})
+                                                                   "worst_case_backstop_frac": 0.002})
     for inv in ({}, {"11": 300, "21": 3000, "22": -3000}, {"12": 2500}, {"21": -800, "22": -900}):
         for ov in grids:
             (an, bn), (ab, bb_) = twin(inv, ov)
             if strip(an.wire) != strip(ab.wire):
                 ok_w = False
                 diffs.append(("wire", inv, ov))
-            if {e: astuple(x.quote) for e, x in bn.ex.items()} != {e: astuple(x.quote) for e, x in bb_.ex.items()}:
+            if ({e: astuple(x.quote)[:NQ] for e, x in bn.ex.items()}
+                    != {e: astuple(x.quote)[:NQ] for e, x in bb_.ex.items()}):
                 ok_q = False
                 diffs.append(("quote", inv, ov))
             bn.write_status(True)
@@ -468,8 +453,9 @@ if base is not None:
             with open(bn.cfg.status_file) as f:
                 kn = set(json.load(f)) - set(getattr(M.Bot, "MM_FUNDING_KEYS", ()))   # (less the later P14 report key)
             with open(bb_.cfg.status_file) as f:
-                kb = set(json.load(f))
-            if kn != kb or set(bn.health) != set(bb_.health) or bn.status_report() != bb_.status_report():
+                kb = set(retired(kn, json.load(f)))
+            if (kn != kb or set(bn.health) != set(retired(bn.health, bb_.health))
+                    or bn.status_report() != bb_.status_report()):
                 ok_s = False
                 diffs.append(("status", inv, ov, kn ^ kb))
     check("two full cycles send the same orders (4 books x plain / value+hurdle / reduce-only / ladder)", ok_w, diffs[:1])
@@ -507,9 +493,10 @@ if base is not None:
         pn = plan(bn, cash)
         cfg = base.Config()
         for k in base.Config.__dataclass_fields__:
-            setattr(cfg, k, getattr(bn.cfg, k))
+            setattr(cfg, k, getattr(bn.cfg, k, RETIRED_FLIPPED.get(k, getattr(cfg, k))))
         bb_ = base.Bot.__new__(base.Bot)
         bb_.__dict__.update({k: v for k, v in bn.__dict__.items() if not k.startswith("mmr_")})
+        bb_.basket_legs = {}                # (the base revision's retired long-tilt basket: never any legs)
         bb_.cfg = cfg
         pb = quiet(base.Bot.alloc_plan, bb_, dict(api_n.inv), time.monotonic(), cash, set(), None)
         ok_a = ok_a and json.dumps(pn, sort_keys=True, default=str) == json.dumps(pb, sort_keys=True, default=str)
@@ -523,7 +510,10 @@ try:
         ov = json.load(f)
 except (OSError, ValueError) as e:
     ov = {"_error": str(e)}
-good, bad = M.validate_overrides({k: v for k, v in ov.items() if not k.startswith("_")}, M.Config())
+RETIRED = ("tilt_exit_priority", "tilt_exit_full_size", "ref_tilt_enabled", "ref_tilt_headline", "ref_guard_tilted",
+           "ref_guard_exits", "take_tilted_ref", "skew_age_enabled")   # (retired on simplify; staged at default)
+good, bad = M.validate_overrides({k: v for k, v in ov.items() if not k.startswith("_") and k not in RETIRED},
+                                 M.Config())
 check("stage1b file: mm_risk_reserve_wc 5000 / _corr 4000, every key valid",
       ov.get("mm_risk_reserve_wc") == 5000.0 and ov.get("mm_risk_reserve_corr") == 4000.0 and not bad, bad)
 py310 = shutil.which("python3.10")

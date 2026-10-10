@@ -27,7 +27,7 @@ def check(name, cond, detail=None):
         failures.append(name)
 
 
-M.alert = lambda *a, **k: None
+M.util.alert = lambda *a, **k: None
 MSG = "Insufficient available funds"
 SHAPES = {
     "data.error string": lambda: {"data": {"error": MSG}},
@@ -116,7 +116,7 @@ check("'Market closed' + funds refusal (other order): exit code 3", code == EXIT
 
 print("--- funds refusals back off: 60 s, doubling to 30 min, one alert per doubling, reset otherwise")
 ALERTS = []
-M.alert = lambda msg, *a, **k: ALERTS.append(msg)
+M.util.alert = lambda msg, *a, **k: ALERTS.append(msg)
 a, b = make_bot()
 a.place_batch = refusing(a, SHAPES["data.error string"], 99, "both")
 waits, alerts_per = [], []
@@ -153,7 +153,7 @@ n0 = len(a.sent("batch"))
 for _ in range(5):
     b.selftest_tick()
 check("no test is placed during a funds wait", len(a.sent("batch")) == n0 and b.selftest_future is None)
-M.alert = lambda *a, **k: None
+M.util.alert = lambda *a, **k: None
 
 print("--- Bot.selftest_funds_refusal")
 f = Bot.selftest_funds_refusal

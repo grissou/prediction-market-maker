@@ -217,14 +217,14 @@ many = [market(str(100 + i), str(1000 + i), "Republican", f"Race {i:03d}") for i
 a, b = make_bot(extra_markets=many)
 a.budget_left = lambda: 80
 check("priming: 74 markets, none loaded, not trading yet -> max_books_per_cycle (30)", len(b.books_to_fetch([])) == 30)
-b.trading_since = M.time.monotonic()
+b.trading_since = M.util.time.monotonic()
 check("priming: just started -> min(startup_prime_books 60, startup_prime_books_per_min 45) = 45",
       b.priming() and len(b.books_to_fetch([])) == 45)
 b.cfg.startup_prime_books_per_min = 100
 check("priming: per-minute cap raised -> startup_prime_books (60) per cycle", len(b.books_to_fetch([])) == 60)
 b.cfg.startup_prime_books_per_min = 45
 b.download_books([], {})
-b.book_reqs.extend([M.time.monotonic()] * 40)            # 40 downloads in the last minute
+b.book_reqs.extend([M.util.time.monotonic()] * 40)            # 40 downloads in the last minute
 check("priming: 40 downloads in the last 60 s -> 5 more this cycle", len(b.books_to_fetch([])) == 5)
 check("priming: order writes leave write_read_reserve + those 5 free (write_reserve)",
       b.write_reserve() == b.cfg.write_read_reserve + 5, b.write_reserve())
@@ -238,10 +238,10 @@ b.cfg.startup_books_first = False
 check("priming off: the old cap and reserve (40 - 20 = 20)", len(b.books_to_fetch([])) == 20)
 b.cfg.startup_books_first = True
 a.budget_left = lambda: 80
-b.trading_since = M.time.monotonic() - 181
+b.trading_since = M.util.time.monotonic() - 181
 check("priming: over after startup_prime_seconds (180 s)", not b.priming() and len(b.books_to_fetch([])) == 30)
 check("priming over: order writes leave just write_read_reserve", b.write_reserve() == b.cfg.write_read_reserve)
-b.trading_since = M.time.monotonic()
+b.trading_since = M.util.time.monotonic()
 for ex in list(b.ex.values())[:67]:
     ex.book = {"bids": [], "asks": []}
 check("priming: over once at most 10% of the books are missing (7 of 74)", not b.priming())
@@ -301,7 +301,7 @@ check("held first: handover start, short 2,000 Rep Ohio with our bid at the best
 b.ex["11"].book = None
 b.ex["11"].verified = 0.0
 check("held first: ...without the book, the bulk bid is our own (blanked) -> R5 cannot price it (the live bug)",
-      b.r5_top(b.ex["11"], M.time.monotonic()) is None and b.other_tops["11"][0] is None, b.other_tops.get("11"))
+      b.r5_top(b.ex["11"], M.util.time.monotonic()) is None and b.other_tops["11"][0] is None, b.other_tops.get("11"))
 
 a, b = make_bot(extra_markets=many)
 b.held = {"1069": -500.0, "1050": 100.0, "1060": 2000.0}
@@ -318,23 +318,23 @@ check("held first: held_missing lists only held markets without a book, biggest 
 for ex in b.ex.values():
     ex.book = {"bids": [], "asks": []}
 b.ex["1069"].book = None
-b.trading_since = M.time.monotonic() - 300
+b.trading_since = M.util.time.monotonic() - 300
 check("held priming: past startup_prime_seconds and 1 of 74 missing, but it is held -> still priming",
       b.priming() and b.prime_need() == 1, (b.priming(), b.prime_need()))
 check("held priming: ...the order writes give up only that one book's request (write_reserve)",
       b.write_reserve() == b.cfg.write_read_reserve + 1, b.write_reserve())
-b.trading_since = M.time.monotonic() - 60
+b.trading_since = M.util.time.monotonic() - 60
 check("held priming: within startup_prime_seconds, below the missing share, a held book missing -> priming", b.priming())
 b.held = {"1050": 100.0}
 check("held priming: ...not when the missing book is not held", not b.priming())
 b.held = {"1069": -500.0}
-b.trading_since = M.time.monotonic() - 901
+b.trading_since = M.util.time.monotonic() - 901
 check("held priming: hard cap startup_prime_held_max_seconds (900 s) ends it anyway", not b.priming())
-b.trading_since = M.time.monotonic() - 300
+b.trading_since = M.util.time.monotonic() - 300
 g = Grab()
 M.log.addHandler(g); M.log.propagate = False; M.log.setLevel(logging.INFO)
 b.log_priming()
-b.trading_since = M.time.monotonic() - 901
+b.trading_since = M.util.time.monotonic() - 901
 b.log_priming()
 M.log.removeHandler(g); M.log.setLevel(old_level); M.log.propagate = True
 check("held priming: the extended priming line names the held markets still missing, then one 'done' line",
@@ -548,17 +548,17 @@ check("recorder: one book row per market downloaded, other traders only (our ord
       len(rows) == 4 and json.loads(rows[0][1]) == [[0.10, 1000.0]] and json.loads(rows[0][2]) == [[0.18, 1000.0]], rows[:1])
 tr = b.db.execute("select eid, price, quantity from trades").fetchall()
 check("recorder: a tournament trade from the feed is stored with price and size", tr == [("11", 0.15, 300.0)], tr)
-b.download_books(["11", "12"], b.orders_by_eid(M.utcnow())); b.last_record = -1e9; b.record({}, 2e9)
+b.download_books(["11", "12"], b.orders_by_eid(M.util.utcnow())); b.last_record = -1e9; b.record({}, 2e9)
 check("recorder: books downloaded again but unchanged -> no new rows",
       b.db.execute("select count(*) from books").fetchone()[0] == 4)
 a.books["11"]["bids"].insert(0, lvl(0.12, 250))
-b.download_books(["11"], b.orders_by_eid(M.utcnow())); b.last_record = -1e9; b.record({}, 3e9)
+b.download_books(["11"], b.orders_by_eid(M.util.utcnow())); b.last_record = -1e9; b.record({}, 3e9)
 last = b.db.execute("select bids from books where eid='11' order by ts desc, rowid desc limit 1").fetchone()[0]
 check("recorder: a rival steps in at 0.12 x 250 -> new row with both levels",
       json.loads(last) == [[0.12, 250.0], [0.10, 1000.0]], last)
 b.cfg.record_books = False
 a.books["11"]["bids"].insert(0, lvl(0.125, 50))
-b.download_books(["11"], b.orders_by_eid(M.utcnow())); b.last_record = -1e9; b.record({}, 4e9)
+b.download_books(["11"], b.orders_by_eid(M.util.utcnow())); b.last_record = -1e9; b.record({}, 4e9)
 check("recorder: record_books=False -> nothing more recorded", b.db.execute("select count(*) from books").fetchone()[0] == 5)
 f = RealtimeFeed.__new__(RealtimeFeed)
 f.lock, f.trade_log = threading.Lock(), deque([(1.0, {"exchangeId": "1"})])

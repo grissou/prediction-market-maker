@@ -22,6 +22,21 @@ sys.path.insert(0, HERE)
 from fakes import FakeApi, FakeRefs, lvl, make_bot, market, pin_test_sizes, run_cycles   # noqa: E402
 import mm_bot as M                                        # noqa: E402
 
+# retired on simplify: the old twin's status / health fields a removed feature owned, at the value it reported while
+# the feature was off (the new code drops them); Quote lost its trailing `behind` flag (always False while that sizing
+# was off) and the age skew its switch (skew_age_enabled: the old default True, live False)
+RETIRED_STATUS = {"tilt_s_applied": (0.0, 0), "tilt_s_applied_headline": (0.0, 0), "fast_unload_windows": (0,),
+                  "behind_best_markets": (0,), "mark_frag_total_cap_active": (False,),
+                  "fl_bias_markets": ({"bid": 0, "ask": 0},)}
+RETIRED_FLIPPED = {"skew_age_enabled": False}
+NQ = len(M.Quote.__dataclass_fields__)
+
+
+def retired(new, old):
+    """The old twin's dict less a retired feature's own key at its OFF value when the new one dropped it."""
+    return {k: v for k, v in old.items() if not (k in RETIRED_STATUS and k not in new and v in RETIRED_STATUS[k])}
+
+
 logging.basicConfig(level=logging.ERROR, format="    log %(levelname)s %(message)s")
 RESULTS = []
 
@@ -173,7 +188,7 @@ b.order_meta = {1: {"our_side": "bid"}, 2: {"our_side": "ask"}, 3: {"our_side": 
                 5: {"our_side": "bid"}, 6: {"our_side": "bid", "take": True}, 7: {"our_side": "ask", "take": True},
                 8: {"our_side": "bid", "take": True, "alloc": True}, 9: {"our_side": "bid", "alloc": True,
                                                                           "set_ladder": 1},
-                10: {"our_side": "bid", "take": True, "basket": True}, 11: {"our_side": "bid", "arb": True},
+                11: {"our_side": "bid", "arb": True},
                 12: {"our_side": "ask", "take": True, "tilt_exit": True}, 13: {"our_side": "bid"},
                 14: {"our_side": "ask"}}
 rows = [("11", "bid", 100, 0.30, NOW - 10 * H, 1),       # middle: buy 100 @ .30
@@ -185,7 +200,6 @@ rows = [("11", "bid", 100, 0.30, NOW - 10 * H, 1),       # middle: buy 100 @ .30
         ("12", "ask", 10, 0.70, NOW - 5 * H, 7),          # take: 10 x (.70 - 2/3)
         ("11", "bid", 500, 0.29, NOW - 4 * H, 8),         # alloc take
         ("21", "bid", 500, 0.04, NOW - 4 * H, 9),         # set ladder (alloc)
-        ("21", "bid", 500, 0.04, NOW - 4 * H, 10),        # basket
         ("11", "bid", 500, 0.29, NOW - 4 * H, 11),        # arb / pair
         ("11", "ask", 10, 0.30, NOW - 3 * H, 12),         # tilt-exit take: 10 x (.30 - 1/3)
         ("21", "bid", 100, 0.03, NOW - 2 * H, 13),        # tail maker buy: 100 x (.05 - .03) = 2
@@ -207,10 +221,9 @@ check("takes_ev: 30 x (1/3 - .32) + 10 x (.70 - 2/3) + 10 x (.30 - 1/3) (tilt ex
       mc["takes_ev"])
 f = mc["fills"]
 check("counts: 5 middle maker, 2 tail maker", f["maker_mid"] == 5 and f["maker_tail"] == 2, f)
-check("counts: 3 takes (alloc / basket takes not)", f["take"] == 3, f)
-check("counts: alloc 2 (alloc take + set ladder), basket 1, arb 1", f["alloc"] == 2 and f["basket"] == 1
-      and f["arb"] == 1, f)
-check("the 30-h-old fill and the '?' row excluded", sum(f.values()) == 14, f)
+check("counts: 3 takes (alloc takes not)", f["take"] == 3, f)
+check("counts: alloc 2 (alloc take + set ladder), arb 1", f["alloc"] == 2 and f["arb"] == 1, f)
+check("the 30-h-old fill and the '?' row excluded", sum(f.values()) == 13, f)
 check("hours covered capped at 24 (file starts 30 h ago)", close(mc["hours_covered"], 24.0), mc["hours_covered"])
 check("per_day = realised x 24 / 24", close(mc["per_day"], 5.6), mc["per_day"])
 check("band = the settings", mc["band"] == [b.cfg.value_mid_low, b.cfg.value_mid_high], mc["band"])
@@ -227,7 +240,7 @@ check("p at fill time used when logged: Utah fill 13 becomes middle (unmatched),
 b.ev_fill_p = {}
 b.order_meta = {}
 mc4 = b.mm_carry(NOW)
-check("notes gone: every fill counted maker, meta_missing says so", mc4["meta_missing"] == 14
+check("notes gone: every fill counted maker, meta_missing says so", mc4["meta_missing"] == 13
       and mc4["fills"]["take"] == 0, mc4)
 api, b = scripted()
 write_fills(b, [("11", "bid", 100, 0.30, NOW - 6 * H, 1), ("11", "ask", 100, 0.36, NOW - 5 * H, 2)])
@@ -245,7 +258,7 @@ api, b = make_bot()
 mc = b.mm_carry(NOW)
 check("no fills: zeros, per_day None", mc["realised"] == 0 and mc["per_day"] is None and mc["hours_covered"] is None, mc)
 api, b = scripted()
-api.fills = [{"id": 77, "orderId": 1, "exchangeId": "11", "price": 0.3, "quantity": 5, "filledAt": M.iso(M.utcnow())}]
+api.fills = [{"id": 77, "orderId": 1, "exchangeId": "11", "price": 0.3, "quantity": 5, "filledAt": M.iso(M.util.utcnow())}]
 b.log_fills({})
 check("log_fills notes the Polymarket p of each new fill", close(b.ev_fill_p.get("77"), 1 / 3), b.ev_fill_p)
 
@@ -357,6 +370,7 @@ if old_src:
         except Exception as e:                    # a setting this head lacks: report, not crash
             check(f"grid {name}: ran", False, repr(e))
             continue
+        old = (retired(new[0], old[0]),) + old[1:]
         diff = {k for k in set(new[0]) | set(old[0]) if new[0].get(k) != old[0].get(k)}
         check(f"grid {name}: status.json without the new fields equals 859e751's", not diff,
               {k: (new[0].get(k), old[0].get(k)) for k in sorted(diff)})

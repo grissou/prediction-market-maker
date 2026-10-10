@@ -29,7 +29,7 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 SNAP = os.environ.get("P9_SNAP", "/home/claude/snap04")
 os.environ.setdefault("P9_SNAP", SNAP)
-import test_p9_dryrun as P                                       # noqa: E402  (the harness: snapshot, fake, clock)
+import dryrun_harness as P                                      # noqa: E402  (the harness: snapshot, fake, clock)
 import p14_1_state as T                                          # noqa: E402  (the 10:21 state)
 import mm_bot as M                                                # noqa: E402
 
@@ -86,7 +86,7 @@ def main():
 
     # ---- the staged file is valid and keeps the live base
     raw141 = json.load(open(P141_FILE))
-    good, bad = M.validate_overrides(raw141, M.Config())
+    good, bad = M.validate_overrides(P.staged(P141_FILE), M.Config())   # (less the retired keys)
     check("files: the staged 14.1 file validates with no problem", not bad, bad)
     check("files: it keeps every key of the live 14.0 file", set(json.load(open(LIVE_FILE))) <= set(raw141),
           set(json.load(open(LIVE_FILE))) - set(raw141))
@@ -114,7 +114,7 @@ def main():
     out(f"| MM inventory (stale, oldest) | 10.5k (7.9k, 23.7 h) | {f0['inventory_usd'] / 1000:.1f}k "
         f"({f0['stale_usd'] / 1000:.1f}k, {f0['oldest_inventory_h']:.1f} h) |")
     out(f"| value adds paused | yes (room < 20k) | {b.mmr_paused} |")
-    now_m = M.time.monotonic()
+    now_m = M.util.time.monotonic()
     buck = T.buckets(b, api, now_m)
     out(f"| book by edge-held | 4.1k <=2% (14), 16.8k 2-5% (46), 44.2k 5-10% (38), 23.6k >10% (14) | "
         + ", ".join(f"{v[0] / 1000:.1f}k {k} ({v[1]})" for k, v in buck.items()) + " |")
@@ -254,7 +254,7 @@ def main():
     api_e, be = T.build(S, live_file(tmp))
     P.apply_stage(be, P141_FILE)
     P.cycles(be, 1, stage="edge")
-    now_m = M.time.monotonic()
+    now_m = M.util.time.monotonic()
     inv = dict(api_e.inv)
     rows = []
     for mes in (0.02, 0.05, 0.08):

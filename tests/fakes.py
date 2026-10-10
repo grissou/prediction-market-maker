@@ -18,7 +18,7 @@ from mm_bot import *                                      # noqa: E402,F401,F403
 
 # Never send real phone notifications from tests, even in a terminal where ALERT_URL is set.
 M.CFG.alert_url = ""
-M.notify = lambda *a, **k: False
+M.util.notify = lambda *a, **k: False
 
 # =============================================================================================
 # THE FAKE EXCHANGE
@@ -118,8 +118,8 @@ class FakeApi(Api):
 
     def expire(self):
         """Like the engine: an order past its expirationDate is gone (can't trade, isn't listed).
-        Uses M.utcnow so a test can run it on a simulated clock."""
-        now = M.utcnow()
+        Uses M.util.utcnow so a test can run it on a simulated clock."""
+        now = M.util.utcnow()
         for k in [k for k, o in self.orders.items() if o.get("expirationDate") and parse_ts(o["expirationDate"]) <= now]:
             del self.orders[k]
 

@@ -6,12 +6,14 @@ Everything in this folder runs offline: no API key, no network. The bot's own fu
 ## The test suites
 
 ```bash
-for t in tests/test_*.py; do python "$t" | tail -1; done      # all 56, about 3 minutes in parallel
+for t in tests/test_*.py; do python "$t" | tail -1; done      # all 35, about 3 minutes in parallel
 python tests/test_mm_bot.py                                   # the core suite alone (600 checks)
 ```
 
 Each suite is a plain script that prints `PASS` / `FAIL` per check and a final count, and exits non-zero
-on any failure. `fakes.py` is the fake exchange they share: it follows the API specification, including
+on any failure. `test_identity.py` runs the current code beside the revision the server runs (`git show
+live-d9220c1:mm_bot.py`) on the live settings and requires identical orders, quotes, notes, status, health and
+summaries in six worlds; it is the gate for every deploy. `fakes.py` is the fake exchange they share: it follows the API specification, including
 its error cases. Suites named `test_p<N>*.py` belong to release *N* (see the root README, §5) and pin that
 release's behaviour with its switches off to the release before it.
 

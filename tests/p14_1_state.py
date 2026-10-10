@@ -1,5 +1,5 @@
 """Package 14.1: the LIVE state of 5 Oct 10:21 UTC approximated on the snap04 seed (helper, not a test suite; used by
-tests/test_p14_1_dryrun.py and analysis/p14/DIAG_14_1.md). On top of the tests/test_p9_dryrun.py harness (all 237 markets,
+tests/test_p14_1_dryrun.py and analysis/p14/DIAG_14_1.md). On top of the tests/dryrun_harness.py harness (all 237 markets,
 other traders' books, Polymarket references, positions, marks, lots): the books converged 20% toward Polymarket (tilt 0.137
 on 4 Oct -> 0.109), the account at 102.0k, MM lots of 10.5k (7.9k stale, oldest 23.7 h) on middle-band low-edge holdings
 whose touch is beyond the value floor (the stale MM that "rests" live), the exchange's NO+NO set rule on, and free cash
@@ -13,7 +13,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 os.environ.setdefault("P9_SNAP", "/home/claude/snap04")
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.dirname(HERE))
-import test_p9_dryrun as P                                       # noqa: E402  (the harness: snapshot, fake, clock)
+import dryrun_harness as P                                      # noqa: E402  (the harness: snapshot, fake, clock)
 import mm_bot as M                                                # noqa: E402
 
 TICK = 0.005
@@ -71,7 +71,7 @@ def build(S, overrides, K=1.0, C=0.8, mm_usd=10500.0, stale_usd=7900.0, oldest_h
     pnl0 = api.pnl
     api.pnl = lambda: (lambda r: {**r, "cashBalance": r["cashBalance"] - api.cash_hold})(pnl0())
     P.cycles(b, warm, stage="warm")
-    now_m, now_w = M.time.monotonic(), M.time.time()
+    now_m, now_w = getattr(M, "util", M).time.monotonic(), getattr(M, "util", M).time.time()
     # MM lots: middle-band, unpinned, non-headline holdings with edge-held < the hurdle; floor-failing ones first (live:
     # mm_resting dominates), biggest first, at most per_market $ each
     pins, hurdle = b.alloc_pins(), b.mm_hurdle()

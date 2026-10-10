@@ -23,8 +23,6 @@ And once the faults stop:
   - no exchange is left stuck (paused / pending), and a quiet cycle changes nothing
 
 Run:  python tests/test_stress.py [steps_per_seed] [seeds]      (default 1500 x 5; exit code 0 = all passed)
-      STRESS_LADDER=1 python tests/test_stress.py ...   the same with the R3 ladder on (duplicates are then judged
-                                                         per side AND ladder level)
 """
 import random
 import sys
@@ -38,8 +36,7 @@ import os
 import tempfile
 
 RESULTS = []
-real_utcnow = M.utcnow
-LADDER = os.environ.get("STRESS_LADDER") == "1"
+real_utcnow = M.util.utcnow
 
 
 def check(name, cond, extra=""):
@@ -165,8 +162,6 @@ def build(seed):
     cfg.record_file, cfg.ref_map_file, cfg.summary_every_hours, cfg.realtime_enabled = "", "", -1, False
     cfg.slow_poll_seconds, cfg.reserved_cash_mode = 30.0, "ignore"
     cfg.parallel_requests = 1             # one request thread: the random faults then fire in a repeatable order
-    if LADDER:                            # R3 ladder on every market; levels wide enough to sit behind the 8c house
-        cfg.ladder_enabled, cfg.ladder_markets, cfg.ladder_offsets = True, "headline,busy,quiet", (0.04, 0.05, 0.06)
     eids = {}
     for m in mk:
         x = M.RACE_TITLE.match(m["title"])
@@ -189,31 +184,20 @@ def build(seed):
     return rng, api, bot, truth, eids, house
 
 
-def our_orders_by_side(api, bot=None):
+def our_orders_by_side(api):
     """{(eid, is_bid): [prices]}; with bot: {(eid, is_bid, ladder level): [prices]} (R3 ladder on)."""
     sides = {}
     api.expire()
     for oid, o in api.orders.items():
         is_bid, p = api.yes_view(o)
-        key = (o["exchangeId"], is_bid) + ((order_level(bot, oid, o, is_bid, p),) if bot else ())
+        key = (o["exchangeId"], is_bid)
         sides.setdefault(key, []).append(p)
     return sides
 
 
-def order_level(bot, oid, order, is_bid, price):
-    """The ladder level the bot gave this order: its notes, or (a batch whose response was lost, not adopted yet)
-    the notes of the order it sent there at that side, price and expiry (as Bot.match_unconfirmed matches them)."""
-    meta = bot.order_meta.get(oid)
-    if meta is None:
-        meta = next((m for o, m, _t in bot.unconfirmed.get(order["exchangeId"]) or []
-                     if (o["action"] == "buy") == is_bid and abs(o["price"] - price) < 1e-6
-                     and o["expirationDate"] == order["expirationDate"]), {})
-    return int(meta.get("level") or 0)
-
-
 def run_seed(seed, steps):
     clock = Clock()
-    M.time, M.utcnow = clock, clock.utcnow
+    M.util.time, M.util.utcnow = clock, clock.utcnow
     rng, api, bot, truth, eids, house = build(seed)
     problems, errors_handled, cycles = [], 0, 0
     feed = bot.feed
@@ -280,7 +264,7 @@ def run_seed(seed, steps):
             problems.append(f"step {cycles}: unexpected exception\n{traceback.format_exc()}")
         cycles += 1
         # --- invariants ---
-        dup = {k: v for k, v in our_orders_by_side(api, bot if LADDER else None).items() if len(v) > 1}
+        dup = {k: v for k, v in our_orders_by_side(api).items() if len(v) > 1}
         if dup:
             problems.append(f"step {cycles}: duplicate quotes {dup}")
         sides = our_orders_by_side(api)
@@ -308,11 +292,11 @@ def run_seed(seed, steps):
         step(True)
     # 2. The election-night exit window, still with faults.
     for ex in bot.ex.values():
-        ex.close = M.utcnow() + timedelta(hours=1.5)
+        ex.close = M.util.utcnow() + timedelta(hours=1.5)
     for _ in range(steps // 5):
         step(True)
     for ex in bot.ex.values():                                            # back to normal trading hours
-        ex.close = M.utcnow() + timedelta(days=30)
+        ex.close = M.util.utcnow() + timedelta(days=30)
     # 3. Faults stop; the feed is healthy; a minute of quiet trading.
     api.rate, feed.ok = 0.0, True
     feed.push(resync=True)
@@ -347,7 +331,7 @@ def run_seed(seed, steps):
     # one side and a Kelly limit on the other): that's a choice, not a stuck exchange.
     wanted = {e for e in priceable if bot.ex[e].quote.bid is not None or bot.ex[e].quote.ask is not None}
     unquoted = sorted(bot.ex[e].label for e in wanted - {o["exchangeId"] for o in api.orders.values()})
-    M.time, M.utcnow = real_time, real_utcnow
+    M.util.time, M.util.utcnow = real_time, real_utcnow
     return {"problems": problems, "record_ok": record == actual, "record": (record, actual), "stuck": stuck,
             "changes": changes, "unquoted": unquoted, "priceable": len(priceable), "cycles": cycles,
             "errors_handled": errors_handled, "faults": api.faults, "fills": len(api.fills),
@@ -357,7 +341,7 @@ def run_seed(seed, steps):
 if __name__ == "__main__":
     import logging
     logging.disable(logging.CRITICAL)                 # thousands of expected error lines otherwise
-    M.alert = lambda msg: None
+    M.util.alert = lambda msg: None
     steps = int(sys.argv[1]) if len(sys.argv) > 1 else 1500
     t0 = real_time.time()
     seeds = int(sys.argv[2]) if len(sys.argv) > 2 else 5

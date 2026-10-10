@@ -93,11 +93,11 @@ check("status.json carries every field", all(k in st for k in b.OPS_KEYS) and cl
 
 print("--- caching: fills.csv re-read only when it changed")
 calls = []
-real = M.read_fills
-M.read_fills = lambda p: calls.append(p) or real(p)
+real = M.measure.read_fills
+M.measure.read_fills = lambda p: calls.append(p) or real(p)
 b.ops_fields(NOW + 1)
 check("unchanged file: not re-read", not calls, calls)
-M.read_fills = real
+M.measure.read_fills = real
 
 print("--- red team: fills.csv read incrementally from a saved offset; realised_pnl scope named")
 api, b = scripted()
@@ -229,9 +229,9 @@ check("tilt without exposure", M.ops_summary_line(ops, 101500.0, 0.051) == want 
 check("unknown pieces show '?'", M.ops_summary_line({"realised_pnl": None}, 101500.0) ==
       "Liquidation ? (account 101.5k), realised ?, ? of capital toward Polymarket, ? older than 6 h")
 check("nothing known: no line", M.ops_summary_line({}, None) is None and M.ops_summary_line(None) is None)
-title, msg = M.build_summary(api, b.cfg.fills_csv, 100000.0, value=101500.0, ops_line=want)
+title, msg = M.measure.build_summary(api, b.cfg.fills_csv, 100000.0, value=101500.0, ops_line=want)
 check("build_summary: the line follows the account line", msg.splitlines()[1] == want, msg)
-title, msg2 = M.build_summary(api, b.cfg.fills_csv, 100000.0, value=101500.0)
+title, msg2 = M.measure.build_summary(api, b.cfg.fills_csv, 100000.0, value=101500.0)
 check("...and is absent without one", want not in msg2)
 api, b = scripted()
 b.ops_last = b.ops_fields(NOW)

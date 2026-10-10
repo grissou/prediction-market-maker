@@ -29,7 +29,7 @@ import mm_bot as M                                        # noqa: E402
 logging.basicConfig(level=logging.ERROR, format="    log %(levelname)s %(message)s")
 RESULTS = []
 ALERTS = []
-M.alert = lambda msg: ALERTS.append(msg)
+M.util.alert = lambda msg: ALERTS.append(msg)
 A, B = "no_set_aware_bids", "pair_no_unwind_max_cost"
 THIRD = market("5", "13", "Independent", "Ohio Senate")   # makes Ohio a 3-leg race (11, 12, 13)
 
@@ -89,7 +89,7 @@ def cyc(bt, n=1):
         bt.drain_writes(5)
 
 
-now = M.utcnow()
+now = M.util.utcnow()
 
 print("--- settings")
 c = M.Config()
@@ -184,17 +184,7 @@ bt.execute_take(ex, 0.70, -975.0, 0.6, time.monotonic())
 t = api.wire[-1] if api.wire else {}
 check("execute_take on the bigger leg: sell NO capped at the lone 158", t.get("side") == "no" and t.get("quantity") == 158
       if t.get("quantity", 0) >= 158 else (t.get("side") == "no" and 1 <= t.get("quantity", 0) <= 158), t)
-api, bt = bot({"21": -817, "22": -975}, a=True)
-bt.cfg.hold_target_hours, bt.hold_open_at = 1.0, -1e18
-bt.hold_take_plan = lambda *a_, **k: [{"eid": "22", "buy": True, "qty": 500, "price": 0.52, "notional": 260.0}]
-bt.take_aged({"21": -817.0, "22": -975.0}, {"22": 0.5}, {}, time.monotonic())
-t = api.wire[-1] if api.wire else {}
-check("take_aged on the bigger leg: sell NO x158", t.get("side") == "no" and t.get("quantity") == 158, t)
-api, bt = bot({"21": -817, "22": -975}, a=True)
-bt.cfg.hold_target_hours, bt.hold_open_at = 1.0, -1e18
-bt.hold_take_plan = lambda *a_, **k: [{"eid": "21", "buy": True, "qty": 500, "price": 0.56, "notional": 280.0}]
-bt.take_aged({"21": -817.0, "22": -975.0}, {"21": 0.5}, {}, time.monotonic())
-check("take_aged on the smaller leg: nothing sent", not api.wire, api.wire)
+# (the hold target's take_aged checks were removed with the feature on simplify)
 check("no_sell_order on the smaller leg: None (not sent); whole=True: converted (a whole-race batch)",
       bt.no_sell_order({"exchangeId": "21", "action": "buy", "quantity": 10, "price": 0.5}, -817.0) is None
       and bt.no_sell_order({"exchangeId": "21", "action": "buy", "quantity": 817, "price": 0.5}, -817.0,
@@ -331,7 +321,7 @@ check("pair_no_unwind_max_per_cycle live override 3 accepted, 11 refused (1-10)"
 
 print("--- fake exchange: set-collateral rule")
 api, bt = bot({"21": -817, "22": -975}, cash=0.0)
-exp_ = M.iso(M.utcnow() + M.timedelta(seconds=600))
+exp_ = M.iso(M.util.utcnow() + M.timedelta(seconds=600))
 
 
 def sell_no(e, q, p=0.995):
@@ -552,41 +542,7 @@ M.log.removeHandler(cap_)
 M.log.setLevel(logging.NOTSET)
 M.log.propagate = True
 
-print("--- D: T2.5 passive short sets skipped with reduce_no_as_sell")
-for reduce in (False, True):
-    api, bt = bot({"21": -40, "22": -40}, reduce=reduce)
-    bt.cfg.pair_unwind_passive = True
-    with_books(bt)
-    inv = {e: bt.ex[e].inv for e in bt.ex}
-    plan = bt.pair_passive_plan(["21", "22"], inv, FVS)
-    if reduce:
-        check("reduce_no_as_sell on: no short-set slice planned", plan is None, plan)
-    else:
-        check("reduce_no_as_sell off: the short-set slice as before", plan is not None and plan["sign"] == -1, plan)
-api, bt = bot({"21": 40, "22": 40})
-bt.cfg.pair_unwind_passive = True
-with_books(bt)
-plan = bt.pair_passive_plan(["21", "22"], {e: bt.ex[e].inv for e in bt.ex}, FVS)
-check("reduce_no_as_sell on: long sets (YES+YES) still planned", plan is not None and plan["sign"] == 1, plan)
-api, bt = bot({"21": -40, "22": -40})
-bt.cfg.pair_unwind_passive = True
-bt.pp = {"Utah Senate": {"leg": "21", "other": "22", "sign": -1, "price": 0.47, "slice": 40, "left": 40,
-                         "base_x": -40, "base_y": -40}}
-q = M.Quote(0.45, 10, 0.55, 10)
-check("an old short-set slice never rests its bid (quote unchanged)", bt.pair_passive_quote(bt.ex["21"], q) == q)
-for state, want in (("off", "planned"), ("ok", "skipped"), (None, "planned")):
-    api, bt = bot({"21": -40, "22": -40})
-    bt.cfg.pair_unwind_passive, bt.cfg.selftest_enabled, bt.nosell_state = True, True, state
-    with_books(bt)
-    plan = bt.pair_passive_plan(["21", "22"], {e: bt.ex[e].inv for e in bt.ex}, FVS)
-    check(f"D keys on the effective state: setting on, sell-NO check {state!r} -> short-set slice {want}",
-          (plan is None) == (want == "skipped"), plan)
-api, bt = bot({"21": -40, "22": -40})
-bt.cfg.pair_unwind_passive, bt.cfg.selftest_enabled, bt.nosell_state = True, True, "off"
-bt.pp = {"Utah Senate": {"leg": "21", "other": "22", "sign": -1, "price": 0.47, "slice": 40, "left": 40,
-                         "base_x": -40, "base_y": -40}}
-check("...and the slice rests its bid when the sell-NO check failed",
-      bt.pair_passive_quote(bt.ex["21"], M.Quote(0.45, 10, 0.55, 10)).bid == 0.47)
+# (section D, the T2.5 passive short-set checks, was removed with the passive pair unwind on simplify)
 
 print("--- E: status")
 api, bt = bot({"21": -817, "22": -975, "11": -5})
@@ -619,7 +575,7 @@ try:
         spec = importlib.util.spec_from_file_location("mm_bot_p6", path)
         base = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(base)
-        base.alert = M.alert
+        base.alert = M.util.alert
         base.notify = lambda *a_, **k: False
 except Exception as e:                            # no git here: the pin is skipped (reported)
     print("    (base module unavailable:", e, ")")
@@ -630,7 +586,7 @@ def base_bot(inv, reduce, three=False):
     api_n, bn = bot(inv, reduce=reduce, three=three)
     cfg = base.Config()
     for k in base.Config.__dataclass_fields__:
-        setattr(cfg, k, getattr(bn.cfg, k))
+        setattr(cfg, k, getattr(bn.cfg, k, getattr(cfg, k)))
     api_b = FakeApi(True)
     api_b.markets_list, api_b.books = list(api_n.markets_list), {e: {"bids": [dict(x) for x in v["bids"]],
                                                                      "asks": [dict(x) for x in v["asks"]]}

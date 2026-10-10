@@ -39,11 +39,26 @@ sys.path.insert(0, HERE)
 from fakes import FakeApi, FakeRefs, lvl, make_bot, market      # noqa: E402
 import mm_bot as M                                                # noqa: E402
 
+# retired on simplify: the old twin's status / health fields a removed feature owned, at the value it reported while
+# the feature was off (the new code drops them); Quote lost its trailing `behind` flag (always False while that sizing
+# was off) and the age skew its switch (skew_age_enabled: the old default True, live False)
+RETIRED_STATUS = {"tilt_s_applied": (0.0, 0), "tilt_s_applied_headline": (0.0, 0), "fast_unload_windows": (0,),
+                  "behind_best_markets": (0,), "mark_frag_total_cap_active": (False,),
+                  "fl_bias_markets": ({"bid": 0, "ask": 0},)}
+RETIRED_FLIPPED = {"skew_age_enabled": False}
+NQ = len(M.Quote.__dataclass_fields__)
+
+
+def retired(new, old):
+    """The old twin's dict less a retired feature's own key at its OFF value when the new one dropped it."""
+    return {k: v for k, v in old.items() if not (k in RETIRED_STATUS and k not in new and v in RETIRED_STATUS[k])}
+
+
 logging.basicConfig(level=logging.CRITICAL)
 RESULTS = []
 ALERTS = []
-M.alert = lambda msg: ALERTS.append(msg)
-M.notify = lambda *a, **k: False
+M.util.alert = lambda msg: ALERTS.append(msg)
+M.util.notify = lambda *a, **k: False
 BASE_REV = "4ff7d91"                              # the Package 14 head this package is built on (LIVE)
 H = 3600.0
 
@@ -84,7 +99,7 @@ def ungrab(g):
     M.log.propagate = True
 
 
-NOW = M.utcnow()
+NOW = M.util.utcnow()
 CLOSE = NOW + timedelta(days=30)
 REFS = {"Ohio Senate|Republican": 0.12, "Ohio Senate|Democratic": 0.88,
         "Utah Senate|Republican": 0.55, "Utah Senate|Democratic": 0.45}
@@ -139,7 +154,7 @@ def sells(a):
 
 def atick(bb):
     time.sleep(0.002)
-    return quiet(bb.alloc_tick, M.utcnow(), dict(bb.api.inv), bb.orders_by_eid(M.utcnow()), None, set())
+    return quiet(bb.alloc_tick, M.util.utcnow(), dict(bb.api.inv), bb.orders_by_eid(M.util.utcnow()), None, set())
 
 
 ON = {"alloc_cancel_mm_first": True, "alloc_rank_all_markets": True, "mm_recycle_sell_first": True,
@@ -163,7 +178,7 @@ check("every default inside its range", not bad and len(good) == len(KEYS), bad)
 good, bad = M.validate_overrides({"alloc_refill_max_cost": 0.06, "alloc_cancel_mm_first": "yes",
                                   "alloc_swap_room_netting": 2}, D)
 check("out of range / not a bool refused (3 of 3)", not good and len(bad) == 3, (good, bad))
-src = open(os.path.join(HERE, "..", "mm_bot.py")).read()
+src = "".join(open(p).read() for p in sorted(__import__("glob").glob(os.path.join(HERE, "..", "mmbot", "*.py"))))
 check("Config comment block '# --- P14.1: the refill and the swaps unstuck' and Bot.P141_FLAGS (the five flags)",
       "# --- P14.1: the refill and the swaps unstuck" in src and set(M.Bot.P141_FLAGS) == set(KEYS[:5]))
 _, b_ = mk()
@@ -205,7 +220,7 @@ if base is not None:
             if mod is base:
                 cfg = base.Config()
                 for k in base.Config.__dataclass_fields__:
-                    setattr(cfg, k, getattr(bn.cfg, k))
+                    setattr(cfg, k, getattr(bn.cfg, k, RETIRED_FLIPPED.get(k, getattr(cfg, k))))
                 d = tempfile.mkdtemp()
                 for k in ("fills_csv", "status_file", "order_notes_file", "kill_file", "position_lots_file",
                           "overrides_file", "market_edge_file", "handover_file"):
@@ -251,7 +266,8 @@ if base is not None:
             if sorted(map(json.dumps, strip(an.wire))) != sorted(map(json.dumps, strip(ab.wire))):   # (writer threads)
                 ok_w = False
                 diffs.append(("wire", inv, ov))
-            if {e: astuple(x.quote) for e, x in bn.ex.items()} != {e: astuple(x.quote) for e, x in bb_.ex.items()}:
+            if ({e: astuple(x.quote)[:NQ] for e, x in bn.ex.items()}
+                    != {e: astuple(x.quote)[:NQ] for e, x in bb_.ex.items()}):
                 ok_q = False
                 diffs.append(("quote", inv, ov))
             strip_t = lambda m: sorted(json.dumps({a: v for a, v in x.items() if a != "t"}, sort_keys=True)  # noqa
@@ -264,7 +280,7 @@ if base is not None:
             with open(bn.cfg.status_file) as f:
                 sn = json.load(f)
             with open(bb_.cfg.status_file) as f:
-                sb = json.load(f)
+                sb = retired(sn, json.load(f))
             drop = VOLATILE | set(M.Bot.MM_FUNDING_KEYS)
             wall = {"last_run_wall", "last_run", "since"}    # (wall clocks: the allocator's run, the pause start)
             cut = lambda s: {k: ({a: x for a, x in v.items() if a not in wall} if k in ("alloc", "mm_risk_room")  # noqa
@@ -274,7 +290,7 @@ if base is not None:
                 ok_s = False
                 diffs.append(("status", inv, ov, {k for k in set(cut(sn)) | set(cut(sb))
                                                   if cut(sn).get(k) != cut(sb).get(k)}))
-            if set(bn.health) != set(bb_.health) or bn.status_report() != bb_.status_report():
+            if set(bn.health) != set(retired(bn.health, bb_.health)) or bn.status_report() != bb_.status_report():
                 ok_h = False
                 diffs.append(("health", inv, ov))
             if bn.summary_ops_line(100000.0) != bb_.summary_ops_line(100000.0):
@@ -300,9 +316,10 @@ if base is not None:
         bn.mmr_paused = True
         cfg = base.Config()
         for k in base.Config.__dataclass_fields__:
-            setattr(cfg, k, getattr(bn.cfg, k))
+            setattr(cfg, k, getattr(bn.cfg, k, RETIRED_FLIPPED.get(k, getattr(cfg, k))))
         bb_ = base.Bot.__new__(base.Bot)
         bb_.__dict__.update(bn.__dict__)
+        bb_.basket_legs = {}                # (the base revision's retired long-tilt basket: never any legs)
         bb_.cfg = cfg
         now_m = time.monotonic()
         pn = quiet(bn.alloc_plan, dict(api_n.inv), now_m, cash, set(), None)
@@ -355,7 +372,7 @@ check("4ff7d91: the stale MM bid is 3.5c from fair (> the 1c concession) -> the 
 api, b = refill_bot(mm_refill_fast=True, alloc_cancel_mm_first=True)
 g = grab()
 time.sleep(0.002)
-b.alloc_tick(M.utcnow(), dict(b.api.inv), b.orders_by_eid(M.utcnow()), None, set())
+b.alloc_tick(M.util.utcnow(), dict(b.api.inv), b.orders_by_eid(M.util.utcnow()), None, set())
 ungrab(g)
 s = sells(api)
 check("flag on: the stale MM shares go at the touch (600 @ 0.545, at the value floor), 'mm_resting' no longer "
@@ -810,7 +827,9 @@ DEPLOY = os.path.join(HERE, "..", "deploy", "package14")
 P141 = os.path.join(DEPLOY, "settings_override.mm_funding_14_1.json")
 P140 = os.path.join(DEPLOY, "settings_override.mm_funding.json")
 raw = json.load(open(P141))
-good, bad = M.validate_overrides(raw, M.Config())
+RETIRED = ("tilt_exit_priority", "tilt_exit_full_size", "ref_tilt_enabled", "ref_tilt_headline", "ref_guard_tilted",
+           "ref_guard_exits", "take_tilted_ref", "skew_age_enabled")   # (retired on simplify; staged at default)
+good, bad = M.validate_overrides({k: v for k, v in raw.items() if k not in RETIRED}, M.Config())
 check("settings_override.mm_funding_14_1.json validates (no refused key)", not bad, bad)
 check("it is the 14.0 file plus the owner's live values and the 14.1 keys (nothing dropped)",
       set(json.load(open(P140))) <= set(raw), set(json.load(open(P140))) - set(raw))

@@ -78,3 +78,13 @@ on a single, explainable mechanism.
   trading only, which is why the layer sum (+0.4k) is below the EV change (+2.4k).
 - Four days is a short window. The allocator's +2,414 came from one day with 20k of cash to deploy; its
   per-unit return (11% gross, 5% net) is the number to plan with, not the daily total.
+
+## Update, 10 October (5–10 October, six days)
+
+Rerun on the logs through 10 October 08:20 UTC. The harvest ladder had its first fills on 8–9 October once
+the refill had raised cash: **+2,885 of expected value on 19.4k sold short (15% per unit of cash)**, the best
+return of any layer. The allocator's buys stayed at +2,676 (nothing deployed since 7 October). The refill sold
+**110.6k** of value at a cost of 3,905 (3.5%); the momentum sleeve −521; market making +786 realised. Trading
+sum +1,261; expected value 108.4k → 112.7k (+4.3k), the rest being reference-price drift on held positions.
+Of the 110k sold, about 43k was deployed by the allocator and the ladder; the remainder funded the market-making
+reserve or was churned. The next change is to size the refill to what the two deployers can place.

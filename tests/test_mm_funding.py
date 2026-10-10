@@ -32,11 +32,26 @@ sys.path.insert(0, HERE)
 from fakes import FakeApi, FakeRefs, lvl, make_bot, market      # noqa: E402
 import mm_bot as M                                                # noqa: E402
 
+# retired on simplify: the old twin's status / health fields a removed feature owned, at the value it reported while
+# the feature was off (the new code drops them); Quote lost its trailing `behind` flag (always False while that sizing
+# was off) and the age skew its switch (skew_age_enabled: the old default True, live False)
+RETIRED_STATUS = {"tilt_s_applied": (0.0, 0), "tilt_s_applied_headline": (0.0, 0), "fast_unload_windows": (0,),
+                  "behind_best_markets": (0,), "mark_frag_total_cap_active": (False,),
+                  "fl_bias_markets": ({"bid": 0, "ask": 0},)}
+RETIRED_FLIPPED = {"skew_age_enabled": False}
+NQ = len(M.Quote.__dataclass_fields__)
+
+
+def retired(new, old):
+    """The old twin's dict less a retired feature's own key at its OFF value when the new one dropped it."""
+    return {k: v for k, v in old.items() if not (k in RETIRED_STATUS and k not in new and v in RETIRED_STATUS[k])}
+
+
 logging.basicConfig(level=logging.CRITICAL)
 RESULTS = []
 ALERTS = []
-M.alert = lambda msg: ALERTS.append(msg)
-M.notify = lambda *a, **k: False
+M.util.alert = lambda msg: ALERTS.append(msg)
+M.util.notify = lambda *a, **k: False
 BASE_REV = "c7c0107"                              # the live head this package is built on
 H = 3600.0
 
@@ -77,7 +92,7 @@ def ungrab(g):
     M.log.propagate = True
 
 
-NOW = M.utcnow()
+NOW = M.util.utcnow()
 CLOSE = NOW + timedelta(days=30)
 REFS = {"Ohio Senate|Republican": 0.12, "Ohio Senate|Democratic": 0.88,
         "Utah Senate|Republican": 0.55, "Utah Senate|Democratic": 0.45}
@@ -152,7 +167,7 @@ check("every default inside its range", not bad and len(good) == len(KEYS), bad)
 good, bad = M.validate_overrides({"mm_inv_max_age_h": 0.4, "mm_inv_max_usd": 60000.0, "mm_recycle_concession": 0.06,
                                   "mm_funding_alert_h": 30.0, "mm_refill_fast": "yes"}, D)
 check("out of range / not a bool refused (5 of 5)", not good and len(bad) == 5, (good, bad))
-src = open(os.path.join(HERE, "..", "mm_bot.py")).read()
+src = "".join(open(p).read() for p in sorted(__import__("glob").glob(os.path.join(HERE, "..", "mmbot", "*.py"))))
 check("Config comment block '# --- P14: market-making funding' and MM_FUNDING_KEYS = ('mm_funding',)",
       "# --- P14: market-making funding (owner, 4 Oct 21:10 UTC" in src and M.Bot.MM_FUNDING_KEYS == ("mm_funding",))
 
@@ -185,7 +200,7 @@ if base is not None:
             if mod is base:
                 cfg = base.Config()
                 for k in base.Config.__dataclass_fields__:
-                    setattr(cfg, k, getattr(bn.cfg, k))
+                    setattr(cfg, k, getattr(bn.cfg, k, RETIRED_FLIPPED.get(k, getattr(cfg, k))))
                 d = tempfile.mkdtemp()
                 for k in ("fills_csv", "status_file", "order_notes_file", "kill_file", "position_lots_file",
                           "overrides_file", "market_edge_file", "handover_file"):
@@ -229,7 +244,8 @@ if base is not None:
             if sorted(map(json.dumps, strip(an.wire))) != sorted(map(json.dumps, strip(ab.wire))):   # (writer threads)
                 ok_w = False
                 diffs.append(("wire", inv, ov))
-            if {e: astuple(x.quote) for e, x in bn.ex.items()} != {e: astuple(x.quote) for e, x in bb_.ex.items()}:
+            if ({e: astuple(x.quote)[:NQ] for e, x in bn.ex.items()}
+                    != {e: astuple(x.quote)[:NQ] for e, x in bb_.ex.items()}):
                 ok_q = False
                 diffs.append(("quote", inv, ov))
             strip_t = lambda m: sorted(json.dumps({a: v for a, v in x.items() if a != "t"}, sort_keys=True)  # noqa
@@ -242,7 +258,7 @@ if base is not None:
             with open(bn.cfg.status_file) as f:
                 sn = json.load(f)
             with open(bb_.cfg.status_file) as f:
-                sb = json.load(f)
+                sb = retired(sn, json.load(f))
             drop = VOLATILE | set(M.Bot.MM_FUNDING_KEYS)
             wall = {"last_run_wall", "last_run", "since"}    # (wall clocks: the allocator's run, the pause start)
             cut = lambda s: {k: ({a: x for a, x in v.items() if a not in wall} if k in ("alloc", "mm_risk_room")  # noqa
@@ -252,7 +268,7 @@ if base is not None:
                 ok_s = False
                 diffs.append(("status", inv, ov, {k for k in set(cut(sn)) | set(cut(sb))
                                                   if cut(sn).get(k) != cut(sb).get(k)}))
-            if set(bn.health) != set(bb_.health) or bn.status_report() != bb_.status_report():
+            if set(bn.health) != set(retired(bn.health, bb_.health)) or bn.status_report() != bb_.status_report():
                 ok_h = False
                 diffs.append(("health", inv, ov))
             if bn.summary_ops_line(100000.0) != bb_.summary_ops_line(100000.0):
@@ -277,9 +293,10 @@ if base is not None:
         bn.mm_lots = {"21": [[600.0, 0.53, time.time() - 7 * H]]}
         cfg = base.Config()
         for k in base.Config.__dataclass_fields__:
-            setattr(cfg, k, getattr(bn.cfg, k))
+            setattr(cfg, k, getattr(bn.cfg, k, RETIRED_FLIPPED.get(k, getattr(cfg, k))))
         bb_ = base.Bot.__new__(base.Bot)
         bb_.__dict__.update(bn.__dict__)
+        bb_.basket_legs = {}                # (the base revision's retired long-tilt basket: never any legs)
         bb_.cfg = cfg
         now_m = time.monotonic()
         pn = quiet(bn.alloc_plan, dict(api_n.inv), now_m, cash, set(), None)
@@ -309,7 +326,7 @@ b.order_meta.update({901: {"our_side": "bid", "price": 0.53, "fv": 0.55, "t": no
 
 def fill(fid, oid, eid, qty, at=None):
     return {"id": fid, "orderId": oid, "exchangeId": eid, "quantity": qty, "price": 0.5,
-            "filledAt": M.iso(M.utcnow() if at is None else at)}
+            "filledAt": M.iso(M.util.utcnow() if at is None else at)}
 
 
 b.mm_inv_step([fill(1, 901, "21", 200)], {"21": 300, "11": 500})
@@ -322,7 +339,7 @@ check("take / allocator fills are not MM inventory", lot_q(b, "21") == 200)
 b.ev_fill_p["5"] = 0.90                           # p at fill (mm_carry_24h's) wins over the quote's fv
 b.mm_inv_step([fill(5, 901, "21", 30)], {"21": 330, "11": 500})
 check("p at fill outside the band -> not MM (p at fill preferred to fv at quote)", lot_q(b, "21") == 200)
-b.mm_inv_step([fill(6, 901, "21", 100, M.utcnow() - timedelta(hours=1))], {"21": 300, "11": 500})
+b.mm_inv_step([fill(6, 901, "21", 100, M.util.utcnow() - timedelta(hours=1))], {"21": 300, "11": 500})
 b.mm_inv_step([fill(7, 904, "21", -150)], {"21": 150, "11": 500})
 check("an MM ask fill closes the OLDEST lot first (FIFO round trip): 200 + 100 - 150 = 150 left",
       lot_q(b, "21") == 150 and len(b.mm_lots["21"]) == 2 and b.mm_lots["21"][0][0] == 50, b.mm_lots["21"])
@@ -526,7 +543,7 @@ def refill_bot(**cfg):
 
 def atick(bb):
     time.sleep(0.002)
-    return quiet(bb.alloc_tick, M.utcnow(), dict(bb.api.inv), bb.orders_by_eid(M.utcnow()), None, set())
+    return quiet(bb.alloc_tick, M.util.utcnow(), dict(bb.api.inv), bb.orders_by_eid(M.util.utcnow()), None, set())
 
 
 def sells(a):
@@ -539,7 +556,7 @@ check("flag off: cash 0 < reserve 1000 but the hourly run is not due -> nothing 
 api, b = refill_bot(mm_refill_fast=True)
 g = grab()
 time.sleep(0.002)
-b.alloc_tick(M.utcnow(), dict(b.api.inv), b.orders_by_eid(M.utcnow()), None, set())
+b.alloc_tick(M.util.utcnow(), dict(b.api.inv), b.orders_by_eid(M.util.utcnow()), None, set())
 ungrab(g)
 s = sells(api)
 check("flag on: refilled on this cycle - first the stale MM shares (21: 600 @ 0.545, IOC), then the lowest edge-held "
@@ -726,7 +743,10 @@ try:
         ov = json.load(f)
 except (OSError, ValueError) as e:
     ov = {"_error": str(e)}
-good, bad = M.validate_overrides({k: v for k, v in ov.items() if not k.startswith("_")}, M.Config())
+RETIRED = ("tilt_exit_priority", "tilt_exit_full_size", "ref_tilt_enabled", "ref_tilt_headline", "ref_guard_tilted",
+           "ref_guard_exits", "take_tilted_ref", "skew_age_enabled")   # (retired on simplify; staged at default)
+good, bad = M.validate_overrides({k: v for k, v in ov.items() if not k.startswith("_") and k not in RETIRED},
+                                 M.Config())
 check("staged file: every key valid", not bad and good, bad)
 check("owner's live values: alloc_mm_reserve 20000, mm_risk_reserve_wc 20000 / _corr 4000, backstop 1.0",
       (ov.get("alloc_mm_reserve"), ov.get("mm_risk_reserve_wc"), ov.get("mm_risk_reserve_corr"),
