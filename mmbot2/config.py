@@ -17,7 +17,7 @@ OPEN     The live file sets skew_max 0 (no inventory lean on prices) while skew_
 import json
 import logging
 import os
-from dataclasses import dataclass, fields, replace
+from dataclasses import asdict, dataclass, fields, replace
 
 log = logging.getLogger("mm2")
 
@@ -164,7 +164,7 @@ def validate(raw, defaults):
         if name not in LIVE:
             bad.append(f"{name}: not a live setting")
             continue
-        v = check_value(name, value, getattr(defaults, name))
+        v = check_value(name, value, asdict(defaults)[name])
         if v is None:
             bad.append(f"{name}: {value!r} is outside {LIVE[name]}")
         else:
@@ -202,10 +202,11 @@ class SettingsFile:
         for reason in set(bad) - self.refused:
             alert(f"{os.path.basename(self.path)}: refused {reason}")
         self.refused = set(bad)
-        wanted = {f.name: good.get(f.name, getattr(self.defaults, f.name)) for f in fields(Settings)}
+        defaults, now = asdict(self.defaults), asdict(current)
+        wanted = {f.name: good.get(f.name, defaults[f.name]) for f in fields(Settings)}
         for name, value in wanted.items():
-            if getattr(current, name) != value:
-                log.warning("SETTING %s: %s -> %s", name, getattr(current, name), value)
+            if now[name] != value:
+                log.warning("SETTING %s: %s -> %s", name, now[name], value)
         return replace(current, **wanted)
 
 
