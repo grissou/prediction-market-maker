@@ -2,11 +2,14 @@
 Identity: the current mm_bot.py makes the SAME decisions as a pinned revision on the LIVE settings.
 
 The pinned revision is the code the server runs (IDENTITY_BASE, default d9220c1 = Package 16). The live settings
-are IDENTITY_SETTINGS (default deploy/package16/settings_override.momentum_armed.json). Both modules are given the
-same fake exchange, the same books, positions, cash and fills, and run four cycles; their order streams, quotes,
-order notes, status.json (minus wall-clock fields), health keys, status line and 2-hourly summary line must match.
-Settings the pinned revision knows but the current code no longer has must be at their default in the live file
-(else the comparison would be meaningless): that is checked and reported.
+are IDENTITY_SETTINGS (default deploy/settings_override.live_minimal.json: the server's live file). Both modules are
+given the same fake exchange, the same books, positions, cash and fills, and run four cycles; their order streams,
+quotes, order notes, status.json (minus wall-clock fields), health keys, status line and 2-hourly summary line must
+match. Settings the pinned revision knows but the current code no longer has (RETIRED_LIVE) are accepted in the live
+file only at their pinned default, or at any value when the retired feature's master switch (RETIRED_MASTERS, e.g.
+momentum_enabled for every momentum_* / mom_* knob) is absent from the live file or at its default there - the old
+code never read the knob while the feature was off, so dropping it changes nothing live. What was accepted is
+printed; anything else is a refusal (the comparison would be meaningless).
 
 This is the proof used before every deploy of a simplified bot: with the retired layers' flags off in the live
 file, the new code must send exactly the orders the old code sends.
@@ -34,8 +37,7 @@ logging.basicConfig(level=logging.CRITICAL)
 logging.disable(logging.CRITICAL)
 M.alert, M.notify = (lambda msg: None), (lambda *a, **k: False)
 BASE_REV = os.environ.get("IDENTITY_BASE", "d9220c1")
-SETTINGS = os.environ.get("IDENTITY_SETTINGS",
-                          os.path.join(ROOT, "deploy", "package16", "settings_override.momentum_armed.json"))
+SETTINGS = os.environ.get("IDENTITY_SETTINGS", os.path.join(ROOT, "deploy", "settings_override.live_minimal.json"))
 RESULTS = []
 
 
@@ -66,28 +68,43 @@ with open(SETTINGS) as f:
     LIVE = json.load(f)
 good_new, bad_new = M.validate_overrides(LIVE, M.Config())
 # Retired settings the live file still names (the file is kept as the server has it): a key the current Config no
-# longer has is accepted ONLY when its live value is the pinned revision's default - the pinned code runs it at the
-# value its default gives, so dropping the setting changes nothing live. Any other value is a refusal, as before.
-# The keys so forgiven are printed, so a deploy sees what the live file still carries.
-RETIRED_LIVE = {}
+# longer has is accepted when its live value is the pinned revision's default - the pinned code runs it at the value
+# its default gives, so dropping the setting changes nothing live - or when the retired feature's MASTER switch
+# (RETIRED_MASTERS: the knob's prefix -> the switch) is absent from the live file or at its default there: the old
+# code never read the knob while the feature was off. Any other value is a refusal, as before. The keys so forgiven
+# are printed, so a deploy sees what the live file still carries.
+RETIRED_MASTERS = {                               # knob prefix -> the retired feature's master switch
+    # P16 momentum sleeve (removed on simplify): every momentum_* / mom_* knob, the value_* classifier, the funding
+    # and election-night hooks were read only while momentum_enabled was true (live: absent = false since 8 Oct)
+    **{pre: "momentum_enabled" for pre in ("momentum_", "mom_", "value_extreme_p", "value_min_edge", "mm_carry_min",
+                                             "election_holdback_")},
+}
+RETIRED_LIVE, RETIRED_OFF = {}, {}
 if base is not None:
-    RETIRED_LIVE = {k: LIVE[k] for k in LIVE
-                    if k in base.Config.__dataclass_fields__ and k not in M.Config.__dataclass_fields__
-                    and LIVE[k] == getattr(base.Config(), k)}
+    def master_off(k):
+        m = next((m for pre, m in RETIRED_MASTERS.items() if k.startswith(pre)), None)
+        return m is not None and LIVE.get(m, getattr(base.Config(), m)) == getattr(base.Config(), m)
+    gone_live = [k for k in LIVE if k in base.Config.__dataclass_fields__ and k not in M.Config.__dataclass_fields__]
+    RETIRED_LIVE = {k: LIVE[k] for k in gone_live if LIVE[k] == getattr(base.Config(), k)}
+    RETIRED_OFF = {k: LIVE[k] for k in gone_live if k not in RETIRED_LIVE and master_off(k)}
     if RETIRED_LIVE:
         print(f"    retired settings in the live file at {BASE_REV}'s default (accepted): "
               + ", ".join(f"{k}={v!r}" for k, v in sorted(RETIRED_LIVE.items())))
+    if RETIRED_OFF:
+        print("    retired settings in the live file off their default but behind a master switch at its default "
+              "(accepted): " + ", ".join(f"{k}={v!r}" for k, v in sorted(RETIRED_OFF.items())))
+    RETIRED_LIVE.update(RETIRED_OFF)
 bad_new = [p for p in bad_new if p.split(":")[0] not in RETIRED_LIVE]
 check(f"live settings accepted by the current code ({len(good_new)} of {len(LIVE)} keys, "
-      f"{len(RETIRED_LIVE)} retired at the pinned default)", not bad_new, bad_new)
+      f"{len(RETIRED_LIVE)} retired at the pinned default or behind an off master switch)", not bad_new, bad_new)
 LIVE_NEW = {k: v for k, v in LIVE.items() if k not in RETIRED_LIVE}   # the live file as the current code takes it
 if base is not None:
     good_old, bad_old = base.validate_overrides(LIVE, base.Config())
     check(f"live settings accepted by {BASE_REV} ({len(good_old)} of {len(LIVE)} keys)", not bad_old, bad_old)
     gone = [k for k in base.Config.__dataclass_fields__ if k not in M.Config.__dataclass_fields__]
-    non_default = [k for k in gone if k in LIVE and LIVE[k] != getattr(base.Config(), k)]
-    check(f"settings removed from the current code ({len(gone)}) are all at their default in the live file",
-          not non_default, non_default)
+    non_default = [k for k in gone if k in LIVE and LIVE[k] != getattr(base.Config(), k) and k not in RETIRED_OFF]
+    check(f"settings removed from the current code ({len(gone)}) are all at their default in the live file "
+          f"or behind a master switch at its default", not non_default, non_default)
 
 # ------------------------------------------------------------------------------------------ a small world
 NOW = M.utcnow()
@@ -184,8 +201,6 @@ def cut(s):
             v = {a: ([f[1:] for f in x] if a == "flows" else x) for a, x in v.items() if a not in WALL}
             if k == "mm_funding" and isinstance(v.get("lots"), dict):
                 v = {**v, "lots": {e: [x[:2] for x in ls] for e, ls in v["lots"].items()}}
-            if k == "momentum":
-                v = {a: x for a, x in v.items() if a not in ("slope", "series_bins", "auto")}
             if "events" in v:                     # [[wall, kind, ...], ...]: drop the wall-clock stamp
                 v = {**v, "events": [x[1:] for x in v["events"]]}
             if k == "alloc" and isinstance(v.get("swaps"), dict):
@@ -214,6 +229,9 @@ RETIRED_STATUS = {                                # e.g. "basket": ({"state": "o
     # only while tilt_exit_take was on or a take had happened; off and unused, the key is absent. The hold target
     # (Package 5 C, removed with it) never wrote a status field of its own.
     "tilt_exit_takes": (),
+    # P16 momentum sleeve (removed on simplify): "momentum" {state, legs, cost, ...} was written only while
+    # momentum_enabled or legs were held (mom_persist_needed); off and unused, the key is absent
+    "momentum": (),
 }
 RETIRED_SUBKEYS = {                               # sub-keys of a surviving top-level dict, dotted paths allowed
     # (mm_risk_room.blocked.basket and mm_carry_24h.fills.basket stay in the new code at 0: the older twin suites

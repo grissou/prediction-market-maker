@@ -116,8 +116,6 @@ for v in ("tomorrow", "2026-11-04T17:00:00", "2026-10-31T23:00:00Z", "2026-11-08
 for v in (-1, 121, True, "15"):
     good, bad = M.validate_overrides({"stop_minutes_before_close": v}, c)
     check(f"validate: stop_minutes_before_close {v!r} refused", not good and len(bad) == 1, (good, bad))
-good, bad = M.validate_overrides({"mom_exit_utc": "x"}, c)
-check("mom_exit_utc still refuses an unparseable time (only '' or an ISO UTC time)", not good and len(bad) == 1)
 
 # ============================================================================================ M1
 print("--- M1 close_override_utc: hours_to_close, the stop, the windows")

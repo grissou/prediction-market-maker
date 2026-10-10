@@ -1300,91 +1300,6 @@ class Config:
     harvest_requote_s: float = 900.0      # a ladder is re-quoted at most this often unless a level / p moved > 1c
     harvest_total_usd: float = 10000.0    # the ladder's resting collateral budget, carved from alloc_mm_reserve
     state_max_usd: float = 0.0            # per-state collateral cap, $ (0 = off; staged 15,000)
-    # --- P16: the ARMED momentum sleeve (Package 13 A's sleeve + 13 C's automation, ported onto Package 15; owner
-    # 6 Oct 11:00 UTC; everything OFF). Not ported: buckets_enabled (the 20/40/40 rebalance and its floor-exempt
-    # sell-down), aggressive_value (aggr_* caps), election_night (but election_holdback_usd below is its hook).
-    # 1. momentum_enabled True: the sleeve's MACHINERY (state, legs at cost, status, exits, the kill; Bot.mom_tick,
-    #    cycle step 6c', before the allocator). Alone it never
-    #    buys: it buys only with momentum_auto and the trigger on (2), or momentum_force (the manual override). The
-    #    sleeve is LONG the tilt: it buys the MOMENTUM longs - longshots with value_extreme_p < p <= mom_max_p whose
-    #    short edge per $ (ask - p) / (1 - ask) is below value_min_edge (Bot.mom_classify; a market holding a position
-    #    outside the sleeve is never a candidate) - YES at the best ask, or in a 2-leg race the favourite's NO (sell
-    #    YES at its best bid) when that is cheaper, smallest gap (ask - p) first, as IMMEDIATE-OR-CANCEL takers sent
-    #    after our own orders on that market are cancelled (p13_send), through the cash gate; per order the touch
-    #    level (>= mom_min_depth shares), the sleeve's target left, the funding (3), the market's collateral cap
-    #    (alloc_max_contract_usd at max(price, p), the position and our resting orders there counted) and the state
-    #    cap (state_max_usd: the sleeve's collateral counts there as any position); at most mom_max_markets markets,
-    #    never a headline race unless mom_headline; momentum_writes_frac of the writes left (3 a order). The sleeve's
-    #    markets are never quoted by the market maker, never traded by takes / arbitrage /
-    #    pair unwinds / the allocator, and the harvest ladder leaves their whole race while held (rule 5 both
-    #    ways). Fill class "momentum" in mm_carry_24h (key only once one exists). Legs, cost and state persist in status.json "momentum". A leg
-    #    the sleeve traded within 120 s is not cut to the positions read (P13 RT13-3: a lagging read re-bought it).
-    #    momentum_exit True (manual) or mom_exit_utc passed: the sleeve is sold into the bids over mom_exit_hours (a
-    #    long at the best bid, a short bought back as a covered "sell NO"), EXEMPT from the value floor (these are
-    #    momentum positions bought above p, not value), never re-bought until re-armed. Kill: the sleeve at the MARK
-    #    (book mid) below mom_kill_frac x its cost for 120 s -> the same exit, latched "killed", one ALERT; reset only
-    #    by momentum_enabled false then true.
-    # 2. momentum_auto True: the sleeve ARMED. TiltSlope (the tilt's level per momentum_slope_bin_h bin: the "slope"
-    #    estimator sum x g / sum x^2 over NON-headline markets with a liquid Polymarket price and an OTHER-traders'
-    #    book spread <= momentum_slope_max_spread, our own orders stripped, never our fills; seeded on a cold start
-    #    from market_data.sqlite in a background thread; kept 72 h in status.json). slope_24h = the regression slope
-    #    of the bins over momentum_slope_hours, slope_6h = the latest bin vs the bin ~6 h before; points a day.
-    #    Trigger: slope_24h >= momentum_on_slope AND slope_6h > 0 held continuously momentum_confirm_h -> "on"
-    #    (ALERT); one burst never triggers (a dip restarts the clock). Ramp: the target starts at momentum_start_usd
-    #    and grows by momentum_step_usd per further momentum_step_h of slope_6h > 0 throughout (slope_6h <= 0 stalls
-    #    it), up to momentum_max_usd. Flip (automatic): slope_24h <= 0, the mark >= (1 + momentum_profit_target) x
-    #    cost for 120 s, mom_exit_utc, the manual momentum_exit, or the kill -> the exit above, and the harvest ladder
-    #    takes those markets over once sold; "flipped" re-arms after momentum_rearm_h of a fresh trigger once the exit
-    #    is done (0 = never). momentum_force True: buys to momentum_max_usd at once, no trigger, the slope flip off
-    #    (the profit target, the date, the manual exit and the kill stay) - the owner asked for the sleeve to be
-    #    TRIGGERED, never forced (analysis/p15/TILT_PATHS.md 4.2): force is a manual override only.
-    # 3. Funding, in this order: (a) free cash above what is kept back = the MM's effective reserve
-    #    (mm_reserve_effective) + the harvest ladder's carve-out not resting yet + election_holdback_usd (from
-    #    election_holdback_from_utc; 0 = none) - i.e. free cash + the ladder's resting carve-out above
-    #    alloc_mm_reserve + the holdback; (b) the MM's effective reserve too while mm_carry_24h.per_day <
-    #    mm_carry_min (per_day unknown = not used; the ladder's carve-out never); (c) momentum_fund_value: VALUE
-    #    positions sold lowest edge-held first for the shortfall (a), (b) leave, through the allocator's refill sale
-    #    path (alloc_plan refill-only, alloc_sell), within alloc_max_turnover_per_hour, NEVER below the value floor
-    #    (p - value_sell_margin; no exemption) - middle-band (MM) holdings and the sleeve's own legs are not sold.
-    #    While a buy round is short (a target not reached, candidates seen) AND there is cash to protect for it (cash
-    #    (a) / (b) lets it spend now, or funding sales pending / their proceeds unspent) the allocator's spare-cash
-    #    buys pause, the harvest ladder places no NEW levels (it keeps its resting ones and yields the candidates'
-    #    races) and the quoter's plan budget leaves the sleeve's kept-back cash + what it can spend of the shortfall,
-    #    so the cash and the sale proceeds reach the sleeve. A round the sleeve cannot fund holds nothing back (Package
-    #    13 held the whole shortfall from the quoter: with no funding that starved the market maker indefinitely).
-    # Rule 5 (no fake buying): the sleeve never buys a market (or race) where we rest or plan a sale - harvest levels
-    # in the race, a refill / swap / funding sale pending there, another feature's resting order; our plain quotes
-    # there are cancelled before the buy and a sleeve market is never quoted after it.
-    momentum_enabled: bool = False        # the sleeve's machinery (never buys alone)
-    momentum_auto: bool = False           # ARMED: buys only while the tilt trigger is on (staged: true)
-    momentum_force: bool = False          # the manual override: buys to momentum_max_usd at once (discouraged)
-    momentum_exit: bool = False           # the manual exit: sell the sleeve over mom_exit_hours
-    momentum_max_usd: float = 40000.0     # the sleeve's target cap ($ at cost): the ramp's ceiling, the forced target
-    mom_exit_hours: float = 6.0           # an exit is spread over this many hours
-    mom_exit_utc: str = ""                # optional ISO UTC time from which the sleeve is sold ("" = none)
-    mom_kill_frac: float = 0.75           # kill when the sleeve at the mark < this x its cost (120 s)
-    mom_min_depth: int = 200              # shares at the touch level, at least
-    mom_headline: bool = False            # True = headline races (party control) may be momentum markets too
-    mom_max_markets: int = 40             # sleeve markets, at most
-    momentum_writes_frac: float = 0.6     # the sleeve's orders a cycle <= this x writes left / 3
-    mom_max_p: float = 0.25               # the longshot band the sleeve buys in (p <= this)
-    value_extreme_p: float = 0.04         # a longshot at or below this p is never bought (a value short)
-    value_min_edge: float = 0.12          # ...nor one whose short edge per $ is at or above this
-    value_min_edge_fav: float = 0.08      # a favourite whose (p - ask) / ask is at or above this: value (no NO route)
-    momentum_slope_hours: float = 24.0    # the slope window (entry and flip), hours
-    momentum_slope_bin_h: float = 4.0     # TiltSlope bin, hours
-    momentum_slope_max_spread: float = 0.06   # a market's other-traders spread at most this to be sampled
-    momentum_on_slope: float = 0.5        # slope_24h at least this (points a day) to switch on
-    momentum_confirm_h: float = 4.0       # ...with slope_6h > 0, held this long (hours)
-    momentum_start_usd: float = 10000.0   # the target at switch-on ($ at cost)
-    momentum_step_usd: float = 10000.0    # +this per further momentum_step_h of rising tilt
-    momentum_step_h: float = 6.0
-    mm_carry_min: float = 300.0           # mm_carry_24h per day below this: the MM reserve may fund the sleeve ($/day)
-    momentum_profit_target: float = 0.25  # flip when the mark >= (1 + this) x cost (0 = off)
-    momentum_fund_value: bool = True      # funding source (c): sell VALUE positions for the shortfall (floor kept)
-    momentum_rearm_h: float = 24.0        # a flipped sleeve re-arms after this long of a fresh trigger (0 = never)
-    election_holdback_usd: float = 0.0    # the hook: cash the sleeve's funding (a) keeps back for election night, $
-    election_holdback_from_utc: str = "2026-11-03T12:00:00Z"   # ...from this time ("" = from now)
 
 
 CFG = Config()
@@ -1651,37 +1566,6 @@ OVERRIDABLE = {
     "harvest_requote_s": (60.0, 7200.0),
     "harvest_total_usd": (0.0, 100000.0),
     "state_max_usd": (0.0, 200000.0),
-    # --- P16: the armed momentum sleeve ---
-    "momentum_enabled": (False, True),
-    "momentum_auto": (False, True),
-    "momentum_force": (False, True),
-    "momentum_exit": (False, True),
-    "momentum_max_usd": (0.0, 200000.0),
-    "mom_exit_hours": (0.25, 72.0),
-    "mom_exit_utc": ("2026-10-01T00:00:00Z", "2026-11-07T00:00:00Z"),   # ISO UTC time (DATE_SETTINGS), "" = none
-    "mom_kill_frac": (0.3, 0.99),
-    "mom_min_depth": (0, 100000),
-    "mom_headline": (False, True),
-    "mom_max_markets": (1, 300),
-    "momentum_writes_frac": (0.0, 1.0),
-    "mom_max_p": (0.01, 0.5),
-    "value_extreme_p": (0.0, 0.25),
-    "value_min_edge": (0.0, 2.0),
-    "value_min_edge_fav": (0.0, 2.0),
-    "momentum_slope_hours": (6.0, 72.0),
-    "momentum_slope_bin_h": (1.0, 12.0),
-    "momentum_slope_max_spread": (0.01, 0.2),
-    "momentum_on_slope": (0.0, 10.0),
-    "momentum_confirm_h": (0.0, 48.0),
-    "momentum_start_usd": (0.0, 100000.0),
-    "momentum_step_usd": (0.0, 100000.0),
-    "momentum_step_h": (1.0, 48.0),
-    "mm_carry_min": (0.0, 10000.0),
-    "momentum_profit_target": (0.0, 5.0),
-    "momentum_fund_value": (False, True),
-    "momentum_rearm_h": (0.0, 168.0),
-    "election_holdback_usd": (0.0, 100000.0),
-    "election_holdback_from_utc": ("2026-10-01T00:00:00Z", "2026-11-07T00:00:00Z"),   # ISO UTC time, "" = from now
 }
 P141_REFILL = ("alloc_cancel_mm_first", "alloc_rank_all_markets",   # P14.1: the flags that need
                "alloc_refill_ignore_prefer_short")                 #  mm_refill_fast to do anything
@@ -1689,9 +1573,8 @@ MM_RISK_HYST = 1.1        # mm_risk_reserve_*: value adds resume once each room 
 MAX_ORDER_TTL = 7200.0    # no order of ours lives longer than this (dead-man's switch), whatever the TTL settings
 LADDER_MAX_LEVELS = 8
 ONE_OF_SETTINGS = {"ref_tilt_estimator", "risk_unheld_legs"}   # string settings that take exactly one of their OVERRIDABLE names
-DATE_SETTINGS = {"close_override_utc",                      # string settings: one ISO UTC time within their range
-                 "mom_exit_utc", "election_holdback_from_utc"}   # (P16)
-DATE_EMPTY_OK = {"close_override_utc", "mom_exit_utc", "election_holdback_from_utc"}   # ...that also take "" (= off)
+DATE_SETTINGS = {"close_override_utc"}     # string settings: one ISO UTC time within their range
+DATE_EMPTY_OK = {"close_override_utc"}     # ...that also take "" (= off)
 FREE_TEXT_SETTINGS = {"alloc_pin"}         # string settings that take any text of (min, max) characters
 
 
@@ -2534,7 +2417,7 @@ def parse_order(o):
     return Resting(int(o["id"]), str(o["exchangeId"]), is_bid, price, float(o["quantity"]), exp)
 
 
-WIRE_PRIVATE = ("_no_sell", "_cash_need", "_alloc_paired", "_mom", "_mom_exit")   # never sent (P16: the sleeve's)
+WIRE_PRIVATE = ("_no_sell", "_cash_need", "_alloc_paired")   # never sent
 
 
 def wire_order(o):
@@ -2545,7 +2428,7 @@ def wire_order(o):
     if not any(k in o for k in WIRE_PRIVATE):
         return o
     w = {k: v for k, v in o.items()                  # _cash_need: Package 8 gate's note; _alloc_paired: Package 10 B
-         if k not in WIRE_PRIVATE}                   # (_mom / _mom_exit: P16's notes)
+         if k not in WIRE_PRIVATE}
     if o.get("_no_sell"):
         w.update(side="no", action="sell", price=round(1 - o["price"], 3))
     return w
@@ -2749,202 +2632,6 @@ class TiltEstimator:
             self.s, self.ready = 0.0, False
         self.t = None
         return self
-
-
-TILT_SLOPE_WINSOR = 0.08      # P16 (Package 13 C): the gap r - mid is winsorised at +-this (the "slope" estimator's)
-TILT_SLOPE_SAMPLE_S = 60.0    # live samples at most this often (the recorder's cadence: seeded and live bins alike)
-TILT_SLOPE_KEEP_H = 72.0      # bins kept (status.json; <= 72 / momentum_slope_bin_h rows)
-TILT_SLOPE_MIN_N = 20         # a bin needs this many market samples to have a value
-TILT_SLOPE_MIN_COVER = 0.25   # the CURRENT (unfinished) bin counts once its samples span this share of a bin
-
-
-def tilt_slope_race(label):
-    """The race of a recorder label ("Rep Ohio Senate" -> "Ohio Senate": the bot's labels are party[:3] + race)."""
-    parts = (label or "").split(" ", 1)
-    return parts[1] if len(parts) == 2 and len(parts[0]) == 3 else (label or "")
-
-
-class TiltSlope:
-    """P16 (Package 13 C): the tilt's level over time, for the momentum sleeve's trigger, ramp and flip. Each sample is
-    one market (r = Polymarket, mid = OTHER traders' best bid / ask mid, legs in its race): x = r - 1/legs (0.5 alone),
-    g = clip(r - mid, +-TILT_SLOPE_WINSOR); a bin (bin_s seconds, aligned to the epoch) keeps sum x g, sum x^2, the
-    count and its first / last sample time; its value = sum x g / sum x^2 (the TiltEstimator's "slope", over every
-    sample in the bin). slope_24h = least-squares slope of the bin values against their start over the window,
-    slope_6h = (latest - the bin ~6 h earlier) / their distance; both x 100 x 86400 = POINTS a day."""
-
-    def __init__(self, bin_s=4 * 3600.0):
-        self.bin_s = float(bin_s)
-        self.bins = {}        # start (epoch s) -> [sum xg, sum x2, n, first t, last t]
-        self.last_t = None    # wall time of the last live sample
-        self.source = None    # "live" / "seed" / "seed+live" (None: no samples yet)
-
-    def add(self, samples, t):
-        """samples [(r, mid, legs)] at wall time t -> its bin. Returns the samples used."""
-        k, n = math.floor(t / self.bin_s) * self.bin_s, 0
-        b = self.bins.get(k)
-        for r, mid, legs in samples:
-            x = r - (1.0 / legs if legs and legs > 1 else 0.5)
-            g = max(-TILT_SLOPE_WINSOR, min(TILT_SLOPE_WINSOR, r - mid))
-            if b is None:
-                b = self.bins[k] = [0.0, 0.0, 0, t, t]
-            b[0] += x * g
-            b[1] += x * x
-            b[2] += 1
-            b[3], b[4] = min(b[3], t), max(b[4], t)
-            n += 1
-        if n:
-            self.last_t = t
-            self.source = "live" if self.source in (None, "live") else "seed+live"
-        return n
-
-    def merge(self, bins):
-        """Seeded bins {start: [sxg, sx2, n, t0, t1]} added in (they cover a time before this run's live samples)."""
-        for k, v in bins.items():
-            b = self.bins.get(k)
-            if b is None:
-                self.bins[k] = list(v)
-            else:
-                b[0] += v[0]
-                b[1] += v[1]
-                b[2] += v[2]
-                b[3], b[4] = min(b[3], v[3]), max(b[4], v[4])
-        if bins:
-            self.source = "seed" if self.source is None else ("seed+live" if self.source != "seed" else "seed")
-
-    def trim(self, now):
-        for k in [k for k in self.bins if k < now - TILT_SLOPE_KEEP_H * 3600 - self.bin_s]:
-            self.bins.pop(k)
-
-    def values(self, now):
-        """[(start, value)] oldest first: bins with >= TILT_SLOPE_MIN_N samples and sum x^2 > 0, up to now; the bin
-        now is in counts only once its samples span TILT_SLOPE_MIN_COVER of a bin."""
-        cur = math.floor(now / self.bin_s) * self.bin_s
-        out = []
-        for k in sorted(self.bins):
-            b = self.bins[k]
-            if k > cur + 1e-9 or b[2] < TILT_SLOPE_MIN_N or b[1] <= 1e-12:
-                continue
-            if k >= cur - 1e-9 and b[4] - b[3] < TILT_SLOPE_MIN_COVER * self.bin_s - 1e-9:
-                continue
-            out.append((k, b[0] / b[1]))
-        return out
-
-    def slope_24h(self, now, hours):
-        """Regression slope (points a day) of the bin values over the window: bins starting after (the bin now -
-        hours); None without >= 3 bins spanning (first to last start + one bin) >= half the window."""
-        cur = math.floor(now / self.bin_s) * self.bin_s
-        pts = [(k, v) for k, v in self.values(now) if k > cur - hours * 3600 + 1e-9]
-        if len(pts) < 3 or pts[-1][0] - pts[0][0] + self.bin_s < hours * 3600 / 2 - 1e-9:
-            return None
-        mx = sum(k for k, _ in pts) / len(pts)
-        my = sum(v for _, v in pts) / len(pts)
-        den = sum((k - mx) ** 2 for k, _ in pts)
-        if den <= 0:
-            return None
-        return 100.0 * 86400.0 * sum((k - mx) * (v - my) for k, v in pts) / den
-
-    def slope_6h(self, now, hours=6.0):
-        """(latest bin value - the value of the earlier bin nearest `hours` before it; a tie goes to the later one)
-        / their distance, in points a day; None without both (that bin within max(bin, 2 h) of `hours` back, and the
-        latest no older than two bins)."""
-        vals = self.values(now)
-        if len(vals) < 2:
-            return None
-        k1, v1 = vals[-1]
-        if now - k1 > 2 * self.bin_s + 1e-9:
-            return None
-        tol = max(self.bin_s, 2 * 3600.0) + 1e-9
-        best = None
-        for k, v in vals[:-1]:
-            d = (k1 - k) / 3600.0
-            if d <= 0 or abs(d - hours) > tol / 3600.0:
-                continue
-            key = (abs(d - hours), d)
-            if best is None or key < best[0]:
-                best = (key, k, v)
-        if best is None:
-            return None
-        _, k0, v0 = best
-        return 100.0 * 86400.0 * (v1 - v0) / (k1 - k0)
-
-    def to_dict(self):
-        return {"bin_s": self.bin_s, "source": self.source, "last_t": self.last_t,
-                "bins": [[k, round(b[0], 8), round(b[1], 8), b[2], round(b[3], 1), round(b[4], 1)]
-                         for k, b in sorted(self.bins.items())]}
-
-    @classmethod
-    def from_dict(cls, d, bin_s):
-        """A saved series (status.json momentum.slope); a different bin width or anything unreadable = empty."""
-        ts = cls(bin_s)
-        try:
-            if isinstance(d, dict) and abs(float(d.get("bin_s") or 0) - ts.bin_s) < 1e-6:
-                for row in d.get("bins") or ():
-                    k, a, b, n, t0, t1 = (float(x) for x in row)
-                    if all(math.isfinite(x) for x in (k, a, b, n, t0, t1)) and n >= 1:
-                        ts.bins[k] = [a, b, int(n), t0, t1]
-                ts.source = d.get("source") if ts.bins and d.get("source") in ("live", "seed", "seed+live") else None
-                lt = d.get("last_t")
-                ts.last_t = float(lt) if isinstance(lt, (int, float)) and not isinstance(lt, bool) else None
-        except (TypeError, ValueError):
-            ts.bins, ts.source, ts.last_t = {}, None, None
-        return ts
-
-    @staticmethod
-    def bins_from_rows(rows, bin_s, headline=(), max_spread=0.06):
-        """THE PURE SEEDER: recorder snapshot rows (ts ISO, label, best_bid, best_ask, reference, our_bid, our_ask) ->
-        bins. Kept: a non-headline label (no headline race name in it), both sides, 0 < spread <= max_spread, a
-        reference, and no own price at the touch (best_bid == our_bid or best_ask == our_ask: the recorder's touch
-        includes our orders, so the others behind it are unknown). legs = the labels sharing its race."""
-        races = defaultdict(set)
-        for row in rows:
-            races[tilt_slope_race(row[1])].add(row[1])
-        secs, bins = {}, {}
-        for ts, label, bb, ba, r, ob, oa in rows:
-            if (not isinstance(label, str) or bb is None or ba is None or r is None
-                    or any(h in label for h in headline)
-                    or not 0 < ba - bb <= max_spread + 1e-9
-                    or (ob is not None and abs(ob - bb) < 1e-9) or (oa is not None and abs(oa - ba) < 1e-9)):
-                continue
-            t = secs.get(ts)
-            if t is None and ts not in secs:
-                try:
-                    t = parse_ts(ts)
-                    t = t.timestamp() if t is not None else None
-                except (TypeError, ValueError, AttributeError):
-                    t = None
-                secs[ts] = t
-            if t is None:
-                continue
-            k = math.floor(t / bin_s) * bin_s
-            legs = len(races[tilt_slope_race(label)])
-            x = r - (1.0 / legs if legs > 1 else 0.5)
-            g = max(-TILT_SLOPE_WINSOR, min(TILT_SLOPE_WINSOR, r - (bb + ba) / 2))
-            b = bins.get(k)
-            if b is None:
-                b = bins[k] = [0.0, 0.0, 0, t, t]
-            b[0] += x * g
-            b[1] += x * x
-            b[2] += 1
-            b[3], b[4] = min(b[3], t), max(b[4], t)
-        return bins
-
-
-def tilt_slope_seed(path, mode, since_w, until_w, bin_s, headline=(), max_spread=0.06):
-    """P16 (Package 13 C): bins from the recorder's market_data.sqlite (read-only, its own connection: safe off the main
-    thread) for snapshots in [since_w, until_w). {} when the file or the table is missing. Raises sqlite3.Error."""
-    if not path or not os.path.exists(path):
-        return {}
-    db = sqlite3.connect(f"file:{path}?mode=ro", uri=True, check_same_thread=False)
-    try:
-        if not db.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'snapshots'").fetchone():
-            return {}
-        lo = iso(datetime.fromtimestamp(since_w, timezone.utc))
-        hi = iso(datetime.fromtimestamp(until_w, timezone.utc))
-        rows = db.execute("SELECT ts, label, best_bid, best_ask, reference, our_bid, our_ask FROM snapshots WHERE "
-                          "mode = ? AND ts >= ? AND ts < ?", (mode, lo, hi)).fetchall()
-    finally:
-        db.close()
-    return TiltSlope.bins_from_rows(rows, bin_s, headline, max_spread)
 
 
 def normalise(fvs):
@@ -4431,7 +4118,6 @@ class Bot:
         self.alloc_init(self.load_status_key("alloc"))   # Package 10 B: the allocator (last run, turnover)
         self.mmf_init(self.load_status_key("mm_funding"))   # P14: MM inventory lots, alert state (status.json)
         self.p15_init()                                     # P15: the harvest ladder, the state cap (this run)
-        self.mom_init(self.load_status_key("momentum"))     # P16: the momentum sleeve (restored from status.json)
         self.pos_marks = {}             # {eid: the exchange's own valuation price of the position (currentPrice)}
         self.fv_fallback_logged = {}      # {eid: source} - which fallback risk_fv used for a held position (logged once)
         self.mark_sd = {}                 # eid -> sd of the 10-min mid change (mark_frag_*; from the recorder)
@@ -5013,23 +4699,9 @@ class Bot:
 
         if self.st_on():                          # P15 state_max_usd: each state's collateral this cycle
             self.st_refresh(inv, now_m)
-        mom_taken = set()
-        # 6a'. P16: the momentum sleeve (trigger, ramp, flips, exits, kill; immediate-or-cancel buys / sales) - FIRST
-        #     among the traders: its round's cash is not spent by this cycle's takes / allocator first (ma_hold: the
-        #     takes' reserve, the allocator's spare-cash pause, the ladder's pause), its funding sales are sold by this
-        #     cycle's alloc_tick, and the takes / allocator then leave its new legs alone
-        if self.running and self.mom_on():
-            try:
-                mom_taken = self.mom_tick(now, inv, mine_real, now_m, skip=set(arb_races))
-            except ApiError:
-                raise                                 # (as the takes: the cycle's own error handling)
-            except Exception:                         # a sleeve bug must never stop the market maker
-                self.orders_stale = True
-                log.exception("momentum tick failed - skipped this cycle")
         # 6b. Take tournament quotes that Polymarket says are clearly stale (confirmed over 2 readings) ---
         taken = (self.take_stale_quotes(refs, liquid, fvs, inv, mine_real, global_reduce, party_delta, now_m)
                  if self.running else set())
-        taken |= mom_taken
         # 6d. Package 10 B: the capital allocator (sell -> cash read -> buy, immediate-or-cancel; see Config)
         if self.running and (cfg.alloc_enabled or self.alloc_pairs or self.alloc_set_races or self.alloc_ladder
                              or (self.api.live and self.sl_orders())):
@@ -5061,8 +4733,6 @@ class Bot:
             self.cg_plan_left, self.cg_capped_now = self.cash_left(), 0
             if self.hv_plans:                     # P15: the quotes leave the ladder the part of its carve-out it
                 self.cg_plan_left = max(0.0, self.cg_plan_left - self.hv_quote_hold())   # still waits to place
-            if getattr(self, "ma_quote_hold", 0.0) > 0:   # P16: and the momentum sleeve the cash it can spend now
-                self.cg_plan_left = max(0.0, self.cg_plan_left - self.ma_quote_hold)
         self.ladder_setup(equity, capital, raw_orders, liquid, party_delta, resting)
         for eid, ex in list(self.ex.items()):
             if not self.running:          # Ctrl+C: stop touching the book immediately
@@ -5709,9 +5379,6 @@ class Bot:
         to buy Democrat YES, which is the hedge. After buying 500 Democrat YES, both are 0.
         """
         eff = {}
-        legs = getattr(self, "mom_legs", None)
-        if legs:                                  # P16 (Package 13 A3): nor the momentum sleeve's
-            inv = {e: inv.get(e, 0.0) - (legs[e]["q"] if e in legs else 0.0) for e in set(inv) | set(legs)}
         for members in self.groups.values():
             for e in members:
                 others = [inv.get(o, 0.0) for o in members if o != e]
@@ -6187,8 +5854,6 @@ class Bot:
         ex.fl_tag, ex.turnover_tag, ex.turnover_dead, ex.bb_tag = "", "", False, ""
         ex.ro_clip = ""
         ex.inv, ex.eff, ex.ref = inv.get(ex.eid, 0.0), eff.get(ex.eid, 0.0), ref
-        if ex.eid in (getattr(self, "mom_legs", None) or ()):   # P16: nor the momentum sleeve's (rule 5)
-            return NO_QUOTE
         hrs = self.hours_to_close(ex)
         if hrs * 60 <= cfg.stop_minutes_before_close:
             return NO_QUOTE                                   # too close to settlement
@@ -7676,8 +7341,6 @@ class Bot:
                               float(order["quantity"]))
         if need <= 1e-9:
             return False
-        if getattr(self, "ma_hold", 0.0) > 0:     # P16: and the momentum sleeve's round, while it has cash to protect
-            reserve += self.ma_hold
         if self.cash_left() + self.hv_carve_used() - need < reserve - 1e-9:   # (P15: the carve-out counts)
             self.take_reserve_blocked = getattr(self, "take_reserve_blocked", 0) + 1
             return True
@@ -8071,8 +7734,7 @@ class Bot:
         for race, members in self.arb_race_order(inv):
             if (len(members) < 2 or not self.running or now_m < self.arb_cooldown.get(race, 0)
                     or race in getattr(self, "pair_owed", ())  # Package 7: its owed legs are evened up first
-                    or any(busy(self.ex[e], now_m) for e in members)
-                    or any(e in (getattr(self, "mom_legs", None) or ()) for e in members)):   # (P16: nor a sleeve's)
+                    or any(busy(self.ex[e], now_m) for e in members)):
                 continue
             # pre-close window: arbitrage would open positions the per-market flatten then pays to unwind;
             # unwinding a held set only reduces them, so it still runs
@@ -8456,8 +8118,6 @@ class Bot:
                 continue
             st = self.pp.get(race)
             if off and st is None:
-                continue
-            if st is None and any(e in (getattr(self, "mom_legs", None) or ()) for e in members):   # P16: no new slice
                 continue
             if st is not None:
                 x, y, s = st["leg"], st["other"], st["sign"]
@@ -9173,8 +8833,6 @@ class Bot:
                 ex.take_since = now_m                     # new direction (or none): the clock starts again
             ex.take_dir = direction
         for eid, ex in self.ex.items():
-            if eid in (getattr(self, "mom_legs", None) or ()):   # P16: takes never touch a momentum leg
-                continue
             if (not self.running or not ex.take_dir or now_m - ex.take_since < cfg.take_confirm_seconds
                     or now_m < ex.take_until
                     or busy(ex, now_m) or global_reduce
@@ -9413,7 +9071,6 @@ class Bot:
         another feature traded this cycle (skip: exchanges and races), not inside the pre-close window that stops
         takes and arbitrage (close_window: at least the stop window, P10 red team RT-3)."""
         return not (ex.eid in skip or ex.group in skip
-                    or ex.eid in (getattr(self, "mom_legs", None) or ())   # (P16: a momentum leg)
                     or (ex.group in self.cfg.headline_races and not self.cfg.alloc_headline)
                     or self.hours_to_close(ex) <= self.close_window("flatten_hours_before_close"))
 
@@ -9533,7 +9190,7 @@ class Bot:
             age_off = edge is not None and edge > 0
         return inv_for_quote - t, age_off
 
-    def alloc_plan(self, inv, now_m, cash, skip=(), turnover_left=None, refill_only=False, fund_usd=None):
+    def alloc_plan(self, inv, now_m, cash, skip=(), turnover_left=None, refill_only=False):
         """THE PURE PLANNER (no request, no state change but the once-only bloc log): ([pair], {"blocked_by",
         "ev_gain_est"}). pair = {"sell": {"kind": "long" | "short" | "set" | "cash", "eid" / "race", "label", "qty",
         "px", "edge", "usd"}, "buy": None | {"eid", "label", "short", "px", "qty", "edge", "usd"}, "usd", "status"}.
@@ -9542,10 +9199,7 @@ class Bot:
         market, the turnover left and (bloc_delta_enabled) the bloc cap.
         P14 mm_refill_fast: the refills sell the stale MM inventory first (mm_refill_held; its legs carry "mm"),
         then the lowest edge-held, every refill sale at or beyond the value floor (mm_floor_ok); a market a refill
-        IOC sold whose sale the positions read does not show yet is skipped (RT13-3). refill_only: no pairs.
-        P16 fund_usd (the momentum sleeve's funding (c), with refill_only): sales for fund_usd instead of the reserve's
-        deficit, VALUE holdings only (no stale-MM legs, no middle-band market, no NO+NO set, no edge-rich one), each at
-        or beyond the strict value floor (mom_floor_ok); no spare-cash entry, no buy levels."""
+        IOC sold whose sale the positions read does not show yet is skipped (RT13-3). refill_only: no pairs."""
         cfg = self.cfg
         blocked = defaultdict(int)
         pins = self.alloc_pins()
@@ -9562,8 +9216,6 @@ class Bot:
                 blocked["in_flight"] += 1
                 continue
             p = self.alloc_p(ex, now_m)
-            if fund_usd is not None and (p is None or self.mom_is_mm(p)):   # P16: value holdings only
-                continue
             book = self.alloc_fresh_book(ex, now_m)
             if book is None and rank_all:         # P14.1 2: the cached book ranks it (alloc_sell downloads a fresh
                 book = ex.book                    #  one before the sale anyway); None = never downloaded
@@ -9579,14 +9231,13 @@ class Bot:
                 continue
             qty = int(qty + 1e-9)
             rich = edge > cfg.alloc_max_edge_sell + 1e-9   # P14.1 2: a REFILL may sell it, a swap may not
-            if qty >= 1 and (not rich or (rank_all and fund_usd is None)) and qty * unit >= self.ALLOC_MIN_USD:
+            if qty >= 1 and (not rich or rank_all) and qty * unit >= self.ALLOC_MIN_USD:
                 held.append({"kind": "long" if q > 0 else "short", "eid": e, "label": ex.label, "px": px, "edge": edge,
                              "unit": unit, "avail": qty * unit,
                              **({"refill_only": True} if rich else {}),                           # P14.1 2
                              **({"p": p} if swap_m else {}),                                      # P14.2
-                             **({"floor_ok": self.mom_floor_ok(q > 0, px, p)} if fund_usd is not None   # P16
-                                else {"floor_ok": self.mm_floor_ok(q > 0, px, p)} if fast else {})})   # P14
-        if cfg.alloc_set_cost_per_usd > 0 and cfg.pair_unwind_enabled and self.pair_no_unwind_on() and fund_usd is None:
+                             **({"floor_ok": self.mm_floor_ok(q > 0, px, p)} if fast else {})})      # P14
+        if cfg.alloc_set_cost_per_usd > 0 and cfg.pair_unwind_enabled and self.pair_no_unwind_on():
             for race, members in sorted(self.groups.items()):
                 if len(members) < 2 or any(m not in self.ex for m in members):
                     continue
@@ -9611,11 +9262,9 @@ class Bot:
                     held.append({"kind": "set", "race": race, "label": f"{race} NO+NO set", "px": sum(asks),
                                  "edge": max(0.0, cpu), "unit": free, "avail": n * free, "members": list(members)})
         spare = cash - cfg.alloc_mm_reserve
-        if getattr(self, "ma_hold", 0.0) > 0:     # P16: the momentum sleeve's open shortfall goes first
-            spare -= self.ma_hold
-        if spare >= self.ALLOC_MIN_USD and fund_usd is None:
+        if spare >= self.ALLOC_MIN_USD:
             held.append({"kind": "cash", "label": "spare cash", "px": 1.0, "edge": 0.0, "unit": 1.0, "avail": spare})
-        if fast and fund_usd is None:             # P14 2: the stale MM inventory is sold first (its value entry out)
+        if fast:                                  # P14 2: the stale MM inventory is sold first (its value entry out)
             mm = self.mm_refill_held(inv, now_m, skip, pins, blocked)
             mm_e = {h["eid"] for h in mm}
             held = mm + [h for h in held if h.get("eid") not in mm_e]
@@ -9625,8 +9274,7 @@ class Bot:
         room = {}
         # P14.1 4: a refill plan while cash is below half the target does not scan buy levels at all (nothing it
         # plans has a buy): the L2 prefer-short count and the pause count then stay out of the refill's blocked_by.
-        no_levels = ((refill_only and self.p141("alloc_refill_ignore_prefer_short") and self.mm_cash_low())
-                     or fund_usd is not None)     # (P16: a funding plan has no buy either)
+        no_levels = refill_only and self.p141("alloc_refill_ignore_prefer_short") and self.mm_cash_low()
         no_buy = ({} if no_levels or not getattr(cfg, "alloc_prefer_short", False)
                   else self.alloc_prefer_short_legs(inv, now_m, skip))
         for e, ex in sorted(self.ex.items()):
@@ -9697,7 +9345,7 @@ class Bot:
             if b is not None:
                 inv_[b["eid"]] = inv_.get(b["eid"], 0.0) + sign * (-b["qty"] if b["short"] else b["qty"])
         # B2: refill the reserve first (sales with no buy; the bloc check as the pairs', red team RT-5)
-        deficit = cfg.alloc_mm_reserve - cash if fund_usd is None else fund_usd   # (P16: the sleeve's shortfall)
+        deficit = cfg.alloc_mm_reserve - cash
         hi = 0
         bloc = bloc_fn(hyp) if bloc_fn is not None else 0.0
         while deficit >= self.ALLOC_MIN_USD and hi < len(held) and left >= self.ALLOC_MIN_USD:
@@ -9954,13 +9602,11 @@ class Bot:
         for pr in self.alloc_pairs:
             if pr["status"] != "pending":
                 continue
-            if self.alloc_sells_stopped and not ((pr.get("fast")      # P14.1 2: a paired level gone stops the PAIRED
-                                                  and self.p141("alloc_rank_all_markets"))   # sales, not the refills
-                                                 or pr.get("fund")):   # (P16: nor the sleeve's funding sales)
+            if self.alloc_sells_stopped and not (pr.get("fast")       # P14.1 2: a paired level gone stops the PAIRED
+                                                 and self.p141("alloc_rank_all_markets")):   # sales, not the refills
                 pr["status"] = "skipped"
                 continue
-            if now_m - pr.get("planned_at", now_m) > (self.MM_FAST_EXPIRE if pr.get("fast") or pr.get("fund")
-                                                      else cfg.alloc_interval_s):
+            if now_m - pr.get("planned_at", now_m) > (self.MM_FAST_EXPIRE if pr.get("fast") else cfg.alloc_interval_s):
                 pr["status"] = "expired"          # a sale still not sent after a whole interval: re-planned afresh
                 continue
             if pr["sell"]["kind"] != "set" and n_left < 1:
@@ -10026,9 +9672,6 @@ class Bot:
             return False
         if pr.get("netting") and not self.alloc_buy_room_ok(b, q, inv, pr):   # P14.1 5: re-checked before the buy
             return False
-        if getattr(self, "ma_hold", 0.0) > 0 and (pr.get("sold_at") or 0.0) < -1e17:
-            self.alloc_block("momentum")          # (P16: a spare-cash buy pauses while the sleeve's round is open with
-            return False                          #  a shortfall: the sleeve's cash is not re-spent)
         # P14.1 5: a netted swap's buy may spend the proceeds of its OWN sale even below the reserve (the cash the MM
         # reserve held before that sale is never touched); every other buy keeps to the cash above alloc_mm_reserve.
         avail = self.cash_left() + self.hv_carve_used() - cfg.alloc_mm_reserve   # (P15: the ladder's carve-out
@@ -10216,12 +9859,6 @@ class Bot:
                 self.alloc_block(why[0])
                 log.info("ALLOC %s not sold (swap): %s", s["label"], why[1])
                 return False
-        if pr.get("fund") and not self.mom_floor_ok(s["kind"] == "long", best, p):   # P16: the sleeve's funding
-            pr["status"] = "gone"                                                     #  sale: the floor, always
-            self.alloc_block("floor")
-            log.info("MOMENTUM funding: %s not sold - %.3f is beyond the value floor (p %.3f, margin %.3f)", s["label"],
-                     best, p, cfg.value_sell_margin)
-            return False
         if fast and b is None and not self.mm_floor_ok(s["kind"] == "long", best, p):   # P14 2: refills >= floor
             pr["status"] = "gone"
             self.alloc_block("floor")
@@ -10266,14 +9903,11 @@ class Bot:
         self.alloc_totals["sold_total"] += usd
         log.warning("ALLOC sold %s %.0f @ %.3f (edge-held %.1f%%, $%.0f freed)%s", s["label"], done, best, 100 * edge,
                     usd, f" -> buy {b['label']} after the next cash read" if b else
-                    " (momentum funding)" if pr.get("fund") else " (reserve refill)")
-        if pr.get("fund"):                        # P16: the proceeds are earmarked for the sleeve
-            self.ma_fund_sold(pr, s, done, best, p, usd)
+                    " (reserve refill)")
         if self.p141("alloc_cancel_mm_first"):    # P14.1 1: the sale cancelled our quotes there (alloc_send) - the
             self.mmf_hold[s["eid"]] = now_m       #  REDUCING side stays off until the positions read shows the sale
         gave = done * ((p - best) if s["kind"] == "long" else (best - p))   # P14.1 7: EV given up (< 0: above p)
-        self.p141_log("swap_sell" if b is not None else "mom_fund" if pr.get("fund") else "refill", usd, real=-gave,
-                      now_w=now_w)
+        self.p141_log("swap_sell" if b is not None else "refill", usd, real=-gave, now_w=now_w)
         if pr.get("swap") is not None:            # P14.2: the sale as traded (realised at p)
             self.swap_sold(pr["swap"], done, best, p, usd)
         if fast or self.p141("alloc_cancel_mm_first"):   # P14: not planned / sold again until the read shows it
@@ -10615,9 +10249,8 @@ class Bot:
         """$ of free cash the quotes' plan budget leaves to the ladder this cycle: what this cycle's ladder plans lock,
         up to harvest_total_usd, less what its levels already lock (the carve-out is the ladder's: the MM keeps the
         rest of the reserve, never the ladder's part). 0 while the ladder plans nothing more (off, paused, capped)."""
-        if (not getattr(self.cfg, "tilt_harvest_ladder", False) or not self.hv_plans
-                or getattr(self, "ma_hold", 0.0) > 0):
-            return 0.0                            # (P16: no new levels while the sleeve's round is short)
+        if not getattr(self.cfg, "tilt_harvest_ladder", False) or not self.hv_plans:
+            return 0.0
         want = min(float(self.cfg.harvest_total_usd), sum(pl["carve"] for pl in self.hv_plans.values()))
         return max(0.0, want - self.hv_resting_lock())
 
@@ -10783,15 +10416,10 @@ class Bot:
         offs = sorted({round(float(x), 3) for x in (cfg.harvest_offsets or ())})[:LADDER_MAX_LEVELS]
         on = bool(cfg.tilt_harvest_ladder) and bool(offs) and not self.global_reduce
         sl = {o.eid for o in self.sl_orders()}
-        mom_races = ({self.ex[m].group for m in getattr(self, "ma_cand_raw", ()) if m in self.ex}   # (P16: a round's
-                     if getattr(self, "ma_hold", 0.0) > 0 else set())                             #  candidates' races,
-        mom_races |= {self.ex[m].group for m in (getattr(self, "mom_legs", None) or ()) if m in self.ex}   # the legs')
         cands = []
         for e, ex in sorted(self.ex.items()):
             if not on:
                 why[e] = "reduce-only" if self.global_reduce and cfg.tilt_harvest_ladder else "off"
-            elif ex.group in mom_races:           # P16: a sleeve leg's race (rule 5 both ways) / a round's candidates
-                why[e] = "momentum"
             elif ex.group in cfg.headline_races and not cfg.alloc_headline:
                 why[e] = "headline"
             elif e in sl:
@@ -10972,10 +10600,7 @@ class Bot:
         send = []
         tol = self.HV_TOL + 1e-9
         locked = self.hv_resting_lock()           # (the carve-out: what our resting levels lock now)
-        # P16: while the momentum sleeve's round is short, no NEW levels and no re-quotes (the resting ones stay)
-        self.hv_mom_paused = getattr(self, "ma_hold", 0.0) > 0
-        for e, plan in (sorted(plans.items(), key=lambda kv: (-kv[1]["edge"], kv[0]))
-                        if not self.hv_mom_paused else ()):
+        for e, plan in sorted(plans.items(), key=lambda kv: (-kv[1]["edge"], kv[0])):
             ex = self.ex[e]
             tg = list(plan["levels"])
             cur = self.hv_orders(e)
@@ -11153,7 +10778,6 @@ class Bot:
                 "planned_markets": len(self.hv_plans),
                 "planned_levels": sum(len(pl["levels"]) for pl in self.hv_plans.values()),
                 "planned_collateral": round(sum(pl["carve"] for pl in self.hv_plans.values()), 2),
-                **({"paused_for_momentum": True} if getattr(self, "hv_mom_paused", False) else {}),   # (P16)
                 **{k: int(v) for k, v in self.hv_totals.items()}}
 
     def hv_note_fills(self, new):
@@ -11196,1118 +10820,6 @@ class Bot:
             return " | ".join(parts)
         except (TypeError, ValueError, AttributeError) as e:
             log.warning("summary P15 part failed: %s", e)
-            return ""
-
-    # ------------------------------------------------------------------------------ P16: the armed momentum sleeve
-    # Package 13 A's sleeve (1fdd467) and Package 13 C's automation, ported onto Package 15 (Config "P16"). The
-    # sleeve's state (persisted in status.json "momentum"): off -> active (momentum_enabled, or legs held) -> exiting
-    # (manual / date / automatic flip) / killed (the kill) -> exited. The automation's state ("auto"): off -> armed
-    # (momentum_auto) -> on (the trigger held momentum_confirm_h; ALERT) -> flipped (slope_24h <= 0, the profit
-    # target, the date, the manual exit; ALERT) / killed (its own alert). flipped -> armed after momentum_rearm_h of a
-    # fresh trigger once the exit is done (0 = never); killed -> armed only by momentum_enabled false then true.
-    MOMENTUM_KEYS = ("momentum",)  # status.json key P16 adds (absent while unused; identity checks skip it)
-    MOM_KILL_SECONDS = 120.0      # the sleeve's mark below mom_kill_frac x cost this long (s) -> killed
-    MOM_STATES = ("off", "active", "exiting", "exited", "killed")   # (order notes _mom / _mom_exit: WIRE_PRIVATE)
-    MA_STATES = ("off", "armed", "on", "flipped", "killed")
-    MA_LOG_SECONDS = 600.0        # a "MOMENTUM eval" journal line at most this often (and at every change)
-    MA_PT_SECONDS = 120.0         # the profit target must hold this long (as the kill: one glitchy mid never flips)
-    MA_SLOPE_6H = 6.0             # slope_6h's look-back (hours)
-    MA_FUND_REPLAN_S = 600.0      # funding (c): a new sale plan at most this often (s)
-    MA_FUND_REFUSED_S = 3600.0    # ...a market whose funding sale was refused is not planned again for this long (s)
-
-    def mom_init(self, mom=None):
-        """P16 state, restored from status.json "momentum": the sleeve's legs with their cost basis ($ paid), its
-        state (and the exit's start), the kill latch and its reset, the totals; then the automation (mom_auto_init)."""
-        mom = mom if isinstance(mom, dict) else {}
-
-        def num(x, default=None):
-            return float(x) if isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) else default
-        self.mom_legs = {}                        # eid -> {"q": signed YES shares the sleeve holds, "cost": $ paid}
-        for e, v in (mom.get("leg_state") if isinstance(mom.get("leg_state"), dict) else {}).items():
-            q, c = (num(v.get("q")), num(v.get("cost"))) if isinstance(v, dict) else (None, None)
-            if q is not None and abs(q) >= 1 and c is not None and c >= 0:
-                self.mom_legs[str(e)] = {"q": q, "cost": c}
-        st = mom.get("state")
-        self.mom_state = st if st in self.MOM_STATES else ("active" if self.mom_legs else "off")
-        self.mom_exit_wall = num(mom.get("exit_started_wall"))   # wall time the exit (manual / flip / kill) started
-        self.mom_exit_start = {str(e): num(q) for e, q in (mom.get("exit_start") or {}).items()
-                               if num(q) is not None} if isinstance(mom.get("exit_start"), dict) else {}
-        self.mom_reset_armed = bool(mom.get("reset_armed", False))   # killed / exited, then momentum_enabled false
-        en = mom.get("enabled_seen")
-        self.mom_enabled_seen = en if isinstance(en, bool) else None
-        self.mom_kill_alerted = bool(mom.get("kill_alerted", False))
-        self.mom_below_since = None               # wall time the mark first fell below the kill level (this run)
-        self.mom_last_trade = {}                  # eid -> wall time the sleeve last traded there (this run; RT13-3)
-        self.mom_totals = {k: num(mom.get(k), 0.0) for k in ("bought_usd", "sold_usd", "buys", "sells")}
-        self.mom_info = {}                        # the latest figures (status.json "momentum")
-        self.mom_target_usd = None                # this cycle's sleeve target ($ at cost)
-        self.mom_auto_init(mom)
-        if self.mom_legs or self.mom_state != "off":
-            log.warning("momentum sleeve restored: %s, %d legs, cost %.0f", self.mom_state, len(self.mom_legs),
-                        sum(v["cost"] for v in self.mom_legs.values()))
-
-    def mom_auto_init(self, mom=None):
-        """The automation's state, restored from status.json "momentum" (its "auto" and "slope" parts)."""
-        mom = mom if isinstance(mom, dict) else {}
-        a = mom.get("auto") if isinstance(mom.get("auto"), dict) else {}
-
-        def num(x, default=None):
-            return float(x) if isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) else default
-        st = a.get("state")
-        self.ma = {"state": st if st in self.MA_STATES else "off", "reason": str(a.get("reason") or ""),
-                   "target_usd": num(a.get("target_usd"), 0.0), "steps": int(num(a.get("steps"), 0.0)),
-                   **{k: num(a.get(k)) for k in ("confirm_since", "on_since", "last_step_at", "rise_since",
-                                                 "flipped_at", "rearm_since")}}
-        f = a.get("funded_from") if isinstance(a.get("funded_from"), dict) else {}
-        self.ma_funded = {k: num(f.get(k), 0.0) for k in ("cash", "reserve", "value_sales", "value_sales_spent")}
-        self.ma_ev_given_up = num(a.get("ev_given_up"), 0.0)   # sum over funding sales of shares x (p - price)
-        self.ma_pool = num(a.get("pool"), 0.0)    # funding-sale proceeds the sleeve has not spent yet
-        self.ma_unseen = deque()                  # (monotonic, $) funding-sale proceeds no cash read shows yet (run)
-        self.ma_fund_prs = []                     # the funding sales planned (allocator refill pairs; this run)
-        self.ma_fund_at = -1e18                   # wall time of the last funding plan (MA_FUND_REPLAN_S)
-        self.ma_fund_refused = {}                 # eid -> wall time a funding sale there was refused (floor, ...)
-        self.ma_hold = 0.0                        # $ the allocator's spare cash / the ladder leave alone (ma_hold_step)
-        self.ma_short = 0.0                       # the open round's shortfall ($)
-        self.ma_quote_hold = 0.0                  # free cash the quotes' plan budget leaves to the sleeve
-        self.ma_cand_raw = set()                  # this cycle's momentum candidates before rule 5 (hold, ladder)
-        self.ma_cands = 0
-        self.ma_s24 = self.ma_s6 = None           # this cycle's slopes (points a day)
-        self.ma_pt_since = None                   # wall time the mark first reached the profit target (this run)
-        self.ma_last_log, self.ma_logged_key = -1e18, None
-        self.ma_seed = None                       # the cold-start seeding from the recorder (see ts_seed_step)
-        self.tslope = TiltSlope.from_dict(mom.get("slope"), 3600.0 * getattr(self.cfg, "momentum_slope_bin_h", 4.0))
-        if self.ma["state"] != "off" or self.tslope.bins:
-            log.warning("momentum automation restored: %s, target %.0f, %d tilt bins (%s)", self.ma["state"],
-                        self.ma["target_usd"], len(self.tslope.bins), self.tslope.source)
-
-    def mom_on(self):
-        """Cycle step 6c' runs: a sleeve flag on, or state left to manage."""
-        cfg = self.cfg
-        return bool(getattr(cfg, "momentum_enabled", False) or getattr(cfg, "momentum_auto", False)
-                    or getattr(cfg, "momentum_force", False) or self.mom_legs or self.mom_state != "off"
-                    or self.ma["state"] != "off")
-
-    def mom_persist_needed(self):
-        return (bool(self.mom_legs) or self.mom_state != "off" or bool(self.mom_info) or self.mom_reset_armed
-                or self.ma["state"] != "off")
-
-    def ma_tracking(self):
-        """The tilt slope series is kept (and status.json "momentum" carries the automation's fields)."""
-        cfg = self.cfg
-        return bool(getattr(cfg, "momentum_auto", False) or getattr(cfg, "momentum_force", False)
-                    or getattr(cfg, "momentum_enabled", False))
-
-    # --- classification: which markets are momentum longs ---
-    def mom_classify(self, inv, now_m):
-        """THE PURE CLASSIFIER (Package 13 A answer 2): {eid: {"bucket": "value" | "momentum" | "mm" | "none", "dir":
-        "short" | "long" | None, "p", "edge"}} for every market with a fresh liquid p (alloc_p) and a fresh book.
-        Longshots (p <= mom_max_p): edge per $ of a SHORT = (ask - p) / (1 - ask); p <= value_extreme_p or that edge
-        >= value_min_edge -> VALUE short; else MOMENTUM long. Favourites (p >= 1 - mom_max_p): (p - ask) / ask >=
-        value_min_edge_fav -> VALUE long, else "none". The middle: "mm". A sleeve leg is MOMENTUM whatever its
-        numbers; a momentum candidate holding a position outside the sleeve is VALUE (never bought over)."""
-        cfg, out = self.cfg, {}
-        legs = self.mom_legs
-        for e, ex in self.ex.items():
-            p, book = self.alloc_p(ex, now_m), self.alloc_fresh_book(ex, now_m)
-            if p is None or book is None:
-                if e in legs:
-                    out[e] = {"bucket": "momentum", "dir": "long" if legs[e]["q"] > 0 else "short", "p": p,
-                              "edge": None}
-                continue
-            ask = book["asks"][0]["price"] if book.get("asks") else None
-            if p <= cfg.mom_max_p + 1e-12:
-                edge = (ask - p) / max(1 - ask, TICK) if ask is not None else None
-                if p <= cfg.value_extreme_p + 1e-12 or (edge is not None and edge >= cfg.value_min_edge - 1e-9):
-                    c = {"bucket": "value", "dir": "short"}
-                elif edge is not None:
-                    c = {"bucket": "momentum", "dir": "long"}
-                else:
-                    c = {"bucket": "none", "dir": None}
-            elif p >= 1 - cfg.mom_max_p - 1e-12:
-                edge = (p - ask) / ask if ask is not None and ask > 0 else None
-                c = ({"bucket": "value", "dir": "long"} if edge is not None and edge >= cfg.value_min_edge_fav - 1e-9
-                     else {"bucket": "none", "dir": None})
-            else:
-                edge, c = None, {"bucket": "mm", "dir": None}
-            q, leg = float(inv.get(e, 0.0)), legs.get(e)
-            if leg is not None:
-                c = {"bucket": "momentum", "dir": "long" if leg["q"] > 0 else "short"}
-            elif c["bucket"] == "momentum" and abs(q) >= 1:
-                c = {"bucket": "value", "dir": "long" if q > 0 else "short"}
-            out[e] = {**c, "p": p, "edge": edge}
-        return out
-
-    def mom_is_mm(self, p):
-        """The middle band (mom_max_p < p < 1 - mom_max_p): market-making inventory, never sold to fund the sleeve."""
-        return self.cfg.mom_max_p < p < 1 - self.cfg.mom_max_p
-
-    # --- the orders: immediate-or-cancel takers ---
-    def p13_floor_blocks(self, order, p, q):
-        """Package 10 A1's value floor for an immediate-or-cancel order that SELLS a held position (value_mode on, p
-        known; q = the position): a long sold below p - value_sell_margin, a short bought back above p + margin ->
-        True (refused). An order that adds (a momentum buy, _mom) is not a sale: never blocked. The momentum exit
-        (_mom_exit: momentum positions, bought above p) is EXEMPT. (The funding sales go through alloc_sell, which
-        keeps the floor with no exemption: mom_floor_ok.)"""
-        if p is None or not getattr(self.cfg, "value_mode", False) or order.get("_mom_exit"):
-            return False
-        m = self.cfg.value_sell_margin
-        if order["action"] == "sell" and q >= 1:
-            return order["price"] < p - m - 1e-9
-        if order["action"] == "buy" and q <= -1:
-            return order["price"] > p + m + 1e-9
-        return False
-
-    def mom_floor_ok(self, long, px, p):
-        """A funding sale at px at or beyond the value floor: a long's >= p - value_sell_margin, a short's buy-back
-        <= p + margin (no exemption, no relaxation)."""
-        m = self.cfg.value_sell_margin
-        return px >= p - m - 1e-9 if long else px <= p + m + 1e-9
-
-    def p13_send(self, ex, order, now_m, what, tag, q=0.0):
-        """One immediate-or-cancel sleeve order (as alloc_send): the value floor (p13_floor_blocks), the cash gate's
-        pre-check, our orders on ex cancelled first (refused if that cannot be confirmed: never a price crossing our
-        own order), the order (alive take_order_ttl), its leftover cancelled at once, its note tagged `tag`
-        ("momentum": its own fill class). Returns the shares traded (0 if refused), or None if not sent. Dry run:
-        logged, nothing sent (None)."""
-        cfg, e = self.cfg, ex.eid
-        if self.p13_floor_blocks(order, self.alloc_p(ex, now_m), q):
-            log.info("MOMENTUM %s %s refused: below the value floor", what, ex.label)
-            return None
-        if not self.api.live:
-            log.info("[dry] MOMENTUM %s %s %d @ %.3f", what, ex.label, order["quantity"], order["price"])
-            return None
-        if self.cash_gate_blocks([order]):
-            self.cash_gate_log(e, "MOMENTUM %s %s skipped: not enough available cash (cash gate)", what, ex.label)
-            return None
-        if not self.cancel(e, [], whole_exchange=True):
-            log.warning("MOMENTUM %s %s skipped: could not confirm our own orders there are cancelled", what, ex.label)
-            return None
-        self.orders_stale = True
-        try:
-            results = self.place_orders([order])
-        except ApiError as err:
-            if err.code == "WRITE_BUDGET_WAIT":
-                return None
-            ex.pending_until = now_m + cfg.pending_seconds
-            alert(f"momentum sleeve order on {ex.label} failed ({err}) - check positions")
-            if err.code in FATAL_API_CODES:
-                fatal(f"orders rejected with {err.code}")
-            return None
-        res = results[0] if results else {}
-        data = res.get("data") or {}
-        if res.get("ok"):
-            self.remember_order(order, data, now_m)
-        self.cancel(e, [], whole_exchange=True, quiet=True)     # the leftover, at once
-        if data.get("orderId") is not None:
-            self.order_meta[data["orderId"]] = {"our_side": "bid" if order["action"] == "buy" else "ask",
-                                                "price": order["price"], "take": True, tag: True, "eid": e,
-                                                "t": time.time(),
-                                                **({"no_sell": True} if order.get("_no_sell") else {}),
-                                                **({"mom_exit": True} if order.get("_mom_exit") else {})}
-            self.notes_dirty = True
-        if not res.get("ok"):
-            log.info("MOMENTUM %s %s refused: %s", what, ex.label, (data.get("error") or {}).get("message", "?"))
-            return 0.0
-        return float(data.get("quantityTraded") or 0)
-
-    def p13_ioc(self, ex, buy, qty, price, inv_q):
-        """An immediate-or-cancel order in YES terms (buy / sell YES at price); a buy-back of NO held goes out as a
-        covered "sell NO" when that is in effect (no_sell_order)."""
-        order = {"exchangeId": ex.eid, "side": "yes", "action": "buy" if buy else "sell", "quantity": int(qty),
-                 "price": round(price, 3), "tournamentId": self.tid,
-                 "expirationDate": iso(utcnow() + timedelta(seconds=self.cfg.take_order_ttl))}
-        if buy and inv_q <= -1:
-            order = self.no_sell_order(order, inv_q)
-        return order
-
-    def p13_own_ioc_resting(self, eid):
-        """A sleeve order of ours still listed as resting on eid (its leftover cancel not confirmed): no new order
-        there until it is gone (never two)."""
-        meta = self.order_meta
-        return any(o.eid == eid and (meta.get(o.order_id) or {}).get("momentum")
-                   for o in list(self.my_orders.values()))
-
-    # --- the sleeve ---
-    def mom_exit_time(self):
-        """mom_exit_utc as an aware datetime, or None ("" = none; an invalid value is refused by validate_overrides,
-        and ignored here)."""
-        v = getattr(self.cfg, "mom_exit_utc", "")
-        if not isinstance(v, str) or not v.strip():
-            return None
-        dt, (lo_s, hi_s) = parse_utc_setting(v), OVERRIDABLE["mom_exit_utc"]
-        return dt if dt is not None and parse_utc_setting(lo_s) <= dt <= parse_utc_setting(hi_s) else None
-
-    def mom_mark(self, e, leg):
-        """A leg's value at the MARK: its shares at the mid of the cached book (our own orders stripped; YES at mid,
-        NO at 1 - mid), else the last fair value, else its cost."""
-        ex = self.ex.get(e)
-        b = (ex.book if ex is not None else None) or {}
-        if b.get("bids") and b.get("asks"):
-            m = (b["bids"][0]["price"] + b["asks"][0]["price"]) / 2
-        elif ex is not None and ex.last_fv is not None:
-            m = ex.last_fv
-        else:
-            return leg["cost"]
-        return self.alloc_held_usd(leg["q"], m)
-
-    def mom_outcome(self, e, leg, now_m=None):
-        """A leg's value at the outcome probability p (alloc_p; else its mark)."""
-        ex = self.ex.get(e)
-        p = self.alloc_p(ex, now_m) if ex is not None else None
-        return self.alloc_held_usd(leg["q"], p) if p is not None else self.mom_mark(e, leg)
-
-    def mom_cost(self):
-        return sum(v["cost"] for v in self.mom_legs.values())
-
-    def mom_reconcile(self, inv):
-        """A leg follows the position: gone (flat / flipped) -> dropped; smaller -> its shares and cost shrink in
-        proportion (a fill elsewhere, a settlement); a bigger position keeps the leg (the rest is not the sleeve's).
-        P13 RT13-3: a leg the sleeve traded within MOM_TRADE_GRACE (120 s) is left alone (the positions read may
-        lag the trade, or be the last good read on a 409: dropping the leg there re-bought it as a new one)."""
-        now_w = time.time()
-        for e in list(self.mom_legs):
-            if now_w - self.mom_last_trade.get(e, -1e18) < self.MOM_TRADE_GRACE:
-                continue
-            leg, q = self.mom_legs[e], float(inv.get(e, 0.0))
-            if abs(q) < 1 or (q > 0) != (leg["q"] > 0):
-                log.warning("MOMENTUM leg %s gone (position %+.0f, leg %+.0f)", self.ex[e].label if e in self.ex else e,
-                            q, leg["q"])
-                self.mom_legs.pop(e)
-            elif abs(q) < abs(leg["q"]) - 1e-9:
-                leg["cost"] *= abs(q) / abs(leg["q"])
-                leg["q"] = q
-
-    MOM_TRADE_GRACE = 120.0            # a leg traded this recently is not cut to a (maybe lagging) positions read
-
-    def mom_market_ok(self, ex, skip=(), headline_ok=False):
-        """A market the sleeve may buy in (alloc_market_ok's rules, its own legs allowed): not traded
-        by another feature this cycle (skip), not headline unless headline_ok (mom_headline), not inside the pre-close
-        window that stops takes (close_window)."""
-        return not (ex.eid in skip or ex.group in skip
-                    or (ex.group in self.cfg.headline_races and not headline_ok)
-                    or self.hours_to_close(ex) <= self.close_window("flatten_hours_before_close"))
-
-    def mom_candidates(self, inv, cls, now_m, skip=()):
-        """THE PURE MOMENTUM PICKER: [{"eid", "label", "buy" (True = buy YES at the best ask; False = sell YES at the
-        best bid, i.e. buy NO: the favourite-NO route), "px", "depth", "unit" ($ per share), "gap"}] smallest gap
-        (ask - p of the longshot: the tilt has the most room to grow) first. A 2-leg race takes the favourite's NO
-        instead when 1 - its best bid < the longshot's best ask. Never: a headline race (unless mom_headline),
-        a market another feature traded this cycle or inside the pre-close window, a market holding a
-        position outside the sleeve, the opposite side of a position, a market with our P12 set ladder resting, a
-        level with fewer than mom_min_depth shares, more than mom_max_markets sleeve markets; rule 5: a market where a
-        sale of ours rests / is planned (mom_sell_planned). Leaves ma_cand_raw: the picks before rule 5 (the cash
-        hold and the ladder's yielding read it)."""
-        cfg, out = self.cfg, []
-        legs = self.mom_legs
-        self.ma_cand_raw = set()
-        for e, c in sorted(cls.items()):
-            if c["bucket"] != "momentum" or c["dir"] != "long" or e in legs and legs[e]["q"] < 0:
-                continue
-            ex = self.ex.get(e)
-            if ex is None:
-                continue
-            members = self.groups.get(ex.group) or [e]
-            fav = None
-            if len(members) == 2:
-                o = members[0] if members[1] == e else members[1]
-                if float(inv.get(o, 0.0)) >= 1 and o not in legs:
-                    continue                          # long the favourite = short this longshot: opposite side
-                fav = self.ex.get(o)
-            if float(inv.get(e, 0.0)) <= -1:
-                continue                              # a short here: opposite side (a value short is never closed)
-            book = self.alloc_fresh_book(ex, now_m)
-            ask = (book or {}).get("asks") or []
-            if not ask or c["p"] is None:
-                continue
-            gap = ask[0]["price"] - c["p"]
-            pick = {"eid": e, "label": ex.label, "buy": True, "px": ask[0]["price"], "depth": ask[0]["quantity"],
-                    "unit": ask[0]["price"], "gap": gap}
-            if fav is not None and fav.eid not in cls or fav is not None and cls[fav.eid]["bucket"] != "value":
-                fb = self.alloc_fresh_book(fav, now_m)
-                bid = (fb or {}).get("bids") or []
-                fq = float(inv.get(fav.eid, 0.0))
-                fleg = legs.get(fav.eid)
-                if (bid and 1 - bid[0]["price"] < pick["unit"] - 1e-9 and fq < 1
-                        and (abs(fq) < 1 or (fleg is not None and abs(fq - fleg["q"]) < 1))):
-                    pick = {"eid": fav.eid, "label": fav.label, "buy": False, "px": bid[0]["price"],
-                            "depth": bid[0]["quantity"], "unit": 1 - bid[0]["price"], "gap": gap}
-            x = self.ex[pick["eid"]]
-            q, leg = float(inv.get(x.eid, 0.0)), legs.get(x.eid)
-            if (not self.mom_market_ok(x, skip, cfg.mom_headline) or abs(q - (leg["q"] if leg else 0.0)) >= 1
-                    or pick["depth"] < cfg.mom_min_depth
-                    or self.sl_orders(x.eid) or (leg is None and len(legs) >= cfg.mom_max_markets)):
-                continue
-            self.ma_cand_raw.add(x.eid)
-            why = self.mom_sell_planned(x)        # (rule 5: never buy where we rest / plan a sale)
-            if why is not None:
-                log.debug("MOMENTUM %s not bought: a sale of ours rests / is planned there (%s)", x.label, why)
-                continue
-            out.append(pick)
-        out.sort(key=lambda r: (r["gap"], r["eid"]))
-        return out
-
-    def mom_sell_planned(self, ex):
-        """Rule 5 (no fake buying): why the sleeve may NOT buy ex - a market (or a race) where we rest or plan a SALE:
-        harvest levels resting / planned anywhere in its race, an allocator sale (refill, swap, momentum funding)
-        pending there, or a resting order of ours there from another feature. None = may buy. (Our plain quotes there
-        are cancelled before the buy - p13_send - and a sleeve market is never quoted after.)"""
-        race = self.groups.get(ex.group) or [ex.eid]
-        hv, hp = getattr(self, "hv_sides", None) or {}, getattr(self, "hv_plans", None) or {}
-        if any(m in hv or m in hp for m in race):
-            return "harvest"
-        if any(pr.get("status") == "pending" and (pr.get("sell") or {}).get("eid") == ex.eid
-               for pr in (getattr(self, "alloc_pairs", None) or ())):
-            return "allocator"
-        if self.api.live:
-            for o in list(self.my_orders.values()):
-                m = self.order_meta.get(o.order_id) or {}
-                if o.eid in race and any(m.get(k) for k in ("harvest", "set_ladder", "alloc", "arb")):
-                    return "resting"
-        return None
-
-    def mom_room(self, ex, q, p, val):
-        """Shares the market's collateral cap still allows a sleeve buy, at val $ a share: alloc_max_contract_usd (the
-        per-market $ cap value buys and the ladder keep) less the position at p (the sleeve's legs included). Our
-        orders there are cancelled before the buy (p13_send), so they do not count."""
-        room = self.cfg.alloc_max_contract_usd - self.alloc_held_usd(q, p)
-        return max(0.0, room) / max(val, TICK)
-
-    def mom_buy_step(self, inv, mine_real, now_m, now_w, skip, cls, n_left):
-        """Buy the sleeve toward its target (mom_buy_target, at cost), largest sizes the caps permit: min(the touch
-        level's shares, the market's collateral cap (mom_room), the state cap (st_add_room), the target left, the
-        cash the funding order allows (ma_cash_avail)) as IOC takers through the cash gate. Returns (exchanges
-        traded, orders left)."""
-        cfg, traded = self.cfg, set()
-        if not self.last_equity:
-            return traded, n_left
-        target = self.mom_buy_target()
-        if target is None:
-            return traded, n_left
-        self.mom_target_usd = target
-        left = target - self.mom_cost()
-        if left < self.ALLOC_MIN_USD or getattr(self, "global_reduce", False):   # (reduce-only: no adding)
-            return traded, n_left
-        if not self.api.live:                     # dry run: the picks logged once per alloc_interval_s, nothing sent
-            if now_w - getattr(self, "mom_dry_at", -1e18) < cfg.alloc_interval_s:
-                return traded, n_left
-            self.mom_dry_at = now_w
-        elif not (self.cash_gate_on() and getattr(self, "cg_cash", None) is not None):
-            return traded, n_left                 # (live: no buy without the cash gate and a cash read)
-        cands = self.mom_candidates(inv, cls, now_m, skip)
-        self.ma_cands = len(self.ma_cand_raw)
-        for c in cands:
-            if n_left < 1 or left < self.ALLOC_MIN_USD:
-                break
-            ex = self.ex[c["eid"]]
-            if busy(ex, now_m) or self.p13_own_ioc_resting(ex.eid) or ex.eid in traded:
-                continue
-            if ex.eid not in self.mom_legs and len(self.mom_legs) >= cfg.mom_max_markets:
-                continue                              # (mom_max_markets: legs bought earlier this tick count)
-            if not self.writes_ready(3):
-                break
-            cash = self.ma_cash_avail() if self.api.live else left   # (funding (a) / (b))
-            if cash < c["unit"]:
-                break
-            book = self.alloc_download(ex, mine_real) if self.api.live else self.alloc_fresh_book(ex, now_m)
-            key = "asks" if c["buy"] else "bids"
-            lv = (book or {}).get(key) or []
-            if (not lv or abs(lv[0]["price"] - c["px"]) > self.ALLOC_LEVEL_TOL + 1e-9
-                    or lv[0]["quantity"] < cfg.mom_min_depth):
-                continue                              # (the level moved / thinned since the plan: next cycle)
-            px = lv[0]["price"]
-            unit = px if c["buy"] else 1 - px
-            q = float(inv.get(ex.eid, 0.0))
-            p = self.alloc_p(ex, now_m)
-            p = p if p is not None else px
-            val = max(unit, p if c["buy"] else 1 - p)
-            qty = int(min(lv[0]["quantity"], self.mom_room(ex, q, p, val), left / unit, cash / unit) + 1e-9)
-            if qty >= 1 and self.st_on():         # P15 state_max_usd: the sleeve's collateral counts at p
-                n_ok = self.st_add_room(ex, c["buy"], qty, p=p, commit=False)
-                if n_ok < qty:
-                    self.st_count(ex, "momentum")
-                qty = n_ok
-            if qty < 1:
-                continue
-            order = self.p13_ioc(ex, c["buy"], qty, px, q)
-            order["_mom"] = True
-            cash_before = self.cash_left() if self.api.live else 0.0
-            done = self.p13_send(ex, order, now_m, "buy", "momentum", q)
-            if done is None:
-                continue
-            n_left -= 1
-            traded.add(ex.eid)
-            if done >= 1:
-                usd = done * unit
-                self.ma_attribute(usd, cash_before)
-                leg = self.mom_legs.setdefault(ex.eid, {"q": 0.0, "cost": 0.0})
-                leg["q"] += done if c["buy"] else -done
-                leg["cost"] += usd
-                self.mom_last_trade[ex.eid] = now_w
-                inv[ex.eid] = q + (done if c["buy"] else -done)
-                if self.st_on():
-                    self.st_add_room(ex, c["buy"], done, p=p, commit=True, force=True)
-                left -= usd
-                self.mom_totals["bought_usd"] += usd
-                self.mom_totals["buys"] += 1
-                log.warning("MOMENTUM bought %s %s%.0f @ %.3f ($%.0f; p %.3f, gap %.1fc; sleeve %.0f of %.0f)",
-                            ex.label, "" if c["buy"] else "NO (short YES) ", done, px, usd, p, 100 * c["gap"],
-                            self.mom_cost(), target)
-        return traded, n_left
-
-    def mom_exit_step(self, inv, mine_real, now_m, now_w, skip, n_left):
-        """Exit (manual momentum_exit / mom_exit_utc / the automatic flip, or the kill): each leg sold into the bids (a
-        long at the best bid, a short bought back at the best ask as a covered sale) as IOC takers, paced over
-        mom_exit_hours from the exit's start (behind schedule -> the shortfall now), EXEMPT from the value floor
-        (_mom_exit: momentum positions, bought above p). Returns (exchanges traded, orders left)."""
-        cfg, traded = self.cfg, set()
-        hours = max(cfg.mom_exit_hours, 1e-6)
-        frac_left = max(0.0, 1.0 - (now_w - (self.mom_exit_wall or now_w)) / (hours * 3600))
-        due = []                                  # (the furthest behind schedule first: with more legs than orders a
-        for e in sorted(self.mom_legs):           #  cycle, a fixed order would starve the last legs)
-            leg = self.mom_legs[e]
-            start = abs(self.mom_exit_start.get(e, leg["q"]))
-            want = int(abs(leg["q"]) - start * frac_left + 1e-9)
-            due.append((-want / max(start, 1.0), e, want))
-        for _, e, want in sorted(due):
-            if n_left < 1:
-                break
-            leg, ex = self.mom_legs[e], self.ex.get(e)
-            if ex is None:
-                continue
-            if want < 1 or busy(ex, now_m) or self.p13_own_ioc_resting(e):
-                continue
-            if self.hours_to_close(ex) * 60 <= cfg.stop_minutes_before_close:
-                continue                              # (stopped for settlement: nothing at all)
-            if not self.writes_ready(3):
-                break
-            book = self.alloc_download(ex, mine_real) if self.api.live else self.alloc_fresh_book(ex, now_m)
-            long_ = leg["q"] > 0
-            lv = (book or {}).get("bids" if long_ else "asks") or []
-            if not lv:
-                continue
-            px = lv[0]["price"]
-            q = float(inv.get(e, 0.0))
-            qty = min(want, int(lv[0]["quantity"] + 1e-9))
-            if qty < 1:
-                continue
-            order = self.p13_ioc(ex, not long_, qty, px, q)
-            if order is None:
-                continue
-            order["_mom_exit"] = True             # (momentum positions: exempt from the value floor)
-            done = self.p13_send(ex, order, now_m, "exit", "momentum", q)
-            if done is None:
-                continue
-            n_left -= 1
-            traded.add(e)
-            if done >= 1:
-                usd = done * (px if long_ else 1 - px)
-                share = min(1.0, done / abs(leg["q"]))
-                leg["cost"] -= leg["cost"] * share
-                leg["q"] += -done if long_ else done
-                self.mom_last_trade[e] = now_w
-                inv[e] = q + (-done if long_ else done)
-                self.mom_totals["sold_usd"] += usd
-                self.mom_totals["sells"] += 1
-                log.warning("MOMENTUM exit (%s) sold %s %.0f @ %.3f ($%.0f), %.0f left", self.mom_state, ex.label,
-                            done, px, usd, abs(leg["q"]))
-                if abs(leg["q"]) < 1:
-                    self.mom_legs.pop(e)
-        return traded, n_left
-
-    def mom_start_exit(self, state, now_w, why):
-        """The flip / the manual exit / the kill: the sleeve is sold into the bids over mom_exit_hours from now; the
-        harvest ladder takes each market over once its leg is sold."""
-        self.mom_state, self.mom_exit_wall = state, now_w
-        self.mom_exit_start = {e: v["q"] for e, v in self.mom_legs.items()}
-        log.warning("MOMENTUM %s (%s): selling %d legs (cost %.0f) into the bids over %g h; the harvest ladder takes "
-                    "them over once sold", state.upper(), why, len(self.mom_legs), self.mom_cost(),
-                    self.cfg.mom_exit_hours)
-
-    def mom_kill_check(self, now_w):
-        """The sleeve's value at the MARK below mom_kill_frac x its cost for MOM_KILL_SECONDS -> exit, latched "killed"
-        (reset only by momentum_enabled false then true), one alert."""
-        cost = self.mom_cost()
-        if self.mom_state != "active" or cost <= 0:
-            self.mom_below_since = None
-            return
-        mark = sum(self.mom_mark(e, v) for e, v in self.mom_legs.items())
-        if mark >= self.cfg.mom_kill_frac * cost - 1e-9:
-            self.mom_below_since = None
-            return
-        if self.mom_below_since is None:
-            self.mom_below_since = now_w
-            log.warning("MOMENTUM sleeve at the mark %.0f < %.2f x cost %.0f: killed if it stays there %.0f s", mark,
-                        self.cfg.mom_kill_frac, cost, self.MOM_KILL_SECONDS)
-        if now_w - self.mom_below_since >= self.MOM_KILL_SECONDS - 1e-9:
-            self.mom_start_exit("killed", now_w, f"mark {mark:.0f} < {self.cfg.mom_kill_frac:g} x cost {cost:.0f}")
-            self.mom_below_since = None
-            if not self.mom_kill_alerted:
-                self.mom_kill_alerted = True
-                alert(f"MOMENTUM sleeve KILLED: mark {mark:.0f} < {self.cfg.mom_kill_frac:g} x cost {cost:.0f} for "
-                      f"{self.MOM_KILL_SECONDS:.0f} s - selling it over {self.cfg.mom_exit_hours:g} h; latched off "
-                      f"(momentum_enabled false then true to reset)")
-
-    def mom_state_step(self, now_w):
-        """The sleeve's state machine, once a cycle: the latch reset (momentum_enabled seen false, then true), the
-        manual exit (momentum_exit / mom_exit_utc), the kill, exited once an exit has sold everything."""
-        cfg = self.cfg
-        en = bool(cfg.momentum_enabled)
-        if self.mom_enabled_seen is True and not en and self.mom_state in ("killed", "exited"):
-            self.mom_reset_armed = True
-        if en and self.mom_reset_armed and not cfg.momentum_exit and self.mom_state in ("killed", "exited"):
-            log.warning("MOMENTUM latch reset (momentum_enabled false then true): %s -> active", self.mom_state)
-            self.mom_state, self.mom_reset_armed, self.mom_kill_alerted = "active", False, False
-            self.mom_exit_wall, self.mom_exit_start = None, {}
-        self.mom_enabled_seen = en
-        if self.mom_state == "off" and (en or self.mom_legs):
-            self.mom_state = "active"
-        exit_at = self.mom_exit_time()
-        if self.mom_state == "active" and (cfg.momentum_exit or (exit_at is not None and utcnow() >= exit_at)):
-            self.mom_start_exit("exiting", now_w,
-                                "momentum_exit" if cfg.momentum_exit else f"mom_exit_utc {iso(exit_at)}")
-        self.mom_kill_check(now_w)
-        if self.mom_state == "exiting" and not self.mom_legs:
-            self.mom_state = "exited"
-            log.warning("MOMENTUM exit done: the sleeve is sold (re-armed by a fresh trigger after momentum_rearm_h, "
-                        "or momentum_enabled false then true)")
-        if self.mom_state == "active" and not en and not self.mom_legs:
-            self.mom_state = "off"
-
-    def mom_tick(self, now, inv, mine_real, now_m=None, skip=()):
-        """P16, cycle step 6c' (after the takes; BEFORE the allocator, the ladder and quoting): the tilt
-        series and its slopes, the state machine (kill, exits), the automation (trigger, ramp, flips), the exit's sales,
-        then the sleeve's buys and the funding (c) plan (sold by this cycle's alloc_tick) - at most
-        momentum_writes_frac of the writes left (3 per order). Returns the exchanges traded."""
-        cfg = self.cfg
-        now_w = now.timestamp()
-        now_m = time.monotonic() if now_m is None else now_m
-        inv = dict(inv)                           # (kept current with this tick's own trades)
-        self.alloc_ages = self.refs.ages() if self.refs is not None and hasattr(self.refs, "ages") else {}
-        self.mom_reconcile(inv)
-        cls = self.mom_classify(inv, now_m)
-        writes = getattr(self.api, "writes_left", lambda: 10 ** 6)()
-        n_left = int(math.floor(cfg.momentum_writes_frac * max(0, writes) / 3 + 1e-9))
-        traded = set()
-        self.ma_cands, self.ma_cand_raw = 0, set()
-        track = self.ma_tracking()
-        if track:                                 # the tilt slope series and this cycle's slopes
-            self.ts_feed(now_w, now_m)
-            self.ma_s24 = self.tslope.slope_24h(now_w, cfg.momentum_slope_hours)
-            self.ma_s6 = self.tslope.slope_6h(now_w, self.MA_SLOPE_6H)
-        self.mom_state_step(now_w)
-        if track or self.ma["state"] != "off":    # trigger, ramp, automatic flips (before the exit step)
-            self.mom_auto_step(now_w)
-        if self.mom_state in ("exiting", "killed") and self.mom_legs:
-            t, n_left = self.mom_exit_step(inv, mine_real, now_m, now_w, skip, n_left)
-            traded |= t
-            if self.mom_state == "exiting" and not self.mom_legs:   # (sold out this tick)
-                self.mom_state_step(now_w)
-        self.ma_fund_settle(now_w)
-        if self.mom_may_buy():                    # (momentum_force, or momentum_auto with the trigger on)
-            t, n_left = self.mom_buy_step(inv, mine_real, now_m, now_w, skip | traded, cls, n_left)
-            traded |= t
-            self.ma_fund_step(inv, now_m, now_w, skip | traded)   # source (c): sales planned for the allocator
-        self.ma_hold_step()
-        on = cfg.momentum_enabled or self.mom_legs or self.mom_state != "off" or track
-        self.mom_info = self.mom_status(now_m) if on else {}
-        return traded
-
-    def ma_hold_step(self):
-        """What the others leave for the sleeve while its buy round is open with a shortfall and candidates
-        (momentum_auto only; 0 otherwise). ma_short = the shortfall. ma_hold = the shortfall while there is cash for
-        it to protect - cash the funding order lets the sleeve spend now ((a) / (b): ma_cash_avail), or funding sales
-        pending / their proceeds not spent yet - else 0: a round the sleeve cannot fund holds nothing back (never a
-        standing pause of the allocator / the ladder). It pauses the allocator's spare-cash buys and the ladder's NEW
-        levels. ma_quote_hold = the free cash the quotes' plan budget leaves: the sleeve's kept-back cash + what it
-        can spend of the shortfall, only while it can spend some (so the quoter never sits on the MM's reserve for a
-        round that cannot be funded)."""
-        cfg = self.cfg
-        self.ma_short = self.ma_hold = self.ma_quote_hold = 0.0
-        tgt = self.mom_target_usd if self.mom_may_buy() else None
-        if not (cfg.momentum_auto and tgt is not None and self.ma_cands):
-            return
-        short = tgt - self.mom_cost()
-        if short < self.ALLOC_MIN_USD:
-            return
-        self.ma_short = short
-        if not self.api.live:
-            self.ma_hold = short
-            return
-        usable = max(0.0, self.ma_cash_avail()) if getattr(self, "cg_cash", None) is not None else 0.0
-        inflight = (self.ma_pool >= self.ALLOC_MIN_USD or bool(self.ma_unseen)
-                    or any(pr.get("status") == "pending" for pr in self.ma_fund_prs))
-        if usable >= self.ALLOC_MIN_USD or inflight:
-            self.ma_hold = short
-        if usable >= self.ALLOC_MIN_USD:
-            self.ma_quote_hold = (self.cash_left() - usable) + min(short, usable)
-
-    def mom_status(self, now_m=None):
-        """status.json "momentum": {state, cost, value_mark, value_outcome, markets, legs, kill_level, exit_progress,
-        ...} plus what a restart restores (legs with cost, exit start, the latch) and the automation's fields."""
-        cost = self.mom_cost()
-        prog = None
-        if self.mom_state in ("exiting", "killed", "exited") and self.mom_exit_wall is not None:
-            start = sum(abs(q) for q in self.mom_exit_start.values())
-            left = sum(abs(v["q"]) for v in self.mom_legs.values())
-            prog = {"started": iso(datetime.fromtimestamp(self.mom_exit_wall, timezone.utc)),
-                    "hours": self.cfg.mom_exit_hours, "shares_start": round(start),
-                    "shares_left": round(left), "done_frac": round(1 - left / start, 4) if start else 1.0}
-        return {"state": self.mom_state, "cost": round(cost, 2),
-                "value_mark": round(sum(self.mom_mark(e, v) for e, v in self.mom_legs.items()), 2),
-                "value_outcome": round(sum(self.mom_outcome(e, v, now_m) for e, v in self.mom_legs.items()), 2),
-                "markets": len(self.mom_legs),
-                "legs": {(self.ex[e].label if e in self.ex else e): round(v["q"])
-                         for e, v in sorted(self.mom_legs.items())},
-                "kill_level": round(self.cfg.mom_kill_frac * cost, 2), "exit_progress": prog,
-                "target": None if self.mom_target_usd is None else round(self.mom_target_usd, 2),
-                "below_kill_since": (iso(datetime.fromtimestamp(self.mom_below_since, timezone.utc))
-                                     if self.mom_below_since else None),
-                # (restored by a restart)
-                "leg_state": {e: {"q": v["q"], "cost": round(v["cost"], 4)} for e, v in self.mom_legs.items()},
-                "exit_started_wall": self.mom_exit_wall, "exit_start": dict(self.mom_exit_start),
-                "reset_armed": self.mom_reset_armed, "enabled_seen": self.mom_enabled_seen,
-                "kill_alerted": self.mom_kill_alerted, **{k: round(v, 2) for k, v in self.mom_totals.items()},
-                **(self.ma_status() if self.ma_tracking() or self.ma["state"] != "off" else {})}
-
-    # --- the automation: the buy gate, the target, the funding order ---
-    def mom_may_buy(self):
-        """THE BUY GATE: the sleeve buys only with momentum_enabled (the machinery), state active, no manual exit, AND
-        momentum_force or momentum_auto with the trigger "on". momentum_enabled alone never buys."""
-        cfg = self.cfg
-        if not cfg.momentum_enabled or self.mom_state != "active" or cfg.momentum_exit:
-            return False
-        return bool(cfg.momentum_force or (cfg.momentum_auto and self.ma["state"] == "on"))
-
-    def mom_buy_target(self):
-        """The sleeve's target ($ at cost) while it may buy: momentum_force = momentum_max_usd (the owner's override,
-        no ramp); the auto trigger = the ramp's target capped at momentum_max_usd. None when it may not buy."""
-        if not self.mom_may_buy():
-            return None
-        cap = float(self.cfg.momentum_max_usd)
-        return cap if self.cfg.momentum_force else min(cap, self.ma["target_usd"])
-
-    def el_holdback_left(self):
-        """The election-night holdback hook: election_holdback_usd from election_holdback_from_utc ("" or unreadable
-        = from now), else 0. Only the sleeve's funding (a) keeps it back here (Package 13's election_night - the
-        calls, the takes and the holdback on the other features - is not ported)."""
-        usd = float(getattr(self.cfg, "election_holdback_usd", 0.0) or 0.0)
-        if usd <= 0:
-            return 0.0
-        dt = parse_utc_setting(getattr(self.cfg, "election_holdback_from_utc", "") or "")
-        return 0.0 if dt is not None and utcnow() < dt else usd
-
-    def cash_reserve(self):
-        """The cash the sleeve's funding (a) keeps back: the MM's effective reserve (mm_reserve_effective) + the
-        harvest ladder's carve-out not resting yet (harvest_total_usd - hv_carve_used, while the ladder is on) + the
-        election holdback. = alloc_mm_reserve - the ladder's resting carve-out + the holdback."""
-        keep = self.mm_reserve_effective() + self.el_holdback_left()
-        if getattr(self.cfg, "tilt_harvest_ladder", False):
-            keep += max(0.0, float(self.cfg.harvest_total_usd) - self.hv_carve_used())
-        return keep
-
-    def ma_reserve_ok(self):
-        """Funding source (b): mm_carry_24h.per_day known AND below mm_carry_min (None = unknown = not used)."""
-        mc = (getattr(self, "ops_last", None) or {}).get("mm_carry_24h")
-        pd = mc.get("per_day") if isinstance(mc, dict) else None
-        return (isinstance(pd, (int, float)) and not isinstance(pd, bool) and math.isfinite(pd)
-                and pd < self.cfg.mm_carry_min)
-
-    def ma_cash_avail(self):
-        """$ the sleeve may spend now (live, the gate's cash): (a) above cash_reserve(); with momentum_auto and (b)
-        (ma_reserve_ok) the MM's effective reserve too (never the ladder's carve-out nor the holdback)."""
-        keep = self.cash_reserve()
-        if getattr(self.cfg, "momentum_auto", False) and self.ma_reserve_ok():
-            keep -= self.mm_reserve_effective()
-        return self.cash_left() - keep
-
-    def ma_attribute(self, usd, cash_before):
-        """A sleeve buy of usd: funded_from - the funding sales' unspent proceeds first (they were sold for it), then
-        free cash above cash_reserve() (a), then the MM reserve (b)."""
-        f = self.ma_funded
-        v = min(usd, max(0.0, self.ma_pool))
-        self.ma_pool -= v
-        f["value_sales_spent"] = f.get("value_sales_spent", 0.0) + v
-        rest = usd - v
-        a_free = max(0.0, cash_before - v - self.cash_reserve()) if self.api.live else rest
-        c = min(rest, a_free)
-        f["cash"] += c
-        f["reserve"] += rest - c
-
-    # --- the tilt slope series ---
-    def ts_feed(self, now_w, now_m):
-        """Once a cycle (at most every TILT_SLOPE_SAMPLE_S): this cycle's cross-section into the series - markets with
-        a LIQUID Polymarket price (cur_liquid), not headline, a book confirmed within book_stale with both sides
-        (OTHER traders: our own orders are stripped from every downloaded book) and 0 < spread <=
-        momentum_slope_max_spread. A changed momentum_slope_bin_h starts a new series (re-seeded)."""
-        cfg = self.cfg
-        bin_s = 3600.0 * cfg.momentum_slope_bin_h
-        if abs(self.tslope.bin_s - bin_s) > 1e-6:
-            log.warning("MOMENTUM tilt series: momentum_slope_bin_h now %g h - a new series (re-seeded)",
-                        cfg.momentum_slope_bin_h)
-            self.tslope, self.ma_seed = TiltSlope(bin_s), None
-        self.ts_seed_step(now_w)
-        if self.tslope.last_t is not None and 0 <= now_w - self.tslope.last_t < TILT_SLOPE_SAMPLE_S - 1e-9:
-            return
-        refs, samples = getattr(self, "cur_refs", None) or {}, []
-        for e in sorted(getattr(self, "cur_liquid", None) or ()):
-            ex, r = self.ex.get(e), refs.get(e)
-            if ex is None or r is None or ex.group in cfg.headline_races:
-                continue
-            b = ex.book or {}
-            if now_m - ex.verified >= cfg.book_stale or not b.get("bids") or not b.get("asks"):
-                continue
-            bid, ask = b["bids"][0]["price"], b["asks"][0]["price"]
-            if not 0 < ask - bid <= cfg.momentum_slope_max_spread + 1e-9:
-                continue
-            samples.append((r, (bid + ask) / 2, self.legs(ex)))
-        self.tslope.add(samples, now_w)
-        self.tslope.trim(now_w)
-
-    def ts_seed_step(self, now_w):
-        """Cold start (no series restored): the recorder's snapshots of the last TILT_SLOPE_KEEP_H read once, in a
-        background thread with its own read-only connection (never blocks a cycle); merged at the first cycle after
-        it finished. Best effort: no recorder file / table / rows, or an error -> the series starts empty (logged)."""
-        cfg, sd = self.cfg, self.ma_seed
-        if sd is None:
-            path = bot_path(cfg.record_file) if cfg.record_file else ""
-            if self.tslope.bins:
-                self.ma_seed = {"done": True, "merged": True, "note": "restored"}
-            elif not path or not os.path.exists(path):
-                self.ma_seed = {"done": True, "merged": True, "note": "no recorder file"}
-            else:
-                sd = self.ma_seed = {"done": False, "merged": False, "bins": None, "err": None, "until": now_w,
-                                     "bin_s": self.tslope.bin_s, "note": "reading"}
-                mode = "live" if self.api.live else "dry"
-                args = (path, mode, now_w - TILT_SLOPE_KEEP_H * 3600, now_w, self.tslope.bin_s,
-                        tuple(cfg.headline_races), cfg.momentum_slope_max_spread)
-
-                def run(sd=sd, args=args):
-                    try:
-                        sd["bins"] = tilt_slope_seed(*args)
-                    except Exception as e:        # (best effort: a bad file never stops the bot)
-                        sd["err"] = f"{type(e).__name__}: {e}"
-                    finally:
-                        sd["done"] = True
-                sd["thread"] = threading.Thread(target=run, daemon=True, name="tilt-seed")
-                sd["thread"].start()
-            return
-        if sd.get("done") and not sd.get("merged"):
-            sd["merged"] = True
-            if sd.get("err"):
-                sd["note"] = "error"
-                log.warning("MOMENTUM tilt series: seeding from the recorder failed (%s) - starting empty", sd["err"])
-            elif not sd.get("bins") or abs(sd.get("bin_s", 0) - self.tslope.bin_s) > 1e-6:
-                sd["note"] = "no rows"
-                log.warning("MOMENTUM tilt series: no recorder history to seed from - starting empty")
-            else:
-                self.tslope.merge(sd["bins"])
-                sd["note"] = "seeded"
-                log.warning("MOMENTUM tilt series seeded from the recorder: %d bin(s) of %g h; slope24 %s, slope6 %s "
-                            "pts/day", len(sd["bins"]), self.tslope.bin_s / 3600,
-                            self.ma_fmt(self.tslope.slope_24h(now_w, cfg.momentum_slope_hours)),
-                            self.ma_fmt(self.tslope.slope_6h(now_w, self.MA_SLOPE_6H)))
-            sd.pop("bins", None)
-
-    @staticmethod
-    def ma_fmt(x):
-        return "n/a" if x is None else f"{x:+.2f}"
-
-    def ma_cond(self):
-        """The trigger's conditions now: slope_24h >= momentum_on_slope and slope_6h > 0 (both known)."""
-        s24, s6 = self.ma_s24, self.ma_s6
-        return s24 is not None and s6 is not None and s24 >= self.cfg.momentum_on_slope - 1e-12 and s6 > 0
-
-    # --- the state machine ---
-    def ma_switch_off(self, now_w, state, why, alert_=True):
-        a = self.ma
-        a.update(state=state, flipped_at=now_w, confirm_since=None, rise_since=None, rearm_since=None, reason=why)
-        self.ma_pt_since = None
-        msg = (f"MOMENTUM auto switched OFF ({why}): sleeve {len(self.mom_legs)} legs, cost "
-               f"${self.mom_cost():,.0f} - "
-               + ("sold into the bids over the exit; the harvest ladder takes over its markets"
-                  if self.mom_state in ("exiting", "killed") else "no sleeve held"))
-        log.warning("%s", msg)
-        if alert_:
-            alert(msg)
-
-    def ma_profit_hit(self, now_w):
-        """The sleeve's MARK >= (1 + momentum_profit_target) x cost, held MA_PT_SECONDS (0 = off)."""
-        pt = self.cfg.momentum_profit_target
-        cost = self.mom_cost()
-        if pt <= 0 or cost <= 0:
-            self.ma_pt_since = None
-            return False
-        mark = sum(self.mom_mark(e, v) for e, v in self.mom_legs.items())
-        if mark < (1 + pt) * cost - 1e-9:
-            self.ma_pt_since = None
-            return False
-        if self.ma_pt_since is None:
-            self.ma_pt_since = now_w
-            log.warning("MOMENTUM sleeve at the mark %.0f >= %.2f x cost %.0f: flips if it stays %.0f s", mark, 1 + pt,
-                        cost, self.MA_PT_SECONDS)
-        return now_w - self.ma_pt_since >= self.MA_PT_SECONDS - 1e-9
-
-    def mom_auto_step(self, now_w):
-        """Once a cycle after mom_state_step: the trigger (armed -> on), the ramp, the automatic flips (slope_24h <= 0
-        unless forced, the profit target; the manual exit / date / kill seen from mom_state_step), the re-arm; the
-        "MOMENTUM eval" journal; ALERTs on switch-on, switch-off and re-arm."""
-        cfg, a = self.cfg, self.ma
-        s24, s6 = self.ma_s24, self.ma_s6
-        cond = self.ma_cond()
-        prev = a["state"]
-        cap = float(cfg.momentum_max_usd)
-        if not (cfg.momentum_enabled and cfg.momentum_auto):
-            if a["state"] != "off":
-                was_on = a["state"] == "on"
-                a.update(state="off", confirm_since=None, rise_since=None, rearm_since=None)
-                msg = ("MOMENTUM auto switched OFF (%s): no more buys from the trigger; the sleeve is held (exit: "
-                       "momentum_exit)" % ("momentum_auto false" if cfg.momentum_enabled else "momentum_enabled false"))
-                log.warning("%s", msg)
-                if was_on:
-                    alert(msg)
-            a["reason"] = self.ma_reason(cond, now_w)     # (no evaluation to log: the automation is off)
-            return
-        if a["state"] == "off":                   # (armed now; a sleeve already exiting / killed keeps that)
-            a.update(state={"killed": "killed", "exiting": "flipped", "exited": "flipped"}.get(self.mom_state, "armed"),
-                     confirm_since=None, rearm_since=None)
-        if a["state"] in ("flipped", "killed") and self.mom_state == "active":
-            a.update(state="armed", confirm_since=None, rearm_since=None)   # (the manual latch reset)
-            log.warning("MOMENTUM auto re-armed (momentum_enabled false then true)")
-        if a["state"] in ("armed", "on") and self.mom_state in ("exiting", "exited", "killed"):
-            exit_at = self.mom_exit_time()
-            why = ("killed (mark below the kill level)" if self.mom_state == "killed" else
-                   "manual momentum_exit" if cfg.momentum_exit else
-                   f"mom_exit_utc {iso(exit_at)}" if exit_at is not None and utcnow() >= exit_at else "exit")
-            self.ma_switch_off(now_w, "killed" if self.mom_state == "killed" else "flipped", why,
-                               alert_=self.mom_state != "killed")   # (the kill alerts itself)
-        # the trigger's continuous-hold clock
-        a["confirm_since"] = (a["confirm_since"] or now_w) if cond else None
-        if a["state"] == "flipped":
-            exit_at = self.mom_exit_time()
-            ok = (self.mom_state == "exited" and not self.mom_legs and cfg.momentum_rearm_h > 0
-                  and not cfg.momentum_exit and (exit_at is None or utcnow() < exit_at))
-            a["rearm_since"] = (a["rearm_since"] or now_w) if ok and cond else None
-            if a["rearm_since"] is not None and now_w - a["rearm_since"] >= cfg.momentum_rearm_h * 3600 - 1e-9:
-                self.mom_state, self.mom_exit_wall, self.mom_exit_start = "active", None, {}
-                self.mom_kill_alerted = False
-                a.update(state="armed", confirm_since=a["rearm_since"], rearm_since=None)
-                msg = (f"MOMENTUM auto RE-ARMED: the trigger held {cfg.momentum_rearm_h:g} h since the flip (slope24 "
-                       f"{self.ma_fmt(s24)}, slope6 {self.ma_fmt(s6)} pts/day)")
-                log.warning("%s", msg)
-                alert(msg)
-        if a["state"] == "armed" and self.mom_state == "active" and not cfg.momentum_exit:
-            if cond and now_w - a["confirm_since"] >= cfg.momentum_confirm_h * 3600 - 1e-9:
-                a.update(state="on", on_since=now_w, target_usd=min(cfg.momentum_start_usd, cap), steps=0,
-                         last_step_at=now_w, rise_since=now_w)
-                msg = (f"MOMENTUM auto switched ON: slope24 {s24:+.2f} pts/day >= {cfg.momentum_on_slope:g} and slope6 "
-                       f"{s6:+.2f} > 0 held {(now_w - a['confirm_since']) / 3600:.1f} h - buying to "
-                       f"${a['target_usd']:,.0f} (+${cfg.momentum_step_usd:,.0f} per {cfg.momentum_step_h:g} h of "
-                       f"rising tilt, up to ${cap:,.0f})")
-                log.warning("%s", msg)
-                alert(msg)
-        if (a["state"] == "on" or (a["state"] == "armed" and self.mom_legs)) and self.mom_state == "active":
-            why = None
-            if s24 is not None and s24 <= 0 and not cfg.momentum_force:
-                why = f"24-h slope {s24:+.2f} pts/day <= 0"
-            elif self.mom_legs and self.ma_profit_hit(now_w):
-                why = f"profit target: mark >= {1 + cfg.momentum_profit_target:.2f} x cost"
-            if why is not None:
-                self.mom_start_exit("exiting", now_w, why)
-                self.ma_switch_off(now_w, "flipped", why)
-        if a["state"] == "on":                    # the ramp: +step per further step_h of slope_6h > 0 throughout
-            rising = s6 is not None and s6 > 0
-            a["rise_since"] = (a["rise_since"] or now_w) if rising else None
-            if rising and a["target_usd"] < cap - 1e-9 and cfg.momentum_step_usd > 0:
-                anchor = max(a["rise_since"], a["last_step_at"] or a["rise_since"])
-                if now_w - anchor >= cfg.momentum_step_h * 3600 - 1e-9:
-                    a["target_usd"] = min(cap, a["target_usd"] + cfg.momentum_step_usd)
-                    a["steps"] += 1
-                    a["last_step_at"] = now_w
-                    log.warning("MOMENTUM ramp: target $%.0f (step %d: slope6 %s pts/day > 0 for %g h; cap $%.0f)",
-                                a["target_usd"], a["steps"], self.ma_fmt(s6), cfg.momentum_step_h, cap)
-        a["reason"] = self.ma_reason(cond, now_w)
-        self.ma_log(now_w, cond, prev)
-
-    def ma_next_step_at(self):
-        a, cfg = self.ma, self.cfg
-        if a["state"] != "on" or a["rise_since"] is None:
-            return None
-        return max(a["rise_since"], a["last_step_at"] or a["rise_since"]) + cfg.momentum_step_h * 3600
-
-    def ma_reason(self, cond, now_w):
-        """Why the sleeve is (not) buying, in a few words (status.json momentum.reason, the eval line)."""
-        cfg, a = self.cfg, self.ma
-        s24, s6 = self.ma_s24, self.ma_s6
-        if not cfg.momentum_enabled:
-            return "momentum_enabled off"
-        if cfg.momentum_force and self.mom_state == "active" and not cfg.momentum_exit:
-            return "forced on (momentum_force)"
-        if not cfg.momentum_auto:
-            return "momentum_auto off (momentum_force to buy)"
-        if a["state"] in ("flipped", "killed"):
-            r = a["reason"] if a["reason"].startswith(("flipped", "killed")) else f"{a['state']}: {a['reason']}"
-            r = r.split(" | ")[0]
-            if a["state"] == "flipped" and a["rearm_since"] is not None:
-                r += f" | re-arm in {max(0.0, cfg.momentum_rearm_h - (now_w - a['rearm_since']) / 3600):.1f} h"
-            return r
-        if not self.tslope.values(now_w):
-            return "no history"
-        if s24 is None:
-            return f"slope24 n/a (too few {self.tslope.bin_s / 3600:g}-h bins in {cfg.momentum_slope_hours:g} h)"
-        if a["state"] == "on":
-            return f"on: target ${a['target_usd']:,.0f}" + ("" if s6 is not None and s6 > 0 else
-                                                             f" (ramp stalled: slope6 {self.ma_fmt(s6)} <= 0)")
-        if s24 < cfg.momentum_on_slope - 1e-12:
-            return f"slope24 {s24:+.2f} < {cfg.momentum_on_slope:g} pts/day"
-        if s6 is None or s6 <= 0:
-            return f"slope6 {self.ma_fmt(s6)} <= 0 (the move is not current)"
-        if cond and a["confirm_since"] is not None:
-            return (f"confirming: held {(now_w - a['confirm_since']) / 3600:.1f} h of "
-                    f"{cfg.momentum_confirm_h:g} h")
-        return "armed"
-
-    def ma_log(self, now_w, cond, prev):
-        """The "MOMENTUM eval" journal line: at most every MA_LOG_SECONDS, and at once on a state change."""
-        a = self.ma
-        key = (a["state"], cond)
-        if key == self.ma_logged_key and now_w - self.ma_last_log < self.MA_LOG_SECONDS and prev == a["state"]:
-            return
-        self.ma_last_log, self.ma_logged_key = now_w, key
-        log.warning("MOMENTUM eval: %s - %s | slope24 %s (>= %g), slope6 %s pts/day | %d bins (%s) | sleeve $%.0f of "
-                    "target $%.0f", a["state"], a["reason"], self.ma_fmt(self.ma_s24), self.cfg.momentum_on_slope,
-                    self.ma_fmt(self.ma_s6), len(self.tslope.bins), self.tslope.source or "none", self.mom_cost(),
-                    self.mom_buy_target() or 0.0)
-
-    # --- funding (c): value sales through the allocator's refill path ---
-    def ma_fund_step(self, inv, now_m, now_w, skip):
-        """Funding source (c): with momentum_fund_value (and the allocator on: its sale machinery sells), while the
-        sleeve may buy, has candidates and its target is not reached, plan VALUE sales for the shortfall that (a) /
-        (b), the proceeds not yet in a cash read and the funding sales still pending leave: alloc_plan refill-only
-        with fund_usd (lowest edge-held first; never a sleeve / pinned / headline / middle-band market; the
-        value floor p -+ value_sell_margin and alloc_max_edge_sell as the refill's; within alloc_max_turnover_per_hour)
-        - appended to the allocator's pairs ("fund"), sold by alloc_sell in this cycle's alloc_tick, their proceeds
-        earmarked for the sleeve (ma_pool). A new plan at most every MA_FUND_REPLAN_S; a market refused is not
-        planned again for MA_FUND_REFUSED_S."""
-        cfg = self.cfg
-        tgt = self.mom_target_usd if self.mom_may_buy() else None
-        cost = self.mom_cost()
-        if (not (cfg.momentum_auto and cfg.momentum_fund_value and cfg.alloc_enabled and self.api.live)
-                or tgt is None or not self.ma_cands or tgt - cost < self.ALLOC_MIN_USD
-                or getattr(self, "global_reduce", False)
-                or not (self.cash_gate_on() and getattr(self, "cg_cash", None) is not None)):
-            return
-        read_at = getattr(self, "cg_read_at", None)
-        while self.ma_unseen and read_at is not None and self.ma_unseen[0][0] < read_at:
-            self.ma_unseen.popleft()              # (a cash read since: those proceeds are in cash_left)
-        open_ = [pr for pr in self.ma_fund_prs if pr.get("status") == "pending"]
-        pending = sum(u for _, u in self.ma_unseen) + sum(pr["usd"] for pr in open_)
-        need = tgt - cost - max(0.0, self.ma_cash_avail()) - pending
-        for e in [e for e, t in self.ma_fund_refused.items() if now_w - t >= self.MA_FUND_REFUSED_S]:
-            self.ma_fund_refused.pop(e)
-        if open_ or need < self.ALLOC_MIN_USD or now_w - self.ma_fund_at < self.MA_FUND_REPLAN_S - 1e-9:
-            return
-        self.ma_fund_at = now_w
-        busy_e = set()                            # (never a second order in a market a pending pair already uses)
-        for pr in self.alloc_pairs:
-            busy_e |= {pr["sell"].get("eid")} | set(pr["sell"].get("members") or ())
-            if pr.get("buy"):
-                busy_e.add(pr["buy"]["eid"])
-        races = {self.ex[e].group for e in self.ma_cand_raw if e in self.ex}   # (never sold where the sleeve buys)
-        skip2 = set(skip) | set(self.ma_fund_refused) | (busy_e - {None}) | races
-        turnover = cfg.alloc_max_turnover_per_hour - self.alloc_turnover(now_w)
-        pairs, info = self.alloc_plan(inv, now_m, self.cash_left(), skip2, turnover, refill_only=True, fund_usd=need)
-        pairs = [pr for pr in pairs if pr["usd"] >= self.ALLOC_MIN_USD]
-        if not pairs:
-            log.info("MOMENTUM funding (c): nothing to sell for the $%.0f shortfall at / above the value floor "
-                     "(blocked_by %s)", need, info.get("blocked_by"))
-            return
-        for pr in pairs:
-            pr.update(planned_at=now_m, fund=True)
-        self.alloc_pairs = list(self.alloc_pairs) + pairs
-        self.ma_fund_prs = [pr for pr in self.ma_fund_prs if pr.get("status") == "pending"] + pairs
-        log.warning("MOMENTUM funding (c): selling VALUE for $%.0f of the sleeve's $%.0f shortfall, lowest edge-held "
-                    "first, never below the value floor, through the allocator: %s", sum(pr["usd"] for pr in pairs),
-                    tgt - cost, "; ".join(self.alloc_journal(pr) for pr in pairs[:5]))
-
-    def ma_fund_sold(self, pr, s, done, best, p, usd):
-        """alloc_sell: a funding sale traded - its proceeds earmarked for the sleeve (ma_pool), funded_from.value_sales,
-        ev_given_up += shares x (p - price) (a long) / shares x (price - p) (a short's buy-back)."""
-        ev = done * ((p - best) if s["kind"] == "long" else (best - p))
-        self.ma_pool += usd
-        self.ma_funded["value_sales"] += usd
-        self.ma_ev_given_up += ev
-        self.ma_unseen.append((time.monotonic(), usd))
-        pr["fund_sold"] = True
-        log.warning("MOMENTUM funding sold %s %s%.0f @ %.3f (p %.3f, edge-held %.1f%%, $%.0f, EV given up $%.0f; at / "
-                    "above the value floor)", s["label"], "NO " if s["kind"] == "short" else "", done, best, p,
-                    100 * s["edge"], usd, ev)
-
-    def ma_fund_settle(self, now_w):
-        """The funding sales the allocator finished: one refused / gone / expired without a sale -> that market is not
-        planned again for MA_FUND_REFUSED_S; finished ones leave the list."""
-        keep = []
-        for pr in self.ma_fund_prs:
-            st = pr.get("status")
-            if st == "pending":
-                keep.append(pr)
-            elif not pr.get("fund_sold") and pr["sell"].get("eid") is not None:
-                self.ma_fund_refused[pr["sell"]["eid"]] = now_w
-        self.ma_fund_prs = keep
-
-    def ma_status(self, now_w=None):
-        """status.json "momentum"'s automation fields (and what a restart restores: "auto", "slope")."""
-        cfg, a = self.cfg, self.ma
-        now_w = time.time() if now_w is None else now_w
-        sold = self.ma_funded.get("value_sales", 0.0)
-        nxt = self.ma_next_step_at()
-        on = self.mom_may_buy()
-
-        def t(x):
-            return None if x is None else iso(datetime.fromtimestamp(x, timezone.utc))
-        return {"armed": bool(cfg.momentum_enabled and cfg.momentum_auto and a["state"] in ("armed", "on")),
-                "on": on, "auto_state": a["state"], "size_usd": round(self.mom_cost(), 2),
-                "target_usd": (round(self.mom_buy_target() or 0.0, 2) if on else 0.0),
-                "max_usd": float(cfg.momentum_max_usd),
-                "slope_24h": None if self.ma_s24 is None else round(self.ma_s24, 3),
-                "slope_6h": None if self.ma_s6 is None else round(self.ma_s6, 3),
-                "reason": a["reason"],
-                "funded_from": {k: round(v, 2) for k, v in self.ma_funded.items()},
-                "ev_given_up": round(self.ma_ev_given_up, 2),
-                "ev_given_up_per_10k": round(self.ma_ev_given_up / (sold / 10000.0), 2) if sold >= 1 else None,
-                "kept_back": round(self.cash_reserve(), 2), "holdback": round(self.el_holdback_left(), 2),
-                "reserve_usable": self.ma_reserve_ok(),
-                "confirm_since": t(a["confirm_since"]), "steps": a["steps"], "next_step_at": t(nxt),
-                "series_bins": [[t(k), round(100 * v, 3)] for k, v in self.tslope.values(now_w)],
-                "series_source": self.tslope.source or ("none" if not self.ma_seed else self.ma_seed.get("note")),
-                "short_usd": round(self.ma_short, 2), "hold_usd": round(self.ma_hold, 2),
-                "quote_hold_usd": round(self.ma_quote_hold, 2),
-                # (restored by a restart)
-                "auto": {**{k: v for k, v in a.items()}, "funded_from": dict(self.ma_funded),
-                         "ev_given_up": self.ma_ev_given_up, "pool": self.ma_pool},
-                "slope": self.tslope.to_dict()}
-
-    def mom_summary(self):
-        """" | momentum $Xk at cost, mark Yk (N legs, state) | momentum armed/on X/Yk, slope24 +a.b, slope6 +c.d" for
-        the 2-hourly summary while in use; "" otherwise. Never raises."""
-        try:
-            parts = []
-            m = self.mom_info or {}
-            if m and (self.mom_legs or m.get("state") not in (None, "off", "active")):
-                parts.append(f"momentum ${m.get('cost', 0) / 1000:.1f}k at cost, mark "
-                             f"{m.get('value_mark', 0) / 1000:.1f}k ({m.get('markets', 0)} legs, {m.get('state')})")
-            cfg = self.cfg
-            if getattr(cfg, "momentum_auto", False) or getattr(cfg, "momentum_force", False):
-                on = self.mom_may_buy()
-                tgt = (self.mom_buy_target() or 0.0) if on else 0.0
-                st = "on" if on else ("armed" if self.ma["state"] == "armed" else self.ma["state"])
-
-                def f(x):
-                    return "n/a" if x is None else f"{x:+.1f}"
-                parts.append(f"momentum {st} {self.mom_cost() / 1000:.1f}/{tgt / 1000:.1f}k, slope24 {f(self.ma_s24)}, "
-                             f"slope6 {f(self.ma_s6)}")
-            return " | ".join(parts)
-        except (TypeError, ValueError, AttributeError) as e:
-            log.warning("summary P16 part failed: %s", e)
             return ""
 
     # ------------------------------------------------------------------------------ P14: market-making funding
@@ -13509,9 +12021,6 @@ class Bot:
         part = self.hv_summary()                      # P15: " | harvest ... | state caps ..." (while in use)
         if part:
             line = f"{line} | {part}" if line else part
-        part = self.mom_summary()                     # P16: " | momentum ..." (while in use)
-        if part:
-            line = f"{line} | {part}" if line else part
         for fn in (ev_outcome_part, mm_carry_part):   # " | EV outcome X (+Y 24h, N unpriced) | MM carry 24h ..."
             try:
                 part = fn(self.ops_last)
@@ -13844,9 +12353,6 @@ class Bot:
             if meta.get("harvest"):               # P15: its own class (the key absent until such a fill exists)
                 cls = "harvest"
                 counts[cls] = counts.get(cls, 0)
-            elif meta.get("momentum"):            # P16: the sleeve's buys / exits (key absent until such a fill exists)
-                cls = "momentum"
-                counts[cls] = counts.get(cls, 0)
             elif meta.get("alloc") or meta.get("set_ladder"):
                 cls = "alloc"
             elif meta.get("arb"):
@@ -13965,8 +12471,6 @@ class Bot:
                 # P15: the harvest ladder, the state cap (HARVEST_KEYS; absent while unused)
                 **({"harvest": self.hv_info} if getattr(self, "hv_info", None) else {}),
                 **({"state_caps": self.st_status()} if self.st_on() else {}),
-                # P16: the momentum sleeve (MOMENTUM_KEYS; also what a restart restores; absent while unused)
-                **({"momentum": self.mom_info or self.mom_status()} if self.mom_persist_needed() else {}),
                 # ev_outcome_delta_24h's ring of (wall, ev) samples (also what a restart restores)
                 "ev_outcome_history": [list(x) for x in self.ev_hist],
                 "seconds_since_cycle": round(time.monotonic() - self.last_cycle_done, 1)

@@ -251,11 +251,18 @@ def build(S, cash=None, overrides="live"):
     return api, b
 
 
+RETIRED_PREFIXES = ("basket_", "momentum_", "mom_", "value_extreme_p", "value_min_edge", "mm_carry_min",
+                    "election_holdback_")          # the momentum sleeve's keys (switched off live 8 Oct)
+RETIRED_KEYS = ("tilt_exit_priority", "tilt_exit_full_size")
+
+
 def staged(path):
-    """A staged file less the keys of features removed on simplify (never enabled live): the basket_* keys and the
-    tilt exits' tilt_exit_* (the staged files pin tilt_exit_priority / tilt_exit_full_size at their default False)."""
+    """A staged file less the keys of features removed on simplify (never enabled live, or switched off live): the
+    basket_* keys, the tilt exits' tilt_exit_* (the staged files pin tilt_exit_priority / tilt_exit_full_size at
+    their default False) and the momentum sleeve's keys (deploy/settings_override.live_minimal.json still carries
+    momentum_max_usd behind momentum_enabled false)."""
     return {k: v for k, v in json.load(open(path)).items()
-            if not k.startswith("basket_") and k not in ("tilt_exit_priority", "tilt_exit_full_size")}
+            if not k.startswith(RETIRED_PREFIXES) and k not in RETIRED_KEYS}
 
 
 def apply_stage(b, path):
