@@ -73,6 +73,7 @@ class Bot:
         self.sim_ids = 0                       # dry-run order ids
         self.last_cycle_mono = time.monotonic()
         self.running, self.killed = True, False
+        self.kill_hits = 0                     # account readings in a row below the kill line
         self.tilt = pricing.TiltEstimator()
         self.allocator, self.inventory, self.ladder = value.Allocator(), mm.Inventory(), ladder.Ladder()
         self.load()
@@ -89,6 +90,7 @@ class Bot:
         wanted = value.apply_floor(self.decide(view, state), view, self.s)
         keep, cancels, new = self.reconcile(view, wanted)
         gate = risk.Gate(view, state, self.s)
+        cancels += [o for o in keep if gate.admit(o) is None]      # kept orders count against the caps first
         admitted = [o for o in (gate.admit(o) for o in new) if o is not None]
         self.refused = dict(gate.refused_usd)
         self.send(view, cancels, admitted)
@@ -208,10 +210,12 @@ class Bot:
 
     def assess(self, view):
         """The RiskState; None after the kill switch fired (README §4.4)."""
-        if risk.kill_switch_hit(view.account, self.s):
+        self.kill_hits = self.kill_hits + 1 if risk.kill_switch_hit(view.account, self.s) else 0
+        if self.kill_hits >= KILL_READINGS:
             self.kill(view.account)
             return None
-        state = risk.assess(view, self.s, self.reduce_only)
+        was_paused = self.risk.adds_paused if self.risk else False
+        state = risk.assess(view, self.s, self.reduce_only, was_paused)
         if state.reduce_only != self.reduce_only:
             log.warning("%s reduce-only: correlated %.0f, worst case %.0f, account %s",
                         "ENTERING" if state.reduce_only else "leaving", state.correlated, state.worst_case,
@@ -507,6 +511,7 @@ class Bot:
         self.tilt = pricing.TiltEstimator.from_dict(d.get("tilt") or {})
 
 
+KILL_READINGS = 2            # two bad account readings in a row, so one glitched read cannot stop the bot
 MARKETS_RELOAD_S = 3600.0     # new or settled markets are picked up hourly
 STATUS_FILE, STATE_FILE, KILL_FILE = "status.json", "state.json", "kill_switch.tripped"
 TAGS_KEEP = 5000              # order tags remembered for fill attribution, beyond the resting ones
