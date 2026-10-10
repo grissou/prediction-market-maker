@@ -91,6 +91,11 @@ class Bot:
         self.dirty = set()                     # books the feed or the tops say changed, until they are re-read
         self.account_pending, self.last_account = False, -1e9   # a fill seen by the feed, not yet read back
         self.blocked = defaultdict(int)        # reason -> orders not sent this cycle (status.json blocked_by)
+        self.ev_hist = []                      # [epoch s, EV at the result] every EV_SAMPLE_S, 25 h (summary)
+        self.events = []                       # [epoch s, "rate"|"error"] for the summary's period counts
+        self.rate_seen, self.pauses_seen = 0, 0   # the client's 429 count / pauses already noted
+        self.reduce_since = None               # wall time reduce-only began
+        self.feed_down = None                  # monotonic time the feed went unhealthy; True once alerted
         self.positions = {}                    # eid -> signed YES shares
         self.marks = {}                        # eid -> the exchange's valuation price (leaderboard)
         self.account = Account()
@@ -133,16 +138,50 @@ class Bot:
         self.blocked = defaultdict(int, gate.blocked)
         keep, cancels, new = self.reconcile(view, admitted)
         self.send(view, cancels, new)
+        self.watch(view)
         self.report(view, state)
         self.save()
         self.last_cycle_mono = time.monotonic()
+
+    def watch(self, view):
+        """The alerts a cycle can see: a new rate-limit penalty, the feed down for FEED_ALERT_S; and the counts
+        and EV samples the phone summary reads."""
+        t = view.now.timestamp()
+        if self.client.rate_limited > self.rate_seen:
+            self.events += [[t, "rate"]] * (self.client.rate_limited - self.rate_seen)
+            self.rate_seen = self.client.rate_limited
+        if self.client.pauses > self.pauses_seen:
+            self.pauses_seen = self.client.pauses
+            self.alert(f"RATE LIMITED: 429 pause #{self.pauses_seen}, budget cut to "
+                       f"{self.rpm():.0f}/min")
+        healthy = self.feed is None or self.feed.healthy()
+        if healthy:
+            self.feed_down = None
+        elif self.feed_down is None:
+            self.feed_down = view.mono
+        elif self.feed_down is not True and view.mono - self.feed_down >= FEED_ALERT_S:
+            self.alert(f"REALTIME FEED DOWN for {(view.mono - self.feed_down) / 60:.0f} min: polling REST")
+            self.feed_down = True
+        self.events = [e for e in self.events if t - e[0] <= 86400.0]
+
+    def note_error(self):
+        """A failed cycle (ops.Runner): counted for the summary, logged there, not alerted."""
+        self.events.append([utcnow().timestamp(), "error"])
+
+    def ev_change_24h(self, ev, t):
+        """EV now less EV 24 h ago (the sample nearest it, within 1 h), or None without one."""
+        if ev is not None and (not self.ev_hist or t - self.ev_hist[-1][0] >= EV_SAMPLE_S):
+            self.ev_hist.append([t, ev])
+        self.ev_hist = [x for x in self.ev_hist if t - x[0] <= 90000.0]
+        old = min(self.ev_hist, key=lambda x: abs(t - x[0] - 86400.0), default=None)
+        return None if ev is None or old is None or abs(t - old[0] - 86400.0) > 3600.0 else round(ev - old[1], 2)
 
     def reload_settings(self, mono):
         """Re-read the live settings file every RELOAD_SECONDS (README §5: a change is a file edit)."""
         if mono - self.settings_read < config.RELOAD_SECONDS:
             return
         self.settings_read = mono
-        new = self.settings_file.load(self.s, self.alert)
+        new = self.settings_file.load(self.s, log.warning)       # refusals: the log only (fix brief)
         if new is not None:
             self.s = new
             self.client.set_budgets(new.requests_per_minute, new.writes_per_minute)
@@ -317,9 +356,9 @@ class Bot:
         was_paused = self.risk.adds_paused if self.risk else False
         state = risk.assess(view, self.s, self.reduce_only, was_paused, self.inventory.shares())
         if state.reduce_only != self.reduce_only:
-            log.warning("%s reduce-only: correlated %.0f, worst case %.0f, account %s",
-                        "ENTERING" if state.reduce_only else "leaving", state.correlated, state.worst_case,
-                        view.account.value)
+            self.reduce_since = view.now if state.reduce_only else None
+            self.alert(f"REDUCE-ONLY {'ON' if state.reduce_only else 'OFF'}: settlement risk "
+                       f"{state.correlated:,.0f}, worst case {state.worst_case:,.0f}, account {view.account.value}")
         self.reduce_only, self.risk = state.reduce_only, state
         return state
 
@@ -587,6 +626,10 @@ class Bot:
             "rate_limited_total": self.client.rate_limited, "realtime": self.feed_state(),
             "alloc": self.allocator.status(), "mm_funding": self.mm_funding(view),
             "harvest": self.ladder.status(), "state_caps": self.state_caps(state),
+            "start_balance": view.account.start, "ev_change_24h": self.ev_change_24h(ev, view.now.timestamp()),
+            "mm_profit_24h": round(self.inventory.profit_24h(view.now.timestamp()), 2),
+            "reduce_only_since": self.reduce_since.strftime("%H:%M") if self.reduce_since else None,
+            "rate_limits_period": self.period_count("rate", view.now), "errors_period": self.period_count("error", view.now),
             "positions": {self.label(e): q for e, q in view.positions.items() if q},
             "seconds_since_cycle": 0.0,
         }
@@ -604,6 +647,11 @@ class Bot:
         out = {k: v for k, v in self.blocked.items() if v}
         no_book = sum(1 for e in view.p if e not in view.books)
         return {**out, "no_book": no_book} if no_book else out
+
+    def period_count(self, kind, now):
+        """Events of a kind in the last summary period (summary_every_h, else 2 h)."""
+        span = 3600.0 * (self.s.summary_every_h or 2)
+        return sum(1 for t, k in self.events if k == kind and now.timestamp() - t <= span)
 
     def mm_funding(self, view):
         """The old mm_funding field: the reserve, what market making holds, and what the refill may raise."""
@@ -640,7 +688,7 @@ class Bot:
         write_json(os.path.join(self.env.run_dir, STATE_FILE), {
             "tags": tags, "last_fill_id": self.last_fill_id, "cost": self.cost, "realised": self.realised,
             "allocator": self.allocator.to_dict(), "inventory": self.inventory.to_dict(),
-            "ladder": self.ladder.to_dict(), "tilt": self.tilt.to_dict()})
+            "ladder": self.ladder.to_dict(), "tilt": self.tilt.to_dict(), "ev_hist": self.ev_hist})
         self.tags = tags
 
     def load(self):
@@ -655,8 +703,11 @@ class Bot:
         self.inventory = mm.Inventory(d.get("inventory"))
         self.ladder = ladder.Ladder(d.get("ladder"))
         self.tilt = pricing.TiltEstimator.from_dict(d.get("tilt") or {})
+        self.ev_hist = d.get("ev_hist") or []
 
 
+FEED_ALERT_S = 300.0          # the realtime feed down this long alerts (once per outage)
+EV_SAMPLE_S = 600.0           # EV sampled for the summary's 24 h change
 KILL_READINGS = 2            # two bad account readings in a row, so one glitched read cannot stop the bot
 MARKETS_RELOAD_S = 3600.0     # new or settled markets are picked up hourly
 STATUS_FILE, STATE_FILE, KILL_FILE = "status.json", "state.json", "kill_switch.tripped"

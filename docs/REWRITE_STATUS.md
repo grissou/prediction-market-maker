@@ -5,9 +5,9 @@ STATUS (2026-10-10, branch rewrite) - IN PROGRESS: rewrite 2 (docs/REWRITE_FIX_B
 done:     fix 1 - the cause of "no orders": the request budget left the books nothing (below); foreign orders;
           DRY PLACE logging; books_fresh / books_dirty / orders_foreign / blocked_by in status.json and the line;
           mm_quote_frac 0.002 -> 0.0005 (the replay still runs at 0.002: it compares logic, see below);
-          the recorder (mmbot2/record.py: run_dir/market_data.sqlite, the old snapshots/account schema, once a minute)
-left:     the stripped phone summary and alerts; line count; READY
-lines:    see the table (updated at READY)
+          the recorder (mmbot2/record.py); the stripped phone summary and alerts (mmbot2/notify.py)
+left:     READY commit
+lines:    mmbot2/ + mm_bot2.py = 3,899 (< 4,000); tests2/ 11 files, all passing
 ```
 
 ## Rewrite 2: why the 10 Oct shadow planned nothing (fix 1)
@@ -44,41 +44,66 @@ old code it fails the same way the shadow did (resting 0, tilt None, foreign ord
 the old bot's plan used on the 4 Oct snapshot (mostly 200-share quotes), so its factor-of-two comparison still
 measures the logic; at 0.0005 101 rows differ by size only. REPLAY.md is unchanged by fix 1.
 
+## Rewrite 2: the phone (stripped)
+
+`mmbot2/notify.py`. Summary every `summary_every_h` (2) on the hour UTC, and `python3 mm_bot2.py summary` sends one now
+(from status.json plus 2 leaderboard reads); nothing else is in it, and a line or part whose figure is unknown is left
+out (the brief's shape is four lines; "five" in the task text are its five figures):
+
+    Balance 104.8k (+4.8%) · leaderboard 156 of 1,396 · Smart Score 25.1 (rank 174)
+    EV at settlement 112.7k (+2.0k 24h)
+    MM profit 24h +83 (realised) · tilt 8.2%
+    OK  (or: REDUCE-ONLY since 13:10 · 3 rate limits · 2 errors)
+
+The EV change compares with the EV sample nearest 24 h ago (sampled every 10 min, kept in state.json); MM profit is
+the realised P&L of market-making round trips (mm.Inventory lots closed in the last 24 h, kept in state.json); the
+counts are over the last summary period. A dry run's summary is titled "mm_bot2 (dry run)".
+
+Alerts, one line, the same cause at most once in 30 minutes: KILL SWITCH, STARTED (every start: a restart),
+CRASH, REDUCE-ONLY ON / OFF, RATE LIMITED (a new 429 pause), SELF-TEST FAILED (and the covered "sell NO" probe
+failing), REALTIME FEED DOWN (> 5 min, once per outage), WATCHDOG. Settings-file refusals and "N failed cycles: pulling
+every quote" now go to the log only. `cancel` cancels only our orders (state.json ids); `cancel --all` everything.
+
 ## Line counts
 
 | File | Lines |
 |---|---|
-| mmbot2/bot.py | 544 |
-| mmbot2/config.py | 243 |
-| mmbot2/exchange.py | 729 |
+| mmbot2/bot.py | 722 |
+| mmbot2/config.py | 244 |
+| mmbot2/exchange.py | 740 |
 | mmbot2/ladder.py | 189 |
-| mmbot2/mm.py | 233 |
-| mmbot2/ops.py | 315 |
+| mmbot2/mm.py | 241 |
+| mmbot2/notify.py | 83 |
+| mmbot2/ops.py | 377 |
 | mmbot2/pricing.py | 229 |
-| mmbot2/risk.py | 330 |
+| mmbot2/record.py | 58 |
+| mmbot2/risk.py | 342 |
 | mmbot2/state.py | 117 |
 | mmbot2/value.py | 543 |
 | mm_bot2.py | 14 |
-| total | 3486 |
+| total | 3899 |
 
-exchange.py (728) is the largest: the realtime feed with its dead-socket and revision-gap handling (~190) and the
+Rewrite 2 added ~410 lines: bot.py +178 (the budget split, book freshness, the foreign rule, blocked_by, the alert
+and summary bookkeeping), notify.py 83, record.py 58, ops.py +62 (summary command and loop, start / crash alerts, `cancel`
+of our orders only), small changes in exchange, risk, mm. exchange.py (740) is the largest: the realtime feed with its dead-socket and revision-gap handling (~190) and the
 50-state table for the per-state cap. value.py (519) holds the floor, the tail quotes and the allocator.
 
 Tests (not counted in the target):
 
 | File | Lines |
 |---|---|
-| tests2/fakes.py | 282 |
-| tests2/test_bot.py | 154 |
+| tests2/fakes.py | 290 |
+| tests2/test_bot.py | 226 |
 | tests2/test_exchange.py | 330 |
 | tests2/test_ladder.py | 157 |
 | tests2/test_mm.py | 199 |
 | tests2/test_pricing.py | 144 |
-| tests2/test_replay.py | 179 |
+| tests2/test_replay.py | 182 |
 | tests2/test_risk.py | 205 |
+| tests2/test_shadow.py | 256 |
 | tests2/test_stress.py | 434 |
 | tests2/test_value.py | 239 |
-| total | 2323 |
+| total | 2662 |
 
 ## Replay differences (old bot vs new on the 4 Oct snapshot)
 

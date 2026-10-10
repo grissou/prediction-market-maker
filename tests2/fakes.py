@@ -109,6 +109,14 @@ class FakeClient:
         value = self.cash + sum(held_usd(q, marks[e]) for e, q in self.inv.items())
         return Account(value=value, cash=self.cash - self.locked(), start=self.start, read_at=time.monotonic())
 
+    def leaderboard(self):
+        self.call("leaderboard", "read")
+        return {"myRank": 156, "total": 1396}
+
+    def smart_score(self):
+        self.call("smart_score", "read")
+        return [{"marketType": "global", "smartScoreDecayed": 25.1, "rank": 174}]
+
     def open_orders(self):
         self.call("open_orders", "read")
         return [Order(o.eid, o.is_bid, o.price, o.size, "", oid=k, expires=o.expires) for k, o in self.orders.items()]

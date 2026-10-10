@@ -105,7 +105,8 @@ def test_settings_file():
     check("the settings file switches strategies off", not bot.s.mm_enabled and not bot.s.ladder_enabled)
     check("a strategy that is off places nothing", not any(o.tag in ("mm", "ladder", "value")
                                                            for o in bot.orders.values()))
-    check("an unknown key is refused with an alert", any("bogus" in a for a in ALERTS))
+    check("an unknown key is refused, in the log only (no phone alert)", not any("bogus" in a for a in ALERTS)
+          and "bogus" not in config.asdict(bot.s))
 
 
 def test_ops():
@@ -157,8 +158,64 @@ def test_recorder():
     check("and an account row", db.execute("select count(*) from account").fetchone()[0] == 1)
 
 
+def test_summary_and_alerts():
+    from datetime import datetime, timezone
+    from mmbot2 import notify
+    st = {"account_value": 104812.0, "start_balance": 100000.0, "ev_outcome": 112703.0, "ev_change_24h": 2012.0,
+          "mm_profit_24h": 83.4, "tilt_s": 0.082, "reduce_only": False, "rate_limits_period": 0, "errors_period": 0}
+    lb, sc = {"myRank": 156, "total": 1396}, [{"marketType": "global", "smartScoreDecayed": 25.07, "rank": 174}]
+    text = notify.summary_text(st, lb, sc)
+    want = ("Balance 104.8k (+4.8%) · leaderboard 156 of 1,396 · Smart Score 25.1 (rank 174)\n"
+            "EV at settlement 112.7k (+2.0k 24h)\nMM profit 24h +83 (realised) · tilt 8.2%\nOK")
+    check("the summary is the brief's four lines", text == want, repr(text))
+    bad = dict(st, reduce_only=True, reduce_only_since="13:10", rate_limits_period=3, errors_period=2,
+               ev_change_24h=None, tilt_s=None)
+    text = notify.summary_text(bad, None, None)
+    check("unknown figures are left out; the status line names what is wrong",
+          text == "Balance 104.8k (+4.8%)\nEV at settlement 112.7k\nMM profit 24h +83 (realised)\n"
+                  "REDUCE-ONLY since 13:10 · 3 rate limits · 2 errors", repr(text))
+    check("a summary is due on the even hour UTC, once",
+          notify.due(datetime(2026, 10, 10, 14, 0, 5, tzinfo=timezone.utc), 2, None) == "2026-10-10 14"
+          and notify.due(datetime(2026, 10, 10, 14, 30, tzinfo=timezone.utc), 2, "2026-10-10 14") is None
+          and notify.due(datetime(2026, 10, 10, 15, 0, tzinfo=timezone.utc), 2, "2026-10-10 14") is None)
+    from mmbot2 import mm
+    inv, t0 = mm.Inventory(), 1.791e9
+    inv.add_fill("21", 50, 0.40, t0, True)
+    inv.add_fill("21", -50, 0.45, t0 + 60, False)
+    inv.add_fill("22", -20, 0.60, t0 - 90000, True)
+    inv.add_fill("22", 20, 0.50, t0 - 90000, False)
+    check("MM profit 24h is the round trips closed in the last 24 h", abs(inv.profit_24h(t0 + 120) - 2.5) < 1e-9,
+          inv.trips)
+    check("and survives a restart", abs(mm.Inventory(inv.to_dict()).profit_24h(t0 + 120) - 2.5) < 1e-9)
+    sent = []
+    phone = notify.Notifier("")
+    phone.send = lambda msg, title=None: sent.append(msg)
+    phone.alert("RATE LIMITED: 429 pause #1")
+    phone.alert("RATE LIMITED: 429 pause #2")
+    phone.alert("REDUCE-ONLY ON: x")
+    check("the same cause alerts once in 30 minutes", sent == ["RATE LIMITED: 429 pause #1", "REDUCE-ONLY ON: x"],
+          sent)
+    client, feed, bot = make()
+    ALERTS.clear()
+    bot.cycle()
+    client.rate_limited, client.pauses = 2, 1
+    feed.ok = False
+    bot.cycle()
+    check("a rate-limit penalty alerts", any(a.startswith("RATE LIMITED") for a in ALERTS), ALERTS)
+    bot.feed_down -= 301
+    bot.cycle()
+    bot.cycle()
+    check("the feed down for 5 minutes alerts once", sum(a.startswith("REALTIME FEED DOWN") for a in ALERTS) == 1,
+          ALERTS)
+    st = json.load(open(os.path.join(bot.env.run_dir, STATUS_FILE)))
+    check("status.json carries the summary's figures", st["rate_limits_period"] == 2 and st["mm_profit_24h"] == 0
+          and st["start_balance"] == 100000.0 and "ev_change_24h" in st, st)
+    check("nothing else alerted", all(a.startswith(("RATE LIMITED", "REALTIME FEED DOWN")) for a in ALERTS),
+          ALERTS)
+
+
 if __name__ == "__main__":
-    for t in (test_recorder, test_cycle, test_dry_run, test_fill_and_state, test_kill_switch, test_settings_file, test_ops):
+    for t in (test_summary_and_alerts, test_recorder, test_cycle, test_dry_run, test_fill_and_state, test_kill_switch, test_settings_file, test_ops):
         try:
             t()
         except Exception as e:                     # a crash is a failure of that test, not of the suite

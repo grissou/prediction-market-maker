@@ -5,7 +5,7 @@ OWNS     the Settings dataclass (one line of reason per field), LIVE (what setti
          its allowed range), validation, SettingsFile (re-read every 30 s), the environment (API key, tournament),
          the run directory, and which strategies the cycle calls (`strategies`).
 NEVER    holds a fact about the exchange (the tick, the request limit, the price band: those are named constants
-         beside the code that uses them), and never lets a bad file value through: it is refused with one alert.
+         beside the code that uses them), and never lets a bad file value through: it is refused with one log line.
 ORIGIN   Sixteen releases taught one lesson over and over: a change must be a file edit, not a restart. The old
          config grew to 1,316 lines and some 400 settings, most of them release switches that are now always on
          or never were. What is left are the 62 values of the live file of 10 October
@@ -183,7 +183,8 @@ class SettingsFile:
         self.mtime, self.refused = None, set()
 
     def load(self, current, alert=lambda msg: None):
-        """New Settings if the file changed, else None. Every change is logged; every refusal alerts once."""
+        """New Settings if the file changed, else None. Every change is logged; every refusal is logged once
+        (`alert` is the log since the fix brief of 10 Oct: refusals do not go to the phone)."""
         try:
             mtime = os.path.getmtime(self.path)
         except OSError:

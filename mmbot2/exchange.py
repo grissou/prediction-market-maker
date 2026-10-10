@@ -400,6 +400,14 @@ class Client:
             account.start = self.start_balance
         return account
 
+    def leaderboard(self):
+        """{"myRank": 156, "total": 1396, ...} (all time): for the phone summary only."""
+        return self.get(f"/tournaments/{self.slug}/leaderboard", limit=1)
+
+    def smart_score(self):
+        """[{"marketType": "global", "smartScoreDecayed": 25.1, "rank": 174, ...}] ([] until scored)."""
+        return self.get(f"/tournaments/{self.slug}/me/smart-score")
+
     def open_orders(self):
         raw = self.paged("/orders", status="open", tournamentId=self.tid, limit=200)
         self.locked = locked_cash(raw)

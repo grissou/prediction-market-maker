@@ -37,6 +37,7 @@ class Inventory:
         saved = saved or {}
         self.lots = {e: [list(x) for x in v] for e, v in saved.get("lots", {}).items()}
         self.handed = dict(saved.get("handed_to_value", {"count": 0, "shares": 0.0}))   # lots now held as value
+        self.trips = [list(x) for x in saved.get("trips", [])]   # [epoch s, P&L] of each round trip closed (24 h)
         self.rows = {}               # eid -> the last stale() valuation, for status
         self.recycling = {}          # label -> the last cycle's recycle order, for status
 
@@ -55,6 +56,7 @@ class Inventory:
         rem = signed
         while abs(rem) > 1e-9 and lots and (lots[0][0] > 0) != (rem > 0):
             n = min(abs(rem), abs(lots[0][0]))
+            self.trips.append([t, n * ((price - lots[0][1]) if lots[0][0] > 0 else (lots[0][1] - price))])
             lots[0][0] += n if lots[0][0] < 0 else -n
             rem += n if rem < 0 else -n
             if abs(lots[0][0]) <= 1e-9:
@@ -107,7 +109,13 @@ class Inventory:
         self.handed["shares"] = round(self.handed["shares"] + sum(abs(x[0]) for x in lots), 2)
 
     def to_dict(self):
-        return {"lots": {e: [list(x) for x in v] for e, v in self.lots.items()}, "handed_to_value": self.handed}
+        return {"lots": {e: [list(x) for x in v] for e, v in self.lots.items()}, "handed_to_value": self.handed,
+                "trips": self.trips}
+
+    def profit_24h(self, now):
+        """Realised P&L of the round trips closed in the last 24 hours (the phone summary's MM profit)."""
+        self.trips = [x for x in self.trips if now - x[0] <= 86400.0]
+        return sum(x[1] for x in self.trips)
 
     def status(self):
         """The market-making part of status.json's mm_funding."""

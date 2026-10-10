@@ -1,9 +1,10 @@
 """
 Running the bot: the command line, the run loop, the handover, the watchdog, the self-test and the exit codes.
 
-OWNS     `main(argv)`: run (a dry run), run --live, status, cancel; logging; phone alerts; the loop that calls
+OWNS     `main(argv)`: run (a dry run), run --live, status, summary, cancel; logging; the loop that calls
          Bot.cycle between feed events; SIGINT/SIGTERM (stop and cancel), SIGUSR1 (handover: stop WITHOUT
-         cancelling, the next process adopts the orders); the watchdog thread; the start-up self-test.
+         cancelling, the next process adopts the orders); the watchdog thread; the start-up self-test; the
+         phone summary every summary_every_h on the hour UTC (notify.py) and the start / crash alerts.
 NEVER    decides a trade. Never starts trading while the kill-switch marker exists, and never exits on a
          handover without leaving the file the next process needs (or, past the handover deadline, at all).
 ORIGIN   The 7 October outage: the exchange went silent for 20 minutes; the watchdog cancelled everything and
@@ -23,10 +24,8 @@ import sys
 import threading
 import time
 
-import requests
-
-from mmbot2 import config
-from mmbot2.bot import Bot, KILL_FILE, write_json, utcnow
+from mmbot2 import config, notify
+from mmbot2.bot import Bot, KILL_FILE, STATE_FILE, STATUS_FILE, write_json, utcnow
 from mmbot2.exchange import ApiError, Client, Feed
 from mmbot2.state import Order
 
@@ -53,17 +52,27 @@ def setup_logging(run_dir):
     logging.getLogger().setLevel(logging.INFO)
 
 
-def notifier(env):
-    """A phone alert function (ntfy): never raises, never blocks the cycle for long."""
-    def alert(msg):
-        log.warning("ALERT %s", msg)
-        if not env.alert_url:
-            return
+def notifier(env, live=True):
+    return notify.Notifier(env.alert_url, "mm_bot2" if live else "mm_bot2 (dry run)")
+
+
+def send_summary(client, bot_status, phone):
+    """The summary now: status.json's figures and the two leaderboard reads (2 requests; a failed read leaves its
+    part out)."""
+    def safe(fn):
         try:
-            requests.post(env.alert_url, data=msg.encode(), headers={"Title": "mm_bot2"}, timeout=5)
-        except requests.RequestException as e:
-            log.warning("alert not sent: %s", e)
-    return alert
+            return fn()
+        except (ApiError, KeyError, TypeError, ValueError) as e:
+            log.warning("summary: %s", e)
+            return None
+    lb, scores = safe(client.leaderboard), safe(client.smart_score)
+    try:
+        text = notify.summary_text(bot_status, lb, scores)
+    except (KeyError, TypeError, ValueError) as e:          # an odd leaderboard reply: the summary without it
+        log.warning("summary: %s", e)
+        text = notify.summary_text(bot_status)
+    log.info("SUMMARY %s", text.replace("\n", " | "))
+    phone.send(text)
 
 
 class NoRefs:
@@ -99,6 +108,8 @@ class Runner:
         self.bot, self.env = bot, env
         self.handover = False                     # set by SIGUSR1: exit without cancelling
         self.errors = 0                           # failed cycles in a row
+        self.summary_key = None                   # the hour of the last summary sent
+        self.phone = None                         # notify.Notifier for the summary (None: no summary)
 
     def request_stop(self, *_):
         self.handover = False                     # a plain stop always cancels, even after a handover request
@@ -138,10 +149,25 @@ class Runner:
 
     def cycle_failed(self, e):
         self.errors += 1
+        self.bot.note_error()
         log.error("cycle failed (%d in a row): %s", self.errors, e)
         if self.errors == ERRORS_BEFORE_PULL:
-            self.bot.alert(f"{self.errors} failed cycles in a row ({e}): pulling every quote")
+            log.error("%d failed cycles in a row: pulling every quote", self.errors)
             self.bot.cancel_everything()
+
+    def maybe_summary(self):
+        """The phone summary on the hour UTC every summary_every_h (README: the fix brief's four lines)."""
+        key = notify.due(utcnow(), self.bot.s.summary_every_h, self.summary_key)
+        if key is None or self.phone is None:
+            return
+        self.summary_key = key
+        try:
+            with open(os.path.join(self.env.run_dir, STATUS_FILE)) as f:
+                st = json.load(f)
+        except (OSError, ValueError) as e:
+            log.warning("summary: no status.json (%s)", e)
+            return
+        send_summary(self.bot.client, st, self.phone)
 
     def wait(self, started):
         """Sleep until a feed event (at least MIN_CYCLE_GAP_S after the last start) or cycle_s."""
@@ -153,6 +179,7 @@ class Runner:
         while self.bot.running:
             started = time.monotonic()
             self.run_cycle()
+            self.maybe_summary()
             if self.bot.running:
                 self.wait(started)
 
@@ -220,14 +247,16 @@ def covered_no_test(client, positions):
 
 def start(env, live):
     """The Bot wired to the exchange, the feed and Polymarket; None after a fatal start-up problem."""
-    s = config.SettingsFile(env.settings_path).load(config.Settings(), notifier(env)) or config.Settings()
+    s = config.SettingsFile(env.settings_path).load(config.Settings(), log.warning) or config.Settings()
     client = Client(env, s, live)
     t = client.tournament()
     refs = reference_prices()
     refs.start()
     feed = Feed(client, t["id"])
     feed.start()
-    bot = Bot(client, feed, refs, s, env, live, alert=notifier(env))
+    phone = notifier(env, live)
+    bot = Bot(client, feed, refs, s, env, live, alert=phone.alert)
+    bot.phone = phone
     bot.tournament_id = t["id"]
     bot.load_markets(time.monotonic())
     return bot
@@ -238,8 +267,11 @@ def run(env, live):
         log.critical("%s exists: the kill switch fired; delete it to trade again", KILL_FILE)
         return EXIT_KILLED
     bot = start(env, live)
-    if live and not adopted_handover(env.run_dir):
-        bot.cancel_everything()                   # a plain start begins from a clean slate
+    handed = live and adopted_handover(env.run_dir)
+    bot.alert(f"STARTED {'live' if live else 'dry run'}{' (handover)' if handed else ''}: "
+              f"{len(bot.markets)} markets", cause="start")
+    if live and not handed:
+        bot.cancel_everything()                   # a plain start begins from a clean slate (our orders only)
     if live:
         for attempt in range(SELFTEST_TRIES):
             try:
@@ -256,6 +288,7 @@ def run(env, live):
             bot.client.covered_no = False
             bot.alert(f"covered 'sell NO' {no_problem}: NO holdings are bought back as 'buy YES' this run")
     runner = Runner(bot, env)
+    runner.phone = bot.phone
     signal.signal(signal.SIGINT, runner.request_stop)
     signal.signal(signal.SIGTERM, runner.request_stop)
     signal.signal(signal.SIGUSR1, runner.request_handover)
@@ -284,12 +317,33 @@ def status(env):
     return EXIT_OK
 
 
-def cancel(env):
+def summary(env):
+    """Send the phone summary now, from the running bot's status.json (2 requests)."""
+    with open(os.path.join(env.run_dir, STATUS_FILE)) as f:
+        st = json.load(f)
+    client = Client(env, config.Settings(), live=False)
+    send_summary(client, st, notifier(env, st.get("mode") == "live"))
+    return EXIT_OK
+
+
+def cancel(env, everything=False):
+    """Cancel our orders (the ids in state.json); with --all every order on the account, foreign ones too."""
     client = Client(env, config.Settings(), live=True)
     client.tournament()
-    ok = client.cancel_all()
-    print("cancelled everything" if ok else "cancel-all incomplete: run again")
-    return EXIT_OK if ok else EXIT_CRASH
+    if everything:
+        ok = client.cancel_all()
+        print("cancelled every order on the account" if ok else "cancel-all incomplete: run again")
+        return EXIT_OK if ok else EXIT_CRASH
+    try:
+        with open(os.path.join(env.run_dir, STATE_FILE)) as f:
+            tags = json.load(f).get("tags", {})
+    except (OSError, ValueError):
+        tags = {}
+    ours = [o for o in client.open_orders() if o.oid in tags]
+    for o in ours:
+        client.cancel(o.oid, wait=True)
+    print(f"cancelled our {len(ours)} orders (foreign orders left; --all cancels them too)")
+    return EXIT_OK
 
 
 def main(argv):
@@ -304,12 +358,20 @@ def main(argv):
             return run(env, live="--live" in argv)
         if command == "status":
             return status(env)
+        if command == "summary":
+            return summary(env)
         if command == "cancel":
-            return cancel(env)
+            return cancel(env, "--all" in argv)
     except ApiError as e:
+        if command == "run":
+            notifier(env).alert(f"CRASH: {'fatal API error' if e.fatal else 'exiting on'} {e}", cause="crash")
         if e.fatal:
             log.critical("fatal API error: %s", e)
             return EXIT_FATAL
         raise
-    print("usage: mm_bot2.py run [--live] | status | cancel", file=sys.stderr)
+    except Exception as e:
+        if command == "run":
+            notifier(env).alert(f"CRASH: {e!r}: exiting (systemd restarts it)", cause="crash")
+        raise
+    print("usage: mm_bot2.py run [--live] | status | summary | cancel [--all]", file=sys.stderr)
     return EXIT_FATAL
