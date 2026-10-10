@@ -172,16 +172,6 @@ class Config:
     mark_frag_window_hours: float = 24.0  # ...sd over the last this many hours of snapshots (refreshed every 30 min)
     mark_frag_min_samples: int = 60       # ...fewer 10-min changes than this in the window -> no estimate, no cap
     mark_frag_floor_sd: float = 0.002     # ...an sd below 0.2c counts as 0.2c, so the limit never explodes
-    behind_best_size_enabled: bool = False   # behind-the-best sizing: an ADDING quote (the side growing |race-netted
-                                          #   position|) resting behind_best_ticks or more behind the best OTHER
-                                          #   trader's price on its side is sized x behind_best_size_factor (never
-                                          #   below behind_best_min_size). Round 2: P(fill in 10 min) 33% at the best,
-                                          #   6-8% one tick behind, 2-5% two+ behind, ~33k of cash locked in those.
-                                          #   Reducing side, empty sides and ref-only markets unchanged; a resting
-                                          #   full-size order stays (it is a size factor, see Quote.bid_max)
-    behind_best_ticks: int = 2            # ...at least this many ticks behind the best other price
-    behind_best_size_factor: float = 0.5  # ...the adding side's size factor then (times the other factors)
-    behind_best_min_size: int = 100       # ...never shrunk below this many shares (coverage and the first fill stay)
     max_order_cash_frac: float = 0.01     # max cash tied up in a single order: 1,000 at 100k
     tail_low: float = 0.05                # fair value below this: don't SELL YES (risks ~95c a share to earn ~1c)...
     tail_high: float = 0.95               # ...above this: don't BUY YES. Either side still allowed to shrink a position
@@ -219,10 +209,8 @@ class Config:
     max_skew_through: float = 0.0         # a skewed quote may sit at most this far THROUGH fair value (0 = at fair
                                           #   value at worst). Not applied in reduce-only/flatten, which must get out.
                                           #   1.0 = off (the old behaviour: up to max_half_spread through it)
-    skew_age_enabled: bool = True         # AGE SKEW: a position held longer than skew_age_after_hours (share-weighted,
-    skew_age_after_hours: float = 1.0     #   oldest shares first out) skews both quotes further toward unloading:
-    skew_age_per_hour: float = 0.0025     #   0.25c per hour beyond that...
-    skew_age_max: float = 0.02            #   ...at most 2c, added on top of the (separately capped) inventory skew.
+    skew_age_after_hours: float = 1.0     # the quote log line shows a position's share-weighted age beyond this (the
+                                          #   age SKEW that used it was removed on simplify: off live since 2 Oct)
                                           #   Never through fair value (max_skew_through). 2 Oct: median held share
                                           #   7.2 h old, 19% > 12 h. False = off (the old behaviour)
     improve_ticks: int = 1                # R4: quote this many ticks better than the best other trader (1 = penny,
@@ -583,30 +571,6 @@ class Config:
                                           #   requests: at most once per record_seconds plus once after a fill, and
                                           #   a position's row only when it changed (or hourly). ~1-3 MB a day
     record_positions_full_seconds: float = 3600.0   # ...but every position at least this often
-
-    # --- SAME-SIDE REFILL COOLDOWN ------------------------------------------------------------
-    # Data (Analyst 10b): the 3rd and later fills of a same-side run within 60 s lost -1.15c a share (81k shares,
-    # -936), within 10 s -1.68c: re-posting the same side straight after it was hit kept buying through fair value.
-    refill_cooldown_enabled: bool = False  # after a same-side run of fills that ADDED to the position, stop re-quoting
-                                          #   that side for a while (a safe resting order there is left alone; an
-                                          #   unsafe one is pulled as usual). A side that reduces the position is exempt
-    refill_cooldown_fills: int = 2        # ...this many fills on one side of one market
-    refill_cooldown_window_seconds: float = 60.0   # ...within this long
-    refill_cooldown_min_shares: int = 200  # ...totalling at least this many shares (1-share probes don't count)
-    refill_cooldown_seconds: float = 30.0  # how long that side stays withheld
-
-    # --- FAST UNLOAD AFTER SWEEP FILLS ---------------------------------------------------------
-    # Data: fills with > 3c edge made +1,704 on 109 fills (DATA_REPORT_2 s5); the mid reverts toward Polymarket with
-    # a 5-13 min half-life, positions are held a median 7.2 h. After a sweep fill, offer the shares back near fair
-    # value for a few minutes (realised P&L) instead of carrying them at the normal skewed quote.
-    fast_unload_enabled: bool = False      # a quote fill that ADDED to a position opens an "unload window" there
-    fast_unload_min_edge: float = 0.02    # ...if it had at least this edge at the quote (vs fv when quoted)...
-    fast_unload_min_shares: int = 100     # ...and at least this many shares
-    fast_unload_seconds: float = 180.0    # how long the window stays open (only its first placement is urgent)
-    fast_unload_edge: float = 0.01        # the reducing side quotes this far from fair value (not min_edge / the
-                                          #   ref_only edge, not pennying), never through fair; 0 = fv rounded away
-    fast_unload_size_mult: float = 1.0    # reducing size = shares still to unload x this, capped by the position
-
     # --- REDUCING SIDE JOINS THE BEST -----------------------------------------------------------
     # Data (Explorer): P(fill in 10 min) 33-34% AT the best, 6-8% one tick behind; our reducing side was at the
     # best only 24% of the time; 11 of 12 positions >= 1,000 sh had no reducing fill in 6 h; round trips made all
@@ -639,31 +603,6 @@ class Config:
     base_url: str = os.environ.get("SUPERMARKET_BASE_URL", "https://sig.thesuper.market/api/v1")
     slug: str = os.environ.get("TOURNAMENT_SLUG", "")
     only_exchanges: str = os.environ.get("ONLY_EXCHANGES", "")
-
-    # --- WRITE SAVERS (Round 4 item 2; IDEAS_ROUND3 A1/A10 and A4/A5) - both OFF by default ------------------
-    # (a) No-chase. 24% of quote changes were a pure 0.5c chase of a rival with neither our fair value nor our
-    # inventory changed, and quotes < 2 min old earn less than resting ones. When the only trigger for re-pricing a
-    # level-0 side is that its target moved (a rival stepped in front / away) - fair value within no_chase_fv_epsilon
-    # of its value at placement, inventory as at placement, the order not (partly) filled - the order stays while it
-    # is within no_chase_tolerance_ticks of the new target (instead of reprice_tolerance_ticks). Everything else
-    # still applies: outside its limit price (unsafe/crossing), bigger than now allowed, mostly filled, expiring.
-    no_chase_enabled: bool = False
-    no_chase_tolerance_ticks: int = 2     # 0.5c ticks; only used with no_chase_enabled
-    no_chase_fv_epsilon: float = 0.0025   # fair value moved more than this since placement -> normal tolerance
-    # (b) TTL saver. order_ttl refreshes rewrite every resting order every ~27 min (~20% of writes).
-    # ttl_tiers_enabled: level-0 orders get a TTL by market tier - headline races order_ttl, "busy" (planned quote
-    # size >= ttl_busy_size_frac of the account) order_ttl_busy, the rest order_ttl_quiet - times a +-ttl_jitter_frac
-    # random factor (so a restart's orders don't all refresh in the same minute), never above MAX_ORDER_TTL (the
-    # dead-man's switch stays bounded at 2 h). ttl_expire_as_cancel: a level-0 order is NOT refreshed (cancel + new)
-    # before it expires; it is left to expire on the exchange (no DELETE), and the side is re-quoted only once it has
-    # been gone ttl_expire_grace_seconds (clock-skew margin: never two of our orders resting on one side).
-    ttl_tiers_enabled: bool = False
-    order_ttl_busy: float = 3600.0
-    order_ttl_quiet: float = 6000.0       # x(1 +- 0.2) = 80-120 min (capped at MAX_ORDER_TTL)
-    ttl_jitter_frac: float = 0.2
-    ttl_busy_size_frac: float = 0.01      # same split as the ladder's default "busy" (1,000 shares at 100k)
-    ttl_expire_as_cancel: bool = False
-    ttl_expire_grace_seconds: float = 5.0
     # --- Package 5: T2.1 tilt-corrected reference ---
     # The tournament prices every market with one favourite-longshot tilt: mid ~ c + (1 - s)(r - c), c = 1/legs.
     # s is estimated every cycle from the cross-section (TiltEstimator) and reported (status.json tilt_s / tilt_diag,
@@ -684,42 +623,6 @@ class Config:
     # B: Kelly sizes on at most this much edge (0 = off; try 0.015 / 0.01): size on the spread, not on a persistent
     #   tournament-vs-Polymarket gap (otherwise the bet is biggest exactly where the tournament disagrees most).
     kelly_edge_cap: float = 0.0
-    # A: the REDUCING side only (long -> ask, short -> bid, size <= this market's position) measures min_edge from the
-    #   tournament book's own price instead of the Polymarket-leaned fair value, never further toward Polymarket than
-    #   the blend (the more aggressive of the two). The adding side keeps the blend, capped 2 x min_edge behind the
-    #   reducing price (we never meet our own order). Off in ref-only markets, without a book price, and for
-    #   reduce_from_book_pause_s after a Polymarket jump (>= ref_jump_threshold) in that market.
-    reduce_from_book: bool = False
-    reduce_from_book_pause_s: float = 120.0
-    reduce_from_book_headline: bool = False   # False = not in headline_races markets (staging gate)
-    # --- Package 5: X5 gap-size shrink ---
-    # Where the quoted fv (Polymarket-blended, tilt-corrected if T2.1 is on) sits far from the book's own price, the
-    # side that ADDS to the position shrinks: factor = max(gap_size_floor, 1 - |fv - book_fv| / gap_size_shrink),
-    # multiplied into decide's adding factor (like the capital ceiling's). The reducing side is untouched. Not in
-    # ref-only markets, not without a book price.
-    gap_size_shrink: float = 0.0          # 0 = off; the gap (in price) at which the adding size reaches the floor (try 0.03)
-    gap_size_floor: float = 0.25          # the smallest factor
-    # --- Package 5: X11 reduce_from_book scope ---
-    # --- Package 6 candidate: backstop soft band ---
-    # With risk_model "correlated": in a band of this many x account value below worst_case_backstop_frac, the
-    # ADDING side's size shrinks linearly to 0 as the sum-of-maxima worst case nears the backstop (see
-    # backstop_soft_factor), so the worst case stops growing before the hard reduce-only cliff instead of flipping
-    # every adding side off and on. The reducing side is never shrunk. 0 = off (unchanged quotes).
-    backstop_soft_frac: float = 0.0
-    # --- Package 6 candidate: exits keep quoting in reduce-only ---
-    # The bot is reduce-only most of the time live (backstop), and there every exit feature was switched off.
-    # exit_quotes_in_reduce_only True: reduce_join_best (still needs its own flag) also runs in reduce-only. It
-    # only moves the REDUCING side toward the book and sizes it <= the (race-netted) position, so risk can only fall;
-    # every other guard stays (reference guard, jump cooldown, headline gates, never meeting our own other side).
-    # Fast unload stays off in reduce-only.
-    exit_quotes_in_reduce_only: bool = False
-    # --- Package 6 candidate: tail adding-size factor ---
-    # In tail markets (raw Polymarket reference r below tail_low or above tail_high) the Polymarket-vs-tournament gap
-    # is mostly the systematic favourite-longshot tilt, so Kelly sizing on that "edge" buys most where it is least
-    # real. There the ADDING side's size is multiplied by this factor (the shared adding factor in Bot.decide); the
-    # reducing side is never shrunk. Uses the raw Polymarket price (decide's ref), not the tilted one; no ref ->
-    # unchanged. 1.0 = off (unchanged quotes); candidate 0.25.
-    tail_adding_factor: float = 1.0
     # --- Package 6: reduce NO holdings as covered NO sales ---
     # Live 3 Oct: every order was sent as side "yes", so a BID that buys back a short YES position (we hold NO) went
     # out as "buy YES @ p", which the exchange treats as a new cash purchase and refuses at 0 free cash ("Insufficient
@@ -819,18 +722,6 @@ class Config:
     # them within pair_unwind_followup_max_cost of the planned price; when nothing can complete them then (same
     # cycle), and from the second try on, the extra legs are bought / sold BACK instead (within arb_min_profit (_buy)
     # + pair_unwind_followup_max_cost), so no one-legged set is kept (tries / max age: pair_unwind_followup_*). status.json arb_cash_blocked; journal "ARB skipped: cash rule (need X, left Y)". False = unchanged.
-    arb_cash_rule: bool = False
-    arb_cash_mult: float = 1.25
-    arb_cash_reserve: float = 2000.0
-    arb_leg_depth_frac: float = 0.8
-    # F5 arb_sellback True (C-4, the mirror of pair_no_unwind_max_cost for long sets; needs pair_unwind_enabled): a
-    # held YES+YES set (long every leg of a race) is sold back as one immediate-or-cancel pair-unwind batch once
-    # other traders' bids add up to >= arb_sellback_min_sum (instead of 1 + pair_unwind_min_profit; below 1.00 =
-    # at a cost, to free the capital), a level at a price of ours skipped whole, sized to the smallest leg held and
-    # the depth (and pair_unwind_max_frac per order, as every pair unwind). A sale only the lower threshold allows
-    # counts against pair_no_unwind_max_per_cycle like a short-set unwind at a cost. False = unchanged.
-    arb_sellback: bool = False
-    arb_sellback_min_sum: float = 1.00
     # --- Package 10 A (analysis/p10/SPEC_P10.md Part A; everything OFF by default) ---
     # SIG pays positions out at the OUTCOME: a contract is worth its Polymarket probability p, not its mark. Below,
     # "p" = the raw Polymarket price scaled to sum to 1 over the race (when every leg has one; else the raw price),
@@ -921,7 +812,6 @@ class Config:
     alloc_min_edge_buy: float = 0.05
     alloc_max_edge_sell: float = 0.02
     alloc_pin: str = ""                   # comma-separated market labels ("Rep Ohio Senate, Dem ...") never sold
-    alloc_headline: bool = False          # False = never the headline_races (party control) markets
     alloc_max_turnover_per_hour: float = 15000.0
     alloc_max_orders_per_cycle: int = 4
     alloc_writes_frac: float = 0.3
@@ -1249,10 +1139,7 @@ OVERRIDABLE = {
     "pair_unwind_max_frac": (0.0, 0.10),
     "pair_unwind_cooldown_seconds": (0.0, 3600.0),
     "limits_use_race_net": (False, True),
-    "skew_age_enabled": (False, True),
     "skew_age_after_hours": (0.0, 48.0),
-    "skew_age_per_hour": (0.0, 0.02),
-    "skew_age_max": (0.0, 0.1),
     "capital_in_positions_max_frac": (0.0, 1.0),
     "capital_ceiling_adding_size_factor": (0.0, 1.0),
     "ref_only_use_tops": (False, True),
@@ -1272,17 +1159,6 @@ OVERRIDABLE = {
     "fl_bad_side_extra_edge": (0.0, 0.05),
     "fl_bad_side_size_factor": (0.0, 1.0),
     "fl_mid_bid_extra_edge": (0.0, 0.03),
-    "refill_cooldown_enabled": (False, True),
-    "refill_cooldown_fills": (1, 20),
-    "refill_cooldown_window_seconds": (1.0, 600.0),
-    "refill_cooldown_min_shares": (0, 100000),
-    "refill_cooldown_seconds": (0.0, 600.0),
-    "fast_unload_enabled": (False, True),
-    "fast_unload_min_edge": (0.0, 0.20),
-    "fast_unload_min_shares": (0, 100000),
-    "fast_unload_seconds": (0.0, 3600.0),
-    "fast_unload_edge": (0.0, 0.05),
-    "fast_unload_size_mult": (0.0, 10.0),
     "reduce_join_best": (False, True),
     "reduce_join_min_edge": (0.0, 0.05),
     "reduce_join_min_shares": (0, 100000),
@@ -1297,20 +1173,6 @@ OVERRIDABLE = {
     "mark_frag_window_hours": (1.0, 168.0),
     "mark_frag_min_samples": (2, 100000),
     "mark_frag_floor_sd": (0.0005, 0.10),
-    "behind_best_size_enabled": (False, True),
-    "behind_best_ticks": (1, 20),
-    "behind_best_size_factor": (0.0, 1.0),
-    "behind_best_min_size": (0, 100000),
-    "no_chase_enabled": (False, True),
-    "no_chase_tolerance_ticks": (1, 10),
-    "no_chase_fv_epsilon": (0.0, 0.02),
-    "ttl_tiers_enabled": (False, True),
-    "order_ttl_busy": (300.0, 7200.0),
-    "order_ttl_quiet": (300.0, 7200.0),
-    "ttl_jitter_frac": (0.0, 0.5),
-    "ttl_busy_size_frac": (0.0, 0.20),
-    "ttl_expire_as_cancel": (False, True),
-    "ttl_expire_grace_seconds": (0.0, 60.0),
     # --- Package 5: T2.1 tilt-corrected reference ---
     "ref_tilt_min_markets": (5, 1000),
     "ref_tilt_halflife_min": (0.5, 1440.0),
@@ -1319,23 +1181,10 @@ OVERRIDABLE = {
     "ref_tilt_estimator": ("slope", "median", "wls"),     # ONE of these (ONE_OF_SETTINGS)
     # --- Package 5: B kelly_edge_cap, A reduce_from_book ---
     "kelly_edge_cap": (0.0, 0.10),
-    "reduce_from_book": (False, True),
-    "reduce_from_book_pause_s": (0.0, 3600.0),
-    "reduce_from_book_headline": (False, True),
     # --- Package 5: T2.4 tilt exposure limit ---
-    # --- Package 5: C hold target ---
-    # --- Package 5: X5 gap-size shrink ---
-    "gap_size_shrink": (0.0, 0.2),
-    "gap_size_floor": (0.0, 1.0),
     # --- Package 5: X11 reduce_from_book scope ---
     # --- Package 5: X12 takes measured from the tilted reference ---
     # --- Package 5: T2.1 ramp-in ---
-    # --- Package 6 candidate: backstop soft band ---
-    "backstop_soft_frac": (0.0, 0.3),
-    # --- Package 6 candidate: exits keep quoting in reduce-only ---
-    "exit_quotes_in_reduce_only": (False, True),
-    # --- Package 6 candidate: tail adding-size factor ---
-    "tail_adding_factor": (0.0, 1.0),
     # --- Package 6: reduce NO holdings as covered NO sales ---
     "reduce_no_as_sell": (False, True),
     # --- Package 7: NO+NO sets ---
@@ -1358,12 +1207,6 @@ OVERRIDABLE = {
     "adding_factor_capital_on": (0.0, 1.0),
     "capital_ceiling_adding_size_factor_resume": (0.0, 1.0),
     # --- Package 9 F5 ---
-    "arb_cash_rule": (False, True),
-    "arb_cash_mult": (1.0, 3.0),
-    "arb_cash_reserve": (0.0, 20000.0),
-    "arb_leg_depth_frac": (0.1, 1.0),
-    "arb_sellback": (False, True),
-    "arb_sellback_min_sum": (0.95, 1.1),
     # --- Package 10 A ---
     "value_mode": (False, True),
     "value_sell_margin": (0.0, 0.05),
@@ -1385,7 +1228,6 @@ OVERRIDABLE = {
     "alloc_min_edge_buy": (0.0, 0.5),
     "alloc_max_edge_sell": (0.0, 0.5),
     "alloc_pin": (0, 4000),          # free text: comma-separated labels, at most 4000 characters (FREE_TEXT_SETTINGS)
-    "alloc_headline": (False, True),
     "alloc_max_turnover_per_hour": (0.0, 200000.0),
     "alloc_max_orders_per_cycle": (1, 20),
     "alloc_writes_frac": (0.0, 1.0),
@@ -1529,16 +1371,6 @@ def validate_overrides(raw, cfg):
             if k in good:
                 del good[k]
                 bad.append(f"{k}: refresh_before_expiry ({refresh:.0f}) must be at most half of order_ttl ({ttl:.0f})")
-    # TTL saver: the same rule for the shortest tier TTL after jitter (order_ttl_for also clamps, this reports it).
-    keys = ("order_ttl_busy", "order_ttl_quiet", "ttl_jitter_frac")
-    tiers = [good.get(k, getattr(cfg, k)) for k in keys]
-    refresh = good.get("refresh_before_expiry", cfg.refresh_before_expiry)
-    if good.get("ttl_tiers_enabled", cfg.ttl_tiers_enabled) and min(tiers[0], tiers[1]) * (1 - tiers[2]) < 2 * refresh:
-        for k in keys + ("refresh_before_expiry", "ttl_tiers_enabled"):
-            if k in good:
-                del good[k]
-                bad.append(f"{k}: the shortest tier TTL after jitter ({min(tiers[0], tiers[1]) * (1 - tiers[2]):.0f}) "
-                           f"must be at least twice refresh_before_expiry ({refresh:.0f})")
     return good, bad
 
 
@@ -2579,7 +2411,6 @@ class Quote:
     # cash / risk limit: the biggest order already resting that may stay (None = the size itself).
     bid_max: int | None = field(default=None, compare=False)
     ask_max: int | None = field(default=None, compare=False)
-    behind: bool = field(default=False, compare=False)   # behind-the-best sizing shrank an adding side (log / status)
 
 
 NO_QUOTE = Quote()
@@ -2678,13 +2509,6 @@ def plan_sizes(activity, headline, bankroll, cfg=CFG, prev=None, lock=None, prev
     return out
 
 
-def age_skew(age_hours, eff_inv, cfg=CFG):
-    """Extra reservation-price shift for a position held long: skew_age_per_hour for every hour beyond
-    skew_age_after_hours, capped at skew_age_max, in the direction that unloads eff_inv (long -> lower)."""
-    if not cfg.skew_age_enabled or not eff_inv or not age_hours or age_hours <= cfg.skew_age_after_hours:
-        return 0.0
-    a = min(cfg.skew_age_max, cfg.skew_age_per_hour * (age_hours - cfg.skew_age_after_hours))
-    return a if eff_inv > 0 else -a
 def fl_side(fv, prev, cfg=CFG):
     """Favourite-longshot bias: which side of a market priced at fv is the "bad" one -> (side, extra edge,
     size factor), side None = no bias. Below fl_low our bid buys the longshot students overpay for; above
@@ -2731,36 +2555,11 @@ def mark_step_sd(series, min_samples=60, floor=0.002, step=MARK_FRAG_STEP_SECOND
     return max(math.sqrt(sum((c - mean) ** 2 for c in ch) / (len(ch) - 1)), floor)
 
 
-def gap_size_factor(fv, book_fv, cfg=CFG):
-    """X5: the adding side's size factor where the quoted fv and the book's own price disagree: 1 at no gap, falling
-    linearly to cfg.gap_size_floor at a gap of cfg.gap_size_shrink (and staying there). 1 when off (shrink <= 0)."""
-    if cfg.gap_size_shrink <= 0 or fv is None or book_fv is None:
-        return 1.0
-    return max(cfg.gap_size_floor, 1.0 - abs(fv - book_fv) / cfg.gap_size_shrink)
-
-
-def backstop_soft_factor(worst, equity, cfg=CFG):
-    """Package 6 candidate (backstop soft band): the adding side's size factor as the sum-of-maxima worst case
-    nears the reduce-only backstop. 1 when off (backstop_soft_frac <= 0, risk_model not "correlated", no account
-    value) or worst <= (backstop - soft) x equity; 0 at or above backstop x equity; linear in between."""
-    soft = cfg.backstop_soft_frac
-    if soft <= 0 or cfg.risk_model != "correlated" or not equity or worst is None:
-        return 1.0
-    hi = cfg.worst_case_backstop_frac * equity
-    lo = (cfg.worst_case_backstop_frac - soft) * equity
-    if worst <= lo:
-        return 1.0
-    if worst >= hi:
-        return 0.0
-    return (hi - worst) / (hi - lo)
-
-
 def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=False, no_bid=False, no_ask=False,
                   bid_cap=None, ask_cap=None, kelly_p=None, bankroll=None, shift=0.0, order_size=None,
                   position_limit=None, min_edge=None, reduce_size=None, net_inv=None, age_hours=0.0,
-                  adding_factor=1.0, bias_side=None, bias_edge=0.0, bias_size=1.0, unload_side=None,
-                  unload_edge=0.0, unload_size=None, adding_limit_factor=1.0, frag_limit=None, behind_best=True,
-                  reduce_fv=None, why=None, adding_per_market=False, value_p=None, skew_inv=None, age_off=False,
+                  adding_factor=1.0, bias_side=None, bias_edge=0.0, bias_size=1.0, adding_limit_factor=1.0, frag_limit=None,
+                  why=None, adding_per_market=False, value_p=None, skew_inv=None, age_off=False,
                   skew_add_flat=False):
     """
     fv         fair YES probability
@@ -2788,9 +2587,6 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
                        max_half_spread) and at bias_size times its size (favourite-longshot bias, see fl_side).
                        Ignored on a side that shrinks this exchange's position: that side quotes normally
                        (its size beyond the position itself still gets bias_size)
-    unload_side        "bid" / "ask" / None: fast unload window (see Bot.note_unloads). That side, if it shrinks this
-                       exchange's position, quotes unload_edge from fv (or closer, if the skews already put it
-                       there), never crossing the best other order, at unload_size shares capped by the position
     adding_limit_factor  the side that grows |net_inv| WANTS at most this fraction of the normal position limit
                        (turnover control: a market whose position cannot turn), at least 1 share while the normal
                        limits would quote it; bid_max / ask_max keep the normal limits. 1 = no change
@@ -2843,27 +2639,18 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
     else:
         skew = cfg.skew_per_share * s_inv
     skew = max(-cfg.skew_max, min(cfg.skew_max, skew))
-    if not age_off:
-        skew += age_skew(age_hours, eff_inv, cfg)          # capped on its own, so skew_max stays the inventory cap
     r = fv - skew - shift
-    # 1a. reduce_from_book (A): the reducing side's own reservation price, from the book when that is closer to it.
+    # (1a: the reduce_from_book reservation price that was computed here was removed on simplify: off live)
     r_bid = r_ask = r
     if skew_add_flat and skew_inv is not None and abs(eff_inv) >= 1:   # (P12 red team RT12-7: adding side braked)
         flat = (cfg.skew_per_quote * eff_inv / order_size if cfg.skew_mode == "quote" and order_size > 0
                 else cfg.skew_per_share * eff_inv)
-        flat = max(-cfg.skew_max, min(cfg.skew_max, flat)) + (0.0 if age_off else age_skew(age_hours, eff_inv, cfg))
+        flat = max(-cfg.skew_max, min(cfg.skew_max, flat))
         if eff_inv > 0:
             r_bid = min(r_bid, fv - flat - shift)
         else:
             r_ask = max(r_ask, fv - flat - shift)
     fv_bid = fv_ask = fv
-    a_bid = a_ask = False
-    if reduce_fv is not None:
-        r_book = reduce_fv - skew - shift
-        if inv >= 1 and r_book < r:               # long: the ask sells down toward the book's price
-            r_ask, fv_ask, a_ask = r_book, min(fv, reduce_fv), True
-        elif inv <= -1 and r_book > r:            # short: the bid buys back toward it
-            r_bid, fv_bid, a_bid = r_book, max(fv, reduce_fv), True
 
     # 2. Allowed band for each side: at least min_edge, at most max_half_spread away from r.
     edge = cfg.min_edge if min_edge is None else min_edge
@@ -2904,7 +2691,7 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
         ask = max(ask, ceil_tick(best_bid + TICK))
 
     # 4a. Reducing side joins the best other price on its side (reduce_join_best): never through fair, never crossing.
-    if (cfg.reduce_join_best and (not reduce_only or cfg.exit_quotes_in_reduce_only)
+    if (cfg.reduce_join_best and not reduce_only
             and abs(eff_inv) >= max(1, cfg.reduce_join_min_shares)):
         if eff_inv > 0 and best_ask is not None:
             ask = min(ask, max(ceil_tick(best_ask), ceil_tick(fv + cfg.reduce_join_min_edge)))   # never moves out
@@ -2918,33 +2705,6 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
                 bid = min(bid, floor_tick(best_ask - TICK))
             bid_hi = max(bid_hi, bid)
             ask = max(ask, ceil_tick(bid + TICK))
-    # 4b. Fast unload window: the reducing side quotes near fair value (no pennying, never through fair).
-    unload_bid = unload_side == "bid" and inv <= -1 and not reduce_only
-    unload_ask = unload_side == "ask" and inv >= 1 and not reduce_only
-    if unload_bid:
-        bid = max(bid, min(floor_tick(fv - unload_edge), floor_tick(best_ask - TICK) if best_ask is not None else 1.0))
-        bid_hi = max(bid_hi, bid)                  # (the keep limit: an order there is safe)
-        ask = max(ask, ceil_tick(bid + TICK))
-    if unload_ask:
-        ask = min(ask, max(ceil_tick(fv + unload_edge), ceil_tick(best_bid + TICK) if best_bid is not None else 0.0))
-        ask_lo = min(ask_lo, ask)
-        bid = min(bid, floor_tick(ask - TICK))
-    # 4c. reduce_from_book self-cross rule: the adding side stays 2 x min_edge behind the lowest (highest) reducing
-    #     price that may rest (the keep limit), so our own bid never meets our own ask.
-    if a_ask:
-        keep = max(ask_lo, ceil_tick(best_bid + TICK)) if best_bid is not None else ask_lo
-        cap = min(ask, keep) - 2 * edge
-        if cap < PMIN - 1e-9:
-            no_bid = True                         # no room for an adding bid under the reducing ask
-        else:
-            bid, bid_hi = min(bid, floor_tick(cap)), min(bid_hi, floor_tick(cap))
-    if a_bid:
-        keep = min(bid_hi, floor_tick(best_ask - TICK)) if best_ask is not None else bid_hi
-        cap = max(bid, keep) + 2 * edge
-        if cap > PMAX + 1e-9:
-            no_ask = True
-        else:
-            ask, ask_lo = max(ask, ceil_tick(cap)), max(ask_lo, ceil_tick(cap))
     # 4d. Package 10: A4 the adding side's hurdle price (tails), A1 the reducing side's value floor. Each only moves a
     #     price AWAY from the other side (and the keep limits with it); step 4 runs again after them.
     if hurdle > 0 and not v_mid:
@@ -3006,14 +2766,6 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
                 ask_size = min(ask_size, frag_limit + inv)
         bid_size = min(bid_size, max_order_cash / bid)          # buying YES costs `bid` a share
         ask_size = min(ask_size, max_order_cash / (1 - ask))    # selling YES = buying NO at 1-ask
-        if unload_bid and unload_size is not None:              # only what it holds: never flips the position
-            bid_size = min(max(1, unload_size), -inv)
-        if unload_ask and unload_size is not None:
-            ask_size = min(max(1, unload_size), inv)
-        if a_bid:                                 # reduce_from_book: the book-priced side never flips the position
-            bid_size = min(bid_size, -inv)
-        if a_ask:
-            ask_size = min(ask_size, inv)
 
         # 6. Risk overrides.
         if reduce_only:
@@ -3065,19 +2817,6 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
             bid_size = min(bid_size, bid_size * adding_factor)
         if net <= 0:
             ask_size = min(ask_size, ask_size * adding_factor)
-    behind = False
-    if behind_best and cfg.behind_best_size_enabled and cfg.behind_best_size_factor < 1.0:
-        # Behind-the-best sizing: an adding quote resting behind_best_ticks+ behind the best other order rarely
-        # fills and locks cash; shrink it (floor behind_best_min_size, never growing it). Like adding_factor this
-        # leaves bid_max / ask_max alone, so a full-size order already resting is kept (hot-fix 2.2).
-        gap = cfg.behind_best_ticks * TICK - 1e-9
-        f, floor = max(0.0, cfg.behind_best_size_factor), cfg.behind_best_min_size
-        if net >= 0 and bid_size > 0 and best_bid is not None and best_bid - bid >= gap:
-            new = min(bid_size, max(bid_size * f, floor))
-            behind, bid_size = behind or new < bid_size, new
-        if net <= 0 and ask_size > 0 and best_ask is not None and ask - best_ask >= gap:
-            new = min(ask_size, max(ask_size * f, floor))
-            behind, ask_size = behind or new < ask_size, new
     bid_size, ask_size = max(0, int(bid_size)), max(0, int(ask_size))   # the API only takes whole shares
     if hold_bid and adding_factor > 0:
         bid_size = max(1, bid_size)
@@ -3106,7 +2845,7 @@ def compute_quote(fv, inv, eff_inv, best_bid, best_ask, cfg=CFG, reduce_only=Fal
     bid_limit = min(bid_hi, floor_tick(best_ask - TICK)) if best_ask is not None else bid_hi
     ask_limit = max(ask_lo, ceil_tick(best_bid + TICK)) if best_bid is not None else ask_lo
     return Quote(bid if bid_size else None, bid_size, ask if ask_size else None, ask_size, bid_limit, ask_limit,
-                 bid_max if bid_max != bid_size else None, ask_max if ask_max != ask_size else None, behind)
+                 bid_max if bid_max != bid_size else None, ask_max if ask_max != ask_size else None)
 
 
 def value_side_prices(p, inv, cfg=CFG):
@@ -3179,75 +2918,31 @@ def unsafe_order(o, price, size, limit, is_bid):
     return (o.price > lim + 1e-9 if is_bid else o.price < lim - 1e-9) or o.qty > size + 1e-9
 
 
-def side_needs_change(resting, price, size, cfg, now, limit=None, is_bid=True, max_size=None, tol_ticks=None,
-                      expire_as_cancel=False):
+def side_needs_change(resting, price, size, cfg, now, limit=None, is_bid=True, max_size=None):
     """True if what's resting on ONE side of an exchange doesn't match what we want there.
     Leaving a good order alone keeps its place in the queue, which is worth money. So an order a tick
     (reprice_tolerance_ticks) off the target is kept, as long as it's inside `limit` (see Quote).
     max_size: the biggest order still acceptable (default: size). Burst mode passes the normal size here while
     `size` is the burst size, so a full-size order placed before the burst stays and a half-size one placed
     during it stays too - neither is cancelled and re-placed when the exchange is slow.
-    tol_ticks: the tolerance instead of reprice_tolerance_ticks (no-chase). expire_as_cancel: an order about to
-    expire is kept (it is left to expire instead of being refreshed: ttl_expire_as_cancel)."""
+    """
     if price is None:
         return bool(resting)                                    # want nothing: anything there must go
     if len(resting) != 1:
         return True                                             # missing, or duplicates
     o = resting[0]
     if abs(o.price - price) > 1e-9:
-        tol = cfg.reprice_tolerance_ticks if tol_ticks is None else tol_ticks
+        tol = cfg.reprice_tolerance_ticks
         close = abs(o.price - price) <= tol * TICK + 1e-9
         safe = limit is not None and (o.price <= limit + 1e-9 if is_bid else o.price >= limit - 1e-9)
         if not (close and safe):
             return True                                         # wrong price
     if not (size * cfg.keep_fraction <= o.qty <= (max_size if max_size is not None else size)):
         return True                                             # mostly filled, or bigger than we now want
-    if not expire_as_cancel and o.expires and (o.expires - now).total_seconds() < cfg.refresh_before_expiry:
+    if o.expires and (o.expires - now).total_seconds() < cfg.refresh_before_expiry:
         return True                                             # about to expire
     return False
 
-
-def chase_only(cfg, fv, placed_fv, inv, placed_inv, qty, placed_qty):
-    """No-chase (no_chase_enabled): True if nothing of OURS changed since this order was placed - fair value within
-    no_chase_fv_epsilon, the same inventory, not (partly) filled - so a re-price would only follow a rival's move.
-    Unknown placement notes -> False (normal rules). Shared by Bot.plan_change and the simulators' plan_changes."""
-    if not cfg.no_chase_enabled or None in (fv, placed_fv, inv, placed_inv, qty, placed_qty):
-        return False
-    return (abs(fv - placed_fv) <= cfg.no_chase_fv_epsilon + 1e-12 and abs(inv - placed_inv) < 1e-9
-            and qty >= placed_qty - 1e-9)
-
-
-def no_chase_needs_change(resting, price, size, cfg, now, limit, is_bid, max_size, fv, placed_fv, inv, placed_inv,
-                          placed_qty, expire_as_cancel=False):
-    """side_needs_change with the no-chase rule: when chase_only holds for the single resting order, judge it at
-    no_chase_tolerance_ticks instead of reprice_tolerance_ticks (every other test - limit price, size, expiry -
-    unchanged). The one decision both Bot.plan_change and strategy_sim.plan_changes use."""
-    fix = side_needs_change(resting, price, size, cfg, now, limit, is_bid, max_size, expire_as_cancel=expire_as_cancel)
-    if (fix and price is not None and len(resting) == 1
-            and chase_only(cfg, fv, placed_fv, inv, placed_inv, resting[0].qty, placed_qty)):
-        fix = side_needs_change(resting, price, size, cfg, now, limit, is_bid, max_size,
-                                tol_ticks=max(cfg.no_chase_tolerance_ticks, cfg.reprice_tolerance_ticks),
-                                expire_as_cancel=expire_as_cancel)
-    return fix
-
-
-def ttl_tier(headline, size, bank, cfg):
-    """TTL saver tier of a market: "headline" (headline_races), "busy" (planned quote size >= ttl_busy_size_frac of
-    the account) or "quiet"."""
-    if headline:
-        return "headline"
-    return "busy" if size >= cfg.ttl_busy_size_frac * bank - 1e-9 else "quiet"
-
-
-def order_ttl_for(cfg, tier, u):
-    """Seconds a new level-0 order lives. u: a uniform [0, 1) draw (the jitter). Without ttl_tiers_enabled, exactly
-    order_ttl. With it: the tier's TTL x (1 +- ttl_jitter_frac), kept within [2 x refresh_before_expiry,
-    MAX_ORDER_TTL] (never "about to expire" at birth; the dead-man's switch stays bounded)."""
-    if not cfg.ttl_tiers_enabled:
-        return cfg.order_ttl
-    base = {"headline": cfg.order_ttl, "busy": cfg.order_ttl_busy}.get(tier, cfg.order_ttl_quiet)
-    ttl = base * (1 + cfg.ttl_jitter_frac * (2 * u - 1))
-    return max(2 * cfg.refresh_before_expiry, min(MAX_ORDER_TTL, ttl))
 
 
 # MEASUREMENT - fills.csv and the `report` command
@@ -3780,7 +3475,6 @@ class Ex:
     fl_side: str | None = None            # favourite-longshot bias side last cycle (for its hysteresis)
     fl_tag: str = ""                      # that bias for the quote log line ("" = none active)
     turnover_dead: bool = False           # holding a position in a market with too little flow (health only)
-    bb_tag: str = ""                      # " bb" on the quote log line while behind-the-best sizing shrinks a side
     ro_clip: str = ""                     # "bid" / "ask" / "bid ask": side(s) decide() left empty ONLY by the reduce-only
                                           #   race-net clip this cycle (diagnostic)
     mmr_tail: bool = False                # P12 ops: value adds paused and a tail market (decide; the ladder too)
@@ -3930,7 +3624,6 @@ class Bot:
         self.unconfirmed = {}             # eid -> [(order, meta, time sent)]: sent, outcome unknown (see adopt_unconfirmed)
         self.placed_qty = {}              # orderId -> shares we placed, and...
         self.filled_qty = defaultdict(float)   # ...shares filled so far (each fill counted once, from fills)
-        self.last_expiry = {}             # ttl_expire_as_cancel: (eid, is_bid) -> expiry of the level-0 order seen there
         self.ref_rejected = set()         # Polymarket keys currently ignored as implausible (alerted once)
         self.ref_only = set()             # eids priced from Polymarket alone this cycle (thin book, R5)
         self.bloc_sens, self.bloc_delta, self.bloc_inv = {}, 0.0, {}   # Package 10 A2 (bloc_refresh)
@@ -3951,9 +3644,7 @@ class Bot:
         self.mmr_paused, self.mmr_since, self.mmr_room = False, None, (None, None)
         self.mmr_blocked = {"takes": 0, "alloc": 0, "basket": 0, "tail_quotes": 0}   # (basket: retired, 0)
         self.mmr_tail_now = 0
-        self.backstop_adding_factor = 1.0     # Package 6 candidate: backstop soft band (cycle step 6 sets it)
         self.ref_moved = set()            # eids whose Polymarket price moved >= urgent_ref_move at the latest reading
-        self.unloads = {}                 # eid -> {"until", "side", "left"}: fast unload windows (note_unloads)
         self.ref_version_urgent = 0
         self.refs = self.load_reference_prices()
         self.ref_version_seen = 0         # last Polymarket reading the jump guard has looked at
@@ -3970,7 +3661,6 @@ class Bot:
         self.arbs_total = 0               # arbitrages / takes since start (summaries report the change)
         self.unwinds_total = 0            # pair unwinds since start (status.json pair_unwinds_total)
         self.pair_owed = {}               # Package 7 pair_unwind_followup: race -> owed legs (pair_followup_step)
-        self.arb_cash_blocked = 0         # Package 9 F5 arb_cash_rule: arbitrages refused by the cash rule
         self.ops_last = {}                # ops fields of the latest status write (ops_fields): recorder, summary
         self.ops_cache = {}               # ops_fields: fills.csv-derived numbers, recomputed when the file changes
         self.ops_warned = False           # ops_fields failed once (logged once)
@@ -3988,7 +3678,6 @@ class Bot:
         self.pos_record_due = False       # a fill was seen: record the next positions read
         self.last_pnl_reply = (None, None)  # recorder: (latest P&L reply, wall time read)
         self.refills = defaultdict(deque)  # (eid, "bid"/"ask") -> (time, shares) of recent fills that added
-        self.refill_until = {}            # (eid, side) -> monotonic time its refill cooldown ends
         self.turnover = TurnoverTracker() # turnover control: shares traded per market (ours + the tape)
         self.turnover_flow = {}           # eid -> observed shares/h (None = not judged yet), see refresh_turnover
         self.turnover_refreshed = -1e9    # monotonic time of the last refresh
@@ -4345,8 +4034,6 @@ class Bot:
         # 4. Fills (every slow_poll_seconds, and straight after a fill) --------------------------------
         if read_fills:
             new_fills = self.log_fills(fvs)
-            self.note_refills(new_fills, inv, now_m)
-            self.note_unloads(new_fills, inv, now_m)
         self.note_turnover(new_fills if read_fills else ())
         self.refresh_turnover(now_m)
         self.mm_inv_step(new_fills if read_fills else (), inv)   # P14: MM inventory lots (read-only, never raises)
@@ -4384,7 +4071,6 @@ class Bot:
             self.mm_risk_room_update(worst, risk, equity,                                   #  never changes it)
                                      self.mm_room_part(inv, fvs, worst, risk)               # P14 3 mm_room_guard
                                      if getattr(cfg, "mm_room_guard", False) else None)
-        self.backstop_adding_factor = backstop_soft_factor(worst, equity, cfg)   # Package 6 candidate: soft band
         capital = self.capital_in_positions(pos, inv, fvs)
         cap_frac = capital / equity if equity else None
         self.update_capital_ceiling(cap_frac, cfg)
@@ -4515,14 +4201,9 @@ class Bot:
             self.health["cash_gate_left"] = round(self.cash_left(), 2) if getattr(self, "cg_cash", None) is not None else None
             age = self.cash_read_age()
             self.health["cash_gate_read_age"] = round(age, 1) if age is not None else None   # s since a good read
-        if cfg.arb_cash_rule:                             # Package 9 F5 (absent while off)
-            self.health["arb_cash_blocked"] = self.arb_cash_blocked
-        self.health["fast_unload_windows"] = sum(1 for e in list(self.unloads)
-                                                 if e in self.ex and self.unload_side(self.ex[e], now_m))
         self.health["fl_bias_markets"] = {k: sum(1 for x in self.ex.values() if x.fl_tag.startswith(f" fl:{k}"))
                                           for k in ("bid", "ask")}
         self.health["market_edge_markets"] = len(self.market_edge) if self.cfg.market_edge_enabled else 0
-        self.health["behind_best_markets"] = sum(1 for x in self.ex.values() if x.bb_tag)
         self.health.update(self.turnover_health(inv, fvs))
 
         self.mm_funding_tick()                    # P14 4: the below-half clock and its alert (never raises)
@@ -5533,7 +5214,7 @@ class Bot:
         fv is what we quote around; book_fv is the tournament book's own price (for the Polymarket guard);
         ref_liquid says whether the Polymarket price is reliable enough to size positions with Kelly."""
         cfg = self.burst_cfg if self.burst else self.cfg
-        ex.fl_tag, ex.turnover_dead, ex.bb_tag = "", False, ""
+        ex.fl_tag, ex.turnover_dead = "", False
         ex.ro_clip = ""
         ex.inv, ex.eff, ex.ref = inv.get(ex.eid, 0.0), eff.get(ex.eid, 0.0), ref
         hrs = self.hours_to_close(ex)
@@ -5645,25 +5326,11 @@ class Bot:
         adding_limit = 1.0
         ex.turnover_dead = self.turnover_dead(ex, planned if planned is not None
                                               else cfg.order_size_frac * self.bankroll(), cfg)
-        if cfg.gap_size_shrink > 0 and book_fv is not None and ex.eid not in self.ref_only:   # X5 gap-size shrink
-            adding *= gap_size_factor(fv, book_fv, cfg)
-        if cfg.backstop_soft_frac > 0:            # Package 6 candidate: backstop soft band (set in cycle step 6)
-            adding *= self.backstop_adding_factor
-        if cfg.tail_adding_factor != 1.0 and ref is not None and (ref < cfg.tail_low or ref > cfg.tail_high):
-            adding *= cfg.tail_adding_factor      # Package 6 candidate: tail adding-size factor (raw Polymarket r)
         side, bias_edge, bias_size = fl_side(fv, ex.fl_side, cfg)
         ex.fl_side, tag = side, side
         side = "bid" if side == "mid" else side       # mid band: an optional extra edge on bids, full size
         ex.fl_tag = (f" fl:{tag}+{100 * bias_edge:g}c" if side and (ex.inv > -1 if side == "bid" else ex.inv < 1)
                      else "")                         # (shown only while it changes the quote: not when unloading)
-        u_side = None if reduce_only else self.unload_side(ex, now_m)   # reduce-only / flatten: stricter anyway
-        u_size = int(self.unloads[ex.eid]["left"] * cfg.fast_unload_size_mult) if u_side else None
-        # reduce_from_book (A): the reducing side prices from the book's own price. Not in ref-only markets, not
-        # without a book price, not for reduce_from_book_pause_s after a Polymarket jump here, and (staging gate)
-        # not in headline markets unless reduce_from_book_headline.
-        reduce_fv = (book_fv if cfg.reduce_from_book and book_fv is not None and ex.eid not in self.ref_only
-                     and (cfg.reduce_from_book_headline or ex.group not in cfg.headline_races)
-                     and now_m - ex.ref_jump_at >= cfg.reduce_from_book_pause_s else None)
         why = {}
         skew_inv, age_off = None, False
         # Package 12 M2: skew from the target holding - never in reduce-only (global_reduce: the risk cap is over, or
@@ -5677,15 +5344,13 @@ class Bot:
                              shift=self.party_shift(ex, party_delta), order_size=planned, position_limit=headline_limit,
                              min_edge=edge, reduce_size=reduce_size, net_inv=ex.eff, age_hours=ex.age,
                              adding_factor=adding, bias_side=side, bias_edge=bias_edge, bias_size=bias_size,
-                             unload_side=u_side, unload_edge=cfg.fast_unload_edge, unload_size=u_size,
                              adding_limit_factor=adding_limit,
-                             behind_best=ex.eid not in self.ref_only, reduce_fv=reduce_fv, why=why,
+                             why=why,
                              adding_per_market=bool(getattr(cfg, "adding_factor_per_market", False)),
                              value_p=vp, skew_inv=skew_inv, age_off=age_off,
                              skew_add_flat=skew_inv is not None and not (cfg.alloc_enabled and ex.eid in
                                                                          (getattr(self, "alloc_targets", None) or {})))
         ex.ro_clip = why.get("ro_clip", "")
-        ex.bb_tag = " bb" if q.behind else ""
         if getattr(cfg, "mm_recycle_enabled", False):   # P14 1: stale MM inventory out through the reducing side
             q = self.mm_recycle_quote(ex, q, fv, best_bid, best_ask, vp, cfg, now_m)
         if self.p141("alloc_cancel_mm_first"):     # P14.1 1: a "refill pending" hold - an allocator sale here
@@ -5865,21 +5530,9 @@ class Bot:
         asks = [o for o in resting if not o.is_bid]
         fix_bid = self.side_fix(ex, bids, q.bid, q.bid_size, q.bid_limit, True, full_bid, fv, now, now_m)
         fix_ask = self.side_fix(ex, asks, q.ask, q.ask_size, q.ask_limit, False, full_ask, fv, now, now_m)
-        if self.cfg.ttl_expire_as_cancel:  # an order just left to expire: re-quote that side only after the grace
-            if self.expiry_wait(ex, bids, True, now):
-                fix_bid = False
-            if self.expiry_wait(ex, asks, False, now):
-                fix_ask = False
         # Reduce-only, flatten and exit windows: always do exactly what the risk logic asks (no holding, no
         # burst-mode skipping), or a position could be left to grow or never be exited.
         critical = self.global_reduce or self.hours_to_close(ex) <= self.close_window("flatten_hours_before_close")
-        # Refill cooldown: no new order on a side that was just hit repeatedly; what rests there stays while safe.
-        cool_bid = not critical and self.refill_cooling(ex, True, now_m)
-        cool_ask = not critical and self.refill_cooling(ex, False, now_m)
-        if cool_bid:
-            fix_bid = fix_bid and any(unsafe_order(o, q.bid, full_bid, q.bid_limit, True) for o in bids)
-        if cool_ask:
-            fix_ask = fix_ask and any(unsafe_order(o, q.ask, full_ask, q.ask_limit, False) for o in asks)
         if self.cfg.churn_control and not critical:
             if fix_bid and self.hold_side(ex, bids, q.bid, q.bid_limit, full_bid, True, now, now_m):
                 fix_bid = False                   # (full size: a full-size order is still safe in a burst)
@@ -5903,9 +5556,9 @@ class Bot:
             doomed = (bids if fix_bid else []) + (asks if fix_ask else [])
             new = [] if now_m < ex.pause_until else (
                 ([self.new_order(ex, True, q.bid, q.bid_size, fv, now)]
-                 if fix_bid and q.bid is not None and not bids and not cool_bid else [])
+                 if fix_bid and q.bid is not None and not bids else [])
                 + ([self.new_order(ex, False, q.ask, q.ask_size, fv, now)]
-                   if fix_ask and q.ask is not None and not asks and not cool_ask else []))
+                   if fix_ask and q.ask is not None and not asks else []))
             if not doomed and not new:
                 return None
             return Change(ex, doomed, False, new,
@@ -5915,15 +5568,15 @@ class Bot:
         doomed = (bids if fix_bid else []) + (asks if fix_ask else [])
         new = []
         if now_m >= ex.pause_until:       # (sizes already scaled for burst mode above)
-            if fix_bid and q.bid is not None and not cool_bid:
+            if fix_bid and q.bid is not None:
                 new.append(self.new_order(ex, True, q.bid, q.bid_size, fv, now))
-            if fix_ask and q.ask is not None and not cool_ask:
+            if fix_ask and q.ask is not None:
                 new.append(self.new_order(ex, False, q.ask, q.ask_size, fv, now))
         log.info("%s%-26.26s fv %s%s inv %+5.0f race %+5.0f%s | bid %s ask %s", "" if self.api.live else "[dry] ",
                  ex.label, f"{fv:.3f}" if fv is not None else "  -  ",
                  f" (ref {ex.ref:.3f})" if ex.ref is not None else "", ex.inv, ex.eff,
                  f" age {ex.age:.0f}h" if ex.inv and ex.age > self.cfg.skew_age_after_hours else "",
-                 fmt(q.bid, q.bid_size), fmt(q.ask, q.ask_size) + ex.fl_tag + ex.bb_tag)
+                 fmt(q.bid, q.bid_size), fmt(q.ask, q.ask_size) + ex.fl_tag)
         if not doomed and not new:
             return None
         # An order that must not stay (unsafe: beyond its limit price, a side we no longer want, or above the
@@ -5952,8 +5605,6 @@ class Bot:
             return False
         if ex.eid in self.ref_moved or now_m - ex.ref_moved_at < 15:
             return False                                  # Polymarket moved here lately: follow it now
-        if self.unload_urgent(ex, now_m) == ("bid" if is_bid else "ask"):
-            return False                                  # new fast unload window: place the unload quote now
         young = o.order_id in self.recent_orders and now_m - self.recent_orders[o.order_id][1] < cfg.min_quote_life_seconds
         hist = ex.reprices.get("bid" if is_bid else "ask") or deque()
         while hist and now_m - hist[0] > cfg.churn_window_seconds:
@@ -5969,7 +5620,7 @@ class Bot:
     def change_key(self, ex, pull, reprice=False):
         """Sending order: pulls first, then the party-control markets, then quotes for empty sides (cheap: a
         share of one batch), then reprices (a cancel each), biggest quotes first within each."""
-        urgent = ex.eid in self.ref_moved or self.unload_urgent(ex, time.monotonic())   # (unload: first placement)
+        urgent = ex.eid in self.ref_moved
         head = 0 if ex.group in self.cfg.headline_races else 1
         rec = ()
         if getattr(self.cfg, "mm_recycle_sell_first", False):   # P14.1 3: recycled SALES (the ask on a long: they
@@ -6293,8 +5944,6 @@ class Bot:
         meta = {"our_side": "bid" if is_bid else "ask", "price": round(price, 3), "fv": fv, "t": time.time()}
         if cover >= 1:
             order["_no_sell"] = meta["no_sell"] = True   # sent as "sell NO @ 1-p" (wire_order)
-        if not level and self.cfg.no_chase_enabled:   # no-chase: what we placed it at (inventory, size)
-            meta["inv"], meta["qty"] = ex.inv, int(size)
         rec = self.mmf_recycling.get(ex.eid) if not level and getattr(self, "mmf_recycling", None) else None
         if rec is not None and rec.get("price") is not None and rec["side"] == ("bid" if is_bid else "ask"):
             meta["recycle"] = True                # P14 1: this side carries the recycler (fills class "recycle")
@@ -6739,50 +6388,12 @@ class Bot:
         return out
 
     def order_ttl(self, ex, level=0):
-        """Seconds a new order lives: order_ttl, or with ttl_tiers_enabled its market tier's (the resting quote; the
-        set / harvest ladders keep order_ttl). Always <= MAX_ORDER_TTL when tiered."""
-        cfg = self.cfg
-        if level or not cfg.ttl_tiers_enabled:
-            return cfg.order_ttl
-        bank = self.bankroll()
-        size = (self.size_plan.get(ex.eid, cfg.size_min_frac * bank) if cfg.size_by_activity
-                else cfg.order_size_frac * bank)
-        return order_ttl_for(cfg, ttl_tier(ex.group in cfg.headline_races, size, bank, cfg), random.random())
+        """Seconds a new order lives (order_ttl for the resting quote and the set / harvest ladders alike)."""
+        return self.cfg.order_ttl
 
     def side_fix(self, ex, resting, price, size, limit, is_bid, max_size, fv, now, now_m=None):
-        """plan_change's per-side test: side_needs_change, plus the write savers when on (no_chase_needs_change,
-        ttl_expire_as_cancel). No-chase never applies where the risk logic must be followed exactly (reduce-only,
-        flatten window, Polymarket just moved, a new fast-unload window), as hold_side."""
-        cfg = self.cfg
-        meta = (self.order_meta.get(resting[0].order_id) or {}) if len(resting) == 1 else {}
-        if cfg.no_chase_enabled and meta:
-            now_m = time.monotonic() if now_m is None else now_m
-            if (self.global_reduce or self.hours_to_close(ex) <= self.close_window("flatten_hours_before_close")
-                    or ex.eid in self.ref_moved or now_m - ex.ref_moved_at < 15
-                    or self.unload_urgent(ex, now_m) == ("bid" if is_bid else "ask")):
-                meta = {}                         # (unknown placement notes -> the normal rules)
-        return no_chase_needs_change(resting, price, size, cfg, now, limit, is_bid, max_size, fv, meta.get("fv"),
-                                     ex.inv, meta.get("inv"), meta.get("qty"), expire_as_cancel=cfg.ttl_expire_as_cancel)
-
-    def expiry_wait(self, ex, resting, is_bid, now):
-        """ttl_expire_as_cancel: True while this side's order expired less than ttl_expire_grace_seconds ago (our
-        clock may run ahead of the exchange's: re-quoting at once could leave two orders resting there)."""
-        key = (ex.eid, is_bid)
-        if resting:
-            exp = [o.expires for o in resting if o.expires]
-            if exp:
-                self.last_expiry[key] = max(exp)
-            return False
-        last = self.last_expiry.get(key)
-        if last is None:
-            return False
-        if now < last:                    # gone before its expiry (filled / cancelled): nothing to wait for
-            del self.last_expiry[key]
-            return False
-        if (now - last).total_seconds() < self.cfg.ttl_expire_grace_seconds:
-            return True
-        del self.last_expiry[key]
-        return False
+        """plan_change's per-side test: side_needs_change."""
+        return side_needs_change(resting, price, size, self.cfg, now, limit, is_bid, max_size)
 
     def sync_orders(self, raw_orders, now_m):
         """Reset our record of our resting orders (self.my_orders) from the API's open-orders list.
@@ -6874,9 +6485,6 @@ class Bot:
         orders, unless it traded in full straight away. Every placement goes through here (quotes,
         arbitrage, takes), so the bot never quotes on top of an order it doesn't know about."""
         oid = data.get("orderId")
-        w = self.unloads.get(str(order.get("exchangeId")))
-        if w is not None and w["side"] == ("bid" if order.get("action") == "buy" else "ask"):
-            w["placed"] = True                            # fast unload: later reprices follow normal churn rules
         traded = float(data.get("quantityTraded") or 0)
         left = order["quantity"] - traded
         if not self.api.live or oid is None or left <= 0:
@@ -7044,7 +6652,6 @@ class Bot:
             return done
         b_left = int(getattr(cfg, "pair_no_unwind_max_per_cycle", 2))   # Package 7: B-only short-set unwinds
         b_waiting = 0
-        cash_rule = bool(getattr(cfg, "arb_cash_rule", False))          # Package 9 F5
         for race, members in self.arb_race_order(inv):
             if (len(members) < 2 or not self.running or now_m < self.arb_cooldown.get(race, 0)
                     or race in getattr(self, "pair_owed", ())  # Package 7: its owed legs are evened up first
@@ -7057,11 +6664,6 @@ class Bot:
             plan = self.arb_plan(members, inv, fvs, closing)      # quick check on the cached books
             if plan is None:
                 continue
-            if cash_rule and plan[0] == "arb":   # Package 9 F5: no set it cannot fully fund (no book download)
-                fit, need, left = self.arb_cash_fit(plan[2], plan[3], plan[1])
-                if fit < 1 and plan[3] >= 1:
-                    self.arb_cash_refused(race, need, left)
-                    continue
             if getattr(self, "arb_plan_b", False) and b_left < 1:     # Package 7: B's per-cycle cap: waits
                 b_waiting += 1
                 continue
@@ -7079,15 +6681,6 @@ class Bot:
             plan = self.arb_plan(members, inv, fvs, closing)
             if plan is None:
                 continue
-            if cash_rule and plan[0] == "arb" and plan[3] >= 1:   # Package 9 F5: the cash rule on the fresh books
-                fit, need, left = self.arb_cash_fit(plan[2], plan[3], plan[1])
-                if fit < 1:
-                    self.arb_cash_refused(race, need, left)
-                    continue
-                if fit < plan[3]:
-                    log.info("arbitrage on %s: %d -> %d sets (cash rule: left %.2f, %s x need + %.0f)", race,
-                             plan[3], fit, left, cfg.arb_cash_mult, cfg.arb_cash_reserve)
-                plan = plan[:3] + (fit,)
             if getattr(self, "arb_plan_b", False):
                 if b_left < 1:
                     b_waiting += 1
@@ -7156,8 +6749,6 @@ class Bot:
             held = [inv.get(e, 0.0) for e in members]
             for sign, levels, action in ((+1, bids, "sell"), (-1, asks, "buy")):
                 sets = min(sign * h for h in held)
-                if sign > 0 and sets >= 1 and getattr(cfg, "arb_sellback", False):
-                    levels = self.arb_levels(members, "bids")   # Package 9 F5: never a level at a price of ours
                 if sets < 1 or not levels:
                     continue
                 total = sum(p for p, _ in levels.values())
@@ -7172,9 +6763,6 @@ class Bot:
                     alloc_cost = (getattr(self, "alloc_set_races", None) or {}).get(self.ex[members[0]].group)
                     if alloc_cost is not None:    # Package 10 B3: a set race the allocator registered, at its cost
                         floor = min(floor, -alloc_cost["cost"])
-                if sign > 0 and getattr(cfg, "arb_sellback", False):
-                    # Package 9 F5 (C-4): a held YES+YES set is sold back once the bids add up to arb_sellback_min_sum
-                    floor = min(floor, cfg.arb_sellback_min_sum - 1)
                 if edge < floor - 1e-9:   # (buying back a short set below 0.90 only cuts risk)
                     continue
                 if nono and getattr(cfg, "pair_no_unwind_asks_le1", False) and self.nono_unwind_gated(
@@ -7195,32 +6783,7 @@ class Bot:
                 if qty >= 1 and self.unwind_is_safe(inv, fvs, members, -sign * qty, **slack_kw):
                     self.arb_plan_b = edge < cfg.pair_unwind_min_profit - 1e-9
                     return "unwind", action, levels, qty
-        if not cfg.arb_enabled or closing:
-            return None
-        rule = bool(getattr(cfg, "arb_cash_rule", False))
-        if rule:                          # Package 9 F5: other traders' levels only, never one at a price of ours
-            bids, asks = self.arb_levels(members, "bids"), self.arb_levels(members, "asks")
-        if bids and sum(p for p, _ in bids.values()) >= 1 + cfg.arb_min_profit - 1e-9:
-            qty = int(min([cfg.arb_max_frac * bank] +
-                          [size for _, size in bids.values()] +                            # only what's bid at that price
-                          [cfg.max_position_frac * bank + inv.get(e, 0.0) for e in members] +   # selling lowers position
-                          [cfg.max_order_cash_frac * bank / max(1 - p, TICK) for p, _ in bids.values()] +  # cash per order
-                          ([cfg.arb_leg_depth_frac * min(size for _, size in bids.values())] if rule else [])))
-            return "arb", "sell", bids, qty
-        # The set pays 1 only if a LISTED party wins. Book fair values are normalised to sum to 1, so they cannot
-        # see an unlisted outsider: every leg needs a LIQUID Polymarket price and those RAW prices must add up to
-        # at least arb_buy_min_ref_sum (owner, 2 Oct 11:25; 110 of 113 races list Dem + Rep only).
-        refs_ok = (all(e in self.cur_liquid and self.cur_refs.get(e) is not None for e in members)
-                   and sum(self.cur_refs[e] for e in members) >= cfg.arb_buy_min_ref_sum - 1e-9)
-        if (cfg.arb_two_sided and asks and not self.global_reduce and refs_ok
-                and cfg.arb_buy_min_sum - 1e-9 <= sum(p for p, _ in asks.values()) <= 1 - cfg.arb_min_profit_buy + 1e-9):
-            qty = int(min([cfg.arb_max_frac * bank] +
-                          [size for _, size in asks.values()] +                            # only what's offered there
-                          [cfg.max_position_frac * bank - inv.get(e, 0.0) for e in members] +   # buying raises position
-                          [cfg.max_order_cash_frac * bank / max(p, TICK) for p, _ in asks.values()] +  # cash per order
-                          ([cfg.arb_leg_depth_frac * min(size for _, size in asks.values())] if rule else [])))
-            return "arb", "buy", asks, qty
-        return None
+        return None      # (the arb_enabled sell-all / buy-set branch that followed was removed on simplify: off live)
 
     def nono_unwind_gated(self, members, asks_sum, alloc_cost=None):
         """Package 12 L3 (pair_no_unwind_asks_le1): True = a NO+NO set race's pair unwind waits - its best asks sum
@@ -7237,7 +6800,6 @@ class Bot:
         bids = self.arb_levels(members, "bids")
         return bool(bids) and sum(p for p, _ in bids.values()) > 1 + 1e-9
 
-    # --- Package 9 F5: the arbitrage cash rule (arb_cash_rule) ---
     def own_prices(self, eid):
         """{(is_bid, YES price)} of every order of ours on eid we know of: resting (our record), just placed (not yet
         listed) and sent with no answer yet (unconfirmed)."""
@@ -7269,54 +6831,6 @@ class Bot:
         for o in orders:
             self.no_sell_order(o, self.ex[o["exchangeId"]].inv, whole=True)
         return orders
-
-    def arb_cash_need(self, levels, qty, action):
-        """F5: the cash the legs of qty sets need together, by the cash gate's own per-order rule (cash_tiers: a sale
-        beyond the YES held buys NO at 1 - price, a purchase price a share, a covered "sell NO" its lone part free,
-        closing sets free when every leg is one); our resting orders there are cancelled first (ignored)."""
-        orders = self.arb_orders(levels, qty, action)
-        free = {o["exchangeId"]: self.cash_free(o["exchangeId"], skip=lambda r: True) for o in orders}
-        closed = all(o.get("_no_sell") for o in orders)
-        need = 0.0
-        for o in orders:
-            b, ns = o["action"] == "buy", bool(o.get("_no_sell"))
-            need += self.tier_need(self.cash_tiers(free[o["exchangeId"]], b, o["price"], ns, closed), qty)
-            self.tier_consume(free[o["exchangeId"]], b, ns, qty)
-        return need
-
-    def arb_cash_fit(self, levels, qty, action):
-        """F5: (sets, need of the planned sets, cash left): the most sets <= qty with cash_left() >= arb_cash_mult x
-        their need + arb_cash_reserve (0 without a good cash figure: the rule needs cash_gate_enabled)."""
-        cfg = self.cfg
-        qty = int(qty)
-        if not self.cash_gate_on() or getattr(self, "cg_cash", None) is None:
-            return 0, (self.arb_cash_need(levels, qty, action) if qty >= 1 else 0.0), None
-        left = self.cash_left()
-        need_q = self.arb_cash_need(levels, qty, action) if qty >= 1 else 0.0
-
-        def fits(n):
-            return left + 1e-9 >= cfg.arb_cash_mult * self.arb_cash_need(levels, n, action) + cfg.arb_cash_reserve
-        if qty < 1 or not fits(1):
-            return 0, need_q, left
-        lo, hi = 1, qty
-        while lo < hi:
-            mid = (lo + hi + 1) // 2
-            if fits(mid):
-                lo = mid
-            else:
-                hi = mid - 1
-        return lo, need_q, left
-
-    def arb_cash_refused(self, race, need, left):
-        """F5: one refusal by the cash rule: counted (status.json arb_cash_blocked) and journaled (once a minute a
-        race)."""
-        self.arb_cash_blocked += 1
-        now_m, seen = time.monotonic(), self.__dict__.setdefault("arb_cash_logged", {})
-        if now_m - seen.get(race, -1e18) >= 60.0:
-            seen[race] = now_m
-            log.warning("ARB skipped: cash rule (need %.2f, left %s) on %s - %s x need + %.0f required", need,
-                        "no cash figure" if left is None else f"{left:.2f}", race, self.cfg.arb_cash_mult,
-                        self.cfg.arb_cash_reserve)
 
     def unwind_is_safe(self, inv, fvs, members, delta, set_slack=False):
         """Would adding `delta` YES shares on every leg of a race leave the party delta within its cap (or no
@@ -7449,8 +6963,6 @@ class Bot:
                 self.notes_dirty = True
         if len(set(traded)) > 1 and followup:     # Package 7: the lagging leg(s) owe the difference
             self.pair_owe(race, orders, traded, action, now_m)
-        elif len(set(traded)) > 1 and kind == "arb" and getattr(cfg, "arb_cash_rule", False):
-            self.arb_owe(race, orders, traded, action, now_m)   # Package 9 F5: never a one-legged set left
         elif len(set(traded)) > 1:
             alert(f"arbitrage on {race} only partly filled {traded}: the difference is now ordinary "
                   f"inventory, which the quoting will work off")
@@ -7517,24 +7029,12 @@ class Bot:
                     ", ".join(f"{self.ex[e].label} {q}" for e, q in legs.items()),
                     self.cfg.pair_unwind_followup_tries, self.cfg.pair_unwind_followup_max_cost)
 
-    # --- Package 9 F5: an arbitrage whose legs filled unequally (arb_cash_rule) ---
+    # --- an arbitrage / pair unwind whose legs filled unequally ---
     @staticmethod
     def arb_owed_legs(st):
         """F5: st["legs"] = {eid: shares behind the most-filled leg} (status.json pair_owed, take_arbitrage's skip)."""
         top = max(st["filled"].values())
         st["legs"] = {e: int(round(top - f)) for e, f in st["filled"].items() if top - f >= 1 - 1e-9}
-
-    def arb_owe(self, race, orders, traded, action, now_m):
-        """F5: an arbitrage batch filled its legs unequally (a leg refused for cash, or its level gone): the race is
-        owed (self.pair_owed, kind "arb"; in memory only) and arb_followup evens it from the next cycle on."""
-        st = {"kind": "arb", "action": action, "filled": {o["exchangeId"]: float(f) for o, f in zip(orders, traded)},
-              "t": now_m, "tries": 0, "price": {o["exchangeId"]: o["price"] for o in orders}}
-        self.arb_owed_legs(st)
-        self.pair_owed[race] = st
-        log.warning("ARBITRAGE on %s filled %s unequally: %s owed - completed next cycle (within %.3f of the planned "
-                    "price), then the extra legs %s back", race, traded,
-                    ", ".join(f"{self.ex[e].label} {q}" for e, q in st["legs"].items()),
-                    self.cfg.pair_unwind_followup_max_cost, "bought" if action == "sell" else "sold")
 
     def arb_followup(self, race, st, fvs, now_m, mine_real=None, inv=None):
         """F5, once a cycle per owed arbitrage: try 1 COMPLETES the set (the arbitrage's own action on each lagging
@@ -8134,7 +7634,7 @@ class Bot:
         another feature traded this cycle (skip: exchanges and races), not inside the pre-close window that stops
         takes and arbitrage (close_window: at least the stop window, P10 red team RT-3)."""
         return not (ex.eid in skip or ex.group in skip
-                    or (ex.group in self.cfg.headline_races and not self.cfg.alloc_headline)
+                    or ex.group in self.cfg.headline_races
                     or self.hours_to_close(ex) <= self.close_window("flatten_hours_before_close"))
 
     def alloc_fresh_book(self, ex, now_m):
@@ -9483,7 +8983,7 @@ class Bot:
         for e, ex in sorted(self.ex.items()):
             if not on:
                 why[e] = "reduce-only" if self.global_reduce and cfg.tilt_harvest_ladder else "off"
-            elif ex.group in cfg.headline_races and not cfg.alloc_headline:
+            elif ex.group in cfg.headline_races:
                 why[e] = "headline"
             elif e in sl:
                 why[e] = "set ladder"
@@ -10777,108 +10277,6 @@ class Bot:
         self.save_order_notes()
         return new
 
-    def note_refills(self, new, inv, now_m):
-        """Same-side refill cooldown: count each new fill of one of our quotes (not takes or arbitrage legs) that
-        ADDED to the position, per market and side; once refill_cooldown_fills of them, together at least
-        refill_cooldown_min_shares, landed within refill_cooldown_window_seconds, that side is withheld for
-        refill_cooldown_seconds (see plan_change)."""
-        if new:
-            self.pos_record_due = True            # recorder: note the positions straight after a fill
-        cfg = self.cfg
-        if not new or not cfg.refill_cooldown_enabled:
-            return
-        wall = utcnow().timestamp()
-        for f in reversed(new):                   # oldest first
-            meta = self.order_meta.get(f.get("orderId")) or {}
-            side, eid = meta.get("our_side"), str(f.get("exchangeId"))
-            if side not in ("bid", "ask") or meta.get("take") or meta.get("arb") or eid not in self.ex:
-                continue
-            try:
-                t = parse_ts(f.get("filledAt"))
-            except (TypeError, ValueError):
-                t = None
-            if t is not None and wall - t.timestamp() > cfg.refill_cooldown_window_seconds:
-                continue                          # an old fill seen late (e.g. after a restart): not a run now
-            pos = float(inv.get(eid, self.ex[eid].inv) if inv is not None else self.ex[eid].inv)
-            if (pos <= 0) if side == "bid" else (pos >= 0):
-                continue                          # it reduced (or closed) the position: unloading is good
-            key, qty = (eid, side), abs(float(f.get("quantity") or 0))
-            run = self.refills[key]
-            run.append((now_m, qty))
-            while run and now_m - run[0][0] > cfg.refill_cooldown_window_seconds:
-                run.popleft()
-            shares = sum(q for _, q in run)
-            if len(run) >= cfg.refill_cooldown_fills and shares >= cfg.refill_cooldown_min_shares:
-                if self.refill_until.get(key, -1e9) <= now_m:
-                    log.info("refill cooldown %s %s %.0f s: %d fills / %s sh in %.0f s", self.ex[eid].label, side,
-                             cfg.refill_cooldown_seconds, len(run), f"{shares:,.0f}", cfg.refill_cooldown_window_seconds)
-                self.refill_until[key] = now_m + cfg.refill_cooldown_seconds
-
-    def refill_cooling(self, ex, is_bid, now_m):
-        """True while this side is in its refill cooldown and quoting it would add to the position."""
-        if not self.cfg.refill_cooldown_enabled or self.refill_until.get((ex.eid, "bid" if is_bid else "ask"), -1e9) <= now_m:
-            return False
-        return ex.inv >= 0 if is_bid else ex.inv <= 0   # a side that would reduce the position is exempt
-
-    def note_unloads(self, new, inv, now_m):
-        """Fast unload: a fill of one of our quotes (not a take or arbitrage leg) that ADDED to the position, with at
-        least fast_unload_min_edge at the quote (quote price vs fv when quoted) and fast_unload_min_shares, opens (or
-        extends) a window of fast_unload_seconds in which the reducing side quotes near fair value (decide,
-        compute_quote). Shares to unload = the position increase; fills on the reducing side count them down."""
-        cfg = self.cfg
-        if not new or not cfg.fast_unload_enabled:
-            return
-        wall = utcnow().timestamp()
-        for f in reversed(new):                   # oldest first
-            meta = self.order_meta.get(f.get("orderId")) or {}
-            side, eid = meta.get("our_side"), str(f.get("exchangeId"))
-            if side not in ("bid", "ask") or meta.get("take") or meta.get("arb") or eid not in self.ex:
-                continue
-            qty = abs(float(f.get("quantity") or 0))
-            w = self.unloads.get(eid)
-            if w and w["side"] == side:           # the reducing side traded: fewer shares left to unload
-                w["left"] -= qty
-                continue
-            try:
-                t = parse_ts(f.get("filledAt"))
-            except (TypeError, ValueError):
-                t = None
-            if t is not None and wall - t.timestamp() > cfg.fast_unload_seconds:
-                continue                          # an old fill seen late (e.g. after a restart)
-            pos = float(inv.get(eid, self.ex[eid].inv) if inv is not None else self.ex[eid].inv)
-            if (pos <= 0) if side == "bid" else (pos >= 0):
-                continue                          # it reduced (or closed) the position
-            price, fv = meta.get("price"), meta.get("fv")
-            if fv is None or price is None:
-                continue
-            edge = (float(fv) - float(price)) if side == "bid" else (float(price) - float(fv))
-            if edge < cfg.fast_unload_min_edge - 1e-9 or qty < cfg.fast_unload_min_shares:
-                continue
-            red = "ask" if side == "bid" else "bid"
-            left = min(qty, abs(pos)) + (w["left"] if w and w["side"] == red else 0.0)
-            self.unloads[eid] = {"until": now_m + cfg.fast_unload_seconds, "side": red, "left": min(left, abs(pos))}
-            log.info("fast unload %s: %s %s at %+.1fc, %s %gc %s fair for %.0f s", self.ex[eid].label,
-                     "bought" if side == "bid" else "sold", f"{qty:,.0f}", 100 * edge,
-                     "offering" if red == "ask" else "bidding", 100 * cfg.fast_unload_edge,
-                     "over" if red == "ask" else "under", cfg.fast_unload_seconds)
-
-    def unload_side(self, ex, now_m):
-        """The reducing side ("bid"/"ask") of this exchange's open fast unload window, or None. A window closes once
-        it has expired, its shares are unloaded, or the position in that direction is gone."""
-        w = self.unloads.get(ex.eid)
-        if w is None:
-            return None
-        if (not self.cfg.fast_unload_enabled or now_m >= w["until"] or w["left"] < 1
-                or (ex.inv < 1 if w["side"] == "ask" else ex.inv > -1)):
-            del self.unloads[ex.eid]
-            return None
-        return w["side"]
-
-    def unload_urgent(self, ex, now_m):
-        """The side of an open fast unload window whose unload quote has not been placed yet (urgent), else None."""
-        side = self.unload_side(ex, now_m)
-        return side if side and not self.unloads[ex.eid].get("placed") else None
-
     def load_order_notes(self):
         """Order notes saved by a previous run (so fills that land around a restart get attributed)."""
         try:
@@ -11632,14 +11030,9 @@ class Bot:
                         "swaps no longer need it (they have their own floor): return value_sell_margin to 0.005",
                         c.alloc_swap_sell_margin, c.value_sell_margin)
         self.warned_swap_margin = bad
-        on = ()                               # Package 10 A1 (iv): mark-driven selling paths left on in value mode
-        if getattr(self.cfg, "value_mode", False):
+        on = ()                               # Package 10 A1 (iv): the mark-driven selling paths it once listed
+        if getattr(self.cfg, "value_mode", False):   # (reduce_from_book, fast_unload_enabled) were removed on simplify
             c = self.cfg
-            on = tuple(n for n, hit in (
-                ("reduce_from_book", c.reduce_from_book), ("fast_unload_enabled", c.fast_unload_enabled)) if hit)
-            if on and on != self.warned_value:
-                log.warning("value_mode is on with %s: these sell at marks below Polymarket (their resting quotes "
-                            "still keep the value floor; turn them off for an outcome-settled book)", ", ".join(on))
             closing = [n for n in ("exit_hours_before_close", "flatten_hours_before_close", "flatten_per_market_hours")
                        if getattr(c, n) > 0]
             if closing and not self.warned_value:
@@ -11889,11 +11282,8 @@ class Bot:
         return eid
 
     def selftest_ttl(self):
-        """The expiry the self-test checks: order_ttl, or with ttl_tiers_enabled the longest a tier can give."""
-        cfg = self.cfg
-        if not cfg.ttl_tiers_enabled:
-            return cfg.order_ttl
-        return max(cfg.order_ttl, min(MAX_ORDER_TTL, max(cfg.order_ttl_busy, cfg.order_ttl_quiet) * (1 + cfg.ttl_jitter_frac)))
+        """The expiry the self-test checks: order_ttl."""
+        return self.cfg.order_ttl
 
     def selftest_run(self, eid, ttl):
         """One test (API calls only, no bot state touched, so it can run on any thread).
@@ -12042,9 +11432,6 @@ class Bot:
             return False
         self.selftest_funds_wait = 0.0                    # not a funds refusal: the back-off starts over
         if verdict == "passed":
-            if self.cfg.ttl_tiers_enabled and ttl < self.selftest_ttl():
-                alert(f"orders expiring in {self.selftest_ttl() / 60:.0f} min were rejected: TTL tiers switched off")
-                self.cfg.ttl_tiers_enabled = False
             if ttl != self.cfg.order_ttl and ttl < self.cfg.order_ttl:
                 alert(f"orders expiring in {self.cfg.order_ttl / 60:.0f} min were rejected but {ttl / 60:.0f}-min "
                       f"ones work - using {ttl / 60:.0f}-min orders from now on")

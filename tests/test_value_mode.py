@@ -131,8 +131,8 @@ print("--- A1 value floor in compute_quote (normal and reduce-only, skew and age
 P = 0.62
 q0 = cq(2000, 0.60, 0.50, 0.70, ro=True, age=12)
 q1 = cq(2000, 0.60, 0.50, 0.70, ro=True, age=12, p=P, value_mode=True)
-check("fail-before: reduce-only long with skew + age skew rests its ask below p - margin (keep limit 0.57)",
-      q0.ask < P - 0.005 and q0.ask_limit < P - 0.005, q0)
+check("fail-before: reduce-only long with skew: the keep limit rests below p - margin (the age skew that also put\n"
+      "      the ask there was removed on simplify)", q0.ask_limit < P - 0.005, q0)
 check("value_mode: reduce-only ask and its keep limit >= p - margin (0.615)", q1.ask >= 0.615 - 1e-9
       and q1.ask_limit >= 0.615 - 1e-9, q1)
 check("value_mode: the ask size is unchanged (only the price moves; never flips)", q1.ask_size == q0.ask_size, (q0, q1))
@@ -143,10 +143,11 @@ check("normal quoting: ask floored too (and the adding bid unchanged)", qn1.ask 
 qs0 = cq(-2000, 0.40, 0.30, 0.50, ro=True, age=12)
 qs1 = cq(-2000, 0.40, 0.30, 0.50, ro=True, age=12, p=0.38, value_mode=True)
 check("short mirror: base buys back above p + margin; value_mode bid and keep limit <= 0.385",
-      qs0.bid > 0.385 and qs1.bid <= 0.385 + 1e-9 and qs1.bid_limit <= 0.385 + 1e-9 and qs1.bid_size == qs0.bid_size,
+      qs1.bid <= 0.385 + 1e-9 and qs1.bid_limit <= 0.385 + 1e-9 and qs1.bid_size == qs0.bid_size,
       (qs0, qs1))
 q = cq(2000, 0.60, 0.50, 0.70, ro=True, age=12, p=P, value_mode=True, value_sell_margin=0.02)
-check("margin 2c: the floor is ceil(p - 0.02) = 0.60", abs(q.ask - 0.60) < 1e-9, q)
+check("margin 2c: the floor is ceil(p - 0.02) = 0.60 (the keep limit; the ask rests at or above it)",
+      abs(q.ask_limit - 0.60) < 1e-9 and q.ask >= 0.60 - 1e-9, q)
 q = cq(2000, 0.60, 0.50, 0.58, ro=True, p=0.75, value_mode=True)
 check("p far above the book: the ask rests at 0.745, beyond the best ask (never crosses the best bid 0.50)",
       abs(q.ask - 0.745) < 1e-9 and q.ask > 0.50, q)
@@ -161,15 +162,10 @@ q = cq(-2000, 0.003, None, 0.02, ro=True, p=0.0, value_mode=True, value_sell_mar
 check("short with p + margin below the grid: no bid (nothing to buy back at or below value)", q.bid is None, q)
 q0 = cq(2000, 0.60, 0.50, 0.70, ro=True, age=12, reduce_join_best=True, reduce_join_min_edge=-0.05)
 q1 = cq(2000, 0.60, 0.50, 0.70, ro=True, age=12, p=P, value_mode=True, reduce_join_best=True,
-        reduce_join_min_edge=-0.05, exit_quotes_in_reduce_only=True)
-check("reduce_join_best on: the joined ask is floored too", q1.ask >= 0.615 - 1e-9, (q0, q1))
+        reduce_join_min_edge=-0.05)
 c_ = cfg_with(value_mode=True)
-q = M.compute_quote(0.60, 2000, 2000, 0.50, 0.70, c_, bankroll=100000, unload_side="ask", unload_edge=0.0,
-                    unload_size=500, value_p=P)
-check("fast unload window: the unload ask is floored (size still <= the position)", q.ask >= 0.615 - 1e-9
-      and q.ask_size <= 2000, q)
-q = M.compute_quote(0.60, 2000, 2000, 0.50, 0.70, c_, bankroll=100000, reduce_fv=0.52, value_p=P)
-check("reduce_from_book: the book-priced ask is floored", q.ask >= 0.615 - 1e-9, q)
+check("reduce_join_best on: the joined ask is floored too (reduce-only: reduce_join_best does not run there, so this "
+      "is the floor on the normal ask)", q1.ask >= 0.615 - 1e-9, (q0, q1))
 qa = cq(2000, 0.60, 0.50, 0.70, ro=True, age=12, value_mode=True)
 check("value_mode without a liquid p: only the max_skew_through clamp now runs in reduce-only (keep limit >= fv 0.60)",
       qa.ask_limit >= 0.60 - 1e-9 and q0.ask_limit < 0.60, (qa, q0))
@@ -281,12 +277,6 @@ b.cfg.value_mode = True
 st_on = b.status_report()[0]
 check("status phase: 'exiting positions' off, not in value mode", "exiting positions" in st_off
       and "exiting" not in st_on and "reducing" not in st_on, (st_off, st_on))
-b.cfg.value_mode = False
-b.ex["21"].lad_ctx = (1.0, 1.0, None)
-caps_off = b.ladder_caps(b.ex["21"], 0.55, 100)
-b.cfg.value_mode = True
-caps_on = b.ladder_caps(b.ex["21"], 0.55, 100)
-check("ladder caps: exit window zero when off, open in value mode", caps_off[True](0.5) == 0 and caps_on[True](0.5) > 0)
 a, b = plain_bot({"21": 600}, close_h=1.0 / 6, value_mode=True)          # closes in 10 minutes
 quiet_cycle(b)
 check("stop_minutes_before_close (15) still holds in value mode: 10 min to close -> nothing quoted",
@@ -310,33 +300,15 @@ old_level, old_prop = M.log.level, M.log.propagate
 M.log.setLevel(logging.WARNING)
 M.log.propagate = False
 try:
-    a, b = plain_bot({}, reduce_from_book=True, ref_guard_exits=True)
+    # (the mark-driven selling paths warn_settings once listed - reduce_from_book, fast_unload_enabled, the ref-guard
+    #  exits, the tilted takes - were all removed on simplify; only the pre-close-windows line is left)
+    a, b = plain_bot({})
     b.warn_settings()
     check("value_mode off: no value warning", not any("value_mode" in m for m in grab.msgs), grab.msgs)
     b.cfg.value_mode = True
     b.warn_settings()
-    w = [m for m in grab.msgs if "value_mode is on with" in m]
-    check("value_mode on: one warning naming reduce_from_book and ref_guard_exits",
-          len(w) == 1 and "reduce_from_book" in w[0] and "ref_guard_exits" in w[0], grab.msgs)
-    check("...and one line saying the pre-close windows are off", sum("pre-close windows are OFF" in m
-                                                                       for m in grab.msgs) == 1, grab.msgs)
-    b.warn_settings()
-    check("no repeat while nothing changes", sum("value_mode is on with" in m for m in grab.msgs) == 1)
-    for k in ("fast_unload_enabled", "ref_tilt_enabled", "take_tilted_ref"):   # (the tilt exits and the hold target,
-        setattr(b.cfg, k, True)                                                 #  once listed too, were removed)
-    b.warn_settings()
-    w = [m for m in grab.msgs if "value_mode is on with" in m]
-    check("a newly switched-on path warns again, listing all five",
-          len(w) == 2 and all(n in w[1] for n in ("fast_unload_enabled", "ref_tilt_enabled", "take_tilted_ref")), w)
-    check("not forced off (the owner decides)", b.cfg.reduce_from_book and b.cfg.fast_unload_enabled)
-    a, b = plain_bot({})
-    n0 = len(grab.msgs)
-    with open(b.cfg.overrides_file, "w") as f:
-        json.dump({"value_mode": True, "ref_guard_exits": True}, f)
-    b.check_overrides(force=True)
-    check("override time: applying value_mode with ref_guard_exits logs the warning",
-          b.cfg.value_mode and any("value_mode is on with" in m and "ref_guard_exits" in m for m in grab.msgs[n0:]),
-          grab.msgs[n0:])
+    check("value_mode on: one line saying the pre-close windows are off", sum("pre-close windows are OFF" in m
+                                                                             for m in grab.msgs) == 1, grab.msgs)
 finally:
     M.log.removeHandler(grab)
     M.log.setLevel(old_level)
@@ -428,13 +400,6 @@ check("bloc_delta_now on a hypothetical book (Part B's hook) and bloc_cap",
 b.cfg.max_bloc_delta_frac = 0.003                    # cap 300/sd
 check("past the bloc cap: Dem bid and Rep ask blocked, the reducing sides open",
       b.party_blocks(b.ex["12"], 0.0) == (True, False) and b.party_blocks(b.ex["11"], 0.0) == (False, True))
-b.ex["12"].lad_ctx = (1.0, 1.0, None)
-cap12 = b.ladder_caps(b.ex["12"], 0.85, 100)
-b.ex["21"].lad_ctx = (1.0, 1.0, None)
-cap21 = b.ladder_caps(b.ex["21"], 0.55, 100)
-check("ladder room in bloc units (cap 300, bloc -403): Dem bid -103 / 0.134 = -764 shares; Dem ask and Rep bid open; "
-      "Rep ask (more Dem-leaning) shut", abs(cap12[True](0.85) - (300 - 402.574) / 0.134191) < 1 and cap12[False](0.85) > 0
-      and cap21[True](0.55) > 0 and cap21[False](0.55) <= 0, (cap12[True](0.85), cap21[False](0.55)))
 a, b = plain_bot({"12": 3000})
 quiet_cycle(b)
 check("flag off: no bloc keys in health / summary", "bloc_delta" not in b.health

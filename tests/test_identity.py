@@ -92,7 +92,23 @@ RETIRED_MASTERS = {                               # knob prefix -> the retired f
     # (ref_tilt_max, _min_markets, _halflife_min, _winsor, _estimator) stay: they shape the live tilt_s reading.
     **{k: "ref_tilt_enabled" for k in ("ref_tilt_headline", "ref_tilt_rampin_min", "ref_tilt_carry_days",
                                        "take_tilted_ref", "ref_guard_tilted")},
+    # last dead knobs (removed on simplify), each read only behind its own master switch (live: all absent = off)
+    **{k: "fast_unload_enabled" for k in ("fast_unload_min_edge", "fast_unload_min_shares", "fast_unload_seconds",
+                                          "fast_unload_edge", "fast_unload_size_mult")},
+    **{k: "refill_cooldown_enabled" for k in ("refill_cooldown_fills", "refill_cooldown_window_seconds",
+                                              "refill_cooldown_min_shares", "refill_cooldown_seconds")},
+    "no_chase_tolerance_ticks": "no_chase_enabled", "no_chase_fv_epsilon": "no_chase_enabled",
+    **{k: "ttl_tiers_enabled" for k in ("order_ttl_busy", "order_ttl_quiet", "ttl_jitter_frac", "ttl_busy_size_frac")},
+    "ttl_expire_grace_seconds": "ttl_expire_as_cancel",
+    "reduce_from_book_headline": "reduce_from_book", "reduce_from_book_pause_s": "reduce_from_book",
+    "arb_sellback_min_sum": "arb_sellback",
+    "behind_best_": "behind_best_size_enabled",
+    "fl_bias_": "fl_bias_enabled",
 }
+# A retired master switch whose CODE default was on but which the live file turns off: the new code behaves as the
+# old did at that live value (the age skew's branch is gone; the lots tracking that fed it stays for the status age
+# fields), so the key is accepted at exactly that value - at any other the comparison would be meaningless.
+RETIRED_FLIPPED = {"skew_age_enabled": False}
 RETIRED_LIVE, RETIRED_OFF = {}, {}
 if base is not None:
     def master_off(k):
@@ -100,7 +116,8 @@ if base is not None:
         return m is not None and LIVE.get(m, getattr(base.Config(), m)) == getattr(base.Config(), m)
     gone_live = [k for k in LIVE if k in base.Config.__dataclass_fields__ and k not in M.Config.__dataclass_fields__]
     RETIRED_LIVE = {k: LIVE[k] for k in gone_live if LIVE[k] == getattr(base.Config(), k)}
-    RETIRED_OFF = {k: LIVE[k] for k in gone_live if k not in RETIRED_LIVE and master_off(k)}
+    RETIRED_OFF = {k: LIVE[k] for k in gone_live if k not in RETIRED_LIVE
+                   and (master_off(k) or (k in RETIRED_FLIPPED and LIVE[k] == RETIRED_FLIPPED[k]))}
     if RETIRED_LIVE:
         print(f"    retired settings in the live file at {BASE_REV}'s default (accepted): "
               + ", ".join(f"{k}={v!r}" for k, v in sorted(RETIRED_LIVE.items())))
@@ -258,6 +275,13 @@ RETIRED_STATUS = {                                # e.g. "basket": ({"state": "o
     # estimate tilt_s, tilt_exposure, tilt_state and tilt_diag stay: live readings used by the owner)
     "tilt_s_applied": (0.0, 0),
     "tilt_s_applied_headline": (0.0, 0),
+    # last dead knobs (removed on simplify): the health key fast_unload_windows counted open fast-unload windows,
+    # 0 while fast_unload_enabled was off; arb_cash_blocked was written only with arb_cash_rule on (absent);
+    # fl_bias_markets counted the fl_bias markets per side, {"bid": 0, "ask": 0} while fl_bias_enabled was off
+    "fast_unload_windows": (0,),
+    "behind_best_markets": (0,),
+    "arb_cash_blocked": (),
+    "fl_bias_markets": ({"bid": 0, "ask": 0},),
 }
 RETIRED_SUBKEYS = {                               # sub-keys of a surviving top-level dict, dotted paths allowed
     # (mm_risk_room.blocked.basket and mm_carry_24h.fills.basket stay in the new code at 0: the older twin suites
@@ -294,7 +318,9 @@ if base is not None:
         what = []
         if strip(an.wire) != strip(ao.wire):
             what.append("orders")
-        if {e: astuple(x.quote) for e, x in bn.ex.items()} != {e: astuple(x.quote) for e, x in bo.ex.items()}:
+        # (Quote.behind, the behind-the-best flag removed on simplify, was always False while that sizing was off)
+        qt = lambda x: astuple(x.quote)[:len(M.Quote.__dataclass_fields__)]      # noqa: E731
+        if {e: qt(x) for e, x in bn.ex.items()} != {e: qt(x) for e, x in bo.ex.items()}:
             what.append("quotes")
         if notes(bn) != notes(bo):
             what.append("notes")
