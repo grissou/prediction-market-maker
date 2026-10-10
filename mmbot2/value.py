@@ -139,6 +139,8 @@ def tail_quotes(view, risk, s):
         if eid not in view.markets or s.band_low <= p <= s.band_high:
             continue
         qty, book = view.positions.get(eid, 0.0), view.books.get(eid)
+        if book is None:
+            continue                                   # no fresh book: a price could cross other traders unseen
         no_bid, no_ask = guard_blocks(p, book, s)
         # tail_high / tail_low: near 1 a YES bid (near 0 a YES ask) risks ~1 to earn ~1c
         for is_bid, allowed in ((True, qty > -1 and p <= s.tail_high and not no_bid),

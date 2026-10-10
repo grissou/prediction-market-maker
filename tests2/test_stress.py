@@ -17,7 +17,7 @@ After every cycle  no bug escaped the cycle (ApiErrors are expected; anything el
           hold (see check_caps for exactly what the bot can guarantee).
 Then      faults off: within a few cycles orders rest again, the bot's orders and positions match the fake, and a
           quiet cycle sends nothing.
-Run:  python3 tests2/test_stress.py [cycles_per_seed] [seeds]      (default 400 x 3; exit code 0 = all passed)
+Run:  python3 tests2/test_stress.py [cycles_per_seed] [seeds]      (default 1000 x 4; exit code 0 = all passed)
 """
 import json
 import logging
@@ -70,6 +70,7 @@ class StressClient(FakeClient):
     def __init__(self, *a, **k):
         super().__init__(*a, **k)
         self.lose_places = self.lose_cancels = 0
+        self.cancels_fail = False         # every cancel this cycle raises and cancels nothing
         self.tags_sent = set()
 
     def clock(self):
@@ -84,6 +85,9 @@ class StressClient(FakeClient):
         return [Placed(o, None, 0.0, "response lost", unknown=True) for o in orders]
 
     def cancel(self, oid):
+        if self.cancels_fail:
+            self.calls.append("cancel")
+            raise ApiError(503, "INJECTED", "cancel failed")
         if self.lose_cancels <= 0:
             return super().cancel(oid)
         self.lose_cancels -= 1
@@ -109,9 +113,14 @@ BASE_SETTINGS = {"market_max_usd": 2500.0, "state_max_usd": 4000.0, "mm_reserve_
 START, CASH = 30000.0, 21000.0
 
 
-def house_book(p):
+# Books off Polymarket in one race: Rep cheap, Dem rich, so the allocator has a buy at >= 5% edge and a holding
+# (Dem Florida, held long) worth selling into a bid above its value.
+BOOK_OFFSET = {("Florida Senate", "Republican"): -0.07, ("Florida Senate", "Democratic"): 0.07}
+
+
+def house_book(p, off=0.0):
     """Other traders' book around fair value p: rich in the tails (the favourite-longshot tilt), 6-8c wide."""
-    mid = p + 0.03 if p < 0.15 else p - 0.03 if p > 0.85 else p
+    mid = off + (p + 0.03 if p < 0.15 else p - 0.03 if p > 0.85 else p)
     half = 0.03 if 0.15 <= p <= 0.85 else 0.025
     bid, ask = floor_tick(mid - half), ceil_tick(mid + half)
     bids = [(bid, 800), (round(bid - 0.02, 3), 2000)]
@@ -129,7 +138,8 @@ class World:
                 raws.append(raw_market(str(n), str(100 + n), party, race))
         markets = [m for r in raws for m in parse_markets(r, None)]
         self.eids = {(m.race, m.party): m.eid for m in markets}
-        books = {self.eids[(r, party)]: house_book(p) for r, legs in self.truth.items() for party, p in legs.items()}
+        books = {self.eids[(r, party)]: house_book(p, BOOK_OFFSET.get((r, party), 0.0))
+                 for r, legs in self.truth.items() for party, p in legs.items()}
         self.client = StressClient(markets, books, cash=CASH, start=START)
         self.client.rng = random.Random(seed + 1)
         e = self.eids
@@ -171,23 +181,28 @@ class World:
         os.utime(self.env.settings_path, (self.mtime, self.mtime))
 
     # ---------------------------------------------------------------- the world moving between cycles
-    def move_race(self, race, jump=False):
-        """Polymarket drifts (or jumps) for one race; the house books follow; our orders they cross are hit."""
+    def move_race(self, race, jump=False, news=False):
+        """Polymarket drifts (or jumps) for one race and the house books follow, hitting our orders they cross. On
+        news Polymarket moves 10c first and the books stay put until the next move (our quotes must turn round)."""
         legs = self.truth[race]
         first = next(iter(legs))
-        step = self.rng.choice((-0.17, 0.17)) if jump else self.rng.gauss(0, 0.01)
+        step = self.rng.gauss(0, 0.01)
+        if jump or news:
+            step = self.rng.choice((-1, 1)) * (0.17 if jump else 0.10)
         legs[first] = min(0.97, max(0.03, legs[first] + step))
         rest = sum(p for k, p in legs.items() if k != first)
         for k in legs:
             if k != first:
                 legs[k] = max(0.01, legs[k] / rest * (1 - legs[first]))
+        self.refs.prices = self.ref_prices()
+        if news:
+            return []
         dirty = []
         for party, p in legs.items():
             eid = self.eids[(race, party)]
-            self.client.others[eid] = house_book(p)
+            self.client.others[eid] = house_book(p, BOOK_OFFSET.get((race, party), 0.0))
             self.hit_crossed(eid)
             dirty.append(eid)
-        self.refs.prices = self.ref_prices()
         return dirty
 
     def hit_crossed(self, eid):
@@ -214,7 +229,7 @@ class World:
     def arm_faults(self, rng):
         """This cycle's faults; False if it has none (a clean cycle)."""
         c = self.client
-        c.fail_rate, c.faults, c.lose_places, c.lose_cancels = 0.0, [], 0, 0
+        c.fail_rate, c.faults, c.lose_places, c.lose_cancels, c.cancels_fail = 0.0, [], 0, 0, False
         c.req_left = c.write_left = UNLIMITED
         if rng.random() < 0.35:
             return False
@@ -225,6 +240,7 @@ class World:
             c.lose_places = 1
         if rng.random() < 0.15:
             c.lose_cancels = 1
+        c.cancels_fail = rng.random() < 0.08
         if rng.random() < 0.1:
             c.req_left = rng.choice((5, 15, 25))           # the request budget nearly spent
         if rng.random() < 0.1:
@@ -236,7 +252,7 @@ class World:
         dirty = []
         for race in self.truth:
             if rng.random() < 0.3:
-                dirty += self.move_race(race, jump=rng.random() < 0.01)
+                dirty += self.move_race(race, jump=rng.random() < 0.01, news=rng.random() < 0.04)
         self.traders_hit_us()
         self.feed.ok = (rng.random() < 0.9) if self.feed.ok else (rng.random() < 0.4)
         if rng.random() < 0.8:
@@ -281,6 +297,8 @@ def check_caps(w):
     alone over a cap; then the bound is the holding itself (no adding order may rest). Under faults no bound is
     claimed: a cancel that failed leaves an order the gate refused until the next cycle can cancel it. Tolerance:
     one share's collateral per order (the gate floors shares) plus a cent."""
+    if w.bot.risk is None:
+        return None
     s, p, c = w.bot.s, w.bot.risk.p, w.client
     state_held, state_add, n_orders = {}, {}, {}
     for e, m in w.bot.markets.items():
@@ -302,7 +320,7 @@ def check_caps(w):
             n_orders[m.state] = n_orders.get(m.state, 0) + k
     for st, held in state_held.items():
         total = held + state_add[st]
-        if state_add[st] > 0.01 + n_orders[st] and total > max(s.state_max_usd, held) + 0.01 + n_orders[st]:
+        if total > max(s.state_max_usd, held) + 0.01 + n_orders[st]:
             return f"state {st}: {total:.0f} (held {held:.0f}) > cap {s.state_max_usd:.0f}"
     return None
 
@@ -325,8 +343,7 @@ def writes(client):
 def run_seed(seed, cycles):
     rng, w = random.Random(seed), World(seed)
     first = {}                                    # check name -> first failure detail
-    clean_full = fills_before = 0
-    fills_before = len(w.client.fill_log)
+    clean_full, fills_before = 0, len(w.client.fill_log)
 
     def note(name, bad):
         if bad and name not in first:
@@ -378,7 +395,7 @@ def run_seed(seed, cycles):
 def recover(w, tag):
     """Faults off, the feed healthy: within a few cycles the bot quotes again and its view matches the fake."""
     c = w.client
-    c.fail_rate, c.faults, c.lose_places, c.lose_cancels = 0.0, [], 0, 0
+    c.fail_rate, c.faults, c.lose_places, c.lose_cancels, c.cancels_fail = 0.0, [], 0, 0, False
     c.req_left = c.write_left = UNLIMITED
     w.feed.ok = True
     w.feed.push(resync=True)
@@ -404,8 +421,8 @@ def recover(w, tag):
 if __name__ == "__main__":
     if os.environ.get("PYTHONHASHSEED") != "0":     # set order (the bot iterates sets) must repeat with the seed
         os.execve(sys.executable, [sys.executable] + sys.argv, {**os.environ, "PYTHONHASHSEED": "0"})
-    cycles = int(sys.argv[1]) if len(sys.argv) > 1 else 400
-    seeds = int(sys.argv[2]) if len(sys.argv) > 2 else 3
+    cycles = int(sys.argv[1]) if len(sys.argv) > 1 else 1000
+    seeds = int(sys.argv[2]) if len(sys.argv) > 2 else 4
     t0 = real_time.time()
     for seed in range(1, seeds + 1):
         try:

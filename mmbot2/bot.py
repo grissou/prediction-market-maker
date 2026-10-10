@@ -34,10 +34,24 @@ BOOK_STALE_S = 300.0          # a book older than this is not traded on (the old
 BOOK_REFRESH_S = 120.0        # a book is re-read at least this often when the request budget allows
 REQUEST_SPARE = 10            # requests left unspent each minute, for the writes' own reads and a resync
 PRICE_TOL = 1e-6
-SIZE_KEEP_FRAC = 0.5          # a resting order at the wanted price is kept while it is at least half the wanted size
+SIZE_KEEP_FRAC = 0.5          # a resting order at the wanted price is kept while it is at least half the wanted size...
+SIZE_TOL = 1.0                # ...and no larger than the gate now allows (a cap that tightened replaces it)
 EXPIRY_MARGIN_S = 120.0       # an order this close to its expiry is replaced, so a quote never lapses
 BATCH_MAX = 20                # orders per batch request (the API's limit)
 PRIORITY = ("alloc", "refill", "recycle", "ladder", "value", "mm")   # who gets cash and writes first
+
+
+def by_priority(orders):
+    """Orders in the order they get cash and writes (stable within a strategy)."""
+    return sorted(orders, key=lambda o: PRIORITY.index(o.tag) if o.tag in PRIORITY else len(PRIORITY))
+
+
+def covered(order, qty):
+    """A bid while we are short goes out as the covered "sell NO", which the exchange trims to the NO held
+    (exchange.place); trim it here too, so reconcile compares with what can actually rest."""
+    if order.is_bid and qty < 0 and order.size > -qty:
+        return replace(order, size=-qty)
+    return order
 
 
 def utcnow():
@@ -87,13 +101,13 @@ class Bot:
         state = self.assess(view)
         if state is None:
             return                              # the kill switch fired: everything is cancelled
-        wanted = value.apply_floor(self.decide(view, state), view, self.s)
-        keep, cancels, new = self.reconcile(view, wanted)
-        gate = risk.Gate(view, state, self.s)
-        cancels += [o for o in keep if gate.admit(o) is None]      # kept orders count against the caps first
-        admitted = [o for o in (gate.admit(o) for o in new) if o is not None]
+        wanted = [covered(o, view.positions.get(o.eid, 0.0))
+                  for o in value.apply_floor(self.decide(view, state), view, self.s)]
+        gate = risk.Gate(view, state, self.s)          # gate first, so reconcile compares with what may rest
+        admitted = [o for o in (gate.admit(o) for o in by_priority(wanted)) if o is not None]
         self.refused = dict(gate.refused_usd)
-        self.send(view, cancels, admitted)
+        keep, cancels, new = self.reconcile(view, admitted)
+        self.send(view, cancels, new)
         self.report(view, state)
         self.save()
         self.last_cycle_mono = time.monotonic()
@@ -140,6 +154,7 @@ class Bot:
         """Positions, the account and new fills; on a full check also our open orders (live only)."""
         self.positions = self.client.positions()
         self.marks = dict(self.client.marks)
+        self.note_fills(self.client.fills(self.last_fill_id))   # before the list, which already shows them
         if full:                                # before account(): free cash is net of these orders' locks
             self.account_orders = defaultdict(list)
             for o in self.client.open_orders():
@@ -148,7 +163,6 @@ class Bot:
                 self.orders = {o.oid: replace(o, tag=self.tags.get(o.oid, ""))
                                for orders in self.account_orders.values() for o in orders}
         self.account = self.client.account()
-        self.note_fills(self.client.fills(self.last_fill_id))
 
     def read_books(self, dirty, mono):
         """Books the feed flagged, then books whose bulk top moved or that are getting old, within the budget."""
@@ -259,18 +273,18 @@ class Bot:
         by_eid = defaultdict(list)
         for o in wanted:
             by_eid[o.eid].append(o)
-        for e in set(by_eid) | set(view.resting):
+        for e in sorted(set(by_eid) | set(view.resting)):
             k, c, n = self.reconcile_market(view, view.resting.get(e, []), by_eid.get(e, []))
             keep, cancels, new = keep + k, cancels + c, new + n
-        new.sort(key=lambda o: PRIORITY.index(o.tag) if o.tag in PRIORITY else len(PRIORITY))
-        return keep, cancels, new
+        return keep, cancels, by_priority(new)
 
     def reconcile_market(self, view, resting, wanted):
         horizon = view.now + timedelta(seconds=EXPIRY_MARGIN_S)
         keep, new, left = [], [], list(resting)
         for w in wanted:
             match = next((r for r in left if not w.ioc and r.is_bid == w.is_bid and r.tag == w.tag
-                          and abs(r.price - w.price) < PRICE_TOL and r.size >= SIZE_KEEP_FRAC * w.size
+                          and abs(r.price - w.price) < PRICE_TOL
+                          and SIZE_KEEP_FRAC * w.size <= r.size <= w.size + SIZE_TOL
                           and (r.expires is None or r.expires > horizon)), None)
             if match is not None:
                 left.remove(match)
@@ -304,8 +318,11 @@ class Bot:
                     self.deferred += 1
                     continue
                 ladder_cancels -= 1
-            if not self.cancel_order(o):
-                places = [p for p in places if not (p.ioc and p.eid == o.eid)]   # its swap waits for the cancel
+            self.cancel_order(o)
+        resting = defaultdict(list)                    # what is really still resting after the cancels
+        for o in self.orders.values():
+            resting[o.eid].append(o)
+        places = [p for p in places if not self.crosses_own(p, resting[p.eid])]   # a cancel failed: wait for it
         for k in range(0, len(places), BATCH_MAX):
             if not self.place_batch(view, places[k:k + BATCH_MAX]):
                 self.deferred += len(places) - k
@@ -314,7 +331,7 @@ class Bot:
             log.info("write budget: %d writes deferred to the next cycle", self.deferred)
 
     def cancel_order(self, o):
-        """True if the order is gone (or was only simulated)."""
+        """Cancel one order; it stays in self.orders (and blocks crossing placements) unless it is gone."""
         if not self.live:
             log.info("WOULD cancel %s %s %.3f x%d [%s]", self.label(o.eid), "bid" if o.is_bid else "ask",
                      o.price, o.size, o.tag)

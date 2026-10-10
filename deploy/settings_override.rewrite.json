@@ -23,6 +23,7 @@
  "alloc_prefer_short": true,
  "mm_reserve_usd": 20000.0,
  "mm_min_edge": 0.01,
+ "mm_quote_frac": 0.002,
  "kelly_fraction": 0.25,
  "kelly_max_market_frac": 0.02,
  "mm_skew_max": 0.0,
