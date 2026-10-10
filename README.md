@@ -190,7 +190,7 @@ order for order; replays a recorded live snapshot as a dry run; and comes with a
 first-hour watch list and a rollback. Sixteen releases were built between 2 and 6 October; twelve went
 live, one at a time, each after the previous one had run for a few hours.
 
-**Tests.** 56 offline test suites, about 4,000 checks, run against a fake exchange that follows the API
+**Tests.** 35 offline test suites, about 3,000 checks, run against a fake exchange that follows the API
 specification. A stress test runs long randomised sessions against a deliberately faulty exchange
 (failed requests, lost responses, a lagging order list, a dropping feed) and checks after every cycle
 that the bot never crashes, never trades against itself, keeps positions within limits, and recovers
