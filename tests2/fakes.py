@@ -17,6 +17,7 @@ import os
 import random
 import sys
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -104,7 +105,7 @@ class FakeClient:
         self.call("account", "read")
         marks = {e: self.mid(e) or 0.5 for e in self.inv}
         value = self.cash + sum(held_usd(q, marks[e]) for e, q in self.inv.items())
-        return Account(value=value, cash=self.cash - self.locked(), start=self.start, read_at=0.0)
+        return Account(value=value, cash=self.cash - self.locked(), start=self.start, read_at=time.monotonic())
 
     def open_orders(self):
         self.call("open_orders", "read")
