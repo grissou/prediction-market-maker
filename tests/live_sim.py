@@ -220,7 +220,7 @@ class LiveSim(Sim):
         # = the cash the cheapest wanted level needed where lad_cash_left dropped every level, average.
         self.lg = dict(calls=0, wgate=0, mkt=0, early=0, geo=0, caps=0, cap1=0, cash=0, cash_lv=0, ok=0, ok_w=0,
                        clip=0, sh=0, lv_cash=0.0, cash_avg=0.0, free_avg=0.0)
-        if self.cfg.ladder_enabled:
+        if getattr(self.cfg, "ladder_enabled", False):   # (R3 ladder: gone from mm_bot)
             self.ladder = {"real": True}      # strategy_sim: mm_bot.plan_exchange ordering of ladder writes
         bot.age_hours = lambda ex, now=None, b=bot: M.Bot.age_hours(b, ex, self.epoch0 + self.t_now)
         bot.hours_to_close = lambda ex: 800.0
@@ -315,7 +315,7 @@ class LiveSim(Sim):
         self.eff = bot.effective_inventory(inv)
         if cfg.tilt_exposure_max_frac > 0:   # T2.4 feed
             bot.tilt_exposure = sum(m.inv * (m.ref_seen - 0.5) for m in self.mkts if m.inv and m.ref_seen is not None)
-        if cfg.ladder_enabled:                    # Bot.ladder_setup: what the ladder may lock this cycle
+        if getattr(cfg, "ladder_enabled", False):  # (R3 ladder: gone from mm_bot)
             other = sum(order_lock(o, m.inv, self.free_short()) for m in self.mkts for o in m.orders
                         if o.owner == "us" and o.level == 0)
             eq = equity
@@ -664,7 +664,7 @@ def bot_strategy(sim, m, t, fv, bfv, ref, book):
         sim.tx_quoted += 1
         sim.tx_bind += any(bot.tilt_blocks(ex, ref))
     want = S.quote_to_want(q)
-    if sim.cfg.ladder_enabled:                     # R3: mm_bot's ladder_targets (anchor, pulls, caps, cash)
+    if getattr(sim.cfg, "ladder_enabled", False):  # (R3 ladder: gone from mm_bot)
         lg, quoted = sim.lg, q.bid is not None or q.ask is not None
         lg["calls"] += quoted
         seen = []                                  # ladder_targets' first ladder_levels call (before the cash)

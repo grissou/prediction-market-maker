@@ -23,8 +23,6 @@ And once the faults stop:
   - no exchange is left stuck (paused / pending), and a quiet cycle changes nothing
 
 Run:  python tests/test_stress.py [steps_per_seed] [seeds]      (default 1500 x 5; exit code 0 = all passed)
-      STRESS_LADDER=1 python tests/test_stress.py ...   the same with the R3 ladder on (duplicates are then judged
-                                                         per side AND ladder level)
 """
 import random
 import sys
@@ -39,7 +37,6 @@ import tempfile
 
 RESULTS = []
 real_utcnow = M.utcnow
-LADDER = os.environ.get("STRESS_LADDER") == "1"
 
 
 def check(name, cond, extra=""):
@@ -165,8 +162,6 @@ def build(seed):
     cfg.record_file, cfg.ref_map_file, cfg.summary_every_hours, cfg.realtime_enabled = "", "", -1, False
     cfg.slow_poll_seconds, cfg.reserved_cash_mode = 30.0, "ignore"
     cfg.parallel_requests = 1             # one request thread: the random faults then fire in a repeatable order
-    if LADDER:                            # R3 ladder on every market; levels wide enough to sit behind the 8c house
-        cfg.ladder_enabled, cfg.ladder_markets, cfg.ladder_offsets = True, "headline,busy,quiet", (0.04, 0.05, 0.06)
     eids = {}
     for m in mk:
         x = M.RACE_TITLE.match(m["title"])
@@ -189,26 +184,15 @@ def build(seed):
     return rng, api, bot, truth, eids, house
 
 
-def our_orders_by_side(api, bot=None):
+def our_orders_by_side(api):
     """{(eid, is_bid): [prices]}; with bot: {(eid, is_bid, ladder level): [prices]} (R3 ladder on)."""
     sides = {}
     api.expire()
     for oid, o in api.orders.items():
         is_bid, p = api.yes_view(o)
-        key = (o["exchangeId"], is_bid) + ((order_level(bot, oid, o, is_bid, p),) if bot else ())
+        key = (o["exchangeId"], is_bid)
         sides.setdefault(key, []).append(p)
     return sides
-
-
-def order_level(bot, oid, order, is_bid, price):
-    """The ladder level the bot gave this order: its notes, or (a batch whose response was lost, not adopted yet)
-    the notes of the order it sent there at that side, price and expiry (as Bot.match_unconfirmed matches them)."""
-    meta = bot.order_meta.get(oid)
-    if meta is None:
-        meta = next((m for o, m, _t in bot.unconfirmed.get(order["exchangeId"]) or []
-                     if (o["action"] == "buy") == is_bid and abs(o["price"] - price) < 1e-6
-                     and o["expirationDate"] == order["expirationDate"]), {})
-    return int(meta.get("level") or 0)
 
 
 def run_seed(seed, steps):
@@ -280,7 +264,7 @@ def run_seed(seed, steps):
             problems.append(f"step {cycles}: unexpected exception\n{traceback.format_exc()}")
         cycles += 1
         # --- invariants ---
-        dup = {k: v for k, v in our_orders_by_side(api, bot if LADDER else None).items() if len(v) > 1}
+        dup = {k: v for k, v in our_orders_by_side(api).items() if len(v) > 1}
         if dup:
             problems.append(f"step {cycles}: duplicate quotes {dup}")
         sides = our_orders_by_side(api)

@@ -78,6 +78,15 @@ RETIRED_MASTERS = {                               # knob prefix -> the retired f
     # and election-night hooks were read only while momentum_enabled was true (live: absent = false since 8 Oct)
     **{pre: "momentum_enabled" for pre in ("momentum_", "mom_", "value_extreme_p", "value_min_edge", "mm_carry_min",
                                              "election_holdback_")},
+    # R3 depth ladder (removed on simplify): every ladder_* knob was read only while ladder_enabled was true
+    "ladder_": "ladder_enabled",
+    # turnover control (removed on simplify): the two quoting knobs were read only with turnover_control_enabled;
+    # reduce_from_book_max_turnover only with reduce_from_book_dead_only (the dead-market diagnostic stays)
+    "turnover_dead_adding_factor": "turnover_control_enabled",
+    "turnover_dead_max_position_frac": "turnover_control_enabled",
+    "reduce_from_book_max_turnover": "reduce_from_book_dead_only",
+    # mark fragility's cap (removed on simplify): mark_frag_total_max_cash was read only with mark_frag_enabled
+    "mark_frag_total_max_cash": "mark_frag_enabled",
 }
 RETIRED_LIVE, RETIRED_OFF = {}, {}
 if base is not None:
@@ -232,6 +241,10 @@ RETIRED_STATUS = {                                # e.g. "basket": ({"state": "o
     # P16 momentum sleeve (removed on simplify): "momentum" {state, legs, cost, ...} was written only while
     # momentum_enabled or legs were held (mom_persist_needed); off and unused, the key is absent
     "momentum": (),
+    # mark fragility's sizing cap (removed on simplify): the health key mark_frag_total_cap_active was False while
+    # mark_frag_enabled was off (the mark-noise estimate itself, mark_frag_total_cash / _top / _capped_markets /
+    # _estimates, stays: it is written from the recorder's snapshots whatever the flag)
+    "mark_frag_total_cap_active": (False,),
 }
 RETIRED_SUBKEYS = {                               # sub-keys of a surviving top-level dict, dotted paths allowed
     # (mm_risk_room.blocked.basket and mm_carry_24h.fills.basket stay in the new code at 0: the older twin suites
@@ -286,7 +299,9 @@ if base is not None:
         if cn != co or set(sn) ^ set(so):
             what.append(("status", sorted(k for k in set(cn) | set(co) if cn.get(k) != co.get(k)) +
                          sorted(set(sn) ^ set(so))))
-        if set(bn.health) != set(bo.health) or bn.status_report() != bo.status_report():
+        ho = {k for k, v in bo.health.items()     # (a retired health key at its OFF value may be gone)
+              if not (k in RETIRED_STATUS and k not in bn.health and v in RETIRED_STATUS[k])}
+        if set(bn.health) != ho or bn.status_report() != bo.status_report():
             what.append("health")
         if bn.summary_ops_line(100000.0) != bo.summary_ops_line(100000.0):
             what.append("summary")

@@ -427,8 +427,7 @@ if base is not None:
     ok_w = ok_q = ok_s = True
     diffs = []
     grids = ({}, {"value_mode": True, "value_quote_hurdle": 0.08}, {"max_worst_case_frac": 0.001,
-                                                                   "worst_case_backstop_frac": 0.002},
-             {"ladder_enabled": True})
+                                                                   "worst_case_backstop_frac": 0.002})
     for inv in ({}, {"11": 300, "21": 3000, "22": -3000}, {"12": 2500}, {"21": -800, "22": -900}):
         for ov in grids:
             (an, bn), (ab, bb_) = twin(inv, ov)
