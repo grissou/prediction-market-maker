@@ -262,13 +262,34 @@ exploitation of exchange bugs; these constraints were part of every design brief
 
 ## 9. The repository
 
-| Path | Contents |
+The bot is a small package. Each file owns one concern and says at its top what it must never do.
+
+| File | Owns |
 |---|---|
-| `mm_bot.py` | The bot. Every tunable is in the `Config` block, with its documentation; `OVERRIDABLE` lists the ones that can be changed live |
-| `ref_prices.py`, `ref_map.json` | Polymarket (and Kalshi) prices and the mapping from races to their markets |
-| `tests/` | The 56 suites, the three simulators and the stress test; `tests/README.md` explains them |
-| `analysis/` | The research behind each release: valuation, tilt paths, turnover, fill analysis, dry-run reports |
-| `deploy/` | Service unit, server setup, the handover script, `RUNBOOK.md`, and each release's staged settings and notes |
+| `mm_bot.py` | The entry point (`python mm_bot.py run --live`); it only imports the package and runs `main` |
+| `mmbot/config.py` | Every setting, with its documentation, and the list of settings that may be changed live |
+| `mmbot/util.py` | The clock, paths, alerts, the logger, the exchange's fixed facts |
+| `mmbot/exchange.py` | The API client, the realtime feed, the per-market state, order-change records |
+| `mmbot/pricing.py` | Fair value from Polymarket, race scaling, the tilt estimator, race and bloc risk maths |
+| `mmbot/quoting.py` | One quote: prices, Kelly sizes, the value floor applied to a quote |
+| `mmbot/measure.py` | Fill statistics, the phone summary, `report` and `analyze` |
+| `mmbot/bot.py` | The `Bot`: its state, the cycle (read, decide, reconcile, send), order management |
+| `mmbot/risk.py` | Kill switch, lots and ages, the worst-case cap, the cash gate, the per-state caps |
+| `mmbot/value.py` | The value book's allocator: swaps, buys at the touch, the refill, the set ladder |
+| `mmbot/mm.py` | Market making's funding: the reserve, the recycler, the room guard |
+| `mmbot/ladder.py` | The harvest ladder |
+| `mmbot/arb.py` | Pair unwinds of NO+NO sets, their follow-ups, the stale-quote takes |
+| `mmbot/status.py` | `status.json`, health, the 2-hourly summary, the live settings file, the recorder |
+| `mmbot/ops.py`, `mmbot/cli.py` | Handover, watchdog, the start-up self-test, the run loop; the command line |
+| `ref_prices.py`, `ref_map.json` | Polymarket prices and the mapping from races to their markets |
+| `tests/` | 35 suites, the three simulators and the stress test (`tests/README.md`); `test_identity.py` proves a new version sends the same orders as the one the server runs |
+| `analysis/` | The reports behind each design decision and the tools that produced them |
+| `deploy/` | Service unit, server setup, the handover script, `RUNBOOK.md`, `RELEASES.md`, the staged settings of each release |
+
+The code was 16,600 lines in one file on 8 October; the features that were never switched on were removed
+(about 4,500 lines and 21 test suites) and the rest split into the package above, each step checked against
+the live code by `tests/test_identity.py`. The build's working material is on the branch
+`archive/build-notes-2026-10`.
 
 ### Running it
 

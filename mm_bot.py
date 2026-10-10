@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-Market-making bot for The Super Market API (SIG Predictions Cup, Midterm Elections tournament).
+Trading bot for the SIG Predictions Cup (The Super Market API, Midterm Elections tournament).
 
-GOAL
-    Earn the bid/ask spread while staying close to flat. The bot has no opinion on who wins:
-    it quotes around the price the market already shows and profits when other traders cross
-    its spread (someone sells to us at our bid, someone else buys from us at our ask).
+WHAT IT DOES
+    Values every contract at Polymarket's probability p (scaled so a race sums to 1) and treats settlement at the
+    election result as the payoff. Four strategies share the account: a VALUE BOOK of positions bought toward p and
+    never sold below it (the value floor); an ALLOCATOR that, hourly, sells the holdings with the least edge per
+    unit of cash and buys the levels with the most; MARKET MAKING in the 15-85% band with its own cash reserve; and
+    a HARVEST LADDER of resting orders that sells the tournament's favourite-longshot tilt only at prices better
+    than today's. A correlated worst-case cap, per-market and per-state caps and a cash gate bound the risk.
+    Live settings come from settings_override.json (re-read every 30 s; see mmbot/config.py OVERRIDABLE).
 
 COMMANDS
     python mm_bot.py tournaments      list tournaments you can see (find TOURNAMENT_SLUG here)
@@ -33,7 +37,7 @@ FILES THE BOT WRITES (next to this script)
     market_data.sqlite   books, fair values and our quotes over time, for tuning settings afterwards
 
 OPTIONAL COMPANION FILES
-    ref_prices.py + ref_map.json   reference prices from Polymarket/Kalshi (see ref_prices.py);
+    ref_prices.py + ref_map.json   reference prices from Polymarket (see ref_prices.py);
                                    used automatically when both exist, ignored otherwise
 
 WHERE THE CODE IS (the mmbot/ package next to this file; this file only re-exports it and runs main)
