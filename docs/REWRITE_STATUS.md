@@ -1,12 +1,12 @@
 # Rewrite status
 
 ```
-STATUS (2026-10-10 14:20 UTC, branch rewrite)
-done:     design contract (docs/REWRITE_DESIGN.md), mmbot2/state.py, mmbot2/config.py
-next:     exchange.py, pricing.py, risk.py (sub-agents), then value/mm/ladder, bot.py, ops.py
+STATUS (2026-10-10 14:00 UTC, branch rewrite)
+done:     contract, state.py, config.py, pricing.py (40/40), bot.py draft, settings_override.rewrite.json
+wip:      exchange.py + tests2/fakes.py, risk.py, value.py (sub-agents; files committed mid-work)
+next:     mm.py, ladder.py, ops.py, mm_bot2.py, stress + replay tests, RUNBOOK section
 blockers: none
-lines:    mmbot2 + mm_bot2.py = see table below (target < 4,000)
-tests:    tests2/ not started
+lines:    mmbot2 so far 2126 (target < 4,000)
 ```
 
 ## Line counts
