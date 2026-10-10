@@ -1,13 +1,16 @@
 # Rewrite status
 
 ```
-STATUS (2026-10-10, branch rewrite) - IN PROGRESS: rewrite 2 (docs/REWRITE_FIX_BRIEF.md)
-done:     fix 1 - the cause of "no orders": the request budget left the books nothing (below); foreign orders;
-          DRY PLACE logging; books_fresh / books_dirty / orders_foreign / blocked_by in status.json and the line;
-          mm_quote_frac 0.002 -> 0.0005 (the replay still runs at 0.002: it compares logic, see below);
-          the recorder (mmbot2/record.py); the stripped phone summary and alerts (mmbot2/notify.py)
-left:     READY commit
-lines:    mmbot2/ + mm_bot2.py = 3,899 (< 4,000); tests2/ 11 files, all passing
+STATUS (2026-10-10, branch rewrite) - READY: rewrite 2 (docs/REWRITE_FIX_BRIEF.md)
+done:     cause of the shadow's "no orders" found and fixed (the request budget left the books nothing; below);
+          the four conditions have tests (tests2/test_shadow.py: foreign orders, slow books at 20/min, the tilt,
+          DRY PLACE lines); mm_quote_frac 0.0005; the recorder (record.py); the stripped summary and alerts
+          (notify.py); tests2/ 11 files all pass (bot 51, exchange 70, ladder 28, mm 58, pricing 40, replay 5,
+          risk 55, shadow 24, stress 60, value 57)
+left:     the owner's second shadow run (not possible from here). Read its status line: "books N fresh" should
+          climb to ~237 within ~25 min at 20/min, DRY PLACE lines should start within minutes, tilt within ~10 min
+          of 50 books, and "blocked" names any rule still refusing orders
+lines:    mmbot2/ + mm_bot2.py = 3,900 (< 4,000)
 ```
 
 ## Rewrite 2: why the 10 Oct shadow planned nothing (fix 1)
@@ -127,6 +130,11 @@ is in `analysis/rewrite/REPLAY.md`. Of 186 (market, side) pairs either bot trade
   once within the 10k budget. Rhode Island stays inside the 15k state cap (6.7k held + ~6k of levels, at p).
 
 ## Open questions for the owner (from the module headers)
+
+- rewrite 2: a dry run sends its own phone summary (titled "mm_bot2 (dry run)") and the start / feed alerts; turn
+  ALERT_URL off for the shadow if that is noise. Live, an order that would trade with a foreign order on the account
+  is not sent (blocked_by self_trade) rather than repriced. A book confirmed by the bulk top only is trusted for
+  BOOK_STALE_S although a deeper level may have changed (quotes and the tilt read the top).
 
 - config: skew_max 0 live while skew_target_inventory is on: was a price lean ever intended? (the rewrite leans by size)
 - pricing: the tilt compares raw Polymarket with a race-normalised book mid, as live did: intended?

@@ -4,7 +4,7 @@ The bot: its state and the cycle, read top to bottom as README §4 tells it.
 OWNS     the cycle (read -> price -> risk -> decide: allocator, ladder, quotes -> floor -> reconcile -> gate ->
          send -> report), our resting orders and what each one is for, the realised P&L, status.json, the phone
          summary line and the saved state that survives a restart.
-NEVER    decides a price or a size (the strategy modules do), sends anything in a dry run (it logs WOULD and
+NEVER    decides a price or a size (the strategy modules do), sends anything in a dry run (it logs DRY PLACE and
          keeps the order as simulated), sends an order that would trade against one of our own, or lets one
          market's failure stop the others.
 ORIGIN   The old bot was one class of seven mixins and ~150 attributes, its cycle a 300-line function with a flag
