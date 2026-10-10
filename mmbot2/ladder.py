@@ -1,11 +1,9 @@
 """
 The harvest ladder: sell the tilt in tranches, at prices better than today's (README §4.3).
 
-OWNS     the ladder's levels: for a longshot (p <= harvest_longshot_p) asks at the best other ask + each offset, for
-         a favourite (p >= harvest_favourite_p) bids at the best other bid - each offset; each level
-         harvest_level_usd of collateral and only at harvest_min_edge per unit of cash or better; the carve-out
-         (harvest_total_usd of cash locked, kept levels first, then the best edges); the re-quote throttle; the 24-h
-         tally of its fills for status.json's `harvest` field.
+OWNS     the levels (longshots: asks at the best other ask + each offset; favourites: bids at the best other bid -
+         each offset; harvest_level_usd each, only at harvest_min_edge or better), the carve-out (harvest_total_usd
+         of cash, kept levels first, then the best edges), the re-quote throttle, and the 24-h tally of its fills.
 NEVER    sends or cancels (the bot does), applies the caps, reduce-only or the cash gate (risk.Gate does), or prices a
          sale of a holding below its value (value.apply_floor runs after this). Ladder fills are value positions,
          held to the result. Never rests at or through the book, or through one of our own orders on the other side.
@@ -14,14 +12,14 @@ ORIGIN   The owner's rule "sell the tilt in tranches": it costs nothing if the t
          raised cash: +2,885 of expected value on 19.4k sold short, 15% per unit of cash, the best layer
          (RETURNS_ATTRIBUTION, 10 Oct). The re-quote throttle keeps a level's queue spot and the ladder's writes
          inside the 28-a-minute budget; a move of more than 1c re-quotes at once.
-OPEN     The old ladder held a market's levels while its book was stale ("soft"); kept here. The old bot also
-         skipped the headline races (alloc_pin); here only the bot's close cut-off and the gate apply.
+OPEN     Why the old bot kept a market's levels while its book was stale ("soft") and skipped the headline races
+         (alloc_pin): the first is kept here, the second left to the gate and the bot's close cut-off.
 """
 from dataclasses import replace
 from datetime import datetime
 
 from mmbot2 import risk
-from mmbot2.pricing import edge_buy, edge_short
+from mmbot2.pricing import HEADLINE_RACES, edge_buy, edge_short
 from mmbot2.state import PMAX, PMIN, Order
 
 MOVE_TOL = 0.01        # the touch or p moved more than 1c since a market's levels were placed: re-quote at once
@@ -93,7 +91,7 @@ class Ladder:
         self.now, self.budget = view.now, s.harvest_total_usd
         self.resting = [o for os in view.resting.values() for o in os if o.tag == "ladder"]
         cands, fresh = [], set()
-        for eid in sorted(view.markets):
+        for eid in sorted(e for e, m in view.markets.items() if m.race not in HEADLINE_RACES):   # as the old bot
             held, levels = self.market_levels(view, eid, s)
             cands += [(held, level_edge(view.p[eid], o.price, o.is_bid), o) for o in levels]
             if levels and not held:
