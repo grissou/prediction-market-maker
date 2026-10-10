@@ -3,8 +3,9 @@
 ```
 STATUS (2026-10-10, branch rewrite) - IN PROGRESS: rewrite 2 (docs/REWRITE_FIX_BRIEF.md)
 done:     fix 1 - the cause of "no orders": the request budget left the books nothing (below); foreign orders;
-          DRY PLACE logging; books_fresh / books_dirty / orders_foreign / blocked_by in status.json and the line
-left:     mm_quote_frac 0.0005; the recorder; the stripped phone summary and alerts; line count; READY
+          DRY PLACE logging; books_fresh / books_dirty / orders_foreign / blocked_by in status.json and the line;
+          mm_quote_frac 0.002 -> 0.0005 (the replay still runs at 0.002: it compares logic, see below)
+left:     the recorder; the stripped phone summary and alerts; line count; READY
 lines:    see the table (updated at READY)
 ```
 
@@ -37,6 +38,10 @@ the feed churning 3 books a cycle, dry run: DRY PLACE within 10 minutes, all boo
 never over budget; live with foreign orders: none cancelled or adopted, quotes beside them, a stop leaves them;
 crossing a foreign order is refused and counted; a dirty flag without a book builds none and is remembered. On the
 old code it fails the same way the shadow did (resting 0, tilt None, foreign orders cancelled).
+
+`mm_quote_frac` default 0.0005 (~52 shares at 105k). `tests2/test_replay.py` runs the new bot at 0.002, the size
+the old bot's plan used on the 4 Oct snapshot (mostly 200-share quotes), so its factor-of-two comparison still
+measures the logic; at 0.0005 101 rows differ by size only. REPLAY.md is unchanged by fix 1.
 
 ## Line counts
 

@@ -111,7 +111,10 @@ def new_plan(S):
             refs[f"{race}|{ {'Rep': 'Republican', 'Dem': 'Democratic'}.get(p, p) }"] = float(r)
     d = tempfile.mkdtemp(prefix="mm2replay")
     env = config.Env("k", "t", "http://x", "", d, os.path.join(d, "settings_override.json"))
-    bot = Bot(client, FakeFeed(), FakeRefs(refs, spread=0.01), config.Settings(), env, True)
+    # The replay compares the logic, so it quotes the size the old bot's plan used that day (0.002 x account);
+    # the default 0.0005 (fix brief, 10 Oct) is the owner's choice to start where the old bot's ceiling left it.
+    s = config.Settings(mm_quote_frac=0.002)
+    bot = Bot(client, FakeFeed(), FakeRefs(refs, spread=0.01), s, env, True)
     bot.load_markets(0.0)
     sent, place = [], client.place
     client.place = lambda orders, positions: (sent.extend(orders), place(orders, positions))[1]

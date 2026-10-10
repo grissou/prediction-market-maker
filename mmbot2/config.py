@@ -61,8 +61,8 @@ class Settings:
 
     # --- market making (README §4.3, finding 3.3) ---
     mm_min_edge: float = 0.01             # never quote within 1c of fair value
-    mm_quote_frac: float = 0.002          # shares per quote x account: 200 at 100k, the old activity plan's typical
-                                          #   size (100 in quiet markets, ~2,000 in the busiest)
+    mm_quote_frac: float = 0.0005         # shares per quote x account: ~50 at 105k, where the old bot's quotes sat
+                                          #   after its capital ceiling (0.002 quoted 4x the old bot; fix brief)
     kelly_fraction: float = 0.25          # quarter Kelly against p
     kelly_max_market_frac: float = 0.02   # at most 2% of the account at risk in one market from quotes
     mm_skew_max: float = 0.0              # price lean from inventory, at most this (live: 0, lean by size only)
