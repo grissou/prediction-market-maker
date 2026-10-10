@@ -17,7 +17,7 @@ from mmbot2 import mm                                                       # no
 
 RESULTS = []
 NOW = datetime(2026, 10, 10, 12, tzinfo=timezone.utc)
-S = Settings()
+S = Settings(mm_quote_frac=0.005)   # the sizes below were worked out with 500-share quotes
 
 
 def check(name, ok, detail=""):

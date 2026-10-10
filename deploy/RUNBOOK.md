@@ -34,3 +34,15 @@ Settings overrides stay in force across a rollback: check settings_override.json
 ## D. Emergency
 - Stop and cancel everything: `sudo systemctl stop mmbot`.
 - Kill switch file: /opt/mmbot/kill_switch.tripped (the bot exits 4 and systemd does not restart it).
+
+## E. The rewrite (mm_bot2.py): shadow run, then switch-over
+1. Stage: copy `mm_bot2.py`, `mmbot2/` and `deploy/settings_override.rewrite.json` to /opt/mmbot (next to the live bot; it
+   reuses `.env`, `ref_prices.py` and `ref_map.json`). Its files live in /opt/mmbot/run2/: `mkdir -p run2 && cp
+   deploy/settings_override.rewrite.json run2/settings_override.json` (new names; the live file's old names are refused).
+2. Shadow (a day, beside the live bot, same account, sends nothing): `nohup .venv/bin/python mm_bot2.py run > run2/shadow.out 2>&1 &`.
+   Read `run2/mm_bot2.log` (`grep WOULD`: every order it would send) and `run2/status.json` (account_value, ev_outcome, alloc...).
+3. Compare with the live bot's journal: same markets, sides within a factor of two (tests2/test_replay.py did this offline).
+4. Switch: stop the shadow (`kill %1`); `sudo systemctl stop mmbot` (cancels everything); point the unit's ExecStart at
+   `mm_bot2.py run --live` (and WorkingDirectory unchanged); `sudo systemctl daemon-reload && sudo systemctl start mmbot`.
+5. Later deploys: `sh deploy/handover-restart.sh` works unchanged (SIGUSR1; run2/handover.json is adopted).
+6. Rollback: restore ExecStart to `mm_bot.py run --live`, `daemon-reload`, `systemctl restart mmbot`. Kill marker: run2/kill_switch.tripped.

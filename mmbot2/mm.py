@@ -11,7 +11,7 @@ ORIGIN   Finding 3.3: market making earned little against faster bots and was de
          older than mm_inv_max_age_h or above mm_inv_max_usd are recycled 1c through p; lots worth holding (edge
          held >= value_quote_hurdle) are handed to the value book instead. Old code: mmbot/quoting.py
          (compute_quote, kelly_position), mmbot/mm.py (mm_lot_add, mm_lots_reconcile, mm_view, mm_recycle_quote).
-OPEN     The quote size (QUOTE_FRAC) and the 2-quote inventory cap were the old order_size_frac / value_mid_*
+OPEN     The quote size (now the setting mm_quote_frac) and the 2-quote inventory cap were the old order_size_frac / value_mid_*
          defaults under an activity size plan that is not carried over: should they be settings? The old deferral
          of short buy-backs while cash was low (mm_recycle_sell_first) and the hold while an allocator sale is in
          flight (alloc_cancel_mm_first) are not here: the Gate's cash check and the bot's reconcile cover them?
@@ -22,7 +22,6 @@ from dataclasses import replace
 from mmbot2 import pricing
 from mmbot2.state import PMAX, PMIN, TICK, Order, ceil_tick, floor_tick
 
-QUOTE_FRAC = 0.005            # shares per quote, x account value: 500 at 100k (old order_size_frac)
 MAX_INVENTORY_QUOTES = 2.0    # the side growing a position stops at 2 quotes held (old value_mid_inventory_quotes)
 MAX_ORDER_CASH_FRAC = 0.01    # cash one quote may tie up, x account value: 1,000 at 100k (old max_order_cash_frac)
 MAX_HALF_SPREAD = 0.04        # never rest further than 4c from the reservation price: no queue spot worth having
@@ -150,7 +149,7 @@ def quotes(view, risk, s, inventory):
 def two_sided(eid, p, inv, book, view, s):
     """(bid, ask) Orders tagged "mm", either None: priced by quote_prices, sized by quote_sizes, ref-guarded."""
     bankroll = view.account.value or view.account.start
-    quote = QUOTE_FRAC * bankroll
+    quote = s.mm_quote_frac * bankroll
     lean = max(-s.mm_skew_max, min(s.mm_skew_max, SKEW_PER_QUOTE * inv / quote)) if quote > 0 else 0.0
     bid_px, ask_px = quote_prices(p, p - lean, book, s)
     no_bid, no_ask = ref_guarded(p, book, s)
@@ -193,7 +192,7 @@ def quote_size(p, price, is_bid, inv, bankroll, s):
     """Whole shares for one side: a quote's size, less as the position nears its limit on the side that grows
     it (quarter Kelly against p, and MAX_INVENTORY_QUOTES quotes), and within the per-order cash cap. The side
     that shrinks the position gets the full quote (its limit is measured from the far side of flat)."""
-    quote = QUOTE_FRAC * bankroll
+    quote = s.mm_quote_frac * bankroll
     limit = pricing.kelly_shares(p, price, is_bid, bankroll, s)
     grows = inv >= 0 if is_bid else inv <= 0
     if grows:

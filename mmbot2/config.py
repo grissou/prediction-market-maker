@@ -61,6 +61,8 @@ class Settings:
 
     # --- market making (README §4.3, finding 3.3) ---
     mm_min_edge: float = 0.01             # never quote within 1c of fair value
+    mm_quote_frac: float = 0.002          # shares per quote x account: 200 at 100k, the old activity plan's typical
+                                          #   size (100 in quiet markets, ~2,000 in the busiest)
     kelly_fraction: float = 0.25          # quarter Kelly against p
     kelly_max_market_frac: float = 0.02   # at most 2% of the account at risk in one market from quotes
     mm_skew_max: float = 0.0              # price lean from inventory, at most this (live: 0, lean by size only)
@@ -116,7 +118,7 @@ LIVE = {
     "alloc_swap_min_gain": (0.0, 1.0), "alloc_swap_sell_margin": (0.0, 0.10),
     "alloc_max_turnover_usd": (0.0, 100000.0), "alloc_pin": ("", ""), "alloc_prefer_short": (False, True),
     "mm_reserve_usd": (0.0, 100000.0),
-    "mm_min_edge": (0.0, 0.10), "kelly_fraction": (0.0, 1.0), "kelly_max_market_frac": (0.0, 0.10),
+    "mm_min_edge": (0.0, 0.10), "mm_quote_frac": (0.0, 0.05), "kelly_fraction": (0.0, 1.0), "kelly_max_market_frac": (0.0, 0.10),
     "mm_skew_max": (0.0, 0.10), "mm_inv_max_age_h": (0.0, 168.0), "mm_inv_max_usd": (0.0, 100000.0),
     "mm_recycle_concession": (0.0, 0.05), "mm_risk_reserve_wc": (0.0, 100000.0),
     "mm_risk_reserve_corr": (0.0, 100000.0),
