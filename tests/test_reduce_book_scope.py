@@ -40,8 +40,9 @@ _ov, _f = list(M.OVERRIDABLE), list(M.Config.__dataclass_fields__)
 check("one contiguous block in OVERRIDABLE and in Config, in order",
       all(k in _ov and k in _f for k in KEYS)
       and _ov[_ov.index(KEYS[0]):_ov.index(KEYS[0]) + 2] == KEYS and _f[_f.index(KEYS[0]):_f.index(KEYS[0]) + 2] == KEYS)
-check("...after the C hold target / T2.3 blocks", KEYS[0] in _f and _f.index(KEYS[0]) > _f.index("ref_tilt_carry_days")
-      and KEYS[0] in _ov and _ov.index(KEYS[0]) > _ov.index("hold_target_headline"))
+check("...after the T2.4 tilt-exposure / T2.3 blocks (the C hold target between them was removed on simplify)",
+      KEYS[0] in _f and _f.index(KEYS[0]) > _f.index("ref_tilt_carry_days")
+      and KEYS[0] in _ov and _ov.index(KEYS[0]) > _ov.index("tilt_exposure_headline"))
 
 
 def bot(**kw):

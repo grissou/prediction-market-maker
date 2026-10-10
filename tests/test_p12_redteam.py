@@ -6,7 +6,7 @@ RT12-2 pair_no_unwind_asks_le1: the allocator planned a B3 set unwind that arb_p
        the pair waited ALLOC_SET_WAIT and the allocator stalled (no new plan while a pair is pending).
 RT12-3 a ladder the EXCHANGE refuses (not the cash gate) was re-sent every cycle: one batch write a race a cycle.
 RT12-4 skew_target_inventory removed the inventory skew in reduce-only (global_reduce / flatten window).
-RT12-5 alloc_set_rich_leg with tilt_exit_take_split_sets: warned (the latter sells the longshot-NO set leg).
+RT12-5 (alloc_set_rich_leg with tilt_exit_take_split_sets warned): gone with the tilt exits, removed on simplify.
 
 Run:  python tests/test_p12_redteam.py      (exit code 0 = all passed)
 """
@@ -289,24 +289,5 @@ finally:
 check("decide: the holding fallback target (no allocator plan) quotes with skew_add_flat", seen2[-1:] == [True], seen2)
 
 # ============================================================================================ RT12-5
-print("--- RT12-5: the ladder with tilt_exit_take_split_sets warns")
-msgs = []
-
-
-class H(logging.Handler):
-    def emit(self, rec):
-        msgs.append(rec.getMessage())
-
-
-api, b = mk_bot(alloc_set_rich_leg=True, tilt_exit_take_split_sets=True)
-h = H()
-M.log.addHandler(h)
-M.log.setLevel(logging.INFO)
-b.warn_settings()
-b.warn_settings()
-M.log.removeHandler(h)
-hits = [m for m in msgs if "tilt_exit_take_split_sets" in m and "alloc_set_rich_leg" in m]
-check("one warning (not repeated) when both are on", len(hits) == 1, msgs[-3:])
-
 print(f"\n{sum(RESULTS)}/{len(RESULTS)} passed")
 sys.exit(0 if all(RESULTS) else 1)

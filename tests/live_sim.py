@@ -313,7 +313,7 @@ class LiveSim(Sim):
         bot.update_adding_resume(self.cap_frac, cfg)       # Package 8 adding_factor_capital_on (no-op when 0)
         self.party_delta = self.bg_party + sum(M.PARTY_SIGN.get(bot.ex[e].party, 0) * q for e, q in inv.items())
         self.eff = bot.effective_inventory(inv)
-        if cfg.tilt_exposure_max_frac > 0 or cfg.tilt_exit_priority or cfg.tilt_exit_full_size:   # T2.4 / Package 8 feed
+        if cfg.tilt_exposure_max_frac > 0:   # T2.4 feed
             bot.tilt_exposure = sum(m.inv * (m.ref_seen - 0.5) for m in self.mkts if m.inv and m.ref_seen is not None)
         if cfg.ladder_enabled:                    # Bot.ladder_setup: what the ladder may lock this cycle
             other = sum(order_lock(o, m.inv, self.free_short()) for m in self.mkts for o in m.orders
@@ -332,8 +332,6 @@ class LiveSim(Sim):
             self.arbitrage(t, inv, fvs)
         if cfg.pair_unwind_passive and t % 5 == 0:      # Package 5 T2.5 (isolated mirror, see pair_passive)
             self.pair_passive(t, inv, fvs)
-        if cfg.hold_target_hours > 0 and t % 5 == 0:    # Package 5 C (isolated mirror, see hold_take)
-            self.hold_take(t, inv)
         if self.bg_wc:                            # the live backstop (mm_bot cycle step 6, sum-of-maxima part only)
             if self.bg_g or self.bg_d:            # the rest of the account adds between episodes, reduces inside them
                 dt_h = (t - self.t_prev_bg) / 3600.0
@@ -461,45 +459,10 @@ class LiveSim(Sim):
         bot.pair_passive_step(inv, fvs, t, execute=execute)
     # ---- end Package 5 T2.5 mirror ----
 
-    # ---- Package 5 C: hold target take-half mirror (isolated; only runs with cfg.hold_target_hours > 0) ----
-    def hold_take(self, t, inv):
-        """Bot.take_aged on the simulated books every 5 s: the same plan (Bot.hold_take_plan: age >= 2 x
-        hold_target_hours, best other price, 1c floor, per-order / per-minute / hourly caps, first hour closed),
-        executed immediate-or-cancel by self.take with our quotes there pulled first. The quote half needs no
-        mirror (bot_strategy calls Bot.decide). Counts: self.hold_take_sh (shares taken)."""
-        bot = self.bot
-        if not hasattr(self, "hold_take_sh"):
-            self.hold_take_sh = 0.0
-        by, bfvs = {}, {}
-        for m in self.mkts:
-            by[m.eid] = m
-            bot.ex[m.eid].book = self.book_dict(m)
-            bfvs[m.eid] = fair_value(bot.ex[m.eid].book, self.cfg)       # as our_step feeds decide (book_fv)
-
-        def execute(eid, buy, qty, price):
-            if not self.take_writes_ok(t):
-                return None                       # refused for writes: not counted (as live)
-            m = by[eid]
-            m.orders = [o for o in m.orders if o.owner != "us"]
-            got = self.take(m, t, buy, qty, price)
-            inv[eid] = m.inv
-            self.hold_take_sh += got
-            return got
-        return bot.take_aged(inv, bfvs, {}, t, execute=execute)
-    # ---- end Package 5 C mirror ----
-
-    def tilt_exit_head(self, m, cancels, places):
-        """Package 8 tilt_exit_priority (Bot.change_key): 0.5 when this change touches the market's tilt exit."""
-        side = self.bot.tilt_exit_side(self.bot.ex[m.eid])
-        if side is None:
-            return 1
-        b = side == "bid"
-        return 0.5 if any(o.is_bid == b for o in cancels) or any(w[0] == b for w in places) else 1
-
     def take_writes_ok(self, t, n=3):
-        """Package 5 mirrors (T2.5 second leg, C takes): a take costs n writes as live (pull our quotes, the IOC
+        """Package 5 mirrors (T2.5 second leg): a take costs n writes as live (pull our quotes, the IOC
         order, the leftover cancel); charge them to the write log, or refuse when the budget has no room (as
-        Bot.take_aged / pair_passive_take wait for writes_ready). The arbitrage path keeps its Round 3 accounting."""
+        pair_passive_take waits for writes_ready). The arbitrage path keeps its Round 3 accounting."""
         spare = self.wcap - sum(c for _, c in self.wlog if t - _ < 60)
         if spare < n:
             self.take_refused = getattr(self, "take_refused", 0) + 1
@@ -672,7 +635,6 @@ class LiveSim(Sim):
                       for k, v in self.lg.items()},
                    dead=sum(1 for e in self.bot.ex.values() if e.turnover_dead),
                    tx_bind_frac=round(self.tx_bind / max(1, self.tx_quoted), 3),   # Package 5 T2.4
-                   hold_take_sh=round(getattr(self, "hold_take_sh", 0.0)),
                    ro_frac=round(self.ro_cycles / max(1, self.n_cycles), 3), bg_wc_end=round(self.bg_wc),
                    wc_start=round(self.wc_start) if self.wc_start is not None else 0,
                    tilt_s_end=round(getattr(getattr(self, "tilt", None), "s", 0.0), 4),

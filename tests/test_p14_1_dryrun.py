@@ -29,7 +29,7 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 SNAP = os.environ.get("P9_SNAP", "/home/claude/snap04")
 os.environ.setdefault("P9_SNAP", SNAP)
-import test_p9_dryrun as P                                       # noqa: E402  (the harness: snapshot, fake, clock)
+import dryrun_harness as P                                      # noqa: E402  (the harness: snapshot, fake, clock)
 import p14_1_state as T                                          # noqa: E402  (the 10:21 state)
 import mm_bot as M                                                # noqa: E402
 
@@ -86,7 +86,7 @@ def main():
 
     # ---- the staged file is valid and keeps the live base
     raw141 = json.load(open(P141_FILE))
-    good, bad = M.validate_overrides(raw141, M.Config())
+    good, bad = M.validate_overrides(P.staged(P141_FILE), M.Config())   # (less the retired keys)
     check("files: the staged 14.1 file validates with no problem", not bad, bad)
     check("files: it keeps every key of the live 14.0 file", set(json.load(open(LIVE_FILE))) <= set(raw141),
           set(json.load(open(LIVE_FILE))) - set(raw141))

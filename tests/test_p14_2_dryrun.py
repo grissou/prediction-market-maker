@@ -26,6 +26,7 @@ sys.path.insert(0, HERE)
 SNAP = os.environ.get("P9_SNAP", "/home/claude/snap04")
 os.environ.setdefault("P9_SNAP", SNAP)
 import test_p14_1_dryrun as DR                                   # noqa: E402  (its helpers: files, status, IOCs)
+RETIRED_KEYS = ("tilt_exit_priority", "tilt_exit_full_size")   # removed from Config; off in every staged file
 P, T, M = DR.P, DR.T, DR.M
 
 DEPLOY = DR.DEPLOY
@@ -127,7 +128,7 @@ def main():
 
     # ---- the staged file
     raw = json.load(open(P142_FILE))
-    good, bad = M.validate_overrides(raw, M.Config())
+    good, bad = M.validate_overrides({k: v for k, v in raw.items() if k not in RETIRED_KEYS}, M.Config())
     check("files: the staged 14.2 file validates with no problem", not bad, bad)
     r141 = json.load(open(P141_FILE))
     check("files: it is the 14.1 file + alloc_swap_sell_margin 0.03, alloc_swap_min_gain 0.05, value_sell_margin "

@@ -65,7 +65,22 @@ check(f"pinned module loaded (git show {BASE_REV}:mm_bot.py)", base is not None)
 with open(SETTINGS) as f:
     LIVE = json.load(f)
 good_new, bad_new = M.validate_overrides(LIVE, M.Config())
-check(f"live settings accepted by the current code ({len(good_new)} of {len(LIVE)} keys)", not bad_new, bad_new)
+# Retired settings the live file still names (the file is kept as the server has it): a key the current Config no
+# longer has is accepted ONLY when its live value is the pinned revision's default - the pinned code runs it at the
+# value its default gives, so dropping the setting changes nothing live. Any other value is a refusal, as before.
+# The keys so forgiven are printed, so a deploy sees what the live file still carries.
+RETIRED_LIVE = {}
+if base is not None:
+    RETIRED_LIVE = {k: LIVE[k] for k in LIVE
+                    if k in base.Config.__dataclass_fields__ and k not in M.Config.__dataclass_fields__
+                    and LIVE[k] == getattr(base.Config(), k)}
+    if RETIRED_LIVE:
+        print(f"    retired settings in the live file at {BASE_REV}'s default (accepted): "
+              + ", ".join(f"{k}={v!r}" for k, v in sorted(RETIRED_LIVE.items())))
+bad_new = [p for p in bad_new if p.split(":")[0] not in RETIRED_LIVE]
+check(f"live settings accepted by the current code ({len(good_new)} of {len(LIVE)} keys, "
+      f"{len(RETIRED_LIVE)} retired at the pinned default)", not bad_new, bad_new)
+LIVE_NEW = {k: v for k, v in LIVE.items() if k not in RETIRED_LIVE}   # the live file as the current code takes it
 if base is not None:
     good_old, bad_old = base.validate_overrides(LIVE, base.Config())
     check(f"live settings accepted by {BASE_REV} ({len(good_old)} of {len(LIVE)} keys)", not bad_old, bad_old)
@@ -124,7 +139,8 @@ def mk(mod, inv, cash, overrides):
     for x in b.ex.values():
         x.close = CLOSE
     b.refs = FakeRefs(dict(REFS))
-    good, _ = mod.validate_overrides(LIVE, b.cfg)
+    good, bad = mod.validate_overrides(LIVE if mod is not M else LIVE_NEW, b.cfg)   # (the current code: filtered)
+    assert not bad, bad
     for k, v in good.items():
         setattr(b.cfg, k, v)
     c = b.cfg
@@ -194,6 +210,10 @@ RETIRED_STATUS = {                                # e.g. "basket": ({"state": "o
     # state other than "off", a kill or a tick's figures), so while off the key is absent; any value it does write
     # means the basket was doing something, and nothing below forgives that
     "basket": (),
+    # P8/P9 F2 tilt exits (removed on simplify): "tilt_exit_takes" {count, shares, usd, cost[, splits]} was written
+    # only while tilt_exit_take was on or a take had happened; off and unused, the key is absent. The hold target
+    # (Package 5 C, removed with it) never wrote a status field of its own.
+    "tilt_exit_takes": (),
 }
 RETIRED_SUBKEYS = {                               # sub-keys of a surviving top-level dict, dotted paths allowed
     # (mm_risk_room.blocked.basket and mm_carry_24h.fills.basket stay in the new code at 0: the older twin suites

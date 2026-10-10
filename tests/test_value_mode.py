@@ -322,16 +322,12 @@ try:
                                                                        for m in grab.msgs) == 1, grab.msgs)
     b.warn_settings()
     check("no repeat while nothing changes", sum("value_mode is on with" in m for m in grab.msgs) == 1)
-    for k in ("fast_unload_enabled", "tilt_exit_priority", "tilt_exit_full_size", "tilt_exit_take", "ref_tilt_enabled",
-              "take_tilted_ref"):
-        setattr(b.cfg, k, True)
-    b.cfg.hold_target_hours = 4.0
+    for k in ("fast_unload_enabled", "ref_tilt_enabled", "take_tilted_ref"):   # (the tilt exits and the hold target,
+        setattr(b.cfg, k, True)                                                 #  once listed too, were removed)
     b.warn_settings()
     w = [m for m in grab.msgs if "value_mode is on with" in m]
-    check("a newly switched-on path warns again, listing all nine",
-          len(w) == 2 and all(n in w[1] for n in ("fast_unload_enabled", "hold_target_hours", "tilt_exit_priority",
-                                                   "tilt_exit_full_size", "tilt_exit_take", "ref_tilt_enabled",
-                                                   "take_tilted_ref")), w)
+    check("a newly switched-on path warns again, listing all five",
+          len(w) == 2 and all(n in w[1] for n in ("fast_unload_enabled", "ref_tilt_enabled", "take_tilted_ref")), w)
     check("not forced off (the owner decides)", b.cfg.reduce_from_book and b.cfg.fast_unload_enabled)
     a, b = plain_bot({})
     n0 = len(grab.msgs)

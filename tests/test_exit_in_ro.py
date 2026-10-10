@@ -1,7 +1,8 @@
 """
 Offline tests for the Package 6 candidates "exits keep quoting in reduce-only":
-  exit_quotes_in_reduce_only   hold_quote (C) and reduce_join_best also run while reduce-only (reducing side only,
-                               sized <= the race-netted position, every other guard kept);
+  exit_quotes_in_reduce_only   reduce_join_best also runs while reduce-only (reducing side only, sized <= the
+                               race-netted position, every other guard kept); the hold target (C) that shared the
+                               flag was removed on simplify (never enabled live);
   pair_passive_in_reduce_only  T2.5's passive slice may rest on a complete-set leg whose slice side decide() left
                                empty ONLY because of the reduce-only race-net clip (ex.ro_clip).
 Flags off = unchanged. Fake exchange, no network.
@@ -57,7 +58,7 @@ def dec(pos, eff, fv=0.62, book_fv=0.52, reduce=True, ref=None, book=BOOK, eid="
 
 
 def flags(**kw):
-    for k, v in {**dict(exit_quotes_in_reduce_only=False, pair_passive_in_reduce_only=False, hold_target_hours=0.0,
+    for k, v in {**dict(exit_quotes_in_reduce_only=False, pair_passive_in_reduce_only=False,
                         reduce_join_best=False, pair_unwind_passive=False), **kw}.items():
         setattr(b.cfg, k, v)
 
@@ -65,52 +66,6 @@ def flags(**kw):
 def no_cross(q):
     return not (q.bid is not None and q.ask is not None and q.bid >= q.ask - 1e-9)
 
-
-print("--- (1) hold_quote in reduce-only (long 500 aged 5 h, Utah Rep; fv 0.62, book 0.52, best ask 0.56)")
-b.lots["21"] = [[500.0, _T0 - 5 * 3600]]
-flags(hold_target_hours=4.0)
-off = dec(500, 500)
-check("flag off: reduce-only keeps the ask at fv + edge (above the best other ask 0.56), no bid",
-      off.ask is not None and off.ask > 0.56 and off.bid is None, off)
-flags(hold_target_hours=4.0, exit_quotes_in_reduce_only=True)
-on = dec(500, 500)
-check("flag on: the reducing ask joins the best other ask 0.56", on.ask == 0.56, on)
-check("...size <= the race-netted position, the bid still pulled (reduce-only), never bid >= ask",
-      1 <= on.ask_size <= 500 and on.bid is None and no_cross(on), on)
-check("...keep limits never cross", on.bid_limit is None or on.ask_limit is None or on.bid_limit < on.ask_limit, on)
-small = dec(500, 40)
-check("race-netted position 40 (other leg long 460): ask joins 0.56 for at most 40 shares",
-      small.ask == 0.56 and 1 <= small.ask_size <= 40, small)
-check("race-netted position 0 (complete set): nothing quoted on the ask", dec(500, 0).ask is None)
-check("race-netted SHORT: no ask, and the bid is the per-market adding side (no hold join on it)",
-      dec(500, -300).ask is None)
-g = dec(500, 500, ref=0.70)
-check("reference guard (Polymarket 0.70 vs book 0.52): no ask at all, flag on or off",
-      g.ask is None and dec(500, 500, ref=0.70) == g, g)
-flags(hold_target_hours=4.0, exit_quotes_in_reduce_only=False)
-check("...same with the flag off", dec(500, 500, ref=0.70).ask is None)
-flags(hold_target_hours=4.0, exit_quotes_in_reduce_only=True)
-b.lots["21"] = [[500.0, _T0 - 3 * 3600]]
-young = dec(500, 500)
-flags(hold_target_hours=4.0)
-check("age 3 h < hold_target 4 h: identical to off", young == dec(500, 500) and young.ask > 0.56, young)
-flags(hold_target_hours=4.0, exit_quotes_in_reduce_only=True)
-b.lots["21"] = [[500.0, _T0 - 5 * 3600]]
-x = b.ex["21"]
-x.book, x.last_fv, x.cooldown_until = BOOK, None, time.monotonic() + 60
-check("jump cooldown: nothing quoted", b.decide(x, 0.62, {"21": 500.0}, {"21": 500.0}, True, 0.0, time.monotonic(),
-                                               book_fv=0.52) == M.NO_QUOTE)
-flags(hold_target_hours=4.0, exit_quotes_in_reduce_only=True, headline_races=("Utah Senate",))
-check("headline gate closed: no join", dec(500, 500).ask > 0.56)
-b.cfg.headline_races = ()
-
-b.lots["22"] = [[-500.0, _T0 - 5 * 3600]]
-flags(hold_target_hours=4.0)
-so = dec(-500, -500, fv=0.38, book_fv=0.48, eid="22", book={"bids": [lvl(0.44, 1000)], "asks": [lvl(0.52, 1000)]})
-flags(hold_target_hours=4.0, exit_quotes_in_reduce_only=True)
-sn = dec(-500, -500, fv=0.38, book_fv=0.48, eid="22", book={"bids": [lvl(0.44, 1000)], "asks": [lvl(0.52, 1000)]})
-check("short mirror: off the bid sits under 0.44; on it joins 0.44, size <= 500, no ask",
-      so.bid is not None and so.bid < 0.44 and sn.bid == 0.44 and 1 <= sn.bid_size <= 500 and sn.ask is None, (so, sn))
 
 print("--- (1) grid: reduce-only, flag on: never bid >= ask, reducing size <= race-netted position")
 bad, n = [], 0
@@ -121,8 +76,7 @@ for bb, ba in ((0.48, 0.56), (0.45, 0.46), (0.30, 0.35), (None, 0.50), (0.52, 0.
                 for rjb in (False, True):
                     book = {"bids": [lvl(bb, 1000)] if bb else [], "asks": [lvl(ba, 1000)]}
                     b.lots["21"] = [[float(pos), _T0 - 9 * 3600]]
-                    flags(hold_target_hours=4.0, exit_quotes_in_reduce_only=True, reduce_join_best=rjb,
-                          reduce_join_min_shares=1)
+                    flags(exit_quotes_in_reduce_only=True, reduce_join_best=rjb, reduce_join_min_shares=1)
                     q = dec(pos, eff, fv=fv, book_fv=bfv, book=book)
                     n += 1
                     if not no_cross(q):
@@ -235,9 +189,8 @@ for bb, ba in ((0.48, 0.56), (0.45, 0.46), (None, 0.50), (0.52, 0.53)):
                 book = {"bids": [lvl(bb, 1000)] if bb else [], "asks": [lvl(ba, 1000)]}
                 outs = []
                 for fl in (False, True):
-                    # reduce-only: identical while hold_target / reduce_join_best are off; otherwise identical always
-                    flags(exit_quotes_in_reduce_only=fl, pair_passive_in_reduce_only=fl,
-                          hold_target_hours=0.0 if reduce else 4.0, reduce_join_best=not reduce)
+                    # reduce-only: identical while reduce_join_best is off; otherwise identical always
+                    flags(exit_quotes_in_reduce_only=fl, pair_passive_in_reduce_only=fl, reduce_join_best=not reduce)
                     q = dec(pos, eff, fv=fv, book_fv=0.52, reduce=reduce, book=book)
                     outs.append((q, q.bid_limit, q.ask_limit, q.bid_max, q.ask_max))
                 n += 1

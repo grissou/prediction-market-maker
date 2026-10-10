@@ -38,7 +38,7 @@ sys.path.insert(0, HERE)
 SNAP = os.environ.get("P9_SNAP", "/home/claude/snap04")
 os.environ.setdefault("P9_SNAP", SNAP)
 import test_p15_dryrun as D                                      # noqa: E402  (its fake: limiter, aggregated books)
-import test_p9_dryrun as P                                       # noqa: E402  (the harness: snapshot, fake, clock)
+import dryrun_harness as P                                      # noqa: E402  (the harness: snapshot, fake, clock)
 import mm_bot as M                                                # noqa: E402
 
 STAGED = os.path.join(ROOT, "deploy", "package16", "settings_override.momentum_armed.json")
@@ -510,7 +510,7 @@ def main():
     M.alert = lambda msg: (M_ALERTS.append(msg), orig_alert(msg))[1]
     STATE["S"] = D.STATE["S"] = P.load_snapshot()
     raw = json.load(open(STAGED))
-    good, bad = M.validate_overrides(raw, M.Config())
+    good, bad = M.validate_overrides(P.staged(STAGED), M.Config())   # (less the retired keys)
     check("files: the staged file validates with no problem", not bad, bad)
     p15 = json.load(open(P15_FILE))
     check("files: the staged file = the Package 15 file + momentum_enabled / momentum_auto true, momentum_force false "

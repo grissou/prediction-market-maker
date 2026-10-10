@@ -37,7 +37,8 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 SNAP = os.environ.get("P9_SNAP", "/home/claude/snap04")
 os.environ.setdefault("P9_SNAP", SNAP)
-import test_p9_dryrun as P                                       # noqa: E402  (the harness: snapshot, fake, clock)
+import dryrun_harness as P                                      # noqa: E402  (the harness: snapshot, fake, clock)
+RETIRED_KEYS = ("tilt_exit_priority", "tilt_exit_full_size")   # removed from Config; off in every staged file
 import p14_1_state as T                                          # noqa: E402  (the live state)
 import mm_bot as M                                                # noqa: E402
 
@@ -642,7 +643,7 @@ def main():
     t_start = _rt.time()
     STATE["S"] = P.load_snapshot()
     raw = json.load(open(STAGED))
-    good, bad = M.validate_overrides(raw, M.Config())
+    good, bad = M.validate_overrides({k: v for k, v in raw.items() if k not in RETIRED_KEYS}, M.Config())
     check("files: the staged file validates with no problem", not bad, bad)
     base142 = json.load(open(LIVE_142))
     check("files: the staged file = the live 14.2 file with value_sell_margin 0.01 + the P15 keys (ladder on, its "

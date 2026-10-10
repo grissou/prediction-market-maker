@@ -184,17 +184,7 @@ bt.execute_take(ex, 0.70, -975.0, 0.6, time.monotonic())
 t = api.wire[-1] if api.wire else {}
 check("execute_take on the bigger leg: sell NO capped at the lone 158", t.get("side") == "no" and t.get("quantity") == 158
       if t.get("quantity", 0) >= 158 else (t.get("side") == "no" and 1 <= t.get("quantity", 0) <= 158), t)
-api, bt = bot({"21": -817, "22": -975}, a=True)
-bt.cfg.hold_target_hours, bt.hold_open_at = 1.0, -1e18
-bt.hold_take_plan = lambda *a_, **k: [{"eid": "22", "buy": True, "qty": 500, "price": 0.52, "notional": 260.0}]
-bt.take_aged({"21": -817.0, "22": -975.0}, {"22": 0.5}, {}, time.monotonic())
-t = api.wire[-1] if api.wire else {}
-check("take_aged on the bigger leg: sell NO x158", t.get("side") == "no" and t.get("quantity") == 158, t)
-api, bt = bot({"21": -817, "22": -975}, a=True)
-bt.cfg.hold_target_hours, bt.hold_open_at = 1.0, -1e18
-bt.hold_take_plan = lambda *a_, **k: [{"eid": "21", "buy": True, "qty": 500, "price": 0.56, "notional": 280.0}]
-bt.take_aged({"21": -817.0, "22": -975.0}, {"21": 0.5}, {}, time.monotonic())
-check("take_aged on the smaller leg: nothing sent", not api.wire, api.wire)
+# (the hold target's take_aged checks were removed with the feature on simplify)
 check("no_sell_order on the smaller leg: None (not sent); whole=True: converted (a whole-race batch)",
       bt.no_sell_order({"exchangeId": "21", "action": "buy", "quantity": 10, "price": 0.5}, -817.0) is None
       and bt.no_sell_order({"exchangeId": "21", "action": "buy", "quantity": 817, "price": 0.5}, -817.0,

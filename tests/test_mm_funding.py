@@ -727,7 +727,9 @@ try:
         ov = json.load(f)
 except (OSError, ValueError) as e:
     ov = {"_error": str(e)}
-good, bad = M.validate_overrides({k: v for k, v in ov.items() if not k.startswith("_")}, M.Config())
+RETIRED = ("tilt_exit_priority", "tilt_exit_full_size")   # (retired on simplify: the staged files pin tilt_exit_priority / tilt_exit_full_size at their default False)
+good, bad = M.validate_overrides({k: v for k, v in ov.items() if not k.startswith("_") and k not in RETIRED},
+                                 M.Config())
 check("staged file: every key valid", not bad and good, bad)
 check("owner's live values: alloc_mm_reserve 20000, mm_risk_reserve_wc 20000 / _corr 4000, backstop 1.0",
       (ov.get("alloc_mm_reserve"), ov.get("mm_risk_reserve_wc"), ov.get("mm_risk_reserve_corr"),

@@ -1111,7 +1111,8 @@ check("an unrecognised label: no state (st_key None), so no state cap there", b.
 print("--- the staged file")
 if os.path.exists(STAGED):
     raw = json.load(open(STAGED))
-    good, bad = M.validate_overrides(raw, M.Config())
+    RETIRED = ("tilt_exit_priority", "tilt_exit_full_size")   # (retired on simplify: the staged files pin tilt_exit_priority / tilt_exit_full_size at their default False)
+    good, bad = M.validate_overrides({k: v for k, v in raw.items() if k not in RETIRED}, M.Config())
     base142 = json.load(open(LIVE_142))
     p15k = {"tilt_harvest_ladder", "harvest_offsets", "harvest_level_usd", "harvest_min_edge", "harvest_max_markets",
             "harvest_writes_frac", "harvest_requote_s", "harvest_total_usd", "state_max_usd"}

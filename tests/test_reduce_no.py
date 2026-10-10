@@ -158,15 +158,7 @@ b.execute_take(ex, 0.70, 50.0, 0.6, time.monotonic())
 check("execute_take adding (long): buy YES", api.wire and api.wire[-1]["side"] == "yes" and api.wire[-1]["action"] == "buy",
       api.wire)
 
-api, b = bot(True, {"21": -40})
-b.cfg.hold_target_hours, b.hold_open_at = 1.0, -1e18
-plan = {"eid": "21", "buy": True, "qty": 60, "price": 0.56, "notional": 33.6}
-b.hold_take_plan = lambda *a, **k: [dict(plan)]
-b.take_aged({"21": -40.0}, {"21": 0.5}, {}, time.monotonic())
-t = api.wire[-1] if api.wire else {}
-check("take_aged buying back: sell NO @ 0.44, capped at the 40 NO held", t.get("side") == "no" and t.get("quantity") == 40
-      and abs(t.get("price", 0) - 0.44) < 1e-9, t)
-
+# (the hold target's take_aged check was removed with the feature on simplify)
 api, b = bot(True, {"21": -40, "22": -40})
 st = {"other": "21", "sign": -1, "price": 0.43, "leg": "22", "slice": 40}
 b.pair_passive_take("Utah Senate", st, 40, {}, time.monotonic())
