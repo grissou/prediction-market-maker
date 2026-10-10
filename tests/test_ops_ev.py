@@ -258,7 +258,7 @@ api, b = make_bot()
 mc = b.mm_carry(NOW)
 check("no fills: zeros, per_day None", mc["realised"] == 0 and mc["per_day"] is None and mc["hours_covered"] is None, mc)
 api, b = scripted()
-api.fills = [{"id": 77, "orderId": 1, "exchangeId": "11", "price": 0.3, "quantity": 5, "filledAt": M.iso(M.utcnow())}]
+api.fills = [{"id": 77, "orderId": 1, "exchangeId": "11", "price": 0.3, "quantity": 5, "filledAt": M.iso(M.util.utcnow())}]
 b.log_fills({})
 check("log_fills notes the Polymarket p of each new fill", close(b.ev_fill_p.get("77"), 1 / 3), b.ev_fill_p)
 

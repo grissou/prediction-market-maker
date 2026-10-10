@@ -46,10 +46,10 @@ def retired(new, old):
 logging.basicConfig(level=logging.CRITICAL)
 RESULTS = []
 ALERTS = []
-M.alert = lambda msg: ALERTS.append(msg)
-M.notify = lambda *a, **k: False
+M.util.alert = lambda msg: ALERTS.append(msg)
+M.util.notify = lambda *a, **k: False
 BASE_REV = "12e84c8"                              # the branch head before Part M
-REAL_UTCNOW = M.utcnow
+REAL_UTCNOW = M.util.utcnow
 
 
 def check(name, cond, extra=""):
@@ -74,12 +74,12 @@ def set_clock(s, mods=(M,)):
     """Shift the bot's wall clock (module utcnow) so that 'now' is s (time keeps flowing)."""
     off = utc(s) - REAL_UTCNOW()
     for mod in mods:
-        mod.utcnow = lambda off=off: REAL_UTCNOW() + off
+        getattr(mod, "util", mod).utcnow = lambda off=off: REAL_UTCNOW() + off
 
 
 def reset_clock(mods=(M,)):
     for mod in mods:
-        mod.utcnow = REAL_UTCNOW
+        getattr(mod, "util", mod).utcnow = REAL_UTCNOW
 
 
 REFS = {"Ohio Senate|Republican": 0.12, "Ohio Senate|Democratic": 0.88,
@@ -103,7 +103,7 @@ def cq(inv, fv, bb, ba, ro=False, age=0.0, p=None, eff=None, mod=None, extra=Non
     c = mod.Config()
     for k, v in kw.items():
         setattr(c, k, v)
-    return mod.compute_quote(fv, inv, inv if eff is None else eff, bb, ba, c, reduce_only=ro, bankroll=100000,
+    return getattr(mod, "quoting", mod).compute_quote(fv, inv, inv if eff is None else eff, bb, ba, c, reduce_only=ro, bankroll=100000,
                              age_hours=age, value_p=p, **(extra or {}))
 
 
@@ -337,11 +337,11 @@ b.alloc_plan = lambda inv_, now_m, cash, skip=(), turnover_left=None: (
     [{"sell": {"kind": "long", "eid": "12", "qty": 700, "label": "x", "px": 0.8, "edge": 0.0, "usd": 1},
       "buy": None, "usd": 1, "status": "pending"}], {"blocked_by": {}, "ev_gain_est": 0.0})
 b.alloc_journal = lambda pr: "pair"
-b.alloc_tick(M.utcnow(), {"12": 2500}, {})
+b.alloc_tick(M.util.utcnow(), {"12": 2500}, {})
 check("alloc_tick (dry run): the plan's intended holding recorded (2500 - 700 = 1800)", b.alloc_targets == {"12": 1800.0},
       b.alloc_targets)
 b.cfg.alloc_enabled = False
-b.alloc_tick(M.utcnow(), {"12": 2500}, {})
+b.alloc_tick(M.util.utcnow(), {"12": 2500}, {})
 check("allocator off: the targets cleared", b.alloc_targets == {})
 
 # ============================================================================================ M2 decide
@@ -394,7 +394,7 @@ try:
     spec = importlib.util.spec_from_file_location("mm_bot_p12m_base", path)
     base = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(base)
-    base.alert, base.notify = M.alert, (lambda *a_, **k: False)
+    base.alert, base.notify = M.util.alert, (lambda *a_, **k: False)
 except Exception as e:                            # no git here: reported as a failure
     print("    (base module unavailable:", e, ")")
 check(f"base module (git show {BASE_REV}:mm_bot.py) loaded", base is not None)

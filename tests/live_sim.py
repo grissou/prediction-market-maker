@@ -193,7 +193,7 @@ class LiveSim(Sim):
                 if m.state["lots"]:
                     bot.lots[m.eid] = [[x, self.epoch0 + t] for x, t in m.state["lots"]]
         self.t_now = 0
-        M.time = _Clock(self)                     # the bot's time.time() = simulated wall clock (turnover, ages)
+        M.util.time = _Clock(self)                     # the bot's time.time() = simulated wall clock (turnover, ages)
         bot.cur_refs, bot.cur_liquid = {}, set()
         bot.mark_sd = {m.eid: m.row["mark_sd"] for m in self.mkts if m.row.get("mark_sd")}
         bot.turnover = M.TurnoverTracker(start=self.epoch0)

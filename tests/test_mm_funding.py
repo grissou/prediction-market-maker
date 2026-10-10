@@ -50,8 +50,8 @@ def retired(new, old):
 logging.basicConfig(level=logging.CRITICAL)
 RESULTS = []
 ALERTS = []
-M.alert = lambda msg: ALERTS.append(msg)
-M.notify = lambda *a, **k: False
+M.util.alert = lambda msg: ALERTS.append(msg)
+M.util.notify = lambda *a, **k: False
 BASE_REV = "c7c0107"                              # the live head this package is built on
 H = 3600.0
 
@@ -92,7 +92,7 @@ def ungrab(g):
     M.log.propagate = True
 
 
-NOW = M.utcnow()
+NOW = M.util.utcnow()
 CLOSE = NOW + timedelta(days=30)
 REFS = {"Ohio Senate|Republican": 0.12, "Ohio Senate|Democratic": 0.88,
         "Utah Senate|Republican": 0.55, "Utah Senate|Democratic": 0.45}
@@ -167,7 +167,7 @@ check("every default inside its range", not bad and len(good) == len(KEYS), bad)
 good, bad = M.validate_overrides({"mm_inv_max_age_h": 0.4, "mm_inv_max_usd": 60000.0, "mm_recycle_concession": 0.06,
                                   "mm_funding_alert_h": 30.0, "mm_refill_fast": "yes"}, D)
 check("out of range / not a bool refused (5 of 5)", not good and len(bad) == 5, (good, bad))
-src = open(os.path.join(HERE, "..", "mm_bot.py")).read()
+src = "".join(open(p).read() for p in sorted(__import__("glob").glob(os.path.join(HERE, "..", "mmbot", "*.py"))))
 check("Config comment block '# --- P14: market-making funding' and MM_FUNDING_KEYS = ('mm_funding',)",
       "# --- P14: market-making funding (owner, 4 Oct 21:10 UTC" in src and M.Bot.MM_FUNDING_KEYS == ("mm_funding",))
 
@@ -326,7 +326,7 @@ b.order_meta.update({901: {"our_side": "bid", "price": 0.53, "fv": 0.55, "t": no
 
 def fill(fid, oid, eid, qty, at=None):
     return {"id": fid, "orderId": oid, "exchangeId": eid, "quantity": qty, "price": 0.5,
-            "filledAt": M.iso(M.utcnow() if at is None else at)}
+            "filledAt": M.iso(M.util.utcnow() if at is None else at)}
 
 
 b.mm_inv_step([fill(1, 901, "21", 200)], {"21": 300, "11": 500})
@@ -339,7 +339,7 @@ check("take / allocator fills are not MM inventory", lot_q(b, "21") == 200)
 b.ev_fill_p["5"] = 0.90                           # p at fill (mm_carry_24h's) wins over the quote's fv
 b.mm_inv_step([fill(5, 901, "21", 30)], {"21": 330, "11": 500})
 check("p at fill outside the band -> not MM (p at fill preferred to fv at quote)", lot_q(b, "21") == 200)
-b.mm_inv_step([fill(6, 901, "21", 100, M.utcnow() - timedelta(hours=1))], {"21": 300, "11": 500})
+b.mm_inv_step([fill(6, 901, "21", 100, M.util.utcnow() - timedelta(hours=1))], {"21": 300, "11": 500})
 b.mm_inv_step([fill(7, 904, "21", -150)], {"21": 150, "11": 500})
 check("an MM ask fill closes the OLDEST lot first (FIFO round trip): 200 + 100 - 150 = 150 left",
       lot_q(b, "21") == 150 and len(b.mm_lots["21"]) == 2 and b.mm_lots["21"][0][0] == 50, b.mm_lots["21"])
@@ -543,7 +543,7 @@ def refill_bot(**cfg):
 
 def atick(bb):
     time.sleep(0.002)
-    return quiet(bb.alloc_tick, M.utcnow(), dict(bb.api.inv), bb.orders_by_eid(M.utcnow()), None, set())
+    return quiet(bb.alloc_tick, M.util.utcnow(), dict(bb.api.inv), bb.orders_by_eid(M.util.utcnow()), None, set())
 
 
 def sells(a):
@@ -556,7 +556,7 @@ check("flag off: cash 0 < reserve 1000 but the hourly run is not due -> nothing 
 api, b = refill_bot(mm_refill_fast=True)
 g = grab()
 time.sleep(0.002)
-b.alloc_tick(M.utcnow(), dict(b.api.inv), b.orders_by_eid(M.utcnow()), None, set())
+b.alloc_tick(M.util.utcnow(), dict(b.api.inv), b.orders_by_eid(M.util.utcnow()), None, set())
 ungrab(g)
 s = sells(api)
 check("flag on: refilled on this cycle - first the stale MM shares (21: 600 @ 0.545, IOC), then the lowest edge-held "

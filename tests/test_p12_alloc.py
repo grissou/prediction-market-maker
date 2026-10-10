@@ -47,8 +47,8 @@ def retired(new, old):
 logging.basicConfig(level=logging.CRITICAL)
 RESULTS = []
 ALERTS = []
-M.alert = lambda msg: ALERTS.append(msg)
-M.notify = lambda *a, **k: False
+M.util.alert = lambda msg: ALERTS.append(msg)
+M.util.notify = lambda *a, **k: False
 BASE_REV = "a1b3eea"                              # the branch head before Part L
 
 
@@ -57,7 +57,7 @@ def check(name, cond, extra=""):
     RESULTS.append(bool(cond))
 
 
-NOW = M.utcnow()
+NOW = M.util.utcnow()
 CLOSE = NOW + timedelta(days=30)
 
 
@@ -165,7 +165,7 @@ def tick(b, skip=()):
     time.sleep(0.002)
     for x in b.ex.values():
         x.inv = float(b.api.inv.get(x.eid, 0.0))
-    return quiet(b.alloc_tick, M.utcnow(), dict(b.api.inv), b.orders_by_eid(M.utcnow()), None, set(skip))
+    return quiet(b.alloc_tick, M.util.utcnow(), dict(b.api.inv), b.orders_by_eid(M.util.utcnow()), None, set(skip))
 
 
 def ladder(api, eid="A1"):
@@ -218,7 +218,7 @@ try:
         spec = importlib.util.spec_from_file_location("mm_bot_base", path)
         base = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(base)
-        base.alert, base.notify = M.alert, (lambda *a_, **k: False)
+        base.alert, base.notify = M.util.alert, (lambda *a_, **k: False)
 except Exception as e:
     print("    (base module unavailable:", e, ")")
 check(f"base module (git show {BASE_REV}:mm_bot.py) loaded", base is not None)
@@ -322,7 +322,7 @@ metas = sorted((b.order_meta[o.order_id]["set_ladder"], b.order_meta[o.order_id]
                for o in b.sl_orders())
 check("tagged set_ladder 1 / 2 / 3, race Alpha", metas == [(1, "Alpha Senate"), (2, "Alpha Senate"),
                                                           (3, "Alpha Senate")], metas)
-check("expires after MAX_ORDER_TTL (2 h)", all(abs((o.expires - M.utcnow()).total_seconds() - M.MAX_ORDER_TTL) < 60
+check("expires after MAX_ORDER_TTL (2 h)", all(abs((o.expires - M.util.utcnow()).total_seconds() - M.MAX_ORDER_TTL) < 60
                                                for o in b.sl_orders()))
 check("status alloc.set_ladder {races 1, shares_resting 999, filled 0}",
       b.alloc_status().get("set_ladder") == {"races": 1, "shares_resting": 999, "filled": 0},
@@ -349,7 +349,7 @@ check("...the position fell (A1 -900): no flip", api.inv["A1"] == -900)
 # the hour passes, the best bid moved down -> re-quoted
 api.books["A1"] = bk(0.915, 0.93)
 b.ex["A1"].book = api.full_book("A1")
-b.ex["A1"].book = M.strip_own(b.ex["A1"].book, b.orders_by_eid(M.utcnow()).get("A1", []))
+b.ex["A1"].book = M.strip_own(b.ex["A1"].book, b.orders_by_eid(M.util.utcnow()).get("A1", []))
 fresh(b)
 b.alloc_ladder["Alpha Senate"]["at"] -= 3600
 n_c, n_a = len(api.sent("cancel_order")), len(api.sent("cancel_all"))
@@ -369,7 +369,7 @@ api, b = mk_bot(alloc_set_rich_leg=True)
 warm(b)
 tick(b)
 # (our ask at 0.905 resting: injected into our record - on these books it would trade with the other traders' 0.92)
-b.my_orders[9999] = M.Resting(9999, "A1", False, 0.905, 10, M.utcnow() + timedelta(hours=1))
+b.my_orders[9999] = M.Resting(9999, "A1", False, 0.905, 10, M.util.utcnow() + timedelta(hours=1))
 n_c = len(api.sent("cancel_order"))
 read(b)
 tick(b)
@@ -467,7 +467,7 @@ no_plan("the favourite pinned: nothing", alloc_pin="Rep Alpha Senate",
 no_plan("covered NO sales not in effect (reduce_no_as_sell off): nothing", reduce_no_as_sell=False)
 no_plan("too small (2 sets: < 1 share a level): nothing", inv={"A1": -2, "A2": -2})
 no_plan("inside the pre-close window: nothing",
-        after=lambda b_: [setattr(x, "close", M.utcnow() + timedelta(minutes=5)) for x in b_.ex.values()])
+        after=lambda b_: [setattr(x, "close", M.util.utcnow() + timedelta(minutes=5)) for x in b_.ex.values()])
 api, b = mk_bot(alloc_set_rich_leg=True)
 warm(b)
 b.api.live = False
@@ -537,7 +537,7 @@ check("no write budget: waits", not ladder(api))
 api, b = mk_bot(alloc_set_rich_leg=True)
 warm(b)
 qb = {"exchangeId": "A1", "side": "yes", "action": "buy", "quantity": 400, "price": 0.85, "tournamentId": "T",
-      "expirationDate": M.iso(M.utcnow() + timedelta(hours=1)), "_no_sell": True}
+      "expirationDate": M.iso(M.util.utcnow() + timedelta(hours=1)), "_no_sell": True}
 res = quiet(b.place_orders, [qb])
 b.remember_order(qb, res[0]["data"], time.monotonic())
 b.order_meta[res[0]["data"]["orderId"]] = {"our_side": "bid", "no_sell": True}
@@ -608,7 +608,7 @@ check("no room left on Beta Dem (alloc_max_contract_usd): not preferred",
       b.alloc_prefer_short_legs({}, time.monotonic()) == {})
 api, b, _ = plan2(alloc_prefer_short=True)
 own = {"exchangeId": "B2", "side": "yes", "action": "buy", "quantity": 5, "price": 0.48, "tournamentId": "T",
-       "expirationDate": M.iso(M.utcnow() + timedelta(hours=1))}
+       "expirationDate": M.iso(M.util.utcnow() + timedelta(hours=1))}
 res = quiet(b.place_orders, [own])
 b.remember_order(own, res[0]["data"], time.monotonic())
 check("own quotes excluded: our bid at 0.48 is not counted (bids sum 0.55 + no other bid)",
@@ -652,10 +652,10 @@ _, r = arb({**books_default(), "A1": bk(0.55, 0.57), "A2": bk(0.38, 0.40)}, pair
 check("a profitable unwind (asks 0.97) still fires", r is not None and r[0] == "unwind", r)
 b, _ = arb(BID_OVER, pair_no_unwind_asks_le1=True)
 own = {"exchangeId": "A1", "side": "yes", "action": "buy", "quantity": 5, "price": 0.61, "tournamentId": "T",
-       "expirationDate": M.iso(M.utcnow() + timedelta(hours=1))}
+       "expirationDate": M.iso(M.util.utcnow() + timedelta(hours=1))}
 res = quiet(b.place_orders, [own])
 b.remember_order(own, res[0]["data"], time.monotonic())
-b.ex["A1"].book = M.strip_own(b.api.full_book("A1"), b.orders_by_eid(M.utcnow()).get("A1", []))
+b.ex["A1"].book = M.strip_own(b.api.full_book("A1"), b.orders_by_eid(M.util.utcnow()).get("A1", []))
 check("own quotes excluded: our bid at 0.61 is not counted (no other bid there: bids not > 1)",
       not b.nono_unwind_gated(b.groups["Alpha Senate"], 1.03))
 LONG = {**books_default(), "A1": bk(0.61, 0.62), "A2": bk(0.40, 0.41)}

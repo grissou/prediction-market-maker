@@ -55,8 +55,8 @@ def retired(new, old):
 logging.basicConfig(level=logging.CRITICAL)
 RESULTS = []
 ALERTS = []
-M.alert = lambda msg: ALERTS.append(msg)
-M.notify = lambda *a, **k: False
+M.util.alert = lambda msg: ALERTS.append(msg)
+M.util.notify = lambda *a, **k: False
 BASE_REV = "64f27c8"                              # Package 14.2 (READY, live), the head this package is built on
 SNAP = os.environ.get("P9_SNAP", "/home/claude/snap04")
 STAGED = os.path.join(ROOT, "deploy", "package15", "settings_override.harvest.json")
@@ -68,7 +68,7 @@ def check(name, cond, extra=""):
     RESULTS.append(bool(cond))
 
 
-NOW = M.utcnow()
+NOW = M.util.utcnow()
 CLOSE = NOW + timedelta(days=30)
 
 
@@ -167,7 +167,7 @@ def agg(book):
 
 def fresh(b):
     now_m = time.monotonic()
-    mine = b.orders_by_eid(M.utcnow())
+    mine = b.orders_by_eid(M.util.utcnow())
     for x in b.ex.values():
         x.book = M.strip_own(agg(b.api.full_book(x.eid)), mine.get(x.eid, [])) if x.eid in b.api.books else x.book
         x.verified = now_m
@@ -196,7 +196,7 @@ def hv(b, skip=(), at=None):
     fresh(b)
     for x in b.ex.values():
         x.inv = float(b.api.inv.get(x.eid, 0.0))
-    return quiet(b.hv_tick, at or M.utcnow(), dict(b.api.inv), b.orders_by_eid(M.utcnow()), None, set(skip))
+    return quiet(b.hv_tick, at or M.util.utcnow(), dict(b.api.inv), b.orders_by_eid(M.util.utcnow()), None, set(skip))
 
 
 def plan(b):
@@ -261,7 +261,7 @@ _f, _ov = list(M.Config.__dataclass_fields__), list(M.OVERRIDABLE)
 check("one contiguous block right after alloc_swap_min_gain, in Config and OVERRIDABLE",
       _f[_f.index("alloc_swap_min_gain") + 1:][:len(SPEC)] == list(SPEC)
       and _ov[_ov.index("alloc_swap_min_gain") + 1:][:len(SPEC)] == list(SPEC))
-src = open(os.path.join(ROOT, "mm_bot.py")).read()
+src = "".join(open(p).read() for p in sorted(__import__("glob").glob(os.path.join(ROOT, "mmbot", "*.py"))))
 check("Config comment block '# --- P15: the harvest ladder alone + a per-state collateral cap'",
       "# --- P15: the harvest ladder alone + a per-state collateral cap" in src)
 check("Bot.HARVEST_KEYS names the status keys P15 adds (harvest, state_caps)",
@@ -498,16 +498,16 @@ check("a level at / through the other side of the book is skipped, not clipped (
       [px for _, px, _, _, _ in plans["A2"]["levels"]] == [0.14], plans["A2"]["levels"])
 api, b = mk_bot(tilt_harvest_ladder=True, refs=ALPHA, **BIG)
 warm(b)
-b.my_orders[901] = M.Resting(901, "A2", True, 0.10, 50, M.utcnow() + timedelta(seconds=600))
-b.my_orders[902] = M.Resting(902, "A1", False, 0.88, 50, M.utcnow() + timedelta(seconds=600))
+b.my_orders[901] = M.Resting(901, "A2", True, 0.10, 50, M.util.utcnow() + timedelta(seconds=600))
+b.my_orders[902] = M.Resting(902, "A1", False, 0.88, 50, M.util.utcnow() + timedelta(seconds=600))
 plans, _ = plan(b)
 check("never at / through our own orders: our bid at 0.10 on A2 -> asks 0.12 / 0.14; our ask 0.88 on A1 -> bid 0.86",
       [px for _, px, _, _, _ in plans["A2"]["levels"]] == [0.12, 0.14]
       and [px for _, px, _, _, _ in plans["A1"]["levels"]] == [0.86], (plans["A2"]["levels"], plans["A1"]["levels"]))
 b.my_orders.pop(901)
 b.my_orders.pop(902)
-b.my_orders[903] = M.Resting(903, "A2", False, 0.12, 50, M.utcnow() + timedelta(seconds=600))
-b.my_orders[904] = M.Resting(904, "A1", True, 0.88, 50, M.utcnow() + timedelta(seconds=600))
+b.my_orders[903] = M.Resting(903, "A2", False, 0.12, 50, M.util.utcnow() + timedelta(seconds=600))
+b.my_orders[904] = M.Resting(904, "A1", True, 0.88, 50, M.util.utcnow() + timedelta(seconds=600))
 plans, _ = plan(b)
 check("P13 C: never at the price of our own resting quote on that side (our ask 0.12 on A2: 0.10 / 0.14 only; our "
       "bid 0.88 on A1: 0.90 / 0.86 only)", [px for _, px, _, _, _ in plans["A2"]["levels"]] == [0.10, 0.14]
@@ -726,7 +726,7 @@ pr = {"sell": {"kind": "cash", "label": "spare cash", "usd": 1000.0, "edge": 0.0
               "usd": 1000.0}, "usd": 1000.0, "status": "sold", "proceeds": 1000.0, "sold_at": -1e18}
 b.alloc_run = {}
 n0 = len(api.wire)
-sent = quiet(b.alloc_buy, pr, dict(api.inv), b.orders_by_eid(M.utcnow()), time.monotonic(), time.time(), set())
+sent = quiet(b.alloc_buy, pr, dict(api.inv), b.orders_by_eid(M.util.utcnow()), time.monotonic(), time.time(), set())
 check("alloc_buy re-checks the state cap before the IOC: RI over the cap -> no order (blocked_by state_cap)",
       not sent and len(api.wire) == n0 and b.alloc_run.get("blocked_by", {}).get("state_cap", 0) == 1,
       (sent, b.alloc_run))
@@ -826,7 +826,7 @@ check("...both markets' six levels in ONE batch write (batch_size 10)", api.sent
       api.sent("batch")[n_b:])
 check("...tagged harvest 2..4 in the notes, alive MAX_ORDER_TTL", sorted(b.order_meta[o.order_id]["harvest"]
                                                                           for o in b.hv_orders("A2")) == [2, 3, 4]
-      and all(abs((o.expires - M.utcnow()).total_seconds() - M.MAX_ORDER_TTL) < 60 for o in b.hv_orders()))
+      and all(abs((o.expires - M.util.utcnow()).total_seconds() - M.MAX_ORDER_TTL) < 60 for o in b.hv_orders()))
 check("...the markets are not quoted this cycle (touched)", touched == {"A1", "A2"}, touched)
 api, b = mk_bot(tilt_harvest_ladder=True, refs=ALPHA, harvest_writes_frac=0.0, **BIG)
 warm(b)
@@ -889,7 +889,7 @@ def fill_at(api_, eid, price, qty):
             api_.inv[eid] = api_.inv.get(eid, 0) + (qty if is_bid else -qty)
             api_.fills.append({"id": len(api_.fills) + 1, "orderId": oid, "exchangeId": eid, "price": p_,
                                "quantity": qty if is_bid else -qty, "side": "yes" if is_bid else "no",
-                               "filledAt": M.iso(M.utcnow())})
+                               "filledAt": M.iso(M.util.utcnow())})
             if o["quantity"] <= 0:
                 del api_.orders[oid]
             return
@@ -928,7 +928,7 @@ b.global_reduce = True
 hv(b)
 check("reduce-only (the backstop tripwire): every level pulled", not b.hv_orders() and not api.orders)
 api, b = laddered()
-b.ex["A2"].close = M.utcnow() + timedelta(minutes=5)
+b.ex["A2"].close = M.util.utcnow() + timedelta(minutes=5)
 hv(b)
 check("the pre-close stop (5 min to close < stop_minutes_before_close 15): pulled", not b.hv_orders("A2")
       and b.hv_orders("A1"))
@@ -1114,7 +1114,7 @@ for _ in range(2):
     b.drain_writes(5)
 check("no Polymarket references at all: cycles run, no ladder (why 'no p')", b.failed_cycles == 0 and not b.hv_plans
       and b.hv_why.get("A2") == "no p", b.hv_why.get("A2"))
-t1 = quiet(b.hv_tick, M.utcnow(), {"NOPE": 10.0}, {}, None, set())
+t1 = quiet(b.hv_tick, M.util.utcnow(), {"NOPE": 10.0}, {}, None, set())
 coll, own = b.st_snapshot({"NOPE": 10.0, "R1": 5.0})
 check("hv_tick / st_snapshot with an unknown market in the positions: no crash (an unknown market has no state; "
       "R1's 5 YES count in RI)", isinstance(t1, set) and "NOPE" not in coll and coll.get("RI", 0) > 0

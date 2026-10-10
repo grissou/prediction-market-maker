@@ -50,8 +50,8 @@ def retired(new, old):
 logging.basicConfig(level=logging.CRITICAL)
 RESULTS = []
 ALERTS = []
-M.alert = lambda msg: ALERTS.append(msg)
-M.notify = lambda *a, **k: False
+M.util.alert = lambda msg: ALERTS.append(msg)
+M.util.notify = lambda *a, **k: False
 BASE_REV = "124ce75"                              # Package 14.1 (READY), the head this package is built on
 H = 3600.0
 
@@ -92,7 +92,7 @@ def ungrab(g):
     M.log.propagate = True
 
 
-NOW = M.utcnow()
+NOW = M.util.utcnow()
 CLOSE = NOW + timedelta(days=30)
 REFS = {"Ohio Senate|Republican": 0.12, "Ohio Senate|Democratic": 0.88,
         "Utah Senate|Republican": 0.55, "Utah Senate|Democratic": 0.45}
@@ -147,7 +147,7 @@ def sells(a):
 
 def atick(bb):
     time.sleep(0.002)
-    return quiet(bb.alloc_tick, M.utcnow(), dict(bb.api.inv), bb.orders_by_eid(M.utcnow()), None, set())
+    return quiet(bb.alloc_tick, M.util.utcnow(), dict(bb.api.inv), bb.orders_by_eid(M.util.utcnow()), None, set())
 
 
 def swap_bot(bid=0.545, inv=None, extra_books=None, **cfg):
@@ -184,7 +184,7 @@ def swap_bot(bid=0.545, inv=None, extra_books=None, **cfg):
 def gtick(bb):
     """alloc_tick with the journal captured (atick keeps it quiet)."""
     time.sleep(0.002)
-    return bb.alloc_tick(M.utcnow(), dict(bb.api.inv), bb.orders_by_eid(M.utcnow()), None, set())
+    return bb.alloc_tick(M.util.utcnow(), dict(bb.api.inv), bb.orders_by_eid(M.util.utcnow()), None, set())
 
 
 def plan(bb, cash=1000.0, refill_only=False):
@@ -216,7 +216,7 @@ good, bad = M.validate_overrides({"alloc_swap_sell_margin": 0.11, "alloc_swap_mi
 check("out of range refused (2 of 2)", not good and len(bad) == 2, (good, bad))
 good, bad = M.validate_overrides({"alloc_swap_sell_margin": -0.01, "alloc_swap_min_gain": "x"}, D)
 check("negative / not a number refused (2 of 2)", not good and len(bad) == 2, (good, bad))
-src = open(os.path.join(HERE, "..", "mm_bot.py")).read()
+src = "".join(open(p).read() for p in sorted(__import__("glob").glob(os.path.join(HERE, "..", "mmbot", "*.py"))))
 check("Config comment block '# --- P14.2: a swap-only value-floor margin'",
       "# --- P14.2: a swap-only value-floor margin" in src)
 _, b_ = mk()

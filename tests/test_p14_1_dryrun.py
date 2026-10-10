@@ -114,7 +114,7 @@ def main():
     out(f"| MM inventory (stale, oldest) | 10.5k (7.9k, 23.7 h) | {f0['inventory_usd'] / 1000:.1f}k "
         f"({f0['stale_usd'] / 1000:.1f}k, {f0['oldest_inventory_h']:.1f} h) |")
     out(f"| value adds paused | yes (room < 20k) | {b.mmr_paused} |")
-    now_m = M.time.monotonic()
+    now_m = M.util.time.monotonic()
     buck = T.buckets(b, api, now_m)
     out(f"| book by edge-held | 4.1k <=2% (14), 16.8k 2-5% (46), 44.2k 5-10% (38), 23.6k >10% (14) | "
         + ", ".join(f"{v[0] / 1000:.1f}k {k} ({v[1]})" for k, v in buck.items()) + " |")
@@ -254,7 +254,7 @@ def main():
     api_e, be = T.build(S, live_file(tmp))
     P.apply_stage(be, P141_FILE)
     P.cycles(be, 1, stage="edge")
-    now_m = M.time.monotonic()
+    now_m = M.util.time.monotonic()
     inv = dict(api_e.inv)
     rows = []
     for mes in (0.02, 0.05, 0.08):

@@ -45,7 +45,7 @@ os.environ.setdefault("TOURNAMENT_SLUG", "test")
 import mm_bot as M                                          # noqa: E402
 from mm_bot import TICK, Config, Resting, compute_quote, fair_value, floor_tick, ceil_tick, side_needs_change, rnd  # noqa: E402
 
-M.notify = lambda *a, **k: False
+M.util.notify = lambda *a, **k: False
 
 # Calibration (DATA_REPORT_2.md section 9, 16 h of day one and the night; SIM_NOTES.md). "day1" = the Builder's.
 CAL = dict(
@@ -610,7 +610,7 @@ def baseline_strategy(sim, m, t, fv, bfv, ref, book):
     side, bias_edge, bias_size = M.fl_side(fv, m.state.get("fl"), cfg)     # favourite-longshot side bias
     m.state["fl"] = side
     over = cfg.capital_in_positions_max_frac < 1.0 and sim.cap_frac > cfg.capital_in_positions_max_frac
-    q = M.compute_quote(fv, m.inv, m.inv, bb, ba, cfg, no_bid=no_bid, no_ask=no_ask,
+    q = M.quoting.compute_quote(fv, m.inv, m.inv, bb, ba, cfg, no_bid=no_bid, no_ask=no_ask,
                         kelly_p=None if m.headline else ref, order_size=size, position_limit=plimit,
                         bias_side="bid" if side == "mid" else side, bias_edge=bias_edge, bias_size=bias_size,
                         net_inv=m.inv, age_hours=lot_age(m.state.get("lots"), t),

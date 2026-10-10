@@ -57,8 +57,8 @@ def retired(new, old):
 logging.basicConfig(level=logging.CRITICAL)
 RESULTS = []
 ALERTS = []
-M.alert = lambda msg: ALERTS.append(msg)
-M.notify = lambda *a, **k: False
+M.util.alert = lambda msg: ALERTS.append(msg)
+M.util.notify = lambda *a, **k: False
 BASE_REV = "4ff7d91"                              # the Package 14 head this package is built on (LIVE)
 H = 3600.0
 
@@ -99,7 +99,7 @@ def ungrab(g):
     M.log.propagate = True
 
 
-NOW = M.utcnow()
+NOW = M.util.utcnow()
 CLOSE = NOW + timedelta(days=30)
 REFS = {"Ohio Senate|Republican": 0.12, "Ohio Senate|Democratic": 0.88,
         "Utah Senate|Republican": 0.55, "Utah Senate|Democratic": 0.45}
@@ -154,7 +154,7 @@ def sells(a):
 
 def atick(bb):
     time.sleep(0.002)
-    return quiet(bb.alloc_tick, M.utcnow(), dict(bb.api.inv), bb.orders_by_eid(M.utcnow()), None, set())
+    return quiet(bb.alloc_tick, M.util.utcnow(), dict(bb.api.inv), bb.orders_by_eid(M.util.utcnow()), None, set())
 
 
 ON = {"alloc_cancel_mm_first": True, "alloc_rank_all_markets": True, "mm_recycle_sell_first": True,
@@ -178,7 +178,7 @@ check("every default inside its range", not bad and len(good) == len(KEYS), bad)
 good, bad = M.validate_overrides({"alloc_refill_max_cost": 0.06, "alloc_cancel_mm_first": "yes",
                                   "alloc_swap_room_netting": 2}, D)
 check("out of range / not a bool refused (3 of 3)", not good and len(bad) == 3, (good, bad))
-src = open(os.path.join(HERE, "..", "mm_bot.py")).read()
+src = "".join(open(p).read() for p in sorted(__import__("glob").glob(os.path.join(HERE, "..", "mmbot", "*.py"))))
 check("Config comment block '# --- P14.1: the refill and the swaps unstuck' and Bot.P141_FLAGS (the five flags)",
       "# --- P14.1: the refill and the swaps unstuck" in src and set(M.Bot.P141_FLAGS) == set(KEYS[:5]))
 _, b_ = mk()
@@ -372,7 +372,7 @@ check("4ff7d91: the stale MM bid is 3.5c from fair (> the 1c concession) -> the 
 api, b = refill_bot(mm_refill_fast=True, alloc_cancel_mm_first=True)
 g = grab()
 time.sleep(0.002)
-b.alloc_tick(M.utcnow(), dict(b.api.inv), b.orders_by_eid(M.utcnow()), None, set())
+b.alloc_tick(M.util.utcnow(), dict(b.api.inv), b.orders_by_eid(M.util.utcnow()), None, set())
 ungrab(g)
 s = sells(api)
 check("flag on: the stale MM shares go at the touch (600 @ 0.545, at the value floor), 'mm_resting' no longer "

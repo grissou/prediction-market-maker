@@ -29,8 +29,8 @@ import mm_bot as M                                                # noqa: E402
 
 SNAP = os.environ.get("P9_SNAP", "/home/claude/snap03")
 RESULTS, ALERTS = [], []
-M.alert = lambda msg: ALERTS.append(msg)
-M.notify = lambda *a, **k: False
+M.util.alert = lambda msg: ALERTS.append(msg)
+M.util.notify = lambda *a, **k: False
 logging.basicConfig(level=logging.CRITICAL)
 
 
@@ -55,8 +55,8 @@ class Clock:
 
 
 CLK = Clock()
-M.time = CLK
-M.utcnow = lambda: datetime.now(timezone.utc) + timedelta(seconds=CLK.off)
+M.util.time = CLK
+M.util.utcnow = lambda: datetime.now(timezone.utc) + timedelta(seconds=CLK.off)
 
 
 class Capture(logging.Handler):

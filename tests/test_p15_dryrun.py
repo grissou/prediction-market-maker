@@ -156,7 +156,7 @@ class Dry15(P.DryApi):
                     self.inv[e] = q0 + (take if is_bid else -take)
                     self.fills.append({"id": len(self.fills) + 1, "orderId": oid, "exchangeId": e, "price": px,
                                        "quantity": take if is_bid else -take, "side": "yes" if is_bid else "no",
-                                       "filledAt": M.iso(M.utcnow())})
+                                       "filledAt": M.iso(M.util.utcnow())})
                     self.maker_fills.append({"t": P.CLK.off, "oid": oid, "eid": e, "bid": is_bid, "px": px,
                                              "qty": take, "pos_before": q0})
                 if o["quantity"] <= 0:
@@ -319,8 +319,8 @@ def base_module(rev):
         spec = importlib.util.spec_from_file_location(f"mm_bot_{rev}", path)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        mod.alert, mod.notify, mod.time = M.alert, (lambda *a, **k: False), P.CLK
-        mod.utcnow = M.utcnow
+        getattr(mod, "util", mod).alert, getattr(mod, "util", mod).notify, getattr(mod, "util", mod).time = M.util.alert, (lambda *a, **k: False), P.CLK
+        getattr(mod, "util", mod).utcnow = M.util.utcnow
         if P.CAP not in mod.log.handlers:
             mod.log.addHandler(P.CAP)
         mod.log.propagate = False

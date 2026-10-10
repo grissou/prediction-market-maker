@@ -237,8 +237,8 @@ class World:
         self.kind, self.seed, self.minutes = kind, seed, minutes
         self.rng = random.Random(seed)
         self.clock = Clock()
-        self.saved = (M.time, M.utcnow)
-        M.time, M.utcnow = self.clock, self.clock.utcnow
+        self.saved = (M.util.time, M.util.utcnow)
+        M.util.time, M.util.utcnow = self.clock, self.clock.utcnow
         self.eng = FakeApi(True)
         self.feed = Feed()
         self.ex = Exchange(self.clock, random.Random(seed + 1), kind, self.eng, self.feed)
@@ -476,7 +476,7 @@ class World:
         finally:
             self.bot.running = False
             th.join(timeout=5)
-            M.time, M.utcnow = self.saved
+            M.util.time, M.util.utcnow = self.saved
         return self.metrics()
 
     def metrics(self):

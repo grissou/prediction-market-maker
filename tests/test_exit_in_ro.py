@@ -24,13 +24,13 @@ def check(name, cond, extra=""):
 
 
 print("--- the why dict (reduce-only clip diagnostics)")
-q = M.compute_quote(0.5, 500, 0, 0.45, 0.55, M.Config(), reduce_only=True)
+q = M.quoting.compute_quote(0.5, 500, 0, 0.45, 0.55, M.Config(), reduce_only=True)
 w = {}
-q2 = M.compute_quote(0.5, 500, 0, 0.45, 0.55, M.Config(), reduce_only=True, why=w)
+q2 = M.quoting.compute_quote(0.5, 500, 0, 0.45, 0.55, M.Config(), reduce_only=True, why=w)
 check("the why dict never changes the quote (long 500, race-net 0: both sides clipped)",
       q == q2 and w == {"ro_clip": "bid ask"}, (q, q2, w))
 w = {}
-M.compute_quote(0.5, 500, 0, 0.45, 0.55, M.Config(), reduce_only=True, no_ask=True, why=w)
+M.quoting.compute_quote(0.5, 500, 0, 0.45, 0.55, M.Config(), reduce_only=True, no_ask=True, why=w)
 check("...a blocked side is not 'clipped'", w == {"ro_clip": "bid"}, w)
 
 print(f"\n{sum(RESULTS)}/{len(RESULTS)} passed")

@@ -71,7 +71,7 @@ def build(S, overrides, K=1.0, C=0.8, mm_usd=10500.0, stale_usd=7900.0, oldest_h
     pnl0 = api.pnl
     api.pnl = lambda: (lambda r: {**r, "cashBalance": r["cashBalance"] - api.cash_hold})(pnl0())
     P.cycles(b, warm, stage="warm")
-    now_m, now_w = M.time.monotonic(), M.time.time()
+    now_m, now_w = getattr(M, "util", M).time.monotonic(), getattr(M, "util", M).time.time()
     # MM lots: middle-band, unpinned, non-headline holdings with edge-held < the hurdle; floor-failing ones first (live:
     # mm_resting dominates), biggest first, at most per_market $ each
     pins, hurdle = b.alloc_pins(), b.mm_hurdle()

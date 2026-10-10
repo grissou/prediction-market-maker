@@ -155,8 +155,8 @@ def base_module():
         spec = importlib.util.spec_from_file_location("mm_bot_p9head", path)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        mod.alert, mod.notify, mod.time = P.M.alert, (lambda *a, **k: False), P.CLK
-        mod.utcnow = P.M.utcnow
+        getattr(mod, "util", mod).alert, getattr(mod, "util", mod).notify, getattr(mod, "util", mod).time = P.M.util.alert, (lambda *a, **k: False), P.CLK
+        getattr(mod, "util", mod).utcnow = P.M.util.utcnow
         mod.log.addHandler(P.CAP)
         mod.log.propagate = False
         return mod

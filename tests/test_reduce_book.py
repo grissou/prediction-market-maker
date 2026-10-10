@@ -56,12 +56,12 @@ check("no edge: allowance only, cap irrelevant", k(0.50, 0.55, BANK, c15) == k(0
 
 print("--- B: kelly_max_market_frac 0.01 halves the add size cap (compute_quote)")
 big = dict(kelly_p=0.60, bankroll=BANK, order_size=1_000_000)
-q2 = M.compute_quote(0.55, 0, 0, None, None, c, **big)
-q1 = M.compute_quote(0.55, 0, 0, None, None, replace(c, kelly_max_market_frac=0.01), **big)
+q2 = M.quoting.compute_quote(0.55, 0, 0, None, None, c, **big)
+q1 = M.quoting.compute_quote(0.55, 0, 0, None, None, replace(c, kelly_max_market_frac=0.01), **big)
 check("flat, huge planned size: bid size = the Kelly long limit; 0.01 = half of 0.02 (+-1 share rounding)",
       q2.bid == q1.bid and abs(q1.bid_size - q2.bid_size / 2) <= 1 and q1.bid_size > 0, (q1, q2))
-q2 = M.compute_quote(0.55, 1500, 1500, None, None, c, **big)
-q1 = M.compute_quote(0.55, 1500, 1500, None, None, replace(c, kelly_max_market_frac=0.01), **big)
+q2 = M.quoting.compute_quote(0.55, 1500, 1500, None, None, c, **big)
+q1 = M.quoting.compute_quote(0.55, 1500, 1500, None, None, replace(c, kelly_max_market_frac=0.01), **big)
 lim2 = k(0.60, q2.bid, BANK, c)
 check("holding 1,500: remaining add room = limit - 1,500 (0.02), and less than half that at 0.01",
       q2.bid_size == lim2 - 1500 and q1.bid_size == max(0, k(0.60, q1.bid, BANK, replace(c, kelly_max_market_frac=0.01))

@@ -49,8 +49,8 @@ def retired(new, old):
 logging.basicConfig(level=logging.CRITICAL)
 RESULTS = []
 ALERTS = []
-M.alert = lambda msg: ALERTS.append(msg)
-M.notify = lambda *a, **k: False
+M.util.alert = lambda msg: ALERTS.append(msg)
+M.util.notify = lambda *a, **k: False
 BASE_REV = "c3e32b6"                              # the branch head before Part B (Part A built)
 
 
@@ -59,7 +59,7 @@ def check(name, cond, extra=""):
     RESULTS.append(bool(cond))
 
 
-NOW = M.utcnow()
+NOW = M.util.utcnow()
 CLOSE = NOW + timedelta(days=30)
 
 
@@ -156,8 +156,8 @@ def read(b, cash=None):
 
 def tick(b, inv=None, skip=(), now=None):
     time.sleep(0.002)                             # (monotonic order: a sale is after the read before it)
-    return quiet(b.alloc_tick, now or M.utcnow(), dict(b.api.inv) if inv is None else inv,
-                 b.orders_by_eid(M.utcnow()), None, set(skip))
+    return quiet(b.alloc_tick, now or M.util.utcnow(), dict(b.api.inv) if inv is None else inv,
+                 b.orders_by_eid(M.util.utcnow()), None, set(skip))
 
 
 def plan(b, cash=None, inv=None, skip=(), left=None):
@@ -224,7 +224,7 @@ try:
         spec = importlib.util.spec_from_file_location("mm_bot_base", path)
         base = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(base)
-        base.alert, base.notify = M.alert, (lambda *a_, **k: False)
+        base.alert, base.notify = M.util.alert, (lambda *a_, **k: False)
 except Exception as e:                            # no git here: reported as a failure
     print("    (base module unavailable:", e, ")")
 check(f"base module (git show {BASE_REV}:mm_bot.py) loaded", base is not None)
@@ -350,9 +350,9 @@ check("an illiquid Polymarket price is not ranked", b.alloc_p(b.ex["B1"]) is Non
 api, b = alloc_bot()
 warm(b)
 api.orders[999] = {"id": 999, "exchangeId": "A1", "side": "yes", "action": "buy", "priceLimit": 0.61, "quantity": 50,
-                   "open": True, "expirationDate": M.iso(M.utcnow() + timedelta(hours=1))}
+                   "open": True, "expirationDate": M.iso(M.util.utcnow() + timedelta(hours=1))}
 quiet(b.sync_orders, api.open_orders("T"), time.monotonic())
-fresh = b.alloc_download(b.ex["A1"], b.orders_by_eid(M.utcnow()))
+fresh = b.alloc_download(b.ex["A1"], b.orders_by_eid(M.util.utcnow()))
 check("own quotes stripped from the fresh book (our 0.61 bid is not the touch)", fresh["bids"][0]["price"] == 0.60,
       fresh["bids"][:2])
 
@@ -414,7 +414,7 @@ warm(b)
 api.calls.clear()
 n0 = len(api.wire)
 api.orders[901] = {"id": 901, "exchangeId": "A1", "side": "yes", "action": "sell", "priceLimit": 0.70, "quantity": 5,
-                   "open": True, "expirationDate": M.iso(M.utcnow() + timedelta(hours=1))}
+                   "open": True, "expirationDate": M.iso(M.util.utcnow() + timedelta(hours=1))}
 quiet(b.sync_orders, api.open_orders("T"), time.monotonic())
 traded = tick(b)
 w = api.wire[n0:]
@@ -428,7 +428,7 @@ ci = api.calls.index(("batch", 1))
 check("our own orders on Rep Alpha cancelled before the order, the leftover cancelled after",
       ("cancel_all", "A1") in api.calls[:ci] and ("cancel_all", "A1") in api.calls[ci:] and 901 not in api.orders)
 check("traded set returned (no quoting there this cycle)", traded == {"A1"})
-check("IOC: the order lives take_order_ttl", abs((M.parse_ts(w[0]["expirationDate"]) - M.utcnow()).total_seconds()
+check("IOC: the order lives take_order_ttl", abs((M.parse_ts(w[0]["expirationDate"]) - M.util.utcnow()).total_seconds()
                                                   - b.cfg.take_order_ttl) < 3)
 pr = b.alloc_pairs[0] if b.alloc_pairs else {}
 check("pair state: sold, $600 proceeds", pr.get("status") == "sold" and abs(pr.get("proceeds", 0) - 600) < 1e-6, pr)
@@ -697,13 +697,13 @@ log_level = logging.getLogger().level
 logging.getLogger().setLevel(logging.INFO)
 M.log.setLevel(logging.INFO)
 n0 = len(api.wire)
-b.alloc_tick(M.utcnow(), dict(api.inv), {}, None, set())
+b.alloc_tick(M.util.utcnow(), dict(api.inv), {}, None, set())
 check("dry run: the plan is logged ([dry] ALLOC ...), nothing sent", any(r.startswith("[dry] ALLOC sell Rep Alpha Senate")
                                                                          for r in recs) and len(api.wire) == n0, recs[:3])
 api, b = alloc_bot()
 warm(b)
 recs.clear()
-b.alloc_tick(M.utcnow(), dict(api.inv), b.orders_by_eid(M.utcnow()), None, set())
+b.alloc_tick(M.util.utcnow(), dict(api.inv), b.orders_by_eid(M.util.utcnow()), None, set())
 check("journal: 'ALLOC sell <label> <qty> @ <px> (edge-held x%) -> buy <label> <qty> @ <px> (edge y%)'",
       any(r.startswith("ALLOC sell Rep Alpha Senate 1000 @ 0.600 (edge-held 0.0%) -> buy Rep Beta Senate 1000 @ 0.600 "
                        "(edge 16.7%)") for r in recs), recs[:4])
@@ -796,7 +796,7 @@ b.global_reduce = False
 api, b = alloc_bot(value_mode=True)
 warm(b)
 for x in b.ex.values():
-    x.close = M.utcnow() + timedelta(minutes=10)
+    x.close = M.util.utcnow() + timedelta(minutes=10)
 pairs, _ = plan(b, cash=1000.0)
 check("RT-3 10 min to close (stop window 15): the allocator plans nothing", not pairs, pairs)
 # RT-5: reserve refill sales had no bloc check (only pairs did): a refill could push |bloc delta| past the cap.

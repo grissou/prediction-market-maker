@@ -28,7 +28,7 @@ import mm_bot as M                                        # noqa: E402
 logging.basicConfig(level=logging.ERROR, format="    log %(levelname)s %(message)s")
 RESULTS = []
 ALERTS = []
-M.alert = lambda msg: ALERTS.append(msg)
+M.util.alert = lambda msg: ALERTS.append(msg)
 F, MC, TR = "pair_unwind_followup", "pair_unwind_followup_max_cost", "pair_unwind_followup_tries"
 RACE = "Utah Senate"
 FVS = {"11": 0.15, "12": 0.85, "21": 0.5, "22": 0.5}
@@ -371,7 +371,7 @@ try:
         spec = importlib.util.spec_from_file_location("mm_bot_p7a", path)
         base = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(base)
-        base.alert = M.alert
+        base.alert = M.util.alert
         base.notify = lambda *a_, **k: False
 except Exception as e:                            # no git here: the pin is skipped (reported)
     print("    (base module unavailable:", e, ")")

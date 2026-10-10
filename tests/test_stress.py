@@ -36,7 +36,7 @@ import os
 import tempfile
 
 RESULTS = []
-real_utcnow = M.utcnow
+real_utcnow = M.util.utcnow
 
 
 def check(name, cond, extra=""):
@@ -197,7 +197,7 @@ def our_orders_by_side(api):
 
 def run_seed(seed, steps):
     clock = Clock()
-    M.time, M.utcnow = clock, clock.utcnow
+    M.util.time, M.util.utcnow = clock, clock.utcnow
     rng, api, bot, truth, eids, house = build(seed)
     problems, errors_handled, cycles = [], 0, 0
     feed = bot.feed
@@ -292,11 +292,11 @@ def run_seed(seed, steps):
         step(True)
     # 2. The election-night exit window, still with faults.
     for ex in bot.ex.values():
-        ex.close = M.utcnow() + timedelta(hours=1.5)
+        ex.close = M.util.utcnow() + timedelta(hours=1.5)
     for _ in range(steps // 5):
         step(True)
     for ex in bot.ex.values():                                            # back to normal trading hours
-        ex.close = M.utcnow() + timedelta(days=30)
+        ex.close = M.util.utcnow() + timedelta(days=30)
     # 3. Faults stop; the feed is healthy; a minute of quiet trading.
     api.rate, feed.ok = 0.0, True
     feed.push(resync=True)
@@ -331,7 +331,7 @@ def run_seed(seed, steps):
     # one side and a Kelly limit on the other): that's a choice, not a stuck exchange.
     wanted = {e for e in priceable if bot.ex[e].quote.bid is not None or bot.ex[e].quote.ask is not None}
     unquoted = sorted(bot.ex[e].label for e in wanted - {o["exchangeId"] for o in api.orders.values()})
-    M.time, M.utcnow = real_time, real_utcnow
+    M.util.time, M.util.utcnow = real_time, real_utcnow
     return {"problems": problems, "record_ok": record == actual, "record": (record, actual), "stuck": stuck,
             "changes": changes, "unquoted": unquoted, "priceable": len(priceable), "cycles": cycles,
             "errors_handled": errors_handled, "faults": api.faults, "fills": len(api.fills),
@@ -341,7 +341,7 @@ def run_seed(seed, steps):
 if __name__ == "__main__":
     import logging
     logging.disable(logging.CRITICAL)                 # thousands of expected error lines otherwise
-    M.alert = lambda msg: None
+    M.util.alert = lambda msg: None
     steps = int(sys.argv[1]) if len(sys.argv) > 1 else 1500
     t0 = real_time.time()
     seeds = int(sys.argv[2]) if len(sys.argv) > 2 else 5

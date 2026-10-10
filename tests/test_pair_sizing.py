@@ -26,7 +26,7 @@ import mm_bot as M                            # noqa: E402
 logging.basicConfig(level=logging.ERROR, format="    log %(levelname)s %(message)s")
 RESULTS = []
 ALERTS = []
-M.alert = lambda msg: ALERTS.append(msg)
+M.util.alert = lambda msg: ALERTS.append(msg)
 FVS = {"11": 0.15, "12": 0.85, "21": 0.5, "22": 0.5}
 BANK = 101000.0
 
@@ -236,8 +236,8 @@ def load_old():
     sys.modules["mm_bot_p7"] = mod
     spec.loader.exec_module(mod)
     mod.CFG.alert_url = ""
-    mod.notify = lambda *a, **k: False
-    mod.alert = lambda msg: ALERTS.append(msg)
+    getattr(mod, "util", mod).notify = lambda *a, **k: False
+    getattr(mod, "util", mod).alert = lambda msg: ALERTS.append(msg)
     return mod
 
 

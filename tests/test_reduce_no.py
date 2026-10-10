@@ -22,7 +22,7 @@ logging.basicConfig(level=logging.ERROR, format="    log %(levelname)s %(message
 RESULTS = []
 KEY = "reduce_no_as_sell"
 ALERTS = []
-M.alert = lambda msg: ALERTS.append(msg)
+M.util.alert = lambda msg: ALERTS.append(msg)
 
 
 def check(name, cond, extra=""):
@@ -77,7 +77,7 @@ check("a sell NO locks no cash (reserved_cash)",
       M.reserved_cash([{**base, "side": "no", "action": "sell", "priceLimit": 0.6}]) == 0.0)
 
 print("--- new_order")
-now = M.utcnow()
+now = M.util.utcnow()
 api, b = bot(True, {"21": -50})
 ex = b.ex["21"]
 o, m = b.new_order(ex, True, 0.40, 30, 0.45, now)
@@ -196,9 +196,9 @@ o_bid, m_bid = b.new_order(ex, True, 0.40, 30, 0.45, now)
 o_ask, m_ask = b.new_order(ex, False, 0.60, 30, 0.45, now)
 b.unconfirmed["21"] = [(o_ask, m_ask, nm), (o_bid, m_bid, nm)]
 api.fills = [{"id": 1, "orderId": 901, "exchangeId": "21", "price": 0.6, "quantity": -10, "side": "no",
-              "filledAt": M.iso(M.utcnow())}]
+              "filledAt": M.iso(M.util.utcnow())}]
 b.log_fills({})
-rows = M.read_fills(b.cfg.fills_csv)
+rows = M.measure.read_fills(b.cfg.fills_csv)
 check("a NO-side fill at 0.6 of the lost sell NO -> fills.csv our_side bid, quote_price 0.4, fill_price kept (NO price)",
       len(rows) == 1 and rows[0]["our_side"] == "bid" and float(rows[0]["quote_price"]) == 0.4
       and float(rows[0]["fill_price"]) == 0.6 and float(rows[0]["qty"]) == 10, rows)
@@ -209,7 +209,7 @@ ex = b.ex["21"]
 o_ask, m_ask = b.new_order(ex, False, 0.40, 30, 0.45, now)
 b.unconfirmed["21"] = [(o_ask, m_ask, nm)]
 api.fills = [{"id": 1, "orderId": 902, "exchangeId": "21", "price": 0.6, "quantity": -10, "side": "no",
-              "filledAt": M.iso(M.utcnow())}]
+              "filledAt": M.iso(M.util.utcnow())}]
 b.log_fills({})
 check("flag off: a converted ask's NO fill still matches the ask (unchanged)",
       b.order_meta.get(902, {}).get("our_side") == "ask", b.order_meta.get(902))
@@ -340,7 +340,7 @@ for on in (True, False):
         check("setup: the bid at 0.40 is a covered sale", o_bid.get("_no_sell"), o_bid)
     b.unconfirmed["21"] = [(o_ask, m_ask, nm), (o_bid, m_bid, nm)]
     api.fills = [{"id": 1, "orderId": 903, "exchangeId": "21", "price": 0.6, "quantity": 10, "side": "yes",
-                  "filledAt": M.iso(M.utcnow())}]
+                  "filledAt": M.iso(M.util.utcnow())}]
     b.log_fills({})
     side = b.order_meta.get(903, {}).get("our_side")
     if on:
@@ -375,7 +375,7 @@ check("off: two full cycles on an inventory grid send only side-yes orders", gri
 
 print("--- fake exchange cash model")
 api, b = bot(True, {"21": -50}, cash=0.0)
-exp_ = M.iso(M.utcnow() + M.timedelta(seconds=600))
+exp_ = M.iso(M.util.utcnow() + M.timedelta(seconds=600))
 ords = [{"exchangeId": "21", "side": "yes", "action": "buy", "quantity": 10, "price": 0.40, "expirationDate": exp_},
         {"exchangeId": "21", "side": "no", "action": "sell", "quantity": 50, "price": 0.60, "expirationDate": exp_},
         {"exchangeId": "21", "side": "no", "action": "sell", "quantity": 1, "price": 0.60, "expirationDate": exp_}]

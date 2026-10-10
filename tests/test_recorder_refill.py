@@ -26,7 +26,7 @@ from fakes import make_bot                                # noqa: E402
 import mark_rule                                          # noqa: E402
 
 M.CFG.alert_url = ""
-M.notify = lambda *a, **k: False
+M.util.notify = lambda *a, **k: False
 logging.basicConfig(level=logging.ERROR, format="    log %(levelname)s %(message)s")
 RESULTS = []
 

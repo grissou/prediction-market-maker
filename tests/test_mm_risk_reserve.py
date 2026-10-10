@@ -43,8 +43,8 @@ def retired(new, old):
 
 logging.basicConfig(level=logging.CRITICAL)
 RESULTS = []
-M.alert = lambda msg: None
-M.notify = lambda *a, **k: False
+M.util.alert = lambda msg: None
+M.util.notify = lambda *a, **k: False
 BASE_REV = "34f5503"                              # the branch head before this change (Z_board20)
 
 
@@ -70,7 +70,7 @@ class Grab(logging.Handler):
         self.lines.append(record.getMessage())
 
 
-NOW = M.utcnow()
+NOW = M.util.utcnow()
 CLOSE = NOW + timedelta(days=30)
 REFS = {"Ohio Senate|Republican": 0.12, "Ohio Senate|Democratic": 0.88,
         "Utah Senate|Republican": 0.55, "Utah Senate|Democratic": 0.45}
@@ -99,7 +99,7 @@ check("5000 / 4000 accepted", not bad and good == {"mm_risk_reserve_wc": 5000.0,
       (good, bad))
 good, bad = M.validate_overrides({"mm_risk_reserve_wc": 60000.0, "mm_risk_reserve_corr": -1.0}, c)
 check("60000 / -1 refused", len(bad) == 2 and not good, (good, bad))
-src = open(os.path.join(HERE, "..", "mm_bot.py")).read()
+src = "".join(open(p).read() for p in sorted(__import__("glob").glob(os.path.join(HERE, "..", "mmbot", "*.py"))))
 check("Config block '# --- P12 ops: market-making risk reserve ---' after skew_target_inventory",
       src.index("# --- P12 ops: market-making risk reserve ---") > src.index("    skew_target_inventory: bool = False"))
 check("hysteresis 1.1", M.MM_RISK_HYST == 1.1)
@@ -396,7 +396,7 @@ try:
         spec = importlib.util.spec_from_file_location("mm_bot_mmrbase", path)
         base = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(base)
-        base.alert, base.notify = M.alert, (lambda *a_, **k: False)
+        base.alert, base.notify = M.util.alert, (lambda *a_, **k: False)
 except Exception as e:                            # no git here: reported as a failure
     print("    (base module unavailable:", e, ")")
 check(f"base module (git show {BASE_REV}:mm_bot.py) loaded", base is not None)

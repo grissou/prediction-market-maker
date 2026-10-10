@@ -23,8 +23,8 @@ import mm_bot as M                                       # noqa: E402
 
 logging.basicConfig(level=logging.CRITICAL)
 RESULTS = []
-M.alert = lambda msg: None
-M.notify = lambda *a, **k: False
+M.util.alert = lambda msg: None
+M.util.notify = lambda *a, **k: False
 
 
 def check(name, cond, extra=""):
@@ -32,7 +32,7 @@ def check(name, cond, extra=""):
     RESULTS.append(bool(cond))
 
 
-CLOSE = M.utcnow() + timedelta(days=30)
+CLOSE = M.util.utcnow() + timedelta(days=30)
 RACES = {"A": "Alpha Senate", "B": "Beta Senate"}
 
 
@@ -120,7 +120,7 @@ def tick(b, skip=()):
     time.sleep(0.002)
     for x in b.ex.values():
         x.inv = float(b.api.inv.get(x.eid, 0.0))
-    return quiet(b.alloc_tick, M.utcnow(), dict(b.api.inv), b.orders_by_eid(M.utcnow()), None, set(skip))
+    return quiet(b.alloc_tick, M.util.utcnow(), dict(b.api.inv), b.orders_by_eid(M.util.utcnow()), None, set(skip))
 
 
 def ladder(api, eid="A1"):
@@ -185,7 +185,7 @@ check("setup: the ladder rests on A1 at the best bid 0.93 / 0.91 / 0.89", [round
       == [0.93, 0.91, 0.89], ladder(api))
 b.sync_orders(api.open_orders("T"), time.monotonic() + 1e6)
 for x in b.ex.values():
-    x.book = M.strip_own(api.full_book(x.eid), b.orders_by_eid(M.utcnow()).get(x.eid, []))
+    x.book = M.strip_own(api.full_book(x.eid), b.orders_by_eid(M.util.utcnow()).get(x.eid, []))
 fv = {e: M.fair_value(x.book, b.cfg) for e, x in b.ex.items()}
 r = quiet(b.arb_plan, b.groups["Alpha Senate"], dict(api.inv), fv, False)
 check("other traders' bids sum 1.01 (> 1): no NO+NO unwind at a cost (asks 1.05) while the ladder sells the set",
@@ -197,7 +197,7 @@ warm(b)
 tick(b)
 b.sync_orders(api.open_orders("T"), time.monotonic() + 1e6)
 for x in b.ex.values():
-    x.book = M.strip_own(api.full_book(x.eid), b.orders_by_eid(M.utcnow()).get(x.eid, []))
+    x.book = M.strip_own(api.full_book(x.eid), b.orders_by_eid(M.util.utcnow()).get(x.eid, []))
 fv = {e: M.fair_value(x.book, b.cfg) for e, x in b.ex.items()}
 r = quiet(b.arb_plan, b.groups["Alpha Senate"], dict(api.inv), fv, False)
 check("...a PROFITABLE unwind (asks 0.98) still fires with the ladder resting", r is not None and r[0] == "unwind", r)
@@ -222,7 +222,7 @@ check("...tried again once the wait is over (and placed)", len(ladder(api)) == 3
 # ============================================================================================ RT12-4
 print("--- RT12-4: skew_target_inventory keeps the inventory skew in reduce-only")
 seen = []
-orig = M.compute_quote
+orig = M.quoting.compute_quote
 
 
 def spy(*a, **k):
@@ -237,7 +237,7 @@ ex = b.ex["12"]
 inv = {"12": 2500.0}
 eff = b.effective_inventory(inv)
 b0, ex0, inv0, eff0 = b, ex, inv, eff
-M.compute_quote = spy
+M.quoting.compute_quote = spy
 try:
     fv = fv0 = M.fair_value(ex.book, b.cfg)
     quiet(b.decide, ex, fv, inv, eff, False, 0.0, time.monotonic(), ref=0.88, ref_liquid=True)
@@ -245,7 +245,7 @@ try:
     quiet(b.decide, ex, fv, inv, eff, True, 0.0, time.monotonic(), ref=0.88, ref_liquid=True)
     red = seen[-1] if seen else "none"
 finally:
-    M.compute_quote = orig
+    M.quoting.compute_quote = orig
 check(f"normal: the +EV holding is the target (skew_inv {normal} ~ 0)", normal is not None and normal != "none"
       and abs(normal) < 1e-6, normal)
 check(f"global_reduce (risk over the cap): the skew is from flat again (skew_inv None: {red})", red is None, red)
@@ -255,7 +255,7 @@ print("--- RT12-7: a target that is just the holding does not unbrake the adding
 
 def cq(inv, fv, bb, ba, **extra):
     c = M.Config()
-    return M.compute_quote(fv, inv, inv, bb, ba, c, bankroll=100000, **extra)
+    return M.quoting.compute_quote(fv, inv, inv, bb, ba, c, bankroll=100000, **extra)
 
 
 flat = cq(600, 0.60, 0.585, 0.615)
@@ -281,11 +281,11 @@ def spy2(*a, **k):
     return orig(*a, **k)
 
 
-M.compute_quote = spy2
+M.quoting.compute_quote = spy2
 try:
     quiet(b0.decide, ex0, fv0, inv0, eff0, False, 0.0, time.monotonic(), ref=0.88, ref_liquid=True)
 finally:
-    M.compute_quote = orig
+    M.quoting.compute_quote = orig
 check("decide: the holding fallback target (no allocator plan) quotes with skew_add_flat", seen2[-1:] == [True], seen2)
 
 # ============================================================================================ RT12-5

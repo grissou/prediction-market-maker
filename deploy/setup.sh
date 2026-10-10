@@ -2,12 +2,12 @@
 # One-time setup of the bot on an Ubuntu/Debian server. Also safe to re-run to UPDATE the bot
 # (copies the new code, keeps your .env, logs, fills and recorded data). Run from your Mac:
 #
-#   scp -r mm_bot.py ref_prices.py ref_map.json deploy root@SERVER_IP:/root/mmbot-src
+#   scp -r mm_bot.py mmbot ref_prices.py ref_map.json deploy root@SERVER_IP:/root/mmbot-src
 #   ssh -t root@SERVER_IP 'bash /root/mmbot-src/deploy/setup.sh'
 #
 # On servers where you log in as your own user instead of root (Azure: azureuser), use sudo:
 #
-#   scp -r mm_bot.py ref_prices.py ref_map.json deploy azureuser@SERVER_IP:mmbot-src
+#   scp -r mm_bot.py mmbot ref_prices.py ref_map.json deploy azureuser@SERVER_IP:mmbot-src
 #   ssh -t azureuser@SERVER_IP 'sudo bash mmbot-src/deploy/setup.sh'
 #
 # It does NOT start live trading. When you're ready: systemctl enable --now mmbot

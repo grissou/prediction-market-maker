@@ -28,7 +28,7 @@ from fakes import FakeApi, FakeFeed, FakeRefs, lvl, make_bot, market, pin_test_s
 M.CFG.alert_url = ""
 _live = Config()                                          # the real defaults, checked below
 pin_test_sizes(M.CFG)                                     # exact expected numbers below use the old sizes
-M.notify = lambda *a, **k: False
+M.util.notify = lambda *a, **k: False
 
 logging.basicConfig(level=logging.ERROR, format="    log %(levelname)s %(message)s")
 RESULTS = []
@@ -332,7 +332,7 @@ check("one snapshot per market per record_seconds (2 quick cycles -> 1 set)", (n
 check("snapshot has book, fair value and our quote", row[2] and row[3] == 0.105 and row[4] == 0.175, row)
 
 sent = []
-real_notify, M.notify = M.notify, lambda message, title="", **k: sent.append((title, message)) or True
+real_notify, M.util.notify = M.util.notify, lambda message, title="", **k: sent.append((title, message)) or True
 a, b = make_bot()
 b.cfg.summary_every_hours = 1                               # every hour, so the current hour is always due
 b.phase = "trading"                                         # as run() sets it once trading is open
@@ -355,7 +355,7 @@ check("the next summary shows the change since the previous one (account, arbitr
       sent and "+0 in 1h" in sent[0][1] and "3 arbitrages" in sent[0][1] and "1 takes" in sent[0][1], sent)
 check("status line first: OK, and what the bot is doing", message.split("\n")[0].startswith("Status: OK | trading"), message)
 sent.clear(); calls_prio = []
-M.notify = lambda message, title="", priority="default", **k: sent.append((title, message)) or calls_prio.append(priority) or True
+M.util.notify = lambda message, title="", priority="default", **k: sent.append((title, message)) or calls_prio.append(priority) or True
 b.last_summary_slot, b.pulled_after_errors, b.failed_cycles = None, True, 3
 b.maybe_summary()
 check("problems -> 'ISSUES' in the title, listed in the status line, sent at high priority",
@@ -371,7 +371,7 @@ b3.sleep_until = lambda t: None
 b3.wait_for_trading()
 check("updates are sent while waiting for the open too (so you know it's alive)",
       sent and "waiting for the open" in sent[0][1] and "order books ready" in sent[0][1], sent)
-M.notify = real_notify
+M.util.notify = real_notify
 empty = FakeApi(); empty.leaderboard = lambda: {"myRank": None, "total": 0}; empty.smart_score = lambda: []
 t2, m2 = build_summary(empty, "/nonexistent/fills.csv", 100_000, value=100_000)
 check("before any trading: 'not ranked yet' / 'not scored yet' instead of an error",
@@ -520,12 +520,12 @@ def backoffs(session_lengths):
     async def fake_sleep(t):
         waits.append(t); clock[0] += t
     feed._session = fake_session
-    real_sleep, real_mono = asyncio.sleep, M.time.monotonic
-    asyncio.sleep, M.time.monotonic = fake_sleep, lambda: clock[0]
+    real_sleep, real_mono = asyncio.sleep, M.util.time.monotonic
+    asyncio.sleep, M.util.time.monotonic = fake_sleep, lambda: clock[0]
     try:
         logging.disable(logging.CRITICAL); asyncio.run(feed._run())
     finally:
-        asyncio.sleep, M.time.monotonic = real_sleep, real_mono; logging.disable(logging.NOTSET)
+        asyncio.sleep, M.util.time.monotonic = real_sleep, real_mono; logging.disable(logging.NOTSET)
     return waits
 w = backoffs([3000, 2400, 1800, 600])
 check("a drop after a healthy session reconnects after 1 s every time (not 2, 4, 8, 16 s)", w[:4] == [1, 1, 1, 1], w)
@@ -594,7 +594,7 @@ def slow_test_batch(orders):
     return real_pb(orders)
 a.place_batch = slow_test_batch
 alerts = []
-real_alert, M.alert = M.alert, lambda m: alerts.append(m)
+real_alert, M.util.alert = M.util.alert, lambda m: alerts.append(m)
 cycles = {"n": 0}
 real_cycle = b.cycle
 def counting():
@@ -610,7 +610,7 @@ def counting():
         b.running = False
 b.cycle, b.cfg.loop_seconds, b.cfg.min_cycle_seconds = counting, 0.01, 0.01
 b.run()
-M.alert = real_alert
+M.util.alert = real_alert
 check("...and its result is picked up once it's in: passed, test orders gone", b.selftest_passed and
       not [o for o in a.orders.values() if o["quantity"] == 1], cycles)
 check("F8: a passed self-test clears selftest_eid (that exchange is ordinary again)", b.selftest_eid is None)
@@ -626,11 +626,11 @@ a, b = make_bot()
 a.batch_error = ApiError(409, "REQUEST_IN_FLIGHT", "in flight")
 b.cfg.selftest_alert_after, b.cfg.selftest_retry_seconds = 0, 0
 alerts = []
-M.alert = lambda m: alerts.append(m)
+M.util.alert = lambda m: alerts.append(m)
 logging.disable(logging.CRITICAL)
 b.self_test(); b.self_test()
 logging.disable(logging.NOTSET)
-M.alert = real_alert
+M.util.alert = real_alert
 check("self-test still busy after selftest_alert_after: exactly one alert, still no exit",
       len([m for m in alerts if "self-test" in m]) == 1, alerts)
 a, b = make_bot()
@@ -912,8 +912,8 @@ b.cycle()
 check("...and with no fair value ever seen, exits around Polymarket's price", a.inv.get("11") == 0, a.inv)
 
 print("--- implausible Polymarket price (wrong match)")
-alerts, real_alert = [], M.alert
-M.alert = alerts.append
+alerts, real_alert = [], M.util.alert
+M.util.alert = alerts.append
 a, b = make_bot()
 b.refs = FakeRefs({"Ohio Senate|Republican": 0.60})        # 46c from the book's 0.14: surely a wrong match
 b.cycle(); b.cycle()
@@ -923,7 +923,7 @@ check("...one alert, not one per cycle", len([m for m in alerts if "Ohio" in m])
 b.refs.prices = {"Ohio Senate|Republican": 0.30}           # back in a plausible range (16c): used again
 b.cycle()
 check("...back within 25c: used again (guard -> bid only)", [s for s, _, _ in a.ours("11")] == ["bid"], a.ours("11"))
-M.alert = real_alert
+M.util.alert = real_alert
 
 print("--- takes respect the tail guard")
 tail_race = {"11": {"bids": [lvl(0.90, 1000)], "asks": [lvl(0.93, 1000)]}, "12": {"bids": [lvl(0.07, 1000)], "asks": [lvl(0.10, 1000)]},
@@ -1067,8 +1067,8 @@ check("a new reading starts the next cycle after the 0.5 s minimum, not after lo
 check("cycles may run every 0.5 s", Config().min_cycle_seconds == 0.5)
 
 print("--- clock check")
-alerts, real_alert = [], M.alert
-M.alert = alerts.append
+alerts, real_alert = [], M.util.alert
+M.util.alert = alerts.append
 a, b = make_bot()
 a.last_date = (M.email.utils.format_datetime(utcnow() - timedelta(seconds=10), usegmt=True), utcnow())
 skew = b.check_clock()
@@ -1105,21 +1105,21 @@ except SystemExit as e:
 finally:
     logging.disable(logging.NOTSET)
 check("orders rejected at any expiry: still stops (exit code 3) for a human to look", code == EXIT_FATAL, code)
-M.alert = real_alert
+M.util.alert = real_alert
 
 print("--- robustness")
 check("timestamps with 7 decimal places parse (Python 3.10 can't read them as they come)",
       parse_ts("2026-09-26T13:56:47.7844565+00:00") == parse_ts("2026-09-26T13:56:47.784456Z"))
 a, b = make_bot()
 b.cfg.summary_every_hours, b.last_summary_slot = 1, None
-real_bs, M.build_summary = M.build_summary, lambda *x, **k: 1 / 0
+real_bs, M.measure.build_summary = M.measure.build_summary, lambda *x, **k: 1 / 0
 logging.disable(logging.CRITICAL)
 try:
     b.maybe_summary(); ok = True
 except Exception:
     ok = False
 finally:
-    logging.disable(logging.NOTSET); M.build_summary = real_bs
+    logging.disable(logging.NOTSET); M.measure.build_summary = real_bs
 check("a failing phone summary is skipped, never an error that would pull the quotes", ok)
 
 print("--- live size defaults")
@@ -1350,7 +1350,7 @@ a, b = make_bot(); b.cycle()
 rest = lambda e: [o for o in b.my_orders.values() if o.eid == e]
 bid11 = [o for o in rest("11") if o.is_bid][0]
 ask11 = [o for o in rest("11") if not o.is_bid][0]
-now, now_m = M.utcnow(), time.monotonic()
+now, now_m = M.util.utcnow(), time.monotonic()
 unsafe_q = Quote(bid11.price - 0.02, int(bid11.qty), ask11.price, int(ask11.qty), bid11.price - 0.01, ask11.price)
 safe_q = Quote(bid11.price + 0.01, int(bid11.qty), ask11.price, int(ask11.qty), bid11.price + 0.01, ask11.price)
 ch_unsafe = b.plan_change(b.ex["11"], unsafe_q, rest("11"), 0.14, now, now_m)
@@ -1382,7 +1382,7 @@ del a.budget_left
 def safe_reprice(b, e):
     o = [x for x in b.my_orders.values() if x.eid == e and x.is_bid][0]
     return o, b.plan_change(b.ex[e], Quote(o.price + 0.01, int(o.qty), None, 0, o.price + 0.01, None), [o],
-                            0.5, M.utcnow(), time.monotonic())
+                            0.5, M.util.utcnow(), time.monotonic())
 for loading in (True, False):
     a, b = make_bot(); b.cycle()
     a.wbudget, a.writes_left = 45, (lambda: 16)               # 29 writes used in the last minute
@@ -1601,7 +1601,7 @@ b.burst, b.burst_set, b.burst_cfg = True, {"11"}, b.cfg
 o11 = [o for o in b.my_orders.values() if o.eid == "11"]
 bid11 = [o for o in o11 if o.is_bid][0]; ask11 = [o for o in o11 if not o.is_bid][0]
 q375 = Quote(bid11.price, 375, ask11.price, 375, bid11.price, ask11.price)
-now, now_m = M.utcnow(), time.monotonic()
+now, now_m = M.util.utcnow(), time.monotonic()
 ch = b.plan_change(b.ex["11"], q375, [o for o in o11 if not o.is_bid], 0.14, now, now_m)
 check("burst: a 375-share quote is placed at 187 (half)", ch is not None and [o["quantity"] for o, _ in ch.new] == [187],
       ch and [o["quantity"] for o, _ in ch.new])
@@ -1727,7 +1727,7 @@ check("a write waiting on the write budget doesn't hold up reads", waited < 0.3,
 print("--- live settings (settings_override.json, re-read every 30 s)")
 a, b = make_bot()
 alerts = []
-real_alert, M.alert = M.alert, lambda m: alerts.append(m)
+real_alert, M.util.alert = M.util.alert, lambda m: alerts.append(m)
 with open(b.cfg.overrides_file, "w") as f:
     json.dump({"min_edge": 0.015, "burst_markets": 25, "api_key": "x", "max_half_spread": 5, "churn_control": "yes"}, f)
 logging.disable(logging.CRITICAL); b.check_overrides(force=True); logging.disable(logging.NOTSET)
@@ -1745,7 +1745,7 @@ with open(b.cfg.overrides_file, "w") as f:
 os.utime(b.cfg.overrides_file, (time.time() + 10, time.time() + 10))
 alerts.clear(); logging.disable(logging.CRITICAL); b.check_overrides(force=True); logging.disable(logging.NOTSET)
 check("an unreadable file keeps the current settings (and alerts)", b.cfg.burst_markets == 25 and alerts, alerts)
-M.alert = real_alert
+M.util.alert = real_alert
 check("never overridable: secrets, URLs, files, the kill switch", not {"api_key", "base_url", "slug", "alert_url",
       "max_drawdown_pct", "fills_csv", "overrides_file"} & set(M.OVERRIDABLE))
 check("every overridable name is a real setting", all(hasattr(Config(), k) for k in M.OVERRIDABLE))
@@ -1795,12 +1795,12 @@ check("start-up: orders left over -> cancelled first",
       a.calls.index(("cancel_all", None)) < min(i for i, c in enumerate(a.calls) if c[0] == "batch"), a.calls[:4])
 a, b = make_bot()
 alerts = []
-real_alert, M.alert = M.alert, lambda m: alerts.append(m)
+real_alert, M.util.alert = M.util.alert, lambda m: alerts.append(m)
 b.cfg.slow_cycle_alert_seconds = 10
 b.cycle_started = time.monotonic() - 30
 b.progress("sending orders")
 st = json.load(open(b.cfg.status_file))
-M.alert = real_alert
+M.util.alert = real_alert
 check("a long cycle keeps status.json fresh (running seconds + phase) and alerts once",
       st.get("cycle_running_seconds") == 30 and st.get("cycle_phase") == "sending orders" and len(alerts) == 1, (st.get("cycle_phase"), alerts))
 
@@ -2129,13 +2129,13 @@ class R:
     def __init__(s, code, text): s.status_code, s.text, s.content, s.headers = code, text, text.encode(), {}
     def json(s): raise ValueError
 real_api.s.request = lambda *a, **k: R(502, "<html>bad gateway</html>")
-real_sleep, M.time.sleep = M.time.sleep, (lambda s: None)
+real_sleep, M.util.time.sleep = M.util.time.sleep, (lambda s: None)
 try:
     real_api.call("GET", "/x"); ok = False
 except ApiError as e:
     ok = e.code == "BAD_RESPONSE"
 finally:
-    M.time.sleep = real_sleep
+    M.util.time.sleep = real_sleep
 check("HTML error page -> ApiError, never a crash", ok)
 
 # Plain-text errors ({"error": "Not found"}, the 2026-10-02 outage): an ApiError carrying the text, never a crash.
@@ -2151,7 +2151,7 @@ check("plain-text error {'error': 'Not found'} -> ApiError with its text, never 
 
 # One phone alert per outage, however long (it used to repeat every cycle while cancel-all failed), one when it ends.
 sent = []
-real_alert, M.alert = M.alert, (lambda m: sent.append(m))
+real_alert, M.util.alert = M.util.alert, (lambda m: sent.append(m))
 try:
     a, b = make_bot()
     def cancel_fails(): raise ApiError(0, "NETWORK", "down")
@@ -2164,7 +2164,7 @@ try:
     b.on_cycle_ok()
     n_quiet = len(sent) - n_outage - n_back
 finally:
-    M.alert = real_alert
+    M.util.alert = real_alert
 check("an outage with a failing cancel-all alerts once, not every cycle", n_outage == 1, sent)
 check("recovery alerts once, and only after an alerted outage", n_back == 1 and n_quiet == 0, sent)
 
@@ -2264,7 +2264,7 @@ finally:
 a, b = make_bot()
 answers, calls = [False, False, True], []
 b.cancel_everything = lambda: (calls.append(1), answers.pop(0))[1]
-real_alert, M.alert = M.alert, (lambda m: None)
+real_alert, M.util.alert = M.util.alert, (lambda m: None)
 logging.disable(logging.CRITICAL)
 try:
     b.on_cycle_error("unexpected error", pull_now=True)
@@ -2274,7 +2274,7 @@ try:
     b.on_cycle_error("unexpected error", pull_now=True)
 finally:
     logging.disable(logging.NOTSET)
-    M.alert = real_alert
+    M.util.alert = real_alert
 check("F11: a cancel-all that left orders resting is retried each failed cycle until it reports none left",
       first is False and len(calls) == 3 and b.pulled_after_errors and not answers, (first, calls))
 
@@ -2605,7 +2605,7 @@ a, b = make_bot(); b.cycle()
 rest = lambda e: [o for o in b.my_orders.values() if o.eid == e]
 bid11 = [o for o in rest("11") if o.is_bid][0]
 ask11 = [o for o in rest("11") if not o.is_bid][0]
-now, now_m = M.utcnow(), time.monotonic()
+now, now_m = M.util.utcnow(), time.monotonic()
 Q, QA = int(bid11.qty), int(ask11.qty)
 shrunk = Quote(bid11.price, max(1, Q // 4), ask11.price, max(1, QA // 4), bid11.price, ask11.price, Q, QA)
 check("a full-size order under a shrunk size FACTOR (ceiling x0.25, bid_max = its size) stays: no change",
@@ -2678,7 +2678,7 @@ def slow_batch(orders, _real=a.place_batch):
 a.place_batch = slow_batch
 rest = lambda e: [o for o in b.my_orders.values() if o.eid == e]
 o11 = rest("11")[0]
-new = [b.new_order(b.ex["11"], o11.is_bid, o11.price, int(o11.qty), 0.14, M.utcnow())]
+new = [b.new_order(b.ex["11"], o11.is_bid, o11.price, int(o11.qty), 0.14, M.util.utcnow())]
 a.cancel_all(None, "11"); b.forget_orders([o.order_id for o in rest("11")])
 t0 = time.monotonic()
 b.send_changes([Change(b.ex["11"], [], False, new, (1, 1, 0, 0))])
@@ -2775,8 +2775,8 @@ check("...True when the budget has room", b.writes_ready(3))
 a, b = make_bot(); b.cycle()
 alerts, exits = [], []
 M.log.disabled = True                     # (the watchdog's stack dump is long)
-_real_alert = M.alert
-M.alert = lambda msg: alerts.append(msg)
+_real_alert = M.util.alert
+M.util.alert = lambda msg: alerts.append(msg)
 b.hard_exit = lambda code: exits.append(code)
 b.cfg.watchdog_alert_seconds, b.cfg.watchdog_exit_seconds = 180, 600
 t = b.last_cycle_done
@@ -2803,7 +2803,7 @@ hang.set()
 b.cfg.watchdog_exit_seconds = 0
 exits.clear()
 check("...watchdog_exit_seconds 0 = never exits", b.watchdog_check(t + 5000) in (None, "alert") and not exits)
-M.alert = _real_alert
+M.util.alert = _real_alert
 M.log.disabled = False
 check("new settings are live-overridable", all(k in M.OVERRIDABLE for k in (
     "urgent_writes_per_cycle", "main_write_wait_margin", "watchdog_alert_seconds", "watchdog_exit_seconds",
@@ -2814,8 +2814,8 @@ check("new settings are live-overridable", all(k in M.OVERRIDABLE for k in (
 # LOW-8: a main-thread write refused for the budget (429 WRITE_BUDGET_WAIT) was never sent: no pending hold, no alert.
 print("--- WRITE_BUDGET_WAIT = not sent (takes, arbitrage)")
 _alerts = []
-_real_alert2 = M.alert
-M.alert = lambda msg: _alerts.append(msg)
+_real_alert2 = M.util.alert
+M.util.alert = lambda msg: _alerts.append(msg)
 a, b = take_setup(); b.cycle()
 ex = b.ex["11"]
 ex.book = {"bids": [lvl(0.10, 1000)], "asks": [lvl(0.18, 1000)]}
@@ -2849,7 +2849,7 @@ check("...with 5 left it runs; a batch refused WRITE_BUDGET_WAIT sets no pending
       all(b.ex[e].pending_until <= now_m for e in ("11", "12")) and not _alerts and b.arbs_skipped_budget == 2,
       _alerts)
 del a.writes_left
-M.alert = _real_alert2
+M.util.alert = _real_alert2
 cap2 = _Api(M.CFG, False)
 cap2.gap, cap2.wbudget, cap2.BUDGET_WINDOW = 0.0, 1, 30.0
 cap2.throttle(write=True); cap2.tl.max_write_wait = 0.1

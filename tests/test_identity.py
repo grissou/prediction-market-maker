@@ -35,7 +35,7 @@ import mm_bot as M                                                # noqa: E402
 
 logging.basicConfig(level=logging.CRITICAL)
 logging.disable(logging.CRITICAL)
-M.alert, M.notify = (lambda msg: None), (lambda *a, **k: False)
+M.util.alert, M.util.notify = (lambda msg: None), (lambda *a, **k: False)
 BASE_REV = os.environ.get("IDENTITY_BASE", "d9220c1")
 SETTINGS = os.environ.get("IDENTITY_SETTINGS", os.path.join(ROOT, "deploy", "settings_override.live_minimal.json"))
 RESULTS = []
@@ -138,7 +138,7 @@ if base is not None:
           f"or behind a master switch at its default", not non_default, non_default)
 
 # ------------------------------------------------------------------------------------------ a small world
-NOW = M.utcnow()
+NOW = M.util.utcnow()
 CLOSE = NOW + timedelta(days=30)
 RACES = {"A": "Alpha Senate", "B": "Beta Senate", "G": "Gamma Senate", "D": "Delta Senate",
          "R": "Rhode Island Senate"}

@@ -29,7 +29,7 @@ import mm_bot as M                                        # noqa: E402
 logging.basicConfig(level=logging.ERROR, format="    log %(levelname)s %(message)s")
 RESULTS = []
 ALERTS = []
-M.alert = lambda msg: ALERTS.append(msg)
+M.util.alert = lambda msg: ALERTS.append(msg)
 A, B = "no_set_aware_bids", "pair_no_unwind_max_cost"
 THIRD = market("5", "13", "Independent", "Ohio Senate")   # makes Ohio a 3-leg race (11, 12, 13)
 
@@ -89,7 +89,7 @@ def cyc(bt, n=1):
         bt.drain_writes(5)
 
 
-now = M.utcnow()
+now = M.util.utcnow()
 
 print("--- settings")
 c = M.Config()
@@ -321,7 +321,7 @@ check("pair_no_unwind_max_per_cycle live override 3 accepted, 11 refused (1-10)"
 
 print("--- fake exchange: set-collateral rule")
 api, bt = bot({"21": -817, "22": -975}, cash=0.0)
-exp_ = M.iso(M.utcnow() + M.timedelta(seconds=600))
+exp_ = M.iso(M.util.utcnow() + M.timedelta(seconds=600))
 
 
 def sell_no(e, q, p=0.995):
@@ -575,7 +575,7 @@ try:
         spec = importlib.util.spec_from_file_location("mm_bot_p6", path)
         base = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(base)
-        base.alert = M.alert
+        base.alert = M.util.alert
         base.notify = lambda *a_, **k: False
 except Exception as e:                            # no git here: the pin is skipped (reported)
     print("    (base module unavailable:", e, ")")

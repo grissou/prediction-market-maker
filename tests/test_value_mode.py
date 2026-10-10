@@ -48,8 +48,8 @@ def retired(new, old):
 
 logging.basicConfig(level=logging.CRITICAL)
 RESULTS = []
-M.alert = lambda msg: None
-M.notify = lambda *a, **k: False
+M.util.alert = lambda msg: None
+M.util.notify = lambda *a, **k: False
 BASE_REV = "a67d9da"
 NEW_KEYS = ("value_mode", "value_sell_margin", "bloc_delta_enabled", "bloc_rho", "bloc_rho_control",
             "max_bloc_delta_frac", "value_quote_hurdle", "value_mid_low", "value_mid_high", "value_mid_inventory_quotes",
@@ -84,13 +84,13 @@ def cq(inv, fv, bb, ba, ro=False, age=0.0, p=None, eff=None, mod=None, **kw):
     for k, v in dict({} if mod is M else RETIRED_FLIPPED, **kw).items():
         setattr(c, k, v)
     extra = {"value_p": p} if mod is M else {}
-    return mod.compute_quote(fv, inv, inv if eff is None else eff, bb, ba, c, reduce_only=ro, bankroll=100000,
+    return getattr(mod, "quoting", mod).compute_quote(fv, inv, inv if eff is None else eff, bb, ba, c, reduce_only=ro, bankroll=100000,
                              age_hours=age, **extra)
 
 
 REFS = {"Ohio Senate|Republican": 0.12, "Ohio Senate|Democratic": 0.88,
         "Utah Senate|Republican": 0.55, "Utah Senate|Democratic": 0.45}
-NOW = M.utcnow()
+NOW = M.util.utcnow()
 
 
 def plain_bot(inv, refs=None, close_h=None, **cfg):
@@ -475,7 +475,7 @@ try:
         spec = importlib.util.spec_from_file_location("mm_bot_p10base", path)
         base = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(base)
-        base.alert, base.notify = M.alert, (lambda *a_, **k: False)
+        base.alert, base.notify = M.util.alert, (lambda *a_, **k: False)
 except Exception as e:                            # no git here: reported as a failure
     print("    (base module unavailable:", e, ")")
 check(f"base module (git show {BASE_REV}:mm_bot.py) loaded", base is not None)
