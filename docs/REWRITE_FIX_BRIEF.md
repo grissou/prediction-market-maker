@@ -47,11 +47,13 @@ live bot's fills, but **planned no orders at all**: zero quotes, zero ladder lev
 The old bot's 2-hourly summary grew to a dozen lines of per-feature detail. The rewrite sends a SHORT one, every 2
 hours on the hour UTC, in this shape and nothing more (numbers from status.json; omit a line whose figure is unknown):
 
-    Account 104.8k (+4.8%) · EV at settlement 112.7k (+2.0k 24h) · realised +2.3k
-    Rank 156 of 1,396 · Smart Score 25.1 (rank 174)
-    Orders 172 · cash 10.0k · 226/237 priced · tilt 8.2%
-    Last 2h: 41 fills, swaps 0, ladder 2 fills, MM +12
+    Balance 104.8k (+4.8%) · leaderboard 156 of 1,396 · Smart Score 25.1 (rank 174)
+    EV at settlement 112.7k (+2.0k 24h)
+    MM profit 24h +83 (realised) · tilt 8.2%
     OK  (or: REDUCE-ONLY since 13:10 · 3 rate limits · 2 errors)
+
+The owner asked for exactly these five figures: current balance, the leaderboard ranks, EV, market-making profit
+(the 24-hour realised figure from the middle-band round trips) and the tilt. Nothing else in the summary.
 
 Alerts (sent at once, one line each, never repeated within 30 minutes for the same cause): the kill switch, a
 crash or restart, reduce-only switching on or off, a rate-limit penalty, the self-test failing, the realtime feed
