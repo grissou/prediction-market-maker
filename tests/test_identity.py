@@ -87,6 +87,11 @@ RETIRED_MASTERS = {                               # knob prefix -> the retired f
     "reduce_from_book_max_turnover": "reduce_from_book_dead_only",
     # mark fragility's cap (removed on simplify): mark_frag_total_max_cash was read only with mark_frag_enabled
     "mark_frag_total_max_cash": "mark_frag_enabled",
+    # ref-tilt application (T2.1 ramp-in, T2.3 carry ramp, X12 tilted takes, Package 8 guard variants; removed on
+    # simplify): read only while ref_tilt_enabled was true (live: absent = false). The estimator and its knobs
+    # (ref_tilt_max, _min_markets, _halflife_min, _winsor, _estimator) stay: they shape the live tilt_s reading.
+    **{k: "ref_tilt_enabled" for k in ("ref_tilt_headline", "ref_tilt_rampin_min", "ref_tilt_carry_days",
+                                       "take_tilted_ref", "ref_guard_tilted")},
 }
 RETIRED_LIVE, RETIRED_OFF = {}, {}
 if base is not None:
@@ -245,6 +250,14 @@ RETIRED_STATUS = {                                # e.g. "basket": ({"state": "o
     # mark_frag_enabled was off (the mark-noise estimate itself, mark_frag_total_cash / _top / _capped_markets /
     # _estimates, stays: it is written from the recorder's snapshots whatever the flag)
     "mark_frag_total_cap_active": (False,),
+    # T2.5 passive pair unwind (removed on simplify): "pair_passive_open" / "pair_passive_sets_total" were written
+    # only with pair_unwind_passive on or a slice open (self.pp, which only the opener filled); off, both are absent
+    "pair_passive_open": (),
+    "pair_passive_sets_total": (),
+    # ref-tilt application (removed on simplify): the s APPLIED to quotes was 0 while ref_tilt_enabled was off (the
+    # estimate tilt_s, tilt_exposure, tilt_state and tilt_diag stay: live readings used by the owner)
+    "tilt_s_applied": (0.0, 0),
+    "tilt_s_applied_headline": (0.0, 0),
 }
 RETIRED_SUBKEYS = {                               # sub-keys of a surviving top-level dict, dotted paths allowed
     # (mm_risk_room.blocked.basket and mm_carry_24h.fills.basket stay in the new code at 0: the older twin suites

@@ -38,7 +38,7 @@ check("negative values refused", len(bad) == 2, bad)
 _ov, _f = list(M.OVERRIDABLE), list(M.Config.__dataclass_fields__)
 check("one contiguous block in OVERRIDABLE and in Config",
       _ov[_ov.index(KEYS[0]):_ov.index(KEYS[0]) + 2] == KEYS and _f[_f.index(KEYS[0]):_f.index(KEYS[0]) + 2] == KEYS)
-check("in Config after the T2.3 block", _f.index(KEYS[0]) > _f.index("ref_tilt_carry_days"))
+check("in Config after the T2.1 estimator block", _f.index(KEYS[0]) > _f.index("ref_tilt_estimator"))
 
 print("--- the factor")
 on = M.Config()

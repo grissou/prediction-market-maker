@@ -22,7 +22,7 @@ import mm_bot as M                                        # noqa: E402
 
 logging.basicConfig(level=logging.ERROR, format="    log %(levelname)s %(message)s")
 RESULTS = []
-KEYS = ["exit_quotes_in_reduce_only", "pair_passive_in_reduce_only"]
+KEYS = ["exit_quotes_in_reduce_only"]      # (pair_passive_in_reduce_only went with the passive pair unwind)
 
 
 def check(name, cond, extra=""):
@@ -32,13 +32,11 @@ def check(name, cond, extra=""):
 
 print("--- settings")
 c = M.Config()
-check("defaults: both off", tuple(getattr(c, k, None) for k in KEYS) == (False, False))
+check("default off", getattr(c, KEYS[0], None) is False)
 good, bad = M.validate_overrides({k: True for k in KEYS}, c)
-check("both live-overridable", len(good) == 2 and not bad, bad)
+check("live-overridable", len(good) == 1 and not bad, bad)
 _ov, _f = list(M.OVERRIDABLE), list(M.Config.__dataclass_fields__)
-check("one contiguous block in OVERRIDABLE and in Config",
-      KEYS[0] in _ov and KEYS[0] in _f and _ov[_ov.index(KEYS[0]):_ov.index(KEYS[0]) + 2] == KEYS
-      and _f[_f.index(KEYS[0]):_f.index(KEYS[0]) + 2] == KEYS)
+check("in OVERRIDABLE and in Config", KEYS[0] in _ov and KEYS[0] in _f)
 
 _T0 = time.time()                                      # frozen wall clock: ages never drift between two decide calls
 time.time = lambda: _T0                                # (the process ends with the test)
@@ -58,8 +56,7 @@ def dec(pos, eff, fv=0.62, book_fv=0.52, reduce=True, ref=None, book=BOOK, eid="
 
 
 def flags(**kw):
-    for k, v in {**dict(exit_quotes_in_reduce_only=False, pair_passive_in_reduce_only=False,
-                        reduce_join_best=False, pair_unwind_passive=False), **kw}.items():
+    for k, v in {**dict(exit_quotes_in_reduce_only=False, reduce_join_best=False), **kw}.items():
         setattr(b.cfg, k, v)
 
 
@@ -118,64 +115,7 @@ check("fast unload stays off in reduce-only (flag on)",
       jq(1000, 1000, 0.45, 0.60, c_on, unload_side="ask", unload_edge=0.0, unload_size=1000)
       == jq(1000, 1000, 0.45, 0.60, c_on))
 
-print("--- (2) complete set (long 7,335 both Ohio legs) in reduce-only: the passive pair slice")
-SETS = 7335
-PBOOKS = {"11": {"bids": [lvl(0.62, 1000)], "asks": [lvl(0.64, 1000)]},
-          "12": {"bids": [lvl(0.37, 1000)], "asks": [lvl(0.375, 1000)]},
-          "21": {"bids": [lvl(0.48, 1000)], "asks": [lvl(0.56, 1000)]},
-          "22": {"bids": [lvl(0.44, 1000)], "asks": [lvl(0.52, 1000)]}}
-api, b = make_bot(books=PBOOKS)
-b.cycle()
-for e, bk in PBOOKS.items():
-    b.ex[e].book = {k: [dict(x) for x in v] for k, v in bk.items()}
-INV = {"11": float(SETS), "12": float(SETS)}
-EFF = b.effective_inventory(INV)
-RACE = b.ex["11"].group
-plan = b.pair_passive_plan(["11", "12"], INV, {})
-cand = b.pp_candidate("11", "12", 1, SETS, b.bankroll())
-check("setup: the plan rests leg A's ask at pp_candidate's price (0.64), one slice",
-      plan and plan["leg"] == "11" and cand and plan["price"] == cand[1] == 0.64 and plan["slice"] == cand[2], plan)
-
-
-def pq(fv=0.63, book_fv=0.63, ref=None, eid="11"):
-    x = b.ex[eid]
-    x.last_fv, x.cooldown_until = None, -1e9
-    q = b.decide(x, fv, INV, EFF, True, 0.0, time.monotonic(), ref=ref, book_fv=book_fv)
-    b.pp = {RACE: dict(plan)}
-    return q, b.pair_passive_quote(x, q)
-
-
-for cfgs in ({}, {"pair_unwind_passive": True}, {"pair_passive_in_reduce_only": True}):
-    for k in ("pair_unwind_passive", "pair_passive_in_reduce_only", "exit_quotes_in_reduce_only"):
-        setattr(b.cfg, k, cfgs.get(k, False))
-    q, p = pq()
-    check(f"{cfgs or 'flags off'}: decide leaves both sides empty (race-net 0), the slice does not rest",
-          q.ask is None and q.bid is None and p == q and p.ask is None, (q, p))
-check("decide records why: the ask was emptied by the reduce-only clip alone", "ask" in b.ex["11"].ro_clip.split(),
-      b.ex["11"].ro_clip)
-b.cfg.pair_unwind_passive = b.cfg.pair_passive_in_reduce_only = True
-q, p = pq()
-check("pair_unwind_passive + pair_passive_in_reduce_only: the slice ask rests at pp_candidate's price for one slice",
-      (p.ask, p.ask_size) == (plan["price"], plan["slice"]) and no_cross(p), p)
-check("...the other leg (B) still quotes nothing (it is not the resting leg)", pq(eid="12")[1].ask is None)
-q, p = pq(fv=None)
-check("fv None: nothing rests", q == M.NO_QUOTE and p.ask is None and b.ex["11"].ro_clip == "", (q, p))
-q, p = pq(ref=0.75)
-check("reference guard (Polymarket 0.75 vs book 0.63): nothing rests", p.ask is None and b.ex["11"].ro_clip == "",
-      (q, p))
-b.ex["11"].cooldown_until = time.monotonic() + 60
-b.ex["11"].last_fv = 0.63
-q = b.decide(b.ex["11"], 0.63, INV, EFF, True, 0.0, time.monotonic(), book_fv=0.63)
-check("jump cooldown: nothing rests", q == M.NO_QUOTE and b.pair_passive_quote(b.ex["11"], q).ask is None)
-q, p = pq()
-INV2 = {"11": float(SETS), "12": float(SETS - 300)}            # 300 more of A than B: race-net +300 on A
-x = b.ex["11"]
-x.last_fv, x.cooldown_until = None, -1e9
-q2 = b.decide(x, 0.63, INV2, b.effective_inventory(INV2), True, 0.0, time.monotonic(), book_fv=0.63)
-check("race-net +300 on A: decide's own reducing ask (no clip flag), the slice replaces it as before",
-      q2.ask is not None and x.ro_clip == "" and b.pair_passive_quote(x, q2).ask == plan["price"], q2)
-b.cfg.pair_passive_in_reduce_only = False
-check("flag off: unchanged (the clipped side stays empty)", pq()[1].ask is None)
+# (section 2, the passive pair slice in reduce-only, was removed with the passive pair unwind on simplify)
 
 print("--- flags off = identical: decide grid with only the new flags toggled where they must not act")
 api, b = make_bot()
@@ -190,7 +130,7 @@ for bb, ba in ((0.48, 0.56), (0.45, 0.46), (None, 0.50), (0.52, 0.53)):
                 outs = []
                 for fl in (False, True):
                     # reduce-only: identical while reduce_join_best is off; otherwise identical always
-                    flags(exit_quotes_in_reduce_only=fl, pair_passive_in_reduce_only=fl, reduce_join_best=not reduce)
+                    flags(exit_quotes_in_reduce_only=fl, reduce_join_best=not reduce)
                     q = dec(pos, eff, fv=fv, book_fv=0.52, reduce=reduce, book=book)
                     outs.append((q, q.bid_limit, q.ask_limit, q.bid_max, q.ask_max))
                 n += 1

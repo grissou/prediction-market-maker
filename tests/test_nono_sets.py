@@ -542,41 +542,7 @@ M.log.removeHandler(cap_)
 M.log.setLevel(logging.NOTSET)
 M.log.propagate = True
 
-print("--- D: T2.5 passive short sets skipped with reduce_no_as_sell")
-for reduce in (False, True):
-    api, bt = bot({"21": -40, "22": -40}, reduce=reduce)
-    bt.cfg.pair_unwind_passive = True
-    with_books(bt)
-    inv = {e: bt.ex[e].inv for e in bt.ex}
-    plan = bt.pair_passive_plan(["21", "22"], inv, FVS)
-    if reduce:
-        check("reduce_no_as_sell on: no short-set slice planned", plan is None, plan)
-    else:
-        check("reduce_no_as_sell off: the short-set slice as before", plan is not None and plan["sign"] == -1, plan)
-api, bt = bot({"21": 40, "22": 40})
-bt.cfg.pair_unwind_passive = True
-with_books(bt)
-plan = bt.pair_passive_plan(["21", "22"], {e: bt.ex[e].inv for e in bt.ex}, FVS)
-check("reduce_no_as_sell on: long sets (YES+YES) still planned", plan is not None and plan["sign"] == 1, plan)
-api, bt = bot({"21": -40, "22": -40})
-bt.cfg.pair_unwind_passive = True
-bt.pp = {"Utah Senate": {"leg": "21", "other": "22", "sign": -1, "price": 0.47, "slice": 40, "left": 40,
-                         "base_x": -40, "base_y": -40}}
-q = M.Quote(0.45, 10, 0.55, 10)
-check("an old short-set slice never rests its bid (quote unchanged)", bt.pair_passive_quote(bt.ex["21"], q) == q)
-for state, want in (("off", "planned"), ("ok", "skipped"), (None, "planned")):
-    api, bt = bot({"21": -40, "22": -40})
-    bt.cfg.pair_unwind_passive, bt.cfg.selftest_enabled, bt.nosell_state = True, True, state
-    with_books(bt)
-    plan = bt.pair_passive_plan(["21", "22"], {e: bt.ex[e].inv for e in bt.ex}, FVS)
-    check(f"D keys on the effective state: setting on, sell-NO check {state!r} -> short-set slice {want}",
-          (plan is None) == (want == "skipped"), plan)
-api, bt = bot({"21": -40, "22": -40})
-bt.cfg.pair_unwind_passive, bt.cfg.selftest_enabled, bt.nosell_state = True, True, "off"
-bt.pp = {"Utah Senate": {"leg": "21", "other": "22", "sign": -1, "price": 0.47, "slice": 40, "left": 40,
-                         "base_x": -40, "base_y": -40}}
-check("...and the slice rests its bid when the sell-NO check failed",
-      bt.pair_passive_quote(bt.ex["21"], M.Quote(0.45, 10, 0.55, 10)).bid == 0.47)
+# (section D, the T2.5 passive short-set checks, was removed with the passive pair unwind on simplify)
 
 print("--- E: status")
 api, bt = bot({"21": -817, "22": -975, "11": -5})

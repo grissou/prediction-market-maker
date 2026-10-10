@@ -88,8 +88,8 @@ _f, _ov = list(M.Config.__dataclass_fields__), list(M.OVERRIDABLE)
 check("defaults: off, max_cost 0.01, 6 tries", (c.pair_unwind_followup, c.pair_unwind_followup_max_cost,
                                                 c.pair_unwind_followup_tries) == (False, 0.01, 6))
 _NC = "pair_no_unwind_max_per_cycle"            # red-team fix 3, after these
-_P8 = ["adding_factor_capital_on",   # then Package 8's
-       "capital_ceiling_adding_size_factor_resume", "ref_guard_tilted", "ref_guard_exits"]
+_P8 = ["adding_factor_capital_on",   # then Package 8's (its ref_guard_tilted / ref_guard_exits went on simplify)
+       "capital_ceiling_adding_size_factor_resume"]
 check("one contiguous block in Config and OVERRIDABLE (then pair_no_unwind_max_per_cycle; later packages may follow)",
       _f[_f.index(F):_f.index(F) + 4] == [F, MC, TR, _NC] and _ov[_ov.index(F):_ov.index(F) + 4] == [F, MC, TR, _NC]
       and all(k in _f and k in _ov for k in _P8), (_f[-4:], _ov[-4:]))

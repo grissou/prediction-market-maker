@@ -200,7 +200,7 @@ class DryApi(FakeApi):
         return res
 
 
-TAGGED = ("take_stale_quotes", "take_arbitrage", "pair_followup_step", "pair_passive_step")
+TAGGED = ("take_stale_quotes", "take_arbitrage", "pair_followup_step")
 
 
 def tag_methods(b):

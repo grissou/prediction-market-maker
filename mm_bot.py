@@ -666,10 +666,8 @@ class Config:
     ttl_expire_grace_seconds: float = 5.0
     # --- Package 5: T2.1 tilt-corrected reference ---
     # The tournament prices every market with one favourite-longshot tilt: mid ~ c + (1 - s)(r - c), c = 1/legs.
-    # On: the blend leans toward that tilted Polymarket price instead of the raw one (the tilt is not mispricing).
-    # s is estimated every cycle from the cross-section (TiltEstimator), even with the flag off (read-only).
-    ref_tilt_enabled: bool = False
-    ref_tilt_headline: bool = False       # False: headline markets keep the raw Polymarket price (staging gate)
+    # s is estimated every cycle from the cross-section (TiltEstimator) and reported (status.json tilt_s / tilt_diag,
+    # the summary's "tilt X%"); applying it to quotes (ref_tilt_enabled and its ramps) was removed on simplify.
     ref_tilt_min_markets: int = 50        # fewer usable markets than this: hold the last estimate
     ref_tilt_halflife_min: float = 30.0   # EMA half-life of the estimate, minutes
     ref_tilt_max: float = 0.20            # estimate clipped to [0, this]. Live s was 6.3% on 2 Oct evening (2.4% a day
@@ -694,33 +692,6 @@ class Config:
     reduce_from_book: bool = False
     reduce_from_book_pause_s: float = 120.0
     reduce_from_book_headline: bool = False   # False = not in headline_races markets (staging gate)
-    # --- Package 5: T2.5 passive pair unwind ---
-    # The active pair unwind needs other traders' bids to add up to >= 1 + pair_unwind_min_profit, which a held set
-    # rarely sees (U.S. Senate, 2 Oct: bid sum ~0.990, 7,335 sets = 7.3k of capital earning 0). Passive: while a
-    # complete set is held in a 2-leg race, rest the ASK of one leg (the one whose ask sits best) at
-    # max(join the best other ask, 1 - best other bid of the other leg - pair_unwind_max_cost), one slice
-    # (pair_unwind_max_frac of the account in cash, at most the other leg's best bid size); when it fills, sell the
-    # same quantity of the other leg at its best bid at once (one take, cooldowns bypassed, write budget not) if
-    # that bid is >= 1 - the resting leg's price - pair_unwind_max_cost - 0.5c (else the take waits, retried each
-    # cycle, one alert). A set is closed for >= 1 - max_cost - 0.5c, or the owed leg waits; the unmatched leg is
-    # never more than one slice. Switched off live: owed second legs are still finished, nothing new rests.
-    # Short sets mirror it (rest a BID, take the other leg's ask). Selling both legs to others is not a self-trade.
-    pair_unwind_passive: bool = False
-    pair_unwind_max_cost: float = 0.003   # at most 0.3c per set below 1 (22 on 7,335 sets)
-    # --- Package 5: T2.4 tilt exposure limit ---
-    # tilt_exposure (T2.1) = sum over held markets of position x (Polymarket - c): what one point of tournament
-    # tilt marks the book by (x -0.01). Above tilt_exposure_max_frac of the account (0 = off; try 0.10), the side
-    # that would grow |tilt_exposure| in a market (contribution sign = sign(Polymarket - c)) is switched off, like
-    # the party-delta cap. Never forces an exit: the side that shrinks it always stays. No Polymarket or r == c:
-    # unaffected. tilt_exposure_headline False = the limit is not applied in headline_races markets (staging gate).
-    tilt_exposure_max_frac: float = 0.0
-    tilt_exposure_headline: bool = False
-    # --- Package 5: T2.3 carry ramp (HARD GATE) ---
-    # MUST stay 0 until the owner has SIG's answer IN WRITING that positions open at the close are settled at the
-    # outcome (not marked at the last trades). > 0 (with ref_tilt_enabled): inside the last N days before a market's
-    # close the tilt s applied in blend_fv ramps linearly to 0 at the close (carry_ramp), so quotes lean back to raw
-    # Polymarket and the book takes the favourite-longshot carry late. The estimator itself is untouched.
-    ref_tilt_carry_days: float = 0.0      # NOT live-overridable (not in OVERRIDABLE): code change + restart
     # --- Package 5: X5 gap-size shrink ---
     # Where the quoted fv (Polymarket-blended, tilt-corrected if T2.1 is on) sits far from the book's own price, the
     # side that ADDS to the position shrinks: factor = max(gap_size_floor, 1 - |fv - book_fv| / gap_size_shrink),
@@ -729,21 +700,6 @@ class Config:
     gap_size_shrink: float = 0.0          # 0 = off; the gap (in price) at which the adding size reaches the floor (try 0.03)
     gap_size_floor: float = 0.25          # the smallest factor
     # --- Package 5: X11 reduce_from_book scope ---
-    # --- Package 5: X12 takes measured from the tilted reference ---
-    # take_tilted_ref True (with ref_tilt_enabled): take_stale_quotes measures the gap, confirms it, re-checks it
-    # and sizes the take (Kelly p) from the tilt-corrected Polymarket price (Bot.tilted_ref_for: same s, carry ramp
-    # and headline gate as the blend) instead of the raw one. Arbitrage, the reference guard and ref_only pricing
-    # stay on the raw price. Off (or ref_tilt_enabled off): unchanged.
-    take_tilted_ref: bool = False
-    # --- Package 5: T2.1 ramp-in ---
-    # With ref_tilt_enabled, the tilt s APPLIED (blend and takes, via Bot.tilted_ref_for) rises linearly from 0 to
-    # the estimate over this many minutes after the flag is switched on (hot toggle, or at start with the flag on),
-    # so fair value does not jump in one step against inventory bought at tournament prices. 0 = no ramp.
-    # SIM_NOTES Round 5 (8 x 3 quiet, tilt world, d pnl_liq / d pnl_lag): step-on +163 +- 60 / +166 +- 72; 20-min ramp
-    # +199 +- 83 / +176 +- 110 with less pick-off (pick_cost +9 vs +38); 120-min ramp -70 +- 130 / -36 +- 150 with MORE
-    # re-prices (+0.8 writes/min) and the same cost at the Polymarket mark. Default 20: the same P&L as the step-on,
-    # the switch-on re-price wave (~157 markets) spread over ~10 cycles. Still: switch on in a quiet hour.
-    ref_tilt_rampin_min: float = 20.0
     # --- Package 6 candidate: backstop soft band ---
     # With risk_model "correlated": in a band of this many x account value below worst_case_backstop_frac, the
     # ADDING side's size shrinks linearly to 0 as the sum-of-maxima worst case nears the backstop (see
@@ -756,12 +712,7 @@ class Config:
     # only moves the REDUCING side toward the book and sizes it <= the (race-netted) position, so risk can only fall;
     # every other guard stays (reference guard, jump cooldown, headline gates, never meeting our own other side).
     # Fast unload stays off in reduce-only.
-    # pair_passive_in_reduce_only True (with pair_unwind_passive): pair_passive_quote may rest the slice side of a
-    # complete-set leg when the ONLY thing that emptied that side in decide() was the reduce-only race-net clip
-    # (ex.ro_clip; never after fv None, stop-before-close, cooldown, the reference guard or a block). Price
-    # pp_candidate's, one slice, the other leg taken on fill as usual, cost capped by pair_unwind_max_cost.
     exit_quotes_in_reduce_only: bool = False
-    pair_passive_in_reduce_only: bool = False
     # --- Package 6 candidate: tail adding-size factor ---
     # In tail markets (raw Polymarket reference r below tail_low or above tail_high) the Polymarket-vs-tournament gap
     # is mostly the systematic favourite-longshot tilt, so Kelly sizing on that "edge" buys most where it is least
@@ -856,15 +807,6 @@ class Config:
     # (hysteresis). status.json capital_ceiling_adding_factor = the factor in force. 0 = off.
     adding_factor_capital_on: float = 0.0
     capital_ceiling_adding_size_factor_resume: float = 0.5
-    # ref_guard_tilted True (with T2.1 on in that market): the reference guard measures its gap from the tilted
-    # reference tilted_ref_for(r) instead of raw Polymarket (Dem House: r 0.925, s 0.11 -> 0.878 vs book ~0.87: the
-    # exit rests; a real 8c Polymarket move still moves r' ~7c and trips it).
-    ref_guard_tilted: bool = False
-    # ref_guard_exits True: the guard does not block the side that shrinks THIS market's own position; that side is
-    # then capped at the position (never flips it); the adding side is still blocked. No exemption (the guard blocks
-    # the exit as before) while Polymarket just moved (urgent_ref_move or ref_jump_threshold within
-    # ref_jump_cooldown_seconds) or when the gap (tilted with ref_guard_tilted) exceeds 2 x ref_guard_gap.
-    ref_guard_exits: bool = False
     # --- Package 9 F5 (analysis/p9/SPEC_F2_F5.md; OFF by default) ---
     # F5 arb_cash_rule True (live 3 Oct: at 0 cash the race arbitrage left one-legged sets, some legs refused for
     # cash): an ARBITRAGE (kind "arb", sell side: bids sum >= 1 + arb_min_profit; buy side: asks sum <= 1 -
@@ -907,7 +849,7 @@ class Config:
     #      live-overridable too (0 = off) for a deploy that keeps value_mode off.
     #  (iii) exit_quote takes the same floor (value_floor) when given one, should the exit ever run again.
     #  (iv) warn_settings logs a WARNING (start-up and override time) for each mark-driven selling path left on with
-    #      it: reduce_from_book, fast_unload_enabled, ref_tilt_enabled, take_tilted_ref, ref_guard_exits. Not forced
+    #      it: reduce_from_book, fast_unload_enabled. Not forced
     #      off: the owner decides
     #      (the floor (i) still holds for every resting quote they price).
     #  (v) Part B's allocator sells go through their own immediate-or-cancel path, never compute_quote: exempt.
@@ -1055,7 +997,7 @@ class Config:
     # live range 2026-11-01 .. 2026-11-07) makes every market's EFFECTIVE close max(API close, this time): it can only
     # EXTEND a close, never shorten one (a market with no API close stays "never closes"). Bot.hours_to_close uses it,
     # so the stop, the pre-close windows (close_window: exit / flatten / per-market flatten, the take / arbitrage /
-    # allocator "closing" checks, the phase line) and carry_ramp all follow. Nothing else changes (no election-night
+    # allocator "closing" checks, the phase line) all follow. Nothing else changes (no election-night
     # taking). "" = off (the API close, as before). An invalid
     # time (unparseable, no time zone, outside the range) is ignored (the API close) with one alert.
     close_override_utc: str = ""
@@ -1370,8 +1312,6 @@ OVERRIDABLE = {
     "ttl_expire_as_cancel": (False, True),
     "ttl_expire_grace_seconds": (0.0, 60.0),
     # --- Package 5: T2.1 tilt-corrected reference ---
-    "ref_tilt_enabled": (False, True),
-    "ref_tilt_headline": (False, True),
     "ref_tilt_min_markets": (5, 1000),
     "ref_tilt_halflife_min": (0.5, 1440.0),
     "ref_tilt_max": (0.0, 0.3),
@@ -1382,27 +1322,18 @@ OVERRIDABLE = {
     "reduce_from_book": (False, True),
     "reduce_from_book_pause_s": (0.0, 3600.0),
     "reduce_from_book_headline": (False, True),
-    "pair_unwind_passive": (False, True),
-    "pair_unwind_max_cost": (0.0, 0.02),
     # --- Package 5: T2.4 tilt exposure limit ---
-    "tilt_exposure_max_frac": (0.0, 1.0),
-    "tilt_exposure_headline": (False, True),
     # --- Package 5: C hold target ---
-    # (Package 5 T2.3 ref_tilt_carry_days is a HARD GATE and deliberately NOT here: changing it from 0 needs a code
-    #  change and a restart, never a live override.)
     # --- Package 5: X5 gap-size shrink ---
     "gap_size_shrink": (0.0, 0.2),
     "gap_size_floor": (0.0, 1.0),
     # --- Package 5: X11 reduce_from_book scope ---
     # --- Package 5: X12 takes measured from the tilted reference ---
-    "take_tilted_ref": (False, True),
     # --- Package 5: T2.1 ramp-in ---
-    "ref_tilt_rampin_min": (0.0, 1440.0),
     # --- Package 6 candidate: backstop soft band ---
     "backstop_soft_frac": (0.0, 0.3),
     # --- Package 6 candidate: exits keep quoting in reduce-only ---
     "exit_quotes_in_reduce_only": (False, True),
-    "pair_passive_in_reduce_only": (False, True),
     # --- Package 6 candidate: tail adding-size factor ---
     "tail_adding_factor": (0.0, 1.0),
     # --- Package 6: reduce NO holdings as covered NO sales ---
@@ -1426,8 +1357,6 @@ OVERRIDABLE = {
     # --- Package 8 ---
     "adding_factor_capital_on": (0.0, 1.0),
     "capital_ceiling_adding_size_factor_resume": (0.0, 1.0),
-    "ref_guard_tilted": (False, True),
-    "ref_guard_exits": (False, True),
     # --- Package 9 F5 ---
     "arb_cash_rule": (False, True),
     "arb_cash_mult": (1.0, 3.0),
@@ -2460,34 +2389,8 @@ def tilted_ref(r, s, legs):
     return c + (1 - s) * (r - c)
 
 
-def carry_ramp(s, hours_to_close, days):
-    """T2.3: the tilt applied in the blend inside the last `days` days before the close, s x min(1, hours / (24 days)),
-    ramping linearly to 0 at the close. days <= 0 (off), or no known close: s unchanged. Never below 0, never above s."""
-    if not days or days <= 0 or hours_to_close is None or hours_to_close == float("inf"):
-        return s
-    return s * max(0.0, min(1.0, hours_to_close / (24.0 * days)))
-
-
-TILT_RAMP_RESUME_SECONDS = 600.0   # T2.1: a restart within this of the last status write resumes the ramp-in
-
-
-def rampin_factor(now, on_at, minutes):
-    """T2.1 ramp-in: the share of the tilt estimate applied `now`, min(1, (now - on_at) / (60 minutes)), rising
-    linearly from 0 when ref_tilt_enabled was switched on (on_at, monotonic seconds). minutes <= 0 (no ramp) or
-    on_at None (not started): 1.0. Never below 0, never above 1."""
-    if not minutes or minutes <= 0 or on_at is None:
-        return 1.0
-    return max(0.0, min(1.0, (now - on_at) / (60.0 * minutes)))
-
-
-def blend_fv(book_fv, r, cfg, s=0.0, legs=2, headline=False, hours_to_close=float("inf")):
-    """The main loop's blend: book price leaned toward Polymarket by ref_weight. With ref_tilt_enabled (and, in a
-    headline market, ref_tilt_headline) toward the tilt-corrected Polymarket price instead of the raw one; with
-    ref_tilt_carry_days > 0 the tilt applied fades to 0 over the last N days before the close (carry_ramp)."""
-    if cfg.ref_tilt_enabled and (cfg.ref_tilt_headline or not headline):
-        s = carry_ramp(s, hours_to_close, getattr(cfg, "ref_tilt_carry_days", 0.0))
-        if s:                                     # s 0 (or ramped to 0): the raw r exactly
-            r = tilted_ref(r, s, legs)
+def blend_fv(book_fv, r, cfg):
+    """The main loop's blend: book price leaned toward Polymarket by ref_weight."""
     return (1 - cfg.ref_weight) * book_fv + cfg.ref_weight * r
 
 
@@ -3879,7 +3782,7 @@ class Ex:
     turnover_dead: bool = False           # holding a position in a market with too little flow (health only)
     bb_tag: str = ""                      # " bb" on the quote log line while behind-the-best sizing shrinks a side
     ro_clip: str = ""                     # "bid" / "ask" / "bid ask": side(s) decide() left empty ONLY by the reduce-only
-                                          #   race-net clip this cycle (pair_passive_in_reduce_only)
+                                          #   race-net clip this cycle (diagnostic)
     mmr_tail: bool = False                # P12 ops: value adds paused and a tail market (decide; the ladder too)
     st_caps: tuple | None = None          # P15 state_max_usd: decide's (bid, ask) adding caps in shares (the ladder)
 
@@ -3984,15 +3887,6 @@ class Bot:
         _tilt_saved = self.load_tilt()
         self.tilt = TiltEstimator(cfg).from_dict(_tilt_saved)   # T2.1: tournament tilt s (see update_tilt)
         self.tilt_s, self.tilt_exposure = self.tilt.s, 0.0
-        # T2.1 ramp-in: monotonic time ref_tilt_enabled was (last) seen switched on, None while off; the s actually
-        # applied = tilt_s x rampin_factor. Persisted as wall-clock times in status.json tilt_state (on_wall,
-        # headline_on_wall): a restart within TILT_RAMP_RESUME_SECONDS of the last status write continues the ramp
-        # where it was (restore_rampin); after a longer outage (or with no saved time) the ramp restarts from 0,
-        # the safe choice (fair value never jumps by the full tilt after a long outage).
-        self.tilt_on_at, self.tilt_s_applied = None, 0.0
-        self.tilt_headline_on_at = None   # the headline gate's own ramp-in clock (ref_tilt_headline switched on later)
-        self.tilt_s_applied_headline = 0.0   # the s applied in headline markets (status.json)
-        self.restore_rampin(_tilt_saved)
         self.alloc_init(self.load_status_key("alloc"))   # Package 10 B: the allocator (last run, turnover)
         self.mmf_init(self.load_status_key("mm_funding"))   # P14: MM inventory lots, alert state (status.json)
         self.p15_init()                                     # P15: the harvest ladder, the state cap (this run)
@@ -4075,9 +3969,7 @@ class Bot:
         self.arb_cooldown = {}            # race -> time.monotonic() until which we leave it alone
         self.arbs_total = 0               # arbitrages / takes since start (summaries report the change)
         self.unwinds_total = 0            # pair unwinds since start (status.json pair_unwinds_total)
-        self.pp = {}                      # T2.5 passive pair unwind: race -> slice state (pair_passive_step)
         self.pair_owed = {}               # Package 7 pair_unwind_followup: race -> owed legs (pair_followup_step)
-        self.pp_sets_total = 0            # ...complete sets closed by it since start (status.json)
         self.arb_cash_blocked = 0         # Package 9 F5 arb_cash_rule: arbitrages refused by the cash rule
         self.ops_last = {}                # ops fields of the latest status write (ops_fields): recorder, summary
         self.ops_cache = {}               # ops_fields: fills.csv-derived numbers, recomputed when the file changes
@@ -4088,7 +3980,6 @@ class Bot:
         self.takes_total = 0
         self.takes_skipped_budget = self.arbs_skipped_budget = 0   # not sent: write budget busy (status.json)
         self.take_version_seen = 0        # last Polymarket reading the take logic has counted
-        self.take_tilted_seen = bool(getattr(cfg, "take_tilted_ref", False))   # X12: a toggle resets take_since
         self.db = self.open_recorder()
         self.last_record = -1e9
         self.book_tops, self.book_rows = {}, []    # recorder: last top levels logged per eid, rows not yet written
@@ -4131,7 +4022,7 @@ class Bot:
         self.nosell_eid, self.nosell_hold = None, 0.0
         # Package 7 pair_no_unwind_max_cost: its start-up check leg (a paired covered NO sale), state as nosell's
         self.pairno_state, self.pairno_future, self.pairno_next, self.pairno_wait = None, None, 0.0, 0.0
-        self.pairno_race, self.pairno_holds, self.pp_short_skip_logged = None, {}, False
+        self.pairno_race, self.pairno_holds = None, {}
         self.selftest_gen = 0             # cancel_gen when the test started
         self.selftest_unlisted = 0        # tests in a row whose orders were accepted but never listed
         self.selftest_errors = 0          # tests in a row that crashed (a bug in the test)
@@ -4438,27 +4329,10 @@ class Bot:
         self.ref_only = self.thin_book_prices(fvs, refs, liquid, now_m) if cfg.ref_only_enabled else set()
         self.warn_unpriced_held(fvs, book_fvs, refs, liquid, now_m)
         self.update_tilt(book_fvs, refs, liquid, inv, now_m)      # T2.1: runs (read-only) with the flag off too
-        if cfg.ref_tilt_enabled:                                  # T2.1 ramp-in clock (persisted: see __init__)
-            if self.tilt_on_at is None:
-                self.tilt_on_at = now_m
-        else:
-            self.tilt_on_at = None                                # re-enabling restarts the ramp
-        if cfg.ref_tilt_enabled and cfg.ref_tilt_headline:        # the headline legs ramp from THEIR switch-on
-            if self.tilt_headline_on_at is None:
-                self.tilt_headline_on_at = now_m
-        else:
-            self.tilt_headline_on_at = None
-        self.tilt_s_applied = (self.tilt_s * rampin_factor(now_m, self.tilt_on_at, cfg.ref_tilt_rampin_min)
-                               if cfg.ref_tilt_enabled else 0.0)
-        hl_on = [t for t in (self.tilt_on_at, self.tilt_headline_on_at) if t is not None]
-        self.tilt_s_applied_headline = (                          # headline legs: ramped from the later clock
-            self.tilt_s * rampin_factor(now_m, max(hl_on) if hl_on else None, cfg.ref_tilt_rampin_min)
-            if cfg.ref_tilt_enabled and cfg.ref_tilt_headline else 0.0)
         if cfg.ref_weight > 0 and refs:
             for eid, r in refs.items():
                 if fvs.get(eid) is not None and eid in liquid and eid not in self.ref_only:   # liquid only
-                    ex = self.ex[eid]
-                    fvs[eid] = blend_fv(fvs[eid], self.tilted_ref_for(ex, r, now_m), cfg)   # tilt applied once, there
+                    fvs[eid] = blend_fv(fvs[eid], r, cfg)
             for members in self.groups.values():
                 if len(members) > 1:
                     fvs.update(normalise({e: fvs[e] for e in members}))
@@ -4483,8 +4357,6 @@ class Bot:
                       else set())
         arb_races = self.take_arbitrage(inv, fvs, mine_real, now_m) if self.running else set()
         arb_races |= owed_races
-        if cfg.pair_unwind_passive or self.pp:    # T2.5: a passive slice filled -> the other leg is taken now
-            arb_races |= self.pair_passive_step(inv, fvs, now_m, skip=arb_races, mine_real=mine_real)
 
         # 6. Portfolio-level risk ------------------------------------------------------------------
         eff = self.effective_inventory(inv)
@@ -4614,8 +4486,6 @@ class Bot:
             try:
                 ex.quote = self.decide(ex, fvs.get(eid), inv, eff, global_reduce, party_delta, now_m,
                                        refs.get(eid), book_fvs.get(eid), eid in liquid)
-                if self.pp:                       # T2.5: the passive pair-unwind slice replaces this leg's ask
-                    ex.quote = self.pair_passive_quote(ex, ex.quote)
                 if cfg.parallel_writes > 1:
                     ch = self.plan_exchange(ex, ex.quote, resting.get(eid, []), fvs.get(eid), now, now_m)
                     if ch:
@@ -4836,26 +4706,6 @@ class Bot:
         for e in self.ref_moved:
             self.ex[e].ref_moved_at = time.monotonic()
 
-    def tilted_ref_for(self, ex, r, now_m=None):
-        """The Polymarket price r as this market's quotes see it: with ref_tilt_enabled (and, in a headline market,
-        ref_tilt_headline) the tilt-corrected r' = tilted_ref(r, s, legs) with s = self.tilt_s x the ramp-in factor
-        (rampin_factor since the flag went on; now_m None = time.monotonic()) faded by carry_ramp near the close;
-        otherwise (or s 0) r unchanged. Shared by the blend and (take_tilted_ref) the takes."""
-        cfg = self.cfg
-        if r is None or not cfg.ref_tilt_enabled or (ex.group in cfg.headline_races and not cfg.ref_tilt_headline):
-            return r
-        now_m = time.monotonic() if now_m is None else now_m
-        on_at = self.tilt_on_at
-        if ex.group in cfg.headline_races and self.tilt_headline_on_at is not None:
-            on_at = max(on_at or -1e18, self.tilt_headline_on_at)   # headline legs: the later of the two switch-ons
-        s = self.tilt_s * rampin_factor(now_m, on_at, getattr(cfg, "ref_tilt_rampin_min", 0.0))
-        s = carry_ramp(s, self.hours_to_close(ex), getattr(cfg, "ref_tilt_carry_days", 0.0))
-        return tilted_ref(r, s, self.legs(ex)) if s else r
-
-    def take_ref(self, ex, r, now_m=None):
-        """X12: the Polymarket price the stale-quote takes compare with the book and size from: tilted_ref_for with
-        take_tilted_ref (ramp-in included), the raw r otherwise."""
-        return self.tilted_ref_for(ex, r, now_m) if getattr(self.cfg, "take_tilted_ref", False) else r
 
     def legs(self, ex):
         """Number of markets in this market's race (1 for a lone market)."""
@@ -4863,7 +4713,7 @@ class Bot:
 
     def load_tilt(self):
         """T2.1: the tilt estimate the previous run left in status.json ({} if none: the estimate starts at 0).
-        The dict also carries "saved_wall": tilt_state's own save time, else the file's mtime (restore_rampin)."""
+        The dict also carries "saved_wall": tilt_state's own save time, else the file's mtime."""
         try:
             path = bot_path(self.cfg.status_file)
             with open(path) as f:
@@ -4875,37 +4725,13 @@ class Bot:
         except (OSError, ValueError, TypeError, AttributeError, KeyError):
             return {}
 
-    def restore_rampin(self, d, now_m=None, now_w=None):
-        """T2.1 ramp-in across a restart: status.json saved less than TILT_RAMP_RESUME_SECONDS ago with a switch-on
-        wall time (on_wall / headline_on_wall) -> tilt_on_at / tilt_headline_on_at = now_m - (now_w - on_wall): the
-        ramp continues where it was. Otherwise None (the first cycle with the flag on starts the ramp from 0). The
-        cycle still clears a clock whose flag is off now."""
-        now_m = time.monotonic() if now_m is None else now_m
-        now_w = time.time() if now_w is None else now_w
-        d = d if isinstance(d, dict) else {}
-        saved = d.get("saved_wall")
-        fresh = (isinstance(saved, (int, float)) and not isinstance(saved, bool)
-                 and 0 <= now_w - saved < TILT_RAMP_RESUME_SECONDS)
-
-        def back(w):
-            if not fresh or not isinstance(w, (int, float)) or isinstance(w, bool) or w > now_w:
-                return None
-            return now_m - (now_w - w)
-        self.tilt_on_at = back(d.get("on_wall"))
-        self.tilt_headline_on_at = back(d.get("headline_on_wall"))
 
     def tilt_state_dict(self):
-        """status.json tilt_state: the estimate plus the ramp-in switch-on times as wall-clock seconds (None = off)
-        and its own save time (saved_wall), so a quick restart resumes the ramp (restore_rampin)."""
-        now_m, now_w = time.monotonic(), time.time()
-
-        def wall(on_at):
-            return None if on_at is None else round(now_w - (now_m - on_at), 3)
-        return {**self.tilt.to_dict(), "on_wall": wall(self.tilt_on_at),
-                "headline_on_wall": wall(self.tilt_headline_on_at), "saved_wall": round(now_w, 3)}
+        """status.json tilt_state: the estimate plus its own save time (saved_wall; the old ramp-in times are gone)."""
+        return {**self.tilt.to_dict(), "saved_wall": round(time.time(), 3)}
 
     def update_tilt(self, book_fvs, refs, liquid, inv, now_m):
-        """T2.1, every cycle and whatever ref_tilt_enabled says: feed the tilt estimator from the markets that are
+        """T2.1, every cycle (read-only): feed the tilt estimator from the markets that are
         liquid, not R5 (ref_only), not headline, with a book price and Polymarket, and not under a jump guard; and
         tilt_exposure = sum over held markets of position x (raw Polymarket - c), c = 1/legs."""
         cfg, samples = self.cfg, []
@@ -5746,27 +5572,13 @@ class Bot:
             return NO_QUOTE
 
         no_bid, no_ask = self.party_blocks(ex, party_delta)
-        tb, ta = self.tilt_blocks(ex, ref)                    # T2.4 (off by default)
-        no_bid, no_ask = no_bid or tb, no_ask or ta
 
         # Reference-price guard: if Polymarket says this contract is worth clearly MORE than the
         # tournament book does, don't sell it to anyone here (they probably know); clearly LESS -> don't
         # buy. Compared with the book's own price, not the leaned fair value (see cycle step 3).
-        exempt_bid = exempt_ask = False
         if ref is not None:
             base = book_fv if book_fv is not None else fv
-            # Package 8 ref_guard_tilted: the gap from the tilted reference (T2.1 on here), not raw Polymarket
-            gref = self.tilted_ref_for(ex, ref, now_m) if cfg.ref_guard_tilted else ref
-            g_ask, g_bid = gref - base > cfg.ref_guard_gap, base - gref > cfg.ref_guard_gap
-            if cfg.ref_guard_exits:               # Package 8: never block the side shrinking THIS market's position
-                # ...unless Polymarket just moved (within ref_jump_cooldown_seconds of an urgent move or a jump) or
-                # the gap is more than 2 x ref_guard_gap: a real jump still pulls the exit off the book
-                recent = now_m - max(ex.ref_moved_at, ex.ref_jump_at) < cfg.ref_jump_cooldown_seconds
-                wide = abs(gref - base) > 2 * cfg.ref_guard_gap
-                ok_exempt = not recent and not wide
-                exempt_ask = g_ask and ex.inv >= 1 and ok_exempt
-                exempt_bid = g_bid and ex.inv <= -1 and ok_exempt
-                g_ask, g_bid = g_ask and not exempt_ask, g_bid and not exempt_bid
+            g_ask, g_bid = ref - base > cfg.ref_guard_gap, base - ref > cfg.ref_guard_gap
             no_ask = no_ask or g_ask
             no_bid = no_bid or g_bid
 
@@ -5777,10 +5589,6 @@ class Bot:
             ask_cap = max(0, int(ex.inv))         # selling YES near 0 = buying NO near 1
         if fv > cfg.tail_high:
             bid_cap = max(0, int(-ex.inv))        # buying YES near 1
-        if exempt_ask:                            # (ref_guard_exits: the exempted exit never flips the position)
-            ask_cap = int(ex.inv) if ask_cap is None else min(ask_cap, int(ex.inv))
-        if exempt_bid:
-            bid_cap = int(-ex.inv) if bid_cap is None else min(bid_cap, int(-ex.inv))
         # P12 ops mm_risk_reserve_*: value adds paused -> in the tails only what shrinks this exchange's position
         ex.mmr_tail = (self.mm_tail_adds_off(ex, fv, ref, ref_liquid) if getattr(self, "mmr_paused", False)
                        else False)
@@ -6007,21 +5815,6 @@ class Bot:
         too_red, too_blue = party_delta > party_cap, party_delta < -party_cap
         return (sign > 0 and too_red) or (sign < 0 and too_blue), (sign > 0 and too_blue) or (sign < 0 and too_red)
 
-    def tilt_blocks(self, ex, ref):
-        """T2.4 tilt-exposure cap -> (no_bid, no_ask). A market's contribution to tilt_exposure is position x
-        (r - c): buying where r > c (or selling where r < c) grows it, the other side shrinks it. Beyond
-        tilt_exposure_max_frac x account, block whichever side would make |tilt_exposure| worse. Off (0), no
-        Polymarket price, r == c, or a headline market without tilt_exposure_headline: nothing blocked."""
-        cfg = self.cfg
-        if cfg.tilt_exposure_max_frac <= 0 or ref is None or (ex.group in cfg.headline_races
-                                                              and not cfg.tilt_exposure_headline):
-            return False, False
-        d = ref - tilted_ref(ref, 1.0, self.legs(ex))        # tilted_ref(r, 1, legs) = c
-        cap, x = cfg.tilt_exposure_max_frac * self.bankroll(), getattr(self, "tilt_exposure", 0.0) or 0.0
-        if d == 0 or abs(x) <= cap:
-            return False, False
-        grow_by_buying = (d > 0) == (x > 0)
-        return grow_by_buying, not grow_by_buying
 
     def bankroll(self):
         """Account value that every size is a fraction of. It follows the real value in steps: only once
@@ -7553,249 +7346,6 @@ class Bot:
             return False
         return self.settlement_risk(after, fvs, after_pd) <= self.settlement_risk(inv, fvs, before_pd) + 1e-6
 
-    # ------------------------------------------------------------------------------ T2.5 passive pair unwind
-    def pp_candidate(self, x, y, sign, sets, bank):
-        """Passive pair unwind, leg x resting and leg y taken on a fill: (sort key, price, slice) or None.
-        Long set (sign +1): ask x at max(join the best other ask, 1 - best other bid of y - pair_unwind_max_cost),
-        never at/through the best other bid of x (a take, not a quote). Short set (-1): the mirror, a bid on x at
-        min(join the best other bid, 1 + max_cost - best other ask of y). Slice = min(sets, the size on y's top level,
-        pair_unwind_max_frac of the account in cash at that price). Key: how far behind the touch it sits, then
-        what the set fetches (long: most) or costs (short: least)."""
-        cfg = self.cfg
-        bx, by = self.ex[x].book or {}, self.ex[y].book or {}
-        side_y, side_x, opp_x = ("bids", "asks", "bids") if sign > 0 else ("asks", "bids", "asks")
-        if not by.get(side_y):
-            return None
-        py, sy = by[side_y][0]["price"], by[side_y][0]["quantity"]
-        touch = bx[side_x][0]["price"] if bx.get(side_x) else None
-        opp = bx[opp_x][0]["price"] if bx.get(opp_x) else None
-        if sign > 0:
-            price = ceil_tick(1 - py - cfg.pair_unwind_max_cost)
-            price = max(price, touch) if touch is not None else price
-            if opp is not None:
-                price = max(price, ceil_tick(opp + TICK))
-            gap = price - touch if touch is not None else 0.0
-        else:
-            price = floor_tick(1 + cfg.pair_unwind_max_cost - py)
-            price = min(price, touch) if touch is not None else price
-            if opp is not None:
-                price = min(price, floor_tick(opp - TICK))
-            gap = touch - price if touch is not None else 0.0
-        if not PMIN - 1e-9 <= price <= PMAX + 1e-9:
-            return None
-        qty = int(min(sets, sy, cfg.pair_unwind_max_frac * bank / max(price, TICK)))
-        if qty < 1:
-            return None
-        return (round(gap, 6), round(-sign * (price + py), 6)), price, qty
-
-    def reduce_no_effective(self):
-        """reduce_no_as_sell as the bot runs it: reduce_no_on() (setting + start-up check) where the bot has it, else
-        the setting (Package 7 D keys on this, so a run whose sell-NO check failed keeps T2.5's short sets)."""
-        fn = getattr(self, "reduce_no_on", None)
-        return bool(fn()) if callable(fn) else bool(self.cfg.reduce_no_as_sell)
-
-    def pair_passive_plan(self, members, inv, fvs, prefer=None):
-        """A new passive slice for a 2-leg race holding a complete set (long or short both legs), or None.
-        prefer = the leg that rested last: kept on a tie of how far behind the touch (no needless leg swaps)."""
-        if len(members) != 2 or any(e not in self.ex for e in members):
-            return None
-        a, b = members
-        ha, hb = inv.get(a, 0.0), inv.get(b, 0.0)
-        sign = 1 if min(ha, hb) >= 1 else -1 if max(ha, hb) <= -1 else 0
-        if not sign:
-            return None
-        if sign < 0 and self.reduce_no_effective():
-            # Package 7: with reduce_no_as_sell (in effect: reduce_no_on) the resting bid is a covered "sell NO" on ONE leg of a NO+NO set,
-            # which breaks the set's collateral and is refused at 0 cash: short sets are unwound as a pair
-            # (arb_plan, pair_no_unwind_max_cost), never passively. Long sets (YES+YES) as before.
-            if not getattr(self, "pp_short_skip_logged", False):
-                self.pp_short_skip_logged = True
-                log.info("T2.5 passive pair unwind: short (NO+NO) sets skipped while reduce_no_as_sell is on")
-            return None
-        sets, bank = min(sign * ha, sign * hb), self.bankroll()
-        cands = [(c, x, y) for x, y in ((a, b), (b, a)) if (c := self.pp_candidate(x, y, sign, sets, bank))]
-        if not cands:
-            return None
-        (_, price, qty), x, y = min(cands, key=lambda c: (c[0][0][0], c[1] != prefer, c[0][0][1], c[1]))
-        if not self.unwind_is_safe(inv, fvs, members, -sign * qty):
-            return None
-        return {"leg": x, "other": y, "sign": sign, "base_x": inv.get(x, 0.0), "base_y": inv.get(y, 0.0),
-                "slice": qty, "left": qty, "price": price}
-
-    def pair_passive_step(self, inv, fvs, now_m, skip=(), mine_real=None, execute=None):
-        """T2.5 (pair_unwind_passive), once a cycle before quoting. Per 2-leg race at most one slice is open:
-          - its resting leg sold (bought back) s shares since the slice began and the other leg has not followed:
-            sell (buy back) the difference on the other leg at its best price NOW - one take, cooldowns bypassed,
-            only the write budget can defer it (next cycle, still urgent). Unmatched is never more than one slice.
-          - part filled: the rest keeps resting, re-priced on the current books;
-          - done (the whole slice matched) or nothing filled: a new slice is planned on the current books.
-        Fills are seen as position changes since the slice began (a fill of our ordinary bid on that leg in the
-        same cycle can hide one: the set is then still whole, nothing is unmatched). Returns the races traded.
-        execute(eid, buy, qty, price) -> shares done replaces the exchange take (simulator)."""
-        cfg, acted = self.cfg, set()
-        off = not cfg.pair_unwind_passive         # switched off live: only owed second legs are finished
-        for race, members in self.groups.items():
-            if len(members) != 2 or race in skip or not self.running:
-                continue
-            st = self.pp.get(race)
-            if off and st is None:
-                continue
-            if st is not None:
-                x, y, s = st["leg"], st["other"], st["sign"]
-                sold_x = max(0.0, s * (st["base_x"] - inv.get(x, 0.0)))
-                # (our own takes count even before a positions read shows them: never sold twice)
-                sold_y = max(0.0, s * (st["base_y"] - inv.get(y, 0.0)), st.get("taken", 0.0))
-                if off:                           # what the slice had sold when switched off: later fills of the
-                    st.setdefault("off_cap", sold_x)  # normal ask on this leg are not the slice's
-                owed = int(round(min(sold_x, st["slice"], st.get("off_cap", sold_x)) - sold_y))
-                if owed >= 1:
-                    acted.add(race)
-                    st["left"] = max(0, int(st["slice"] - sold_x))
-                    st["taken"] = sold_y + self.pair_passive_take(race, st, owed, fvs, now_m, mine_real, execute)
-                    continue
-                if off:                                           # nothing owed: the slice state is dropped
-                    del self.pp[race]
-                    continue
-                if "off_cap" not in st and 0.5 <= sold_x < st["slice"] - 0.5:   # part filled and matched:
-                    c = self.pp_candidate(x, y, s, st["slice"] - sold_x, self.bankroll())   # the rest keeps resting
-                    st["left"] = int(st["slice"] - sold_x) if c else 0
-                    if c:
-                        st["price"] = c[1]
-                    continue
-                if sold_x >= st["slice"] - 0.5 or "off_cap" in st:   # (back on after a hot off: a fresh slice)
-                    self.pp_sets_total += int(round(min(sold_x, sold_y)))
-                    log.warning("PAIR UNWIND (passive) %s: slice of %d sets closed", race, st["slice"])
-                prefer = st["leg"]
-                del self.pp[race]
-            else:
-                prefer = None
-            closing = any(self.hours_to_close(self.ex[e]) <= self.close_window("flatten_hours_before_close")
-                          for e in members if e in self.ex)
-            plan = None if closing else self.pair_passive_plan(members, inv, fvs, prefer)
-            if plan is not None:
-                self.pp[race] = plan
-        return acted
-
-    def pair_passive_take(self, race, st, qty, fvs, now_m, mine_real=None, execute=None):
-        """The urgent second leg: sell (long set) / buy back (short set) qty on the other leg at its best price."""
-        y, buy = st["other"], st["sign"] < 0
-        ex = self.ex[y]
-        if execute is None and self.api.live:
-            if not self.writes_ready(3):          # cancel + take + leftover cancel: deferred, still urgent
-                self.arbs_skipped_budget += 1
-                log.info("pair unwind second leg on %s deferred: write budget busy (next cycle)", race)
-                return 0.0
-            try:                                  # the cached book may be old
-                ex.book = strip_own(self.api.book(y, self.tid), (mine_real or {}).get(y, []))
-                ex.book_time = ex.verified = time.monotonic()
-            except ApiError as e:
-                log.warning("pair unwind second leg on %s: book download failed (%s) - cached book", race, e)
-        side = (ex.book or {}).get("asks" if buy else "bids") or []
-        if not side:
-            log.warning("pair unwind second leg on %s: no %s on %s - retrying next cycle", race,
-                        "ask" if buy else "bid", ex.label)
-            return 0.0
-        price = side[0]["price"]
-        # Floor (long set) / ceiling (short set): the set closes for >= 1 - max_cost - 0.5c, or the owed leg waits
-        px, slack = st["price"], self.cfg.pair_unwind_max_cost + 0.005
-        if (price < 1 - px - slack - 1e-9) if not buy else (price > 1 + slack - px + 1e-9):
-            log.warning("pair unwind second leg on %s deferred: best %s %.3f on %s is past the %s %.3f (retrying)",
-                        race, "ask" if buy else "bid", price, ex.label, "ceiling" if buy else "floor",
-                        (1 + slack - px) if buy else (1 - px - slack))
-            if not st.get("floor_alerted"):
-                st["floor_alerted"] = True
-                alert(f"pair unwind {race}: {qty} of {ex.label} owed but its best {'ask' if buy else 'bid'} "
-                      f"{price:.3f} is past the {'ceiling' if buy else 'floor'} - waiting (unmatched leg held)")
-            return 0.0
-        log.warning("%sPAIR UNWIND (passive) %s: %s filled -> %s %d YES on %s at %.3f", "" if self.api.live or execute
-                    else "[dry] ", race, self.ex[st["leg"]].label, "buying" if buy else "selling", qty, ex.label, price)
-        if execute is not None:
-            return execute(y, buy, qty, price)
-        if not self.api.live:
-            return 0.0
-        if self.cash_gate_on():                   # Package 8: nothing of it fits the cash -> retried next cycle
-            prov = self.no_sell_order({"exchangeId": y, "side": "yes", "action": "buy" if buy else "sell",
-                                       "quantity": int(qty), "price": price, "tournamentId": self.tid}, ex.inv)
-            if prov is not None and self.cash_gate_blocks([prov]):
-                self.cash_gate_log(y, "pair unwind second leg on %s deferred: not enough available cash (cash gate)",
-                                   race)
-                return 0.0
-        if not self.cancel(y, [], whole_exchange=True):   # our own quotes there first: never trade with ourselves
-            return 0.0
-        order = self.no_sell_order({"exchangeId": y, "side": "yes", "action": "buy" if buy else "sell",
-                                    "quantity": int(qty), "price": price, "tournamentId": self.tid,
-                                    "expirationDate": iso(utcnow() + timedelta(seconds=self.cfg.arb_order_ttl))}, ex.inv)
-        self.orders_stale = True
-        if order is None:                         # Package 7: all NO there is in a NO+NO set (no_set_aware_bids)
-            log.warning("pair unwind second leg on %s not sent: the NO on %s is all in a NO+NO set", race, ex.label)
-            return 0.0
-        try:
-            results = self.place_orders([order])
-        except ApiError as e:
-            if e.code == "WRITE_BUDGET_WAIT":
-                self.arbs_skipped_budget += 1
-                return 0.0
-            ex.pending_until = now_m + self.cfg.pending_seconds
-            alert(f"pair unwind second leg on {race} failed ({e}) - check positions")
-            if e.code in FATAL_API_CODES:
-                fatal(f"orders rejected with {e.code}")
-            return 0.0
-        res = results[0] if results else {}
-        data = res.get("data") or {}
-        if res.get("ok"):
-            self.remember_order(order, data, now_m)
-        self.cancel(y, [], whole_exchange=True, quiet=True)
-        if data.get("orderId") is not None:
-            self.order_meta[data["orderId"]] = {"our_side": "bid" if buy else "ask", "price": price, "arb": True,
-                                                "fv": fvs.get(y), "t": time.time(), "eid": y,
-                                                **({"no_sell": True} if order.get("_no_sell") else {})}
-            self.notes_dirty = True
-        return float(data.get("quantityTraded") or 0)
-
-    def pair_passive_quote(self, ex, q):
-        """The passive slice replaces the resting leg's ask (long set) or bid (short set) in the normal quote:
-        exactly that price (a resting order of ours below/above it is replaced), the slice's open size, and our
-        own other side kept at least a tick away. A leg the decision left unquoted (no fair value, stop before
-        close...) stays unquoted, and so does a slice side decide() blocked (long set: no ask; short set: no bid),
-        except, with pair_passive_in_reduce_only, a side emptied ONLY by the reduce-only race-net clip (ex.ro_clip:
-        a set leg's race-netted position is ~0, but a pair unwind lowers the risk). Applied to the quote decide()
-        returned, before reconciling."""
-        st = next((v for v in self.pp.values() if v["leg"] == ex.eid), None)
-        if st is None or not self.cfg.pair_unwind_passive:
-            return q
-        if st["sign"] < 0 and self.reduce_no_effective():
-            return q                              # Package 7: a short-set slice never rests (see pair_passive_plan)
-        side = "ask" if st["sign"] > 0 else "bid"
-        if getattr(q, side) is None and not (self.cfg.pair_passive_in_reduce_only
-                                             and side in getattr(ex, "ro_clip", "").split()):
-            return q                              # decide() blocked the slice's side: it stays blocked
-        left, price = int(st.get("left", st["slice"])), st["price"]
-        if st["sign"] > 0:
-            if left < 1:
-                return replace(q, ask=None, ask_size=0, ask_limit=None, ask_max=None)
-            bid, bid_size, bid_limit = q.bid, q.bid_size, q.bid_limit
-            if bid_limit is not None:             # an older resting bid at/above the slice ask is never kept
-                bid_limit = min(bid_limit, floor_tick(price - TICK))
-            if bid is not None and bid >= price - 1e-9:
-                bid = floor_tick(price - TICK)
-                bid_limit = min(bid_limit, bid) if bid_limit is not None else bid
-                if bid < PMIN - 1e-9 or bid >= price - 1e-9:
-                    bid, bid_size, bid_limit = None, 0, None
-            return replace(q, bid=bid, bid_size=bid_size if bid is not None else 0, bid_limit=bid_limit,
-                           ask=price, ask_size=left, ask_limit=price, ask_max=left)
-        if left < 1:
-            return replace(q, bid=None, bid_size=0, bid_limit=None, bid_max=None)
-        ask, ask_size, ask_limit = q.ask, q.ask_size, q.ask_limit
-        if ask_limit is not None:                 # an older resting ask at/below the slice bid is never kept
-            ask_limit = max(ask_limit, ceil_tick(price + TICK))
-        if ask is not None and ask <= price + 1e-9:
-            ask = ceil_tick(price + TICK)
-            ask_limit = max(ask_limit, ask) if ask_limit is not None else ask
-            if ask > PMAX + 1e-9 or ask <= price + 1e-9:
-                ask, ask_size, ask_limit = None, 0, None
-        return replace(q, ask=ask, ask_size=ask_size if ask is not None else 0, ask_limit=ask_limit,
-                       bid=price, bid_size=left, bid_limit=price, bid_max=left)
-
     def writes_ready(self, n):
         """Main thread: True if n writes can go now without waiting for the write budget or a 429 pause."""
         if not self.api.live:
@@ -8334,11 +7884,6 @@ class Bot:
         """
         cfg = self.cfg
         taken = set()
-        tilted = bool(getattr(cfg, "take_tilted_ref", False))
-        if tilted != getattr(self, "take_tilted_seen", tilted):   # X12 toggled: the price compared changed, so
-            for ex in self.ex.values():                         # every gap must be confirmed afresh on it
-                ex.take_dir, ex.take_since = 0, now_m
-        self.take_tilted_seen = tilted
         version = getattr(self.refs, "version", 0)
         if not cfg.take_enabled or not self.refs or version == self.take_version_seen:
             return taken
@@ -8348,7 +7893,6 @@ class Bot:
             p = refs.get(eid)
             if p is not None and 0 < cfg.take_ref_max_age_seconds < ages.get(f"{ex.group}|{ex.party}", 0.0):
                 p = None                                  # an old price, kept through failed downloads: not evidence
-            p = self.take_ref(ex, p, now_m)               # X12: the tilted r' with take_tilted_ref
             direction = self.take_direction(ex, p) if (p is not None and eid in liquid) else 0
             if direction != ex.take_dir:
                 ex.take_since = now_m                     # new direction (or none): the clock starts again
@@ -8362,8 +7906,7 @@ class Bot:
             if not self.writes_ready(3):          # cancel + take + leftover cancel, on the main thread
                 continue                          # (the direction stays confirmed: taken once the budget frees)
             no_bid, no_ask = self.party_blocks(ex, party_delta)
-            tb, ta = self.tilt_blocks(ex, refs.get(eid))  # T2.4: no take that grows |tilt_exposure| past the cap
-            if (ex.take_dir > 0 and (no_bid or tb)) or (ex.take_dir < 0 and (no_ask or ta)):
+            if (ex.take_dir > 0 and no_bid) or (ex.take_dir < 0 and no_ask):
                 continue
             try:                                          # the cached book may be old: check it's still there
                 ex.book = strip_own(self.api.book(eid, self.tid), mine_real.get(eid, []))
@@ -8371,7 +7914,6 @@ class Bot:
             except ApiError as e:
                 log.warning("take on %s skipped: book download failed (%s)", ex.label, e)
                 continue
-            p = self.take_ref(ex, refs[eid], now_m)       # X12: the tilted r' with take_tilted_ref
             if self.take_direction(ex, p) != ex.take_dir:
                 ex.take_dir = 0                           # the gap has closed: nothing to take
                 continue
@@ -11754,10 +11296,6 @@ class Bot:
             unreal += sum(x * (marks[e] - p) for x, p in lots) if lots else 0.0
         out["unrealised_pnl"], out["pnl_unreconciled"] = round(unreal, 2), bad
         out["exit_ratio_24h"] = round(fl["reduced_24h"] / fl["added_24h"], 3) if fl["added_24h"] > 0 else None
-        if cfg.pair_unwind_passive or self.pp:
-            out["pair_passive_open"] = {r: {"leg": self.ex[v["leg"]].label, "price": v["price"], "left": v["left"]}
-                                        for r, v in self.pp.items() if v["leg"] in self.ex}
-            out["pair_passive_sets_total"] = self.pp_sets_total
         return out
 
     # ------------------------------------------------------------------------------ EV at the outcome, MM carry
@@ -11976,8 +11514,7 @@ class Bot:
                 "realised_pnl_scope": "maker fills only",   # arb / take fills (our_side '?') are not in realised_pnl
                 **(self.api.pause_state() if hasattr(self.api, "pause_state") else {}),
                 # T2.1: the tilt estimate (also restored from here at start) and the position's exposure to it
-                "tilt_s": round(self.tilt_s, 4), "tilt_s_applied": round(self.tilt_s_applied, 4),
-                "tilt_s_applied_headline": round(self.tilt_s_applied_headline, 4),
+                "tilt_s": round(self.tilt_s, 4),
                 "tilt_exposure": round(self.tilt_exposure),
                 "tilt_state": self.tilt_state_dict(),
                 "tilt_diag": {**getattr(self.tilt, "diag", {}),
@@ -12099,9 +11636,7 @@ class Bot:
         if getattr(self.cfg, "value_mode", False):
             c = self.cfg
             on = tuple(n for n, hit in (
-                ("reduce_from_book", c.reduce_from_book), ("fast_unload_enabled", c.fast_unload_enabled),
-                ("ref_tilt_enabled", c.ref_tilt_enabled), ("take_tilted_ref", c.take_tilted_ref),
-                ("ref_guard_exits", c.ref_guard_exits)) if hit)
+                ("reduce_from_book", c.reduce_from_book), ("fast_unload_enabled", c.fast_unload_enabled)) if hit)
             if on and on != self.warned_value:
                 log.warning("value_mode is on with %s: these sell at marks below Polymarket (their resting quotes "
                             "still keep the value floor; turn them off for an outcome-settled book)", ", ".join(on))

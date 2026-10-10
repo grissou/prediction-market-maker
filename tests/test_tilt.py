@@ -16,7 +16,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from fakes import FakeRefs, make_bot                      # noqa: E402
 import mm_bot as M                                        # noqa: E402
-import strategy_sim as S                                  # noqa: E402
 
 logging.basicConfig(level=logging.ERROR, format="    log %(levelname)s %(message)s")
 RESULTS = []
@@ -33,35 +32,27 @@ def close(a, b, tol=1e-9):
 
 print("--- settings")
 c = M.Config()
-check("defaults: off, headline gate off, 50 markets, 30 min half-life, max 12%, winsor 8c",
-      (c.ref_tilt_enabled, c.ref_tilt_headline, c.ref_tilt_min_markets, c.ref_tilt_halflife_min, c.ref_tilt_max,
-       c.ref_tilt_winsor) == (False, False, 50, 30.0, 0.20, 0.08))
-names = ["ref_tilt_enabled", "ref_tilt_headline", "ref_tilt_min_markets", "ref_tilt_halflife_min", "ref_tilt_max",
-         "ref_tilt_winsor"]
+check("defaults: 50 markets, 30 min half-life, max 20%, winsor 8c (the estimator's knobs; applying the tilt to",
+      " quotes was removed on simplify)",
+      (c.ref_tilt_min_markets, c.ref_tilt_halflife_min, c.ref_tilt_max, c.ref_tilt_winsor) == (50, 30.0, 0.20, 0.08))
+names = ["ref_tilt_min_markets", "ref_tilt_halflife_min", "ref_tilt_max", "ref_tilt_winsor"]
 _ov = list(M.OVERRIDABLE)
 _i = _ov.index(names[0])
-check("all six live-overridable, one block after the savers", _ov[_i:_i + 6] == names and _i > _ov.index("ttl_expire_grace_seconds"),
-      _ov[_i:_i + 6])
+check("all four live-overridable, one block after the savers",
+      _ov[_i:_i + 4] == names and _i > _ov.index("ttl_expire_grace_seconds"), _ov[_i:_i + 4])
 good, bad = M.validate_overrides({"ref_tilt_enabled": True, "ref_tilt_max": 0.5}, c)
-check("override ranges: flag accepted, ref_tilt_max 0.5 refused", good == {"ref_tilt_enabled": True} and len(bad) == 1,
-      (good, bad))
+check("override ranges: the removed flag and ref_tilt_max 0.5 both refused", not good and len(bad) == 2, (good, bad))
 
-print("--- tilted_ref and blend_fv")
+print("--- tilted_ref (the estimator's model) and blend_fv")
 check("two legs: 0.80 with s 5% -> 0.5 + 0.95 x 0.30 = 0.785", close(M.tilted_ref(0.80, 0.05, 2), 0.785))
 check("two legs: 0.10 with s 5% -> 0.12 (longshots pulled up)", close(M.tilted_ref(0.10, 0.05, 2), 0.12))
 check("three legs: c = 1/3", close(M.tilted_ref(0.6, 0.1, 3), 1 / 3 + 0.9 * (0.6 - 1 / 3)))
 check("one leg counts as c = 0.5", close(M.tilted_ref(0.3, 0.1, 1), 0.32) and close(M.tilted_ref(0.3, 0.1, 0), 0.32))
 check("s = 0: unchanged", close(M.tilted_ref(0.37, 0.0, 4), 0.37))
-off, on = M.Config(), M.Config()
-on.ref_tilt_enabled = True
+off = M.Config()
 for bfv, r in ((0.14, 0.30), (0.5123, 0.6789), (0.91, 0.88)):
-    check(f"flag off: blend_fv == the old expression bit for bit (book {bfv}, r {r})",
-          M.blend_fv(bfv, r, off, 0.07, 2) == (1 - off.ref_weight) * bfv + off.ref_weight * r)
-check("flag on: blend uses r' (0.3 * 0.14 + 0.7 * 0.785)", close(M.blend_fv(0.14, 0.80, on, 0.05, 2), 0.3 * 0.14 + 0.7 * 0.785))
-check("flag on, headline market: raw r (staging gate)",
-      M.blend_fv(0.14, 0.80, on, 0.05, 2, headline=True) == M.blend_fv(0.14, 0.80, off, 0.05, 2))
-on_h = M.Config(); on_h.ref_tilt_enabled = on_h.ref_tilt_headline = True
-check("...unless ref_tilt_headline", close(M.blend_fv(0.14, 0.80, on_h, 0.05, 2, headline=True), 0.3 * 0.14 + 0.7 * 0.785))
+    check(f"blend_fv == the old expression bit for bit (book {bfv}, r {r})",
+          M.blend_fv(bfv, r, off) == (1 - off.ref_weight) * bfv + off.ref_weight * r)
 
 print("--- TiltEstimator")
 rng = random.Random(7)
@@ -126,8 +117,6 @@ for v in ("slope", "median", "wls"):
 for v in ("slope,median", "mean", "", 3, None, ["median"]):
     good, bad = M.validate_overrides({"ref_tilt_estimator": v}, c)
     check(f"override {v!r} refused (exactly one of slope, median, wls)", not good and len(bad) == 1, (good, bad))
-good, bad = M.validate_overrides({"ladder_markets": "headline,busy"}, c)
-check("ladder_markets still takes a comma list", good == {"ladder_markets": "headline,busy"} and not bad, (good, bad))
 
 
 def est_with(kind, samples, **kw):
@@ -181,37 +170,6 @@ check("bad state = 0", M.TiltEstimator(M.Config()).from_dict({"s": "x"}).s == 0.
 r1.update(synth(100, 0.09, noise=0.0), 12345.0)
 check("after a restore the first update only sets the clock (no jump to the new raw value)", r1.s == est.s, r1.s)
 
-print("--- main loop: flag off identical, flag on tilted, headline gate")
-
-
-def run_bot(enabled, s, headline_races=None, tilt_headline=False):
-    a, b = make_bot()
-    b.refs, b.cfg.ref_weight = FakeRefs({"Ohio Senate|Republican": 0.30}), 0.5
-    b.cfg.ref_tilt_enabled, b.cfg.ref_tilt_headline = enabled, tilt_headline
-    b.cfg.ref_tilt_rampin_min = 0.0                       # the full tilt at once (ramp-in: test_tilt_rampin.py)
-    if headline_races is not None:
-        b.cfg.headline_races = headline_races
-    b.tilt.s = s                                          # 1 market < 50: the estimator holds it
-    b.cycle()
-    return a, b
-
-
-_, b_off = run_bot(False, 0.0)
-_, b_off_s = run_bot(False, 0.05)
-check("flag off: the estimate does not change fair value", b_off.ex["11"].last_fv == b_off_s.ex["11"].last_fv,
-      (b_off.ex["11"].last_fv, b_off_s.ex["11"].last_fv))
-exp_off = M.normalise({"11": 0.5 * 0.14 + 0.5 * 0.30, "12": 0.86})["11"]
-check("flag off: fair value = the old blend (0.14 / 0.30, normalised)", close(b_off.ex["11"].last_fv, exp_off),
-      (b_off.ex["11"].last_fv, exp_off))
-_, b_on = run_bot(True, 0.05)
-exp_on = M.normalise({"11": 0.5 * 0.14 + 0.5 * M.tilted_ref(0.30, 0.05, 2), "12": 0.86})["11"]
-check("flag on: fair value blends toward r' = 0.31", close(b_on.ex["11"].last_fv, exp_on), (b_on.ex["11"].last_fv, exp_on))
-check("flag on: the race's legs set c (Ohio: 2 markets)", b_on.legs(b_on.ex["11"]) == 2)
-_, b_hd = run_bot(True, 0.05, headline_races=("Ohio Senate",))
-check("flag on, headline race: raw r", close(b_hd.ex["11"].last_fv, exp_off), b_hd.ex["11"].last_fv)
-_, b_hd2 = run_bot(True, 0.05, headline_races=("Ohio Senate",), tilt_headline=True)
-check("...tilted with ref_tilt_headline", close(b_hd2.ex["11"].last_fv, exp_on), b_hd2.ex["11"].last_fv)
-
 print("--- which markets feed the estimator; tilt_exposure; status.json and restore")
 a, b = make_bot()
 b.cfg.ref_tilt_min_markets = 1
@@ -254,48 +212,6 @@ with open(b.cfg.status_file, "w") as f:
 check("status.json without the key: s = 0", M.Bot(a, b.cfg).tilt.s == 0.0)
 os.remove(b.cfg.status_file)
 check("no status.json: s = 0", M.Bot(a, b.cfg).tilt.s == 0.0)
-
-print("--- strategy_sim mirror")
-
-
-def sim_metrics(over, patch=None):
-    saved = (M.tilted_ref, M.TiltEstimator)
-    if patch:
-        M.tilted_ref, M.TiltEstimator = patch
-    try:
-        return S.Sim(1, 0.05, "quiet", S.make_cfg(over)).run()
-    finally:
-        M.tilted_ref, M.TiltEstimator = saved
-
-
-def boom(*a, **k):
-    raise AssertionError("tilt code called with the flag off")
-
-
-m_absent = sim_metrics({})
-m_off = sim_metrics({"ref_tilt_enabled": False}, patch=(boom, boom))
-check("flag off: identical metrics, and no tilt code runs", m_off == m_absent)
-calls = {"ref": 0, "upd": 0}
-real_ref, real_est = M.tilted_ref, M.TiltEstimator
-
-
-def counting_ref(*a):
-    calls["ref"] += 1
-    return real_ref(*a)
-
-
-class CountingEst(real_est):
-    def update(self, samples, now):
-        calls["upd"] += 1
-        return super().update(samples, now)
-
-
-m_on = sim_metrics({"ref_tilt_enabled": True, "ref_tilt_min_markets": 5}, patch=(counting_ref, CountingEst))
-check("flag on: the sim calls mm_bot's own tilted_ref and TiltEstimator (one update per cycle)",
-      calls["ref"] > 0 and 0 < calls["upd"] <= int(0.05 * 3600 / 2) + 1, calls)
-sim = S.Sim(1, 0.05, "quiet", S.make_cfg({"ref_tilt_enabled": True, "ref_tilt_min_markets": 5}))
-sim.run()
-check("flag on: the sim's estimator ran on its markets", sim.tilt.n >= 5 and 0.0 <= sim.tilt.s <= 0.20, (sim.tilt.n, sim.tilt.s))
 
 print(f"\n{sum(RESULTS)} of {len(RESULTS)} passed")
 sys.exit(0 if all(RESULTS) else 1)

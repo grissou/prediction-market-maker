@@ -159,12 +159,7 @@ check("execute_take adding (long): buy YES", api.wire and api.wire[-1]["side"] =
       api.wire)
 
 # (the hold target's take_aged check was removed with the feature on simplify)
-api, b = bot(True, {"21": -40, "22": -40})
-st = {"other": "21", "sign": -1, "price": 0.43, "leg": "22", "slice": 40}
-b.pair_passive_take("Utah Senate", st, 40, {}, time.monotonic())
-t = no_sells(api, "21")
-check("pair-passive second leg (short set): sell NO x40 @ 1 - ask", len(t) == 1 and t[0]["quantity"] == 40
-      and abs(t[0]["price"] - 0.44) < 1e-9, api.wire)
+# (the pair-passive second-leg take check was removed with the passive pair unwind on simplify)
 
 api, b = bot(True, {"21": -40, "22": -40})
 b.execute_arbitrage("Utah Senate", ["21", "22"], {"21": (0.56, 1000), "22": (0.52, 1000)}, 30, {}, time.monotonic(),

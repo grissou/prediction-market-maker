@@ -31,8 +31,8 @@ c = M.Config()
 check("default off (1.0)", getattr(c, KEY, None) == 1.0)
 _ov, _f = list(M.OVERRIDABLE), list(M.Config.__dataclass_fields__)
 check("its own block in Config and OVERRIDABLE, after the Package 6 reduce-only one",
-      KEY in _f and KEY in _ov and _f[_f.index(KEY) - 1] == "pair_passive_in_reduce_only"
-      and _ov[_ov.index(KEY) - 1] == "pair_passive_in_reduce_only", (_f[-3:], _ov[-3:]))
+      KEY in _f and KEY in _ov and _f[_f.index(KEY) - 1] == "exit_quotes_in_reduce_only"
+      and _ov[_ov.index(KEY) - 1] == "exit_quotes_in_reduce_only", (_f[-3:], _ov[-3:]))
 check("range (0, 1)", M.OVERRIDABLE.get(KEY) == (0.0, 1.0))
 good, bad = M.validate_overrides({KEY: 0.25}, c)
 check("0.25 accepted live", good == {KEY: 0.25} and not bad, bad)

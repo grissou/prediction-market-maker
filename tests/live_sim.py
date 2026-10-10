@@ -149,7 +149,6 @@ class LiveSim(Sim):
         self.bot = self.make_bot()
         self.strategy = bot_strategy
         self.unwinds = self.arbs = self.unwind_sh = self.arb_sh = self.outsider_arb_sh = 0
-        self.tx_bind = self.tx_quoted = 0                 # Package 5 T2.4: binding / quoted market-cycles
         self.arb_pnl = 0.0
         self.curve, self.wc_peak, self.nf = [], 0.0, 0
         self.bidsum = {"senate": [], "asksum_lo": 0, "race_min": 0}
@@ -313,8 +312,6 @@ class LiveSim(Sim):
         bot.update_adding_resume(self.cap_frac, cfg)       # Package 8 adding_factor_capital_on (no-op when 0)
         self.party_delta = self.bg_party + sum(M.PARTY_SIGN.get(bot.ex[e].party, 0) * q for e, q in inv.items())
         self.eff = bot.effective_inventory(inv)
-        if cfg.tilt_exposure_max_frac > 0:   # T2.4 feed
-            bot.tilt_exposure = sum(m.inv * (m.ref_seen - 0.5) for m in self.mkts if m.inv and m.ref_seen is not None)
         if getattr(cfg, "ladder_enabled", False):  # (R3 ladder: gone from mm_bot)
             other = sum(order_lock(o, m.inv, self.free_short()) for m in self.mkts for o in m.orders
                         if o.owner == "us" and o.level == 0)
@@ -330,8 +327,6 @@ class LiveSim(Sim):
             self.lad_gate_hits += not self.lad_writes_ok
         if t % 10 == 0:
             self.arbitrage(t, inv, fvs)
-        if cfg.pair_unwind_passive and t % 5 == 0:      # Package 5 T2.5 (isolated mirror, see pair_passive)
-            self.pair_passive(t, inv, fvs)
         if self.bg_wc:                            # the live backstop (mm_bot cycle step 6, sum-of-maxima part only)
             if self.bg_g or self.bg_d:            # the rest of the account adds between episodes, reduces inside them
                 dt_h = (t - self.t_prev_bg) / 3600.0
@@ -431,38 +426,10 @@ class LiveSim(Sim):
             self.pair_followup_sh = getattr(self, "pair_followup_sh", 0.0) + f
     # ---- end Package 7 follow-up mirror ----
 
-    # ---- Package 5 T2.5: passive pair unwind mirror (isolated; only runs with cfg.pair_unwind_passive) ----
-    def pair_passive(self, t, inv, fvs):
-        """Bot.pair_passive_step on the simulated books every 5 s: a fill of the resting leg -> the other leg taken at
-        once (self.take, our quotes there pulled first). The resting ask goes through Bot.decide, wrapped once with
-        Bot.pair_passive_quote as cycle_body applies it. Counts: self.pp_take_sh (second-leg shares taken)."""
-        bot = self.bot
-        if not getattr(self, "pp_wrapped", False):
-            self.pp_wrapped, self.pp_take_sh, plain = True, 0.0, bot.decide
-            bot.decide = lambda ex, *a, **k: (bot.pair_passive_quote(ex, plain(ex, *a, **k)) if bot.pp
-                                              else plain(ex, *a, **k))
-        by = {}
-        for ms in self.races.values():
-            if len(ms) == 2:
-                for m in ms:
-                    bot.ex[m.eid].book, by[m.eid] = self.book_dict(m), m
-
-        def execute(eid, buy, qty, price):
-            if not self.take_writes_ok(t):
-                return 0.0                        # refused for writes: nothing sold (the owed leg waits)
-            m = by[eid]
-            m.orders = [o for o in m.orders if o.owner != "us"]
-            got = self.take(m, t, buy, qty, price)
-            inv[eid] = m.inv
-            self.pp_take_sh += got
-            return got
-        bot.pair_passive_step(inv, fvs, t, execute=execute)
-    # ---- end Package 5 T2.5 mirror ----
-
     def take_writes_ok(self, t, n=3):
-        """Package 5 mirrors (T2.5 second leg): a take costs n writes as live (pull our quotes, the IOC
+        """Package 7 mirror (pair follow-up): a take costs n writes as live (pull our quotes, the IOC
         order, the leftover cancel); charge them to the write log, or refuse when the budget has no room (as
-        pair_passive_take waits for writes_ready). The arbitrage path keeps its Round 3 accounting."""
+        a take waits for writes_ready). The arbitrage path keeps its Round 3 accounting."""
         spare = self.wcap - sum(c for _, c in self.wlog if t - _ < 60)
         if spare < n:
             self.take_refused = getattr(self, "take_refused", 0) + 1
@@ -634,7 +601,6 @@ class LiveSim(Sim):
                                          else round(v / max(1, self.lg["cash"])) if k == "lv_cash" else round(v))
                       for k, v in self.lg.items()},
                    dead=sum(1 for e in self.bot.ex.values() if e.turnover_dead),
-                   tx_bind_frac=round(self.tx_bind / max(1, self.tx_quoted), 3),   # Package 5 T2.4
                    ro_frac=round(self.ro_cycles / max(1, self.n_cycles), 3), bg_wc_end=round(self.bg_wc),
                    wc_start=round(self.wc_start) if self.wc_start is not None else 0,
                    tilt_s_end=round(getattr(getattr(self, "tilt", None), "s", 0.0), 4),
@@ -657,12 +623,7 @@ def bot_strategy(sim, m, t, fv, bfv, ref, book):
         # reference_jump_guard sets: feed it the sim's Polymarket jump (see_ref sets cooldown_until = jump + cooldown)
         ex.ref_jump_at = max(ex.ref_jump_at, m.cooldown_until - sim.cfg.ref_jump_cooldown_seconds)
     inv = {x.eid: x.inv for x in sim.mkts}
-    if sim.cfg.ref_guard_tilted and getattr(sim, "tilt", None) is not None:   # Package 8: the guard's tilted_ref_for
-        bot.tilt_s, bot.tilt_on_at = sim.tilt.s, sim.tilt_on_at              # reads the sim's estimate (sim seconds)
     q = bot.decide(ex, fv, inv, sim.eff, sim.global_reduce, sim.party_delta, t, ref=ref, book_fv=bfv, ref_liquid=True)
-    if sim.cfg.tilt_exposure_max_frac > 0:         # Package 5 T2.4: market-cycles where the tilt limit binds
-        sim.tx_quoted += 1
-        sim.tx_bind += any(bot.tilt_blocks(ex, ref))
     want = S.quote_to_want(q)
     if getattr(sim.cfg, "ladder_enabled", False):  # (R3 ladder: gone from mm_bot)
         lg, quoted = sim.lg, q.bid is not None or q.ask is not None
