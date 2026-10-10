@@ -325,11 +325,12 @@ check("off by default: mom_on False, no momentum status, may not buy", not b_.mo
       and not b_.mom_may_buy() and b_.ma["state"] == "off")
 if os.path.exists(STAGED):
     raw = json.load(open(STAGED))
-    RETIRED = ("tilt_exit_priority", "tilt_exit_full_size")   # (retired: the staged files pin them at their default False)
+    RETIRED = ("tilt_exit_priority", "tilt_exit_full_size")   # retired settings the old staged files still carry
     good, bad = M.validate_overrides({k: v for k, v in raw.items() if k not in RETIRED}, M.Config())
     p15 = json.load(open(P15_STAGED))
     p16k = set(raw) - set(p15)
-    check("staged file validates whole (no problem)", not bad and len(good) == len(raw) - sum(x in raw for x in RETIRED), bad)
+    n_ret = sum(x in raw for x in RETIRED)
+    check("staged file validates whole (no problem)", not bad and len(good) == len(raw) - n_ret, bad)
     check("staged file = the Package 15 file + the P16 keys only (nothing of Package 15 changed)",
           {k: v for k, v in raw.items() if k in p15} == p15 and p16k <= set(SPEC), sorted(p16k - set(SPEC)))
     check("staged: momentum_enabled true, momentum_auto true, momentum_force false, momentum_exit not set",
