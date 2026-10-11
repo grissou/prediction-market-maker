@@ -38,7 +38,10 @@ HANDOVER_EXIT_S = 150.0           # a handover that has not exited by then exits
 WATCHDOG_CANCEL_S = 20.0          # the watchdog's cancel-all gets this long, then the process exits regardless
 MIN_CYCLE_GAP_S = 2.0             # feed events closer than this share one cycle (README §5: 1-2 s reaction)
 ERRORS_BEFORE_PULL = 3            # failed cycles in a row before every quote is pulled
-SELFTEST_TRIES = 3
+SELFTEST_TRIES = 120              # a busy or down exchange is retried every SELFTEST_WAIT_S for up to 2 hours...
+SELFTEST_WAIT_S = 60.0            # ...(the 11 Oct outage: 503s for 25 minutes killed the bot with a "fatal" exit)
+START_TRIES, START_WAIT_S = 30, 60.0   # the same patience for the start-up reads (tournament, markets)
+BUSY_SIGNS = ("500", "502", "503", "504", "429", "409", "timed out", "unavailable", "retry", "in flight")
 
 
 def setup_logging(run_dir):
@@ -266,7 +269,16 @@ def run(env, live):
     if os.path.exists(os.path.join(env.run_dir, KILL_FILE)):
         log.critical("%s exists: the kill switch fired; delete it to trade again", KILL_FILE)
         return EXIT_KILLED
-    bot = start(env, live)
+    bot = None
+    for attempt in range(START_TRIES):          # a down exchange at start-up is waited out, not crashed on
+        try:
+            bot = start(env, live)
+            break
+        except ApiError as e:
+            if e.fatal or attempt == START_TRIES - 1:
+                raise
+            log.warning("start-up read failed (%s): retrying in %.0f s", e, START_WAIT_S)
+            time.sleep(START_WAIT_S)
     handed = live and adopted_handover(env.run_dir)
     bot.alert(f"STARTED {'live' if live else 'dry run'}{' (handover)' if handed else ''}: "
               f"{len(bot.markets)} markets", cause="start")
@@ -276,13 +288,17 @@ def run(env, live):
         for attempt in range(SELFTEST_TRIES):
             try:
                 problem = self_test(bot.client, bot.markets)
-                break
             except ApiError as e:                 # a busy exchange is not a failure: try again shortly
                 problem = f"exchange busy ({e})"
-                time.sleep(30)
+            busy = problem is not None and any(sign in problem.lower() for sign in BUSY_SIGNS)
+            if not busy:
+                break
+            if attempt == 4:
+                bot.alert(f"self-test waiting on the exchange ({problem}); retrying every minute", cause="start")
+            time.sleep(SELFTEST_WAIT_S)
         if problem:
             bot.alert(f"SELF-TEST FAILED: {problem}: not trading")
-            return EXIT_FATAL
+            return EXIT_CRASH if busy else EXIT_FATAL   # still busy after 2 h: let systemd try again later
         no_problem = covered_no_test(bot.client, bot.client.positions())
         if no_problem:                            # as the old bot: alert, buy back as "buy YES", keep running
             bot.client.covered_no = False

@@ -61,7 +61,9 @@ is expected to be (§6). Both numbers move every hour. Neither is a final result
 **3.1 The prices carry a favourite–longshot tilt.** Across all markets, the tournament's mid price *m*
 relates to Polymarket's probability *r* roughly as
 
-  *m* ≈ *c* + (1 − *s*)(*r* − *c*),  where *c* = 1 / (number of candidates in the race).
+```math
+m \approx c + (1 - s)(r - c), \qquad c = \frac{1}{\text{number of candidates in the race}}
+```
 
 In words: prices are pulled toward "every candidate equally likely" by a factor *s*. A candidate with a
 2% chance trades at 10–15c; one with a 97% chance trades at 85–88c. The bot estimates *s* every cycle
@@ -102,10 +104,10 @@ Every opportunity is scored the same way: the expected gain at the result divide
 
 | Action | Edge |
 |---|---|
-| Buy YES at the ask *a* | (*p* − *a*) / *a* |
-| Sell YES short at the bid *b* | (*b* − *p*) / (1 − *b*) |
-| Keep a long rather than sell it at the bid *b* | (*p* − *b*) / *b* |
-| Keep a short rather than buy it back at the ask *a* | (*a* − *p*) / (1 − *a*) |
+| Buy YES at the ask *a* | $(p - a) / a$ |
+| Sell YES short at the bid *b* | $(b - p) / (1 - b)$ |
+| Keep a long rather than sell it at the bid *b* | $(p - b) / b$ |
+| Keep a short rather than buy it back at the ask *a* | $(a - p) / (1 - a)$ |
 
 One scale for everything means the allocator can compare selling one position against buying another,
 and each strategy can apply a simple hurdle: 8% for the ladder, 5 points of net gain for a swap.
