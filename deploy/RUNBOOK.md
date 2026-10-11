@@ -1,48 +1,38 @@
 # Runbook: operating the live bot
 
-Server: /opt/mmbot (Python 3.10 venv), systemd unit `mmbot`, live settings in /opt/mmbot/settings_override.json
-(re-read every 30 s, whitelisted keys only: `OVERRIDABLE` in mm_bot.py), phone alerts via ntfy.
+Server: /opt/mmbot (Python 3.10 venv), systemd unit `mmbot` (`deploy/mmbot.service`: `mm_bot.py run --live`,
+WorkingDirectory /opt/mmbot), phone alerts via ntfy (ALERT_URL in /opt/mmbot/.env). Everything the bot writes is
+under /opt/mmbot/run/: `settings_override.json`, `status.json` (health: account_value, resting, ev_outcome, alloc...),
+`state.json`, `handover.json`, `kill_switch.tripped`, `mm_bot.log` (rotated), the recorder's `market_data.sqlite`.
 
-## A. Parameter-only package (no restart)
-1. Open /opt/mmbot/settings_override.json (create it if missing; one JSON object).
-2. Merge the package's snippet into it (the staged file under deploy/package<N>/). Keep existing keys you still want.
-3. Within 30 s the journal shows `SETTING name: old -> new` for each key; a refused key is reported once
-   (`journalctl -u mmbot -n 50 | grep -i 'SETTING\|override'`). status.json lists the active overrides.
-4. Rollback: delete the key (the default returns) or the whole file. Takes effect within 30 s.
+## A. Settings (no restart)
+1. Edit /opt/mmbot/run/settings_override.json (one JSON object; start from `deploy/settings_override.json.example`).
+   Only the names in `LIVE` in mmbot/config.py are accepted, each within its range; anything else is refused with
+   one alert and ignored.
+2. The file is re-read every 30 s; the journal shows `SETTING name: old -> new` per key
+   (`journalctl -u mmbot -n 50 | grep SETTING`). status.json lists the active settings.
+3. Rollback: delete the key (the default in mmbot/config.py returns) or the whole file; takes effect within 30 s.
 
-## B. Code package (handover restart: resting orders are kept)
-1. Stage: `mkdir -p /opt/mmbot/staging-<date>` and copy the package's files there (mm_bot.py AND the package directory mmbot/ next to it).
-2. Test on your own machine first (`for t in tests/test_*.py; do python "$t" | tail -1; done`, plus `python tests/test_identity.py`
-   against the commit the server runs); on the server only compile: `/opt/mmbot/.venv/bin/python -m py_compile mm_bot.py`
-   (the suites take over 10 minutes on the server's single CPU and compete with the bot).
-3. Back up: `mkdir -p /opt/mmbot/backup-<date> && cp -r /opt/mmbot/mm_bot.py /opt/mmbot/mmbot /opt/mmbot/ref_prices.py /opt/mmbot/ref_map.json /opt/mmbot/backup-<date>/`.
-4. Copy the staged files into /opt/mmbot: mm_bot.py and the whole `mmbot/` package directory next to it
-   (`cp -r staging-<date>/mmbot /opt/mmbot/`; the code lives in mmbot/*.py, mm_bot.py is only the entry point;
-   remove stale `mmbot/__pycache__` if in doubt) - not .env, not state files: fills.csv, order_notes.json, market_data.sqlite, settings_override.json).
-5. Restart without cancelling: `sh /opt/mmbot/deploy/handover-restart.sh` (SIGUSR1, waits up to 240 s (the bot exits within 150 s), always starts the new version, which
-   adopts the resting orders). Then `journalctl -u mmbot -f | grep -i 'handover\|ALERT\|BURST\|SETTING'`.
-   - If the new version does not start within ~2 min, the resting orders are unmanaged until they expire (30 min): roll back at once.
-   - A plain `systemctl restart mmbot` still cancels everything on stop and start; use it when the package section says so.
-6. First 10 minutes: see the package section ("What to watch"). Generic checks: the summary line
-   `account X (locked in orders L, already included) | worst-case loss Y (risk Z) | ... | priced a/237 | resting n`
-   has X near the pre-deploy value, Z below 30% of X, a rising, no repeated ERROR, no 429, few 409s; fills.csv shows no fill through fair value.
+## B. Code deploy
+1. Test on your own machine: `for t in tests/test_*.py; do python3 "$t" | tail -1; done` (all `N/N passed`).
+2. Back up: `mkdir -p /opt/mmbot/backup-<date> && cp -r /opt/mmbot/mm_bot.py /opt/mmbot/mmbot /opt/mmbot/backup-<date>/`.
+3. Copy `mm_bot.py` and the whole `mmbot/` directory into /opt/mmbot (`scp -r mm_bot.py mmbot mmbot@SERVER:/opt/mmbot/`,
+   or re-run `deploy/setup.sh`, which also keeps .env and run/). Remove `mmbot/__pycache__`. Never copy .env or run/.
+4. Compile on the server (`/opt/mmbot/.venv/bin/python -m py_compile /opt/mmbot/mm_bot.py /opt/mmbot/mmbot/*.py`),
+   then restart, one of:
+   - handover, resting orders kept: `systemctl kill -s USR1 mmbot && sleep 5 && systemctl start mmbot` (the old process writes
+     run/handover.json and exits within 150 s, the new one adopts the orders);
+   - plain: `sudo systemctl restart mmbot` (SIGINT: cancels every order on stop, starts clean).
+5. First 10 minutes: `journalctl -u mmbot -f | grep -i 'handover\|ALERT\|SETTING\|429'`, and run/status.json:
+   account_value near the pre-deploy value, worst case below 40% of it, `priced` near 237, orders resting, no 429s.
 
-## C. Rollback (code)
-`cp /opt/mmbot/backup-<date>/* /opt/mmbot/ && sh /opt/mmbot/deploy/handover-restart.sh` (or `systemctl restart mmbot` to also cancel).
-Settings overrides stay in force across a rollback: check settings_override.json for keys the old code does not know (they are refused with one alert, harmless).
+## C. Rollback
+`cp -r /opt/mmbot/backup-<date>/* /opt/mmbot/ && systemctl restart mmbot` (`systemctl restart mmbot`
+to also cancel). Settings stay in force across a rollback; a key the old code does not know is refused, harmless.
 
 ## D. Emergency
-- Stop and cancel everything: `sudo systemctl stop mmbot`.
-- Kill switch file: /opt/mmbot/kill_switch.tripped (the bot exits 4 and systemd does not restart it).
-
-## E. The rewrite (mm_bot2.py): shadow run, then switch-over
-1. Stage: copy `mm_bot2.py`, `mmbot2/` and `deploy/settings_override.rewrite.json` to /opt/mmbot (next to the live bot; it
-   reuses `.env`, `ref_prices.py` and `ref_map.json`). Its files live in /opt/mmbot/run2/: `mkdir -p run2 && cp
-   deploy/settings_override.rewrite.json run2/settings_override.json` (new names; the live file's old names are refused).
-2. Shadow (a day, beside the live bot, same account, sends nothing): `nohup .venv/bin/python mm_bot2.py run > run2/shadow.out 2>&1 &`.
-   Read `run2/mm_bot2.log` (`grep WOULD`: every order it would send) and `run2/status.json` (account_value, ev_outcome, alloc...).
-3. Compare with the live bot's journal: same markets, sides within a factor of two (tests2/test_replay.py did this offline).
-4. Switch: stop the shadow (`kill %1`); `sudo systemctl stop mmbot` (cancels everything); point the unit's ExecStart at
-   `mm_bot2.py run --live` (and WorkingDirectory unchanged); `sudo systemctl daemon-reload && sudo systemctl start mmbot`.
-5. Later deploys: `sh deploy/handover-restart.sh` works unchanged (SIGUSR1; run2/handover.json is adopted).
-6. Rollback: restore ExecStart to `mm_bot.py run --live`, `daemon-reload`, `systemctl restart mmbot`. Kill marker: run2/kill_switch.tripped.
+- Stop and cancel everything: `sudo systemctl stop mmbot` (exit codes 3 fatal API / 4 kill switch stay stopped).
+- Kill switch: the bot stops itself 30% below the start value, cancels, leaves run/kill_switch.tripped and exits 4;
+  read the log, then `rm /opt/mmbot/run/kill_switch.tripped && sudo systemctl start mmbot`.
+- Cancel without the service: `cd /opt/mmbot && .venv/bin/python mm_bot.py cancel` (`--all` for every order on the account).
+- Look without touching: `.venv/bin/python mm_bot.py status`; a dry run (`mm_bot.py run`, no `--live`) sends nothing.

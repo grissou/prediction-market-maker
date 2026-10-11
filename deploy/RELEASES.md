@@ -1,9 +1,9 @@
 # Releases
 
 What went live, when, and what it switched on. Every release shipped with its new settings OFF; the files
-under `deploy/package<N>/` are the staged `settings_override.json` that switched them on, in stages. A
-"handover" is `deploy/handover-restart.sh`: the new code adopts the resting orders. Rollback copies live on
-the server under `/opt/mmbot/backup-<date>/`. Times are UTC. The commit is the `mm_bot.py` that ran.
+`deploy/package<N>/` named below were the staged `settings_override.json` that switched them on, in stages (kept in git history: tag `legacy-2026-10-11`). A
+"handover" is a SIGUSR1 stop (`systemctl kill -s USR1 mmbot`, then start): the new code adopts the resting orders. Rollback copies live on
+the server under `/opt/mmbot/backup-<date>/`. Times are UTC. The commit is the code that ran.
 
 | # | Live from | Commit | What it added | Switched on |
 |---|---|---|---|---|
@@ -21,6 +21,8 @@ the server under `/opt/mmbot/backup-<date>/`. Times are UTC. The commit is the `
 | 14.2 | 5 Oct 18:25 | `64f27c8` | The swap-only value-floor margin: a swap may sell up to 3c below value only for a 5-point gain | `alloc_swap_sell_margin` 0.03, `alloc_swap_min_gain` 0.05 |
 | 15 | 6 Oct 18:32 | `ed65638` | The **harvest ladder** (asks above longshots, bids under favourites, 0/2/4/6c, ≥ 8% edge) with a 10k budget carved from the reserve; the **per-state collateral cap** | `tilt_harvest_ladder`, `state_max_usd` 15,000 |
 | 16 | 6 Oct 21:59 | `d9220c1` | The **armed momentum sleeve**: buys longshots only while the tilt's 24-h and 6-h slopes are rising, 10k steps, automatic flip, kill at −25% | `momentum_enabled`, `momentum_auto`, cap 10k (the Team staged 40k) |
+| 17 | 10 Oct 11:21 | `7298727` | The **split package**: `mm_bot.py` reduced to the entry point, the code in the package directory `mmbot/` (same behaviour, byte-identical settings) | as 16 |
+| rewrite | 11 Oct 11:33 | `8b1b000` (as `mmbot2`; renamed `mmbot` in the next commit) | The **rewrite** (built as `mmbot2`, 3,900 lines in 12 files, 58 settings, 10 suites) went live by a service switch (ExecStart to the new entry point; the old package stopped and retired). It keeps the strategy (value floor, allocator, market making in the band, harvest ladder; no momentum sleeve) and the recorder's sqlite schema; its files live under `run/` | the live values of 10 Oct (`deploy/settings_override.json.example`) |
 
 Not deployed: 4 (superseded by 5), 9 (the long-tilt basket; built, dry-run, never switched on), 11 (the
 literature review behind 12), 13 (the 20/40/40 rebalance and the first momentum sleeve; its sleeve was ported

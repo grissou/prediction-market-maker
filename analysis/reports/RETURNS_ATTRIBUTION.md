@@ -1,90 +1,75 @@
-# Which layer earns? Attribution, 4–8 October 2026
+# Which part of the bot makes the money?
+*8 October 2026 (updated 10 October); the bot's own trade log, 4 October 02:12 to 8 October 14:38 UTC, then to 10 October 08:20 UTC.*
 
-Source: the bot's own log lines (every trade carries the Polymarket price *p* at the time), parsed by
-`analysis/returns_attribution.py` over `mm_bot.log*` (4 Oct 02:12 to 8 Oct 14:38 UTC). Expected value (EV)
-means value at settlement, positions at *p*. 4 October is the transition day (value mode went live at
-11:15); the four days 5–8 October are the bot as it runs now.
+**In one paragraph.** Over 5 to 8 October the bot's expected value at settlement rose from 108.1k to 110.5k. Only one part earned a large, measured return: the hourly reallocation step that buys the cheapest edge per unit of cash (+2,676 on 23.6k bought, +1,142 net of the sales that paid for it). Market making in the middle of the price range earned +667 but cost 1,627 to fund (value positions sold to top up its 20k reserve), and the momentum sleeve sold 12.9k of value positions and bought nothing (−521). By 10 October the harvest ladder, once funded, had become the best earner: +2,885 on 19.4k sold (15% per unit of cash).
 
-## The table (5–8 October, four days)
+## Why it mattered
+The bot had several competing layers that all drew on the same cash. This analysis decided which to keep: it led to turning the momentum sleeve off, narrowing the value floor, and shrinking the market-making reserve so that cash went to the reallocation step and the ladder instead.
+
+## What was done
+Every trade line in the bot's log carries the Polymarket probability *p* at the time. Each trade was valued at settlement, with positions valued at *p*. Trades were grouped by the layer that produced them. Market-making round trips were matched first-in, first-out. 4 October was the transition day (value mode went live at 11:15), so the totals cover the four days 5 to 8 October.
+
+## What it found
+
+### 5 to 8 October (four days)
 
 | Layer | Activity | Expected value | Per day |
 |---|---|---|---|
-| **Allocator buys** (swaps and spare-cash buys at the touch) | 23.6k bought | **+2,676** | +670 |
-| Allocator swap sales (the sale half of a swap) | | −1,534 | −380 |
-| → Allocator net | | **+1,142** | +290 |
-| **Market making** (middle band, FIFO-matched round trips) | 4,050 fills | +667 realised | +170 |
+| Reallocation buys (swaps and spare-cash buys at the touch) | 23.6k bought | **+2,676** | +670 |
+| Reallocation swap sales (the sale half of a swap) | | −1,534 | −380 |
+| Reallocation, net | | **+1,142** | +290 |
+| Market making (middle band, matched round trips) | 4,050 fills | +667 realised | +170 |
 | Value positions acquired through tail quotes | | +650 | +160 |
-| **Refill** (value sold to fund market making's 20k reserve) | **56k sold** | **−1,627** | −410 |
-| **Momentum sleeve** (funding sales; it bought nothing) | 12.9k sold | **−521** | |
+| Refill (value sold to fund the 20k market-making reserve) | **56k sold** | **−1,627** | −410 |
+| Momentum sleeve (funding sales; it bought nothing) | 12.9k sold | **−521** | |
 | Harvest ladder | 0 fills | 0 | |
-| Takes | 0 since 5 Oct (paused by the risk room) | 0 | |
-| Arbitrage / pair unwinds | 1 event | ≈0 | |
-| Account at the marks | 100.8k → 103.6k | | +700 |
-| EV at settlement | 108.1k → 110.5k | | +600 |
+| Takes | 0 since 5 Oct (paused) | 0 | |
+| Arbitrage and pair unwinds | 1 event | about 0 | |
+| Account at the exchange's marks | 100.8k → 103.6k | | +700 |
+| Expected value at settlement | 108.1k → 110.5k | | +600 |
 
 Three things stand out.
 
-**1. The allocator is the only layer with a large, measured return, and it has been starved.** Its
-buys earned about 11% of EV per unit of cash deployed; after paying for the sale half of each swap, about
-5%. Almost all of it happened on 5 October (20.8k bought, +2,414). Since then it bought 1.3k on the 6th,
-1.3k on the 7th and nothing on the 8th: every unit of cash the refill raised went to the market-making
-reserve or the momentum sleeve instead.
+**The reallocation step earned the most and was starved.** Its buys earned about 11% of expected value per unit of cash, about 5% after paying for the sale half of each swap. Almost all of it came on 5 October (20.8k bought, +2,414). It then bought 1.3k on the 6th, 1.3k on the 7th and nothing on the 8th. Every unit of cash the refill raised went to the market-making reserve or the momentum sleeve instead.
 
-**2. Market making costs more to fund than it earns.** It realised +667 in four days. The refill that
-keeps its reserve topped up sold 56k of value positions and gave up 1,627 of EV doing so (the 4c floor
-on 7–8 October accounts for 1,370 of that). Even adding the inventory market making still holds (about
-+600 at *p* in `status.json`), the layer is roughly break-even at best, and it occupies 20k of cash
-plus the bot's request budget.
+**Market making cost more to fund than it earned.** It realised +667 in four days. The refill sold 56k of value positions and gave up 1,627 of expected value doing so; the 4c selling floor on 7 and 8 October accounts for 1,370 of that. Even counting the inventory it still held (about +600 at *p*), the layer was roughly break-even at best. It also occupied 20k of cash and much of the bot's request budget.
 
-**3. The momentum sleeve cannot buy.** It switched on at 16:00 on 7 October, sold 12.9k of value
-positions over six hours to fund itself (−521 EV), and bought nothing before the tilt turned and it
-switched off at 04:00. Its candidate filter excludes any longshot the bot is short or whose favourite it
-is long (`mom_candidates`, `mm_bot.py:12951`), and the value book is short nearly every longshot. By
-construction it is a seller only.
+**The momentum sleeve could not buy.** It switched on at 16:00 on 7 October, sold 12.9k of value positions over six hours to fund itself, and bought nothing before the tilt turned and it switched off at 04:00. Its candidate filter excludes any longshot the bot is short, or whose favourite it is long. The value book is short nearly every longshot, so by construction the sleeve could only sell.
 
-## What this says about the design
+### Update, 5 to 10 October (six days)
 
-The bot's returns come from one idea: **buy the most edge per unit of cash, sell the least, never below
-value.** That is the allocator. Everything that competes with it for cash (the market-making reserve, the
-refill, the sleeve) has cost expected value over this window, and the ladder has done nothing.
+| Layer | Activity | Expected value |
+|---|---|---|
+| Harvest ladder (first fills 8 to 9 October, once the refill had raised cash) | 19.4k sold short | **+2,885** (15% per unit of cash) |
+| Reallocation buys | nothing deployed since 7 October | +2,676 |
+| Refill | **110.6k** sold | −3,905 (3.5%) |
+| Momentum sleeve | | −521 |
+| Market making | | +786 realised |
+| Trading sum | | +1,261 |
+| Expected value at settlement | 108.4k → 112.7k | +4.3k |
 
-Proposed keep / retire list for the owner's decision:
+The difference between the trading sum and the change in expected value is drift in Polymarket prices on held positions. Of the 110k sold, about 43k was deployed by the reallocation step and the ladder; the rest funded the market-making reserve or was churned.
+
+### What this says about the design
+The bot's returns come from one idea: buy the most edge per unit of cash, sell the least, never below value. Everything that competed with that for cash cost expected value over this window.
 
 | Keep | Retire |
 |---|---|
-| Fair value from Polymarket (race-scaled) | Momentum sleeve (disarm now: `momentum_auto` false) |
-| The value floor | Refill and the 20k market-making reserve (`alloc_mm_reserve` → small) |
-| The allocator: swaps and spare-cash buys, hourly, with its swap margin and 5-point hurdle | Market making in the middle band (or keep a token reserve for a week to compare) |
-| Correlated worst-case cap, per-market and per-state caps, cash gate | Harvest ladder (0 fills; the value book is already short the tilt) |
-| API, feed, budgets, handover, watchdog, self-test, status and alerts | Arbitrage, pair unwinds, takes (redundant with the allocator's buys at the touch) |
+| Fair value from Polymarket (scaled within each race) | Momentum sleeve |
+| The value floor | Refill and the 20k market-making reserve |
+| Reallocation: swaps and spare-cash buys, hourly, with its swap margin and 5-point hurdle | Market making in the middle band (or a token reserve for a week to compare) |
+| Correlated worst-case cap, per-market and per-state caps, cash gate | Arbitrage, pair unwinds, takes (the reallocation buys at the touch do the same job) |
+| API, feed, budgets, handover, watchdog, self-test, status and alerts | |
 
-Immediate settings changes that follow from the numbers, before any code is written:
-1. `momentum_auto` false: stops the sleeve re-arming and selling value for nothing.
-2. `value_sell_margin` 0.04 → 0.01: the wide floor existed to fund the sleeve and market making.
-3. `alloc_mm_reserve` 20000 → 2000 (or 0): the refill stops draining value positions, and the 10k of
-   free cash now sitting in the reserve goes to the allocator's buys at about 10% edge.
-
-Expected effect, from the table: the refill's −400/day stops, and the allocator gets back to the
-5 October pace (+290/day net, more with 10k of cash to deploy). The account's returns would then rest
-on a single, explainable mechanism.
+The 10 October update reversed one line: the harvest ladder, idle in the first window, became the best earner once funded. The next change was to size the refill to what the reallocation step and the ladder can actually place.
 
 ## Caveats
+- The parser reads trade lines, written when a sale or buy is confirmed; market-making fills come from fill lines with the fair value at quote time.
+- 4 October is excluded: that day's take lines (+16k by the naive formula) were the old tilt-exit sales, logged per attempt, and are not comparable.
+- Expected value also moves when Polymarket prices drift on held positions; the table counts trading only. That is why the layer sum (+0.4k) is below the change in expected value (+2.4k).
+- Four days is short. The +2,414 came from one day with 20k of cash to deploy; the per-unit return (11% gross, 5% net) is the number to plan with.
 
-- Lines, not fills: the parser reads the bot's trade lines, which are written when a sale or buy is
-  confirmed; market-making fills come from the `FILL` lines with the fair value at quote time.
-- The 4 October column is excluded from the totals above: the `TAKE` lines that day (+16k by the naive
-  formula) are the old tilt-exit sales, logged per attempt, and are not comparable.
-- EV moves for reasons other than trading (Polymarket prices drift on held positions); the table counts
-  trading only, which is why the layer sum (+0.4k) is below the EV change (+2.4k).
-- Four days is a short window. The allocator's +2,414 came from one day with 20k of cash to deploy; its
-  per-unit return (11% gross, 5% net) is the number to plan with, not the daily total.
+## Details
+Settings changes proposed from the first window: `momentum_auto` false; `value_sell_margin` 0.04 → 0.01 (the wide floor existed to fund the sleeve and market making); `alloc_mm_reserve` 20000 → 2000 or 0 (the refill stops draining value positions and the 10k of free cash in the reserve goes to buys at about 10% edge). Expected effect: the refill's −400/day stops and the reallocation step returns to its 5 October pace of +290/day net.
 
-## Update, 10 October (5–10 October, six days)
-
-Rerun on the logs through 10 October 08:20 UTC. The harvest ladder had its first fills on 8–9 October once
-the refill had raised cash: **+2,885 of expected value on 19.4k sold short (15% per unit of cash)**, the best
-return of any layer. The allocator's buys stayed at +2,676 (nothing deployed since 7 October). The refill sold
-**110.6k** of value at a cost of 3,905 (3.5%); the momentum sleeve −521; market making +786 realised. Trading
-sum +1,261; expected value 108.4k → 112.7k (+4.3k), the rest being reference-price drift on held positions.
-Of the 110k sold, about 43k was deployed by the allocator and the ladder; the remainder funded the market-making
-reserve or was churned. The next change is to size the refill to what the two deployers can place.
+Expected value here means value at settlement with positions at *p*, as opposed to the exchange's marks. The momentum candidate filter is the function that lists momentum candidates in the old bot (tag `legacy-2026-10-11`). The parser is `analysis/returns_attribution.py`.

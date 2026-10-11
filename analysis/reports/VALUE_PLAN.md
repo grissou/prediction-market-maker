@@ -1,95 +1,62 @@
-# Package 10, the value-mode plan (executor, 4 Oct ~09:30 UTC) — one page for the owner
+# If positions pay out at the outcome, how should the bot run?
+*4 October 2026, about 09:30 UTC (corrected at 11:55); the 3 October 22:47 snapshot of the book, a 20,000-draw outcome model, and a literature sweep.*
 
-**Rule confirmed by the owner: SIG pays positions out at the OUTCOME.** A position is worth its Polymarket probability p; interim marks
-(the tilt) do not matter for the payout; selling below p destroys value unless the cash buys more edge per $.
+**In one paragraph.** The exchange pays positions out at the election outcome, so a position is worth its Polymarket probability *p* and interim marks do not matter. Held as it was, the book had an expected final value of 109.0k (standard deviation 7.5k) with no realistic chance of 150k. Reallocating to the highest edge per dollar and holding lifts that to 112.9k (114.9k with recycling on convergence), and the only way to reach 150k with meaningful odds was a single correlated bet of up to 20k; the first candidate (Republican Senate control at 0.35) turned out to be roughly fair once the Ohio price was fixed, and a Texas Senate bet replaced it (about 30% chance of 150k, expected 112.1k). Market making continued only as value market making: quote on the side that adds value at the outcome, and gate the reserve on 24 hours of live earnings.
 
-## Where the book stands (outcome model `analysis/p10/H_outcome.py`: Polymarket probabilities race-scaled, one national factor rho 0.45
-## (0.85 for the control markets), independents separate, 20k outcomes; data = the 22:47 snapshot)
-Current book held: **E[final] 109.0k** (the owner's 108.5k checks), sd 7.5k, P(>= 120k) 2.7%, **P(>= 150k) 0%**, P(<= 85k) 0.6%.
-The party delta the bot reports (-15.4k shares) has the wrong SIGN for this purpose: the book's real sensitivity to a national swing is
-Rep-leaning, +2.55k per sd. Tilt-long accounts (the leader) mark at a median ~183k today and settle at a median ~28k.
+## Why it mattered
+This plan produced value mode. Its parts: no reducing quote below *p* − 0.5c; an hourly reallocation step; a national-swing cap instead of a share-count party cap. Risk limits were rewritten for a book that settles at the outcome rather than at marks.
 
-## The table (plan, E[final], P(>= 120k), P(>= 150k), P(<= 85k), P(<= 70k))
-| Plan | E | P>=120k | P>=150k | P<=85k | P<=70k | What it takes |
+## What was done
+Each plan was run through an outcome model: Polymarket probabilities scaled within each race, one national factor with correlation 0.45 (0.85 for the control markets), independents separate, 20,000 outcomes. Each plan reports the expected final value and the chance of ending above 120k and 150k or below 85k and 70k.
+
+## What it found
+
+### Plans compared
+| Plan | Expected | P ≥ 120k | P ≥ 150k | P ≤ 85k | P ≤ 70k | What it takes |
 |---|---|---|---|---|---|---|
 | 0. Hold the book | 109.0k | 2.7% | 0% | 0.6% | 0% | nothing |
-| (a') sell the 23 lowest-edge positions (< 2% edge-held, $8.8k), redeploy | 110.7k | 12% | 0% | 1.8% | 0% | 28 orders, now |
-| (a) max-EV reallocation held to the outcome | 112.9k | 29% | 0% | 1.9% | 0.1% | ~111 orders, $127k turnover |
-| (b) (a) + recycling on convergence (sell within 2c of p, redeploy) | 114.9k | 30% | 0% | 0.9% | 0.1% | + ~25 orders; depends on the tilt path |
-| **(c1) (a) + Rep U.S. Senate YES $20k at 0.35** | 110.5k | 34% | **17%** | 4.3% | 0% | the only +EV correlated bet |
-| (c1) $22.5k | 110.2k | 34% | 26% | 4-25% (cliff) | 0.1% | |
-| (c1) $30k | 109.3k | 35% | 32% | **65%** | 3.9% | |
-| (c1) for 40% | unreachable: capped by P(Rep Senate) ~35% | | | | | |
-| (c2/c3) competitive-race party blocs ($35-97k) | 95-108k | 35% | 20% | 33-47% | 3-38% | lose EV at the ask: NO |
-| (a) + funded value market making, carry 0.67k/day (I-6) | ~133k (= (a) + 30 d x carry) | - | 6% | ~0.1% | ~0% | 15-25k rotating cash; 24 h live proof first |
-| (a) + value MM, carry 1.0k/day | ~143k | - | 29% | 0.1% | ~0% | same |
-| (a) + value MM 0.67k/day + Rep Senate $15k | ~133k | - | 26% | 0.7% | - | |
-| (a) + value MM 0.33k/day + Rep Senate $20k | ~123k | - | 28% | 3.4% | - | |
-Under the Senate seat-count model (the 34 listed races imply P(Dem control) 0.49-0.59 vs the market's 0.645), the $20k sleeve is E 116.1k,
-P(>= 150k) 24%, P(<= 85k) 4%. The cliff on P(<= 85k) sits between $20k and $27.5k: **$20k is the ceiling**. Before any sleeve: check SIG's
-contract wording for Senate control (independents caucusing, vacancies, the VP tiebreak) and the Ohio / Alaska prices.
-**Recycling (owner's option 1): +1.6k probability-weighted (+1.4%), range +0.5k (tilt keeps growing) to +4.2k (linear convergence);
-"+10-20%" is not plausible as a share of the account (it is ~10-20% of the EDGE), because uniform convergence also erases the edges to
-redeploy into. It is a rule inside the allocator, not a plan.** **Correlated party bet (option 2): the Rep Senate sleeve is the one
-version that is +EV; competitive-race blocs at the ask are dominated (they pay the tilt). "+40-60% / -30-40%" matches a ~$40k sleeve,
-where the bad night is the likelier one (P(<= 70k) 45-51%).**
+| (a') sell the 23 lowest-edge positions (under 2% edge, 8.8k), redeploy | 110.7k | 12% | 0% | 1.8% | 0% | 28 orders, now |
+| (a) maximum-expectation reallocation, held to the outcome | 112.9k | 29% | 0% | 1.9% | 0.1% | about 111 orders, 127k turnover |
+| (b) (a) plus recycling on convergence (sell within 2c of *p*, redeploy) | 114.9k | 30% | 0% | 0.9% | 0.1% | about 25 more orders; depends on the tilt path |
+| (c1) (a) plus Rep U.S. Senate YES 20k at 0.35 | 110.5k | 34% | **17%** | 4.3% | 0% | the only positive-expectation correlated bet |
+| (c1) at 22.5k | 110.2k | 34% | 26% | 4 to 25% (cliff) | 0.1% | |
+| (c1) at 30k | 109.3k | 35% | 32% | **65%** | 3.9% | |
+| (c2, c3) party blocs across competitive races (35 to 97k) | 95 to 108k | 35% | 20% | 33 to 47% | 3 to 38% | lose expectation at the ask: no |
+| (a) plus value market making at 0.67k a day | about 133k | | 6% | about 0.1% | about 0% | 15 to 25k of rotating cash; 24 h live proof first |
+| (a) plus value market making at 1.0k a day | about 143k | | 29% | 0.1% | about 0% | same |
+| (a) plus market making 0.67k a day plus Rep Senate 15k | about 133k | | 26% | 0.7% | | |
+| (a) plus market making 0.33k a day plus Rep Senate 20k | about 123k | | 28% | 3.4% | | |
 
-## Market making continues (the owner's requirement), as VALUE market making
-Valued at the outcome, 3 Oct's maker fills split: favourite bids + longshot asks **+1,948** (+5.1c/share), favourite asks + longshot bids
-**-1,920**, middle two-way +604, takes +1,862 (+7.5c/share). Rule (`value_quote_hurdle`): fair value = raw Polymarket; the adding side
-must clear a per-$ hurdle (8%: a YES bid <= p/1.08, an adding ask >= 1 - (1 - p)/1.08) so in the tails only favourite bids and longshot
-asks rest; the middle (15-85c) is two-way at min_edge, capped at 2 quote sizes so the cash rotates. It needs 15-25k of rotating cash
-(the sets, unwound by cost per $ freed, are the cheapest: 21.2k for $668 of EV); F's flow model says 0.9-2.0k/day at the mark, I's
-outcome valuation ~1.4k/day on today's ~210 adding sides; UNMEASURED live in value mode: gate the reserve on 24 h of live data at
->= 0.6k/day. The stale-quote takes keep running (they buy value at +7.5c/share) but respect the reserve (`take_respect_reserve`).
+Bets of 40% were unreachable: capped by the probability of Republican Senate control, about 35%. The cliff in the chance of ending below 85k sits between 20k and 27.5k, so 20k is the ceiling for any single correlated bet.
 
+Recycling on convergence adds +1.6k probability-weighted (+1.4%), ranging from +0.5k if the tilt keeps growing to +4.2k with linear convergence. A claimed "+10 to 20%" is not plausible as a share of the account; it is 10 to 20% of the edge, because uniform convergence also erases the edges to redeploy into. A 40k correlated bet would match "+40 to 60% / −30 to 40%", but the bad night is the likelier one (45 to 51% chance of ending below 70k).
 
-## Carry check (`analysis/p10/CARRY.md`, 09:55): what "market-making carry" really is at the outcome
-Maker fills by day, valued at the outcome: value sides (favourite bids, longshot asks) 1 Oct +1.4k on 39k of cash, 2 Oct +4.3k on 79k,
-3 Oct +0.2k on 3.4k: **~4.9c per $, ONCE** (the positions are locked to the outcome) - so "1.0k/day of carry" from the value sides needs
-20-35k of FRESH cash a day, which a 100k account does not have: that income is plan (a) itself (deploy the capital once at ~5-10%). The
-repeatable part is the MIDDLE two-way book (15-85c): +1,976 over ~1.3 days (mostly 2 Oct, ~1.5k that day), largely netting out, so it
-rotates the cash. The anti-value sides lost 1.9k (the value-mode rule removes them). k 0.9 calibration cuts the value sides ~35%.
-**Corrected reading of the MM rows above:** the 6% / 29% P(>= 150k) at 0.67 / 1.0k per day stands only if the middle two-way book earns
-that on the 15-20k reserve; the one funded day says ~1.5k, from a single day. Gate stage 3 on 24 h of live data: maker P&L at the
-Polymarket mark in the middle band >= 0.6k/day before counting on it. Without it, the honest expectation is plan (a)/(b): E ~113-115k,
-P(>= 150k) ~0% - and the Senate sleeve is the only lever for 150k (17-24% at P(<= 85k) 4%).
+The party delta the bot reported (−15.4k shares) had the wrong sign for this purpose: the book's real sensitivity to a national swing was Republican-leaning, +2.55k per standard deviation. Accounts long the tilt (such as the leader) marked at a median of about 183k but would settle at a median of about 28k.
 
-## CORRECTION (11:55, Package 11 literature sweep, `analysis/p11/lit_portfolio.md` PORT-2/3 and `lit_anomalies.md`)
-The Rep U.S. Senate sleeve's "edge" came mostly from the seat-count model assuming Ohio at pDem 0.40; the market has Ohio at ~0.57-0.61.
-With that fixed the races imply P(Dem control) 0.58-0.63, so Rep Senate at 0.35 is roughly FAIR, not underpriced (and the political-market
-literature says race prices are themselves pulled toward 50%, which would bias a seat-count sum the same way). Do NOT buy the Senate
-sleeve on the earlier numbers. If a rank bet is wanted, the literature's answer (Browne 1999: a floor plus ONE digital that pays the gap)
-and the re-run point to a $20k **Texas Rep** sleeve (short Dem TX at 0.67 / long Rep TX at 0.34, on top of plan (a)'s existing Dem TX
-short): P(>= 150k) ~30% vs 16%, E 112.1k vs 110.6k, P(<= 85k) 6.5% vs 5.2%, P(top 50) 28% vs 23%; one volatile race (Paxton 51% -> 35%
-on Kalshi in a month); $20k stays the ceiling for any single digital (P(<= 85k) ~24% at $22k); hedges against a Dem wave make it worse.
-Also from the sweep: assume NO reversion of the tilt before the close (Page & Clemen; Restocchi: mispricing JUMPS in the last 24 h), so
-drop the +1.6k recycling assumption and keep 10-15k back for the last days; the stage-3 `value_quote_hurdle` 0.08 puts favourite bids
-~2.5c behind the book (they would not fill): use ~0.04-0.05 (the allocator's marginal edge); the NO+NO sets are stock to SELL into the
-tilt (rest asks on the favourite-NO leg at the rich price) rather than unwind at cost; the rules page says trades are accepted until
-12:00 pm ET on 4 Nov and rank = balance after all markets resolve (the brief's 00:00 UTC close needs confirming against the API).
+### Market making as value market making
+Valued at the outcome, 3 October's maker fills split: favourite bids and longshot asks +1,948 (+5.1c a share); favourite asks and longshot bids −1,920; middle two-way +604; takes +1,862 (+7.5c a share). The rule: fair value is raw Polymarket, and the side that adds a position must clear a per-dollar hurdle, so in the tails only favourite bids and longshot asks rest. The middle (15 to 85c) stays two-way at the minimum edge, capped at two quote sizes so the cash rotates. Flow models put the earnings at 0.9 to 2.0k a day at the mark, or about 1.4k a day at the outcome. This was unmeasured live. The reserve was therefore gated on 24 hours of live data at 0.6k a day or more.
 
-## What Package 10 built (all OFF; `deploy/package10/`; dry run on the live state in `analysis/p10/DRYRUN.md`)
-1. `value_mode`: no reducing quote below p - 0.5c (above p + 0.5c for a short) in normal AND reduce-only quoting (the reduce-only skew
-   clamp was skipped: today 4 of 6 resting reducing quotes sit below value); the pre-close windows (`exit_hours_before_close` 2,
-   `flatten_*` 12/6: a forced exit at fv - 3c in the last 2 h and a flatten reduce-only in the last 12 h, which would have dumped the
-   book and any sleeve before the results) are inert and now OVERRIDABLE; `exit_quote` floored; warnings for any value-selling flag.
-2. `bloc_delta_enabled`: the closed-form national-factor sensitivity (sqrt(rho) phi(Phi^-1(p)) per share) replaces the share-count
-   party cap (`max_bloc_delta_frac` 0.05 of the account per sd); ranges: `worst_case_backstop_frac` up to 1.5, `max_worst_case_frac` 0.35.
-3. `alloc_*`: the hourly capital allocator: ranks holdings by edge-held and book levels by edge per $ of collateral to the outcome,
-   sells first (IOC at the touch, only if the paired level is still there), reads the cash, then buys; refills a market-making reserve
-   (`alloc_mm_reserve` 15k) from the lowest-edge holdings and NO+NO sets (`alloc_set_cost_per_usd` 0.06); pins; bloc check; caps.
-4. `value_quote_hurdle` + `capital_ceiling_adding_size_factor` 0.5 (owner's call) = value market making; `take_respect_reserve`.
-**Deploy order:** stage0 (code) -> stage1_value_guard (the guard, bloc delta, backstop 1.3, risk cap 0.35: leaves reduce-only, no
-value sold) -> stage2_allocator (reserve refills: ~11k from sets in 4 h) -> stage3_value_mm (hurdle, adding factor 0.5, takes respect
-the reserve). Rollback = the previous file. The Rep Senate sleeve, if wanted, is a manual buy (pin it with `alloc_pin`).
+### Carry check (09:55)
+Maker fills on the value sides earned +1.4k on 39k of cash on 1 October, +4.3k on 79k on 2 October and +0.2k on 3.4k on 3 October: about 4.9c per dollar, once, because the positions are locked to the outcome. So "1.0k a day of carry" from the value sides needs 20 to 35k of fresh cash a day, which a 100k account does not have; that income is plan (a) itself. The repeatable part is the middle two-way book: +1,976 over about 1.3 days, mostly on 2 October. The anti-value sides lost 1.9k. A calibration that shrinks probabilities toward 50% by 10% cuts the value-side figure by about 35%. So the 6% and 29% chances of 150k in the market-making rows stand only if the middle book earns that on a 15 to 20k reserve. One day's data (about 1.5k) cannot prove it. Without it the honest expectation is plan (a) or (b): 113 to 115k and no realistic chance of 150k.
 
-## Risk limits for an outcome-settled book (owner point 3)
-`max_worst_case_frac` 0.30 -> 0.35 (plan (a) needs 31.7k vs today's 30.3k cap; P(<= 85k) ~1-2% for a diversified value book);
-`worst_case_backstop_frac` 0.8 -> 1.3 (it protects against every race failing at once, impossible; at 0.8 it pins the value book
-reduce-only: worst case 82k vs 80.8k); the share party cap -> the bloc-delta cap 0.05/sd (0.22 with a $20k sleeve); kill switch
-`max_drawdown_pct` 0.30 on MARKS -> 0.40 or settlement-based (code default, not overridable): a mark drawdown is not a loss now.
-Ruin numbers: value book P(<= 85k) 0.6-1.9%; + $20k sleeve 4-5%; $25k+ 49-65%.
+### Correction (11:55)
+The Republican Senate bet's edge came mostly from a seat-count model that put Ohio at 0.40 for the Democrat; the market had Ohio at about 0.57 to 0.61. With that fixed the races imply a 58 to 63% chance of Democratic control, so Republican control at 0.35 is roughly fair. The bet was not to be bought on the earlier numbers. If a rank bet is wanted, the literature (a floor plus one digital that pays the gap) and the re-run point to a 20k Texas Republican Senate bet: about 30% chance of 150k against 16%, expected 112.1k against 110.6k, 6.5% chance of ending below 85k against 5.2%, 28% chance of the top 50 against 23%. One volatile race; 20k stays the ceiling (24% chance below 85k at 22k). Also from the sweep: assume no reversion of the tilt before the close, drop the +1.6k recycling assumption and keep 10 to 15k back for the last days; an 8% hurdle puts favourite bids about 2.5c behind the book, so use 4 to 5%; the paired NO positions are stock to sell into the tilt rather than unwind at cost.
 
-## Point 5: markets close 4 Nov 00:00 UTC, before results; under outcome settlement nothing is valued at marks. If the rule were mixed,
-## we are short ~7.7k at the median tilt (20k at p95) + ~535 on the sets; a ~$2.2k longshot-YES hedge would cancel that for ~1.8k of EV.
+## Caveats
+- The outcome model's correlation structure (one national factor) is an assumption.
+- Market-making carry was unmeasured in value mode; the figures rest on one funded day.
+- The seat-count model was shown to be sensitive to a single race price (Ohio).
+- The close time (midnight or 17:00 UTC on 4 November) needed confirming against the API at the time.
+
+## Details
+What the plan built, all off by default in the old bot (tag `legacy-2026-10-11`): `value_mode` (no reducing quote below *p* − 0.5c, or above *p* + 0.5c for a short, in normal and reduce-only quoting; the pre-close exit and flatten windows made inert and overridable); `bloc_delta_enabled` (a closed-form national-factor sensitivity per share replacing the share-count party cap, `max_bloc_delta_frac` 0.05 of the account per standard deviation); the hourly allocator `alloc_*` (ranks holdings by edge held and book levels by edge per dollar of collateral, sells first at the touch, then buys; refills a market-making reserve `alloc_mm_reserve` 15k from the lowest-edge holdings and paired sets at `alloc_set_cost_per_usd` 0.06); `value_quote_hurdle` with `capital_ceiling_adding_size_factor` 0.5 and `take_respect_reserve`.
+
+Risk limits for an outcome-settled book: `max_worst_case_frac` 0.30 → 0.35; `worst_case_backstop_frac` 0.8 → 1.3 (at 0.8 it pinned the book reduce-only: worst case 82k against 80.8k); the kill switch `max_drawdown_pct` 0.30 on marks → 0.40 or settlement-based. Ruin numbers: value book 0.6 to 1.9% chance below 85k; with a 20k bet 4 to 5%; at 25k or more 49 to 65%.
+
+```
+national-factor sensitivity per share = sqrt(rho) × phi(Phi⁻¹(p))
+hurdle 8%: YES bid ≤ p / 1.08;  adding ask ≥ 1 − (1 − p) / 1.08
+calibration: p' = logistic(0.9 × logit p), re-normalised per race
+```
+
+If settlement were at marks rather than the outcome, the book was short about 7.7k at the median tilt (20k at the 95th percentile) plus about 535 on the sets; a roughly 2.2k longshot-YES hedge would cancel that for about 1.8k of expected value. Deploy order at the time: code, then the value guard, then the allocator, then value market making; rollback was the previous file.

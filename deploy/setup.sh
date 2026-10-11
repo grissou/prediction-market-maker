@@ -62,10 +62,14 @@ id mmbot &>/dev/null || useradd --system --home "$DEST" --shell /usr/sbin/nologi
 
 echo "==> copying the bot to $DEST"
 mkdir -p "$DEST"
-install -m 644 "$SRC/mm_bot.py" "$DEST/mm_bot.py"
-for f in ref_prices.py ref_map.json; do                 # optional reference-price feature
+install -m 644 "$SRC/mm_bot.py" "$DEST/mm_bot.py"       # the entry point...
+mkdir -p "$DEST/mmbot" && rm -rf "$DEST/mmbot/__pycache__"
+install -m 644 "$SRC"/mmbot/*.py "$DEST/mmbot/"         # ...and the package it runs
+for f in ref_prices.py ref_map.json; do                 # the Polymarket reference prices
   [ -f "$SRC/$f" ] && install -m 644 "$SRC/$f" "$DEST/$f"
 done
+mkdir -p "$DEST/run"                                    # settings_override.json, status.json, logs, the recorder's sqlite
+[ -f "$DEST/run/settings_override.json" ] || install -m 644 "$SRC/deploy/settings_override.json.example" "$DEST/run/settings_override.json"
 [ -d "$DEST/.venv" ] || python3 -m venv "$DEST/.venv"
 "$DEST/.venv/bin/pip" install -q --upgrade pip requests realtime
 
@@ -94,10 +98,10 @@ Done. Next:
   systemctl enable --now mmbot        start trading (and restart on reboot). Start it at least 30 min
                                       before trading opens: it downloads the books while it waits
   journalctl -u mmbot -f              watch the log
-  cat /opt/mmbot/status.json          quick health check: "realtime": "connected",
-                                      "rate_limited_total": 0, "last_cycle_ok": true
+  cat /opt/mmbot/run/status.json      quick health check: "realtime": "connected",
+                                      "account_value", "resting", "ev_outcome"
   systemctl stop mmbot                stop (cancels all orders)
 If `systemctl status mmbot` shows exit code 4, the kill switch fired: read the log, then
-  rm /opt/mmbot/kill_switch.tripped && systemctl start mmbot
+  rm /opt/mmbot/run/kill_switch.tripped && systemctl start mmbot
 If you updated the bot by re-running this script:  systemctl restart mmbot
 EOF

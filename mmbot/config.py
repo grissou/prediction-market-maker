@@ -9,7 +9,7 @@ NEVER    holds a fact about the exchange (the tick, the request limit, the price
 ORIGIN   Sixteen releases taught one lesson over and over: a change must be a file edit, not a restart. The old
          config grew to 1,316 lines and some 400 settings, most of them release switches that are now always on
          or never were. What is left are the 62 values of the live file of 10 October
-         (deploy/settings_override.live_2026-10-10.json), under names that say what they decide. The kill switch's
+         (deploy/settings_override.json.example), under names that say what they decide. The kill switch's
          drawdown is deliberately NOT live-changeable (house rule since day one).
 OPEN     The live file sets skew_max 0 (no inventory lean on prices) while skew_target_inventory is on; the rewrite
          keeps the lean through sizes only (mm.py) and asks the owner whether a price lean was ever intended.

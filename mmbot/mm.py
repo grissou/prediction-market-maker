@@ -9,7 +9,7 @@ ORIGIN   Finding 3.3: market making earned little against faster bots and was de
          compare. Day one, skewing by shares put 42% of fills at or through our own fair value (-804), hence quotes
          never inside mm_min_edge of p and a price lean capped at mm_skew_max (0 live). Release 14 (P14): MM lots
          older than mm_inv_max_age_h or above mm_inv_max_usd are recycled 1c through p; lots worth holding (edge
-         held >= value_quote_hurdle) are handed to the value book instead. Old code: mmbot/quoting.py
+         held >= value_quote_hurdle) are handed to the value book instead. Old bot (tag legacy-2026-10-11): mmbot/quoting.py
          (compute_quote, kelly_position), mmbot/mm.py (mm_lot_add, mm_lots_reconcile, mm_view, mm_recycle_quote).
 OPEN     The quote size (now the setting mm_quote_frac) and the 2-quote inventory cap were the old order_size_frac /
          value_mid_* defaults under an activity size plan that is not carried over: should they be settings? The old
