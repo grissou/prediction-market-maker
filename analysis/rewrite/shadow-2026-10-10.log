@@ -1,0 +1,553 @@
+2026-10-10 17:23:58,372 WARNING SETTING requests_per_minute: 80 -> 20
+2026-10-10 17:23:58,373 WARNING SETTING writes_per_minute: 28 -> 5
+2026-10-10 17:23:59,988 INFO realtime: subscribed to tournament - full resync next cycle
+2026-10-10 17:24:00,009 INFO realtime: subscribed to user - full resync next cycle
+2026-10-10 17:24:00,471 INFO tracking 237 markets in 117 races
+2026-10-10 17:24:00,471 INFO mm_bot2 DRY RUN (logs the orders it would send): 237 markets
+2026-10-10 17:24:01,961 INFO tracking 237 markets in 117 races
+2026-10-10 17:24:05,938 INFO account 105250.15 | EV outcome 112597.02 | realised 3.01 | worst case 84169 (corr 19589) | priced 225/237 | resting 0 | tilt None
+2026-10-10 17:24:59,941 INFO account 105250.15 | EV outcome 112597.02 | realised 3.01 | worst case 84169 (corr 19589) | priced 225/237 | resting 0 | tilt None
+2026-10-10 17:25:13,496 INFO account 105250.15 | EV outcome 112597.01 | realised 3.01 | worst case 84169 (corr 19589) | priced 225/237 | resting 0 | tilt None
+2026-10-10 17:25:43,489 INFO account 105250.15 | EV outcome 112597.01 | realised 3.01 | worst case 84169 (corr 19589) | priced 225/237 | resting 0 | tilt None
+2026-10-10 17:26:13,613 INFO account 105250.15 | EV outcome 112597.01 | realised 3.01 | worst case 84169 (corr 19589) | priced 225/237 | resting 0 | tilt None
+2026-10-10 17:26:43,496 INFO account 105251.15 | EV outcome 112597.01 | realised 3.01 | worst case 84169 (corr 19589) | priced 225/237 | resting 0 | tilt None
+2026-10-10 17:27:13,567 INFO account 105251.2 | EV outcome 112597.02 | realised 3.01 | worst case 84169 (corr 19589) | priced 225/237 | resting 0 | tilt None
+2026-10-10 17:27:43,503 INFO account 105251.39 | EV outcome 112603.68 | realised 3.01 | worst case 84176 (corr 19580) | priced 225/237 | resting 0 | tilt None
+2026-10-10 17:28:13,694 INFO account 105251.73 | EV outcome 112603.68 | realised 3.01 | worst case 84176 (corr 19580) | priced 225/237 | resting 0 | tilt None
+2026-10-10 17:28:43,495 INFO account 105251.73 | EV outcome 112603.68 | realised 3.01 | worst case 84176 (corr 19580) | priced 225/237 | resting 0 | tilt None
+2026-10-10 17:29:13,519 INFO account 105251.73 | EV outcome 112603.68 | realised 3.01 | worst case 84176 (corr 19580) | priced 225/237 | resting 0 | tilt None
+2026-10-10 17:29:43,830 INFO account 105252.1 | EV outcome 112603.68 | realised 3.01 | worst case 84176 (corr 19580) | priced 225/237 | resting 0 | tilt None
+2026-10-10 17:30:13,866 INFO account 105252.1 | EV outcome 112603.68 | realised 3.01 | worst case 84176 (corr 19580) | priced 225/237 | resting 0 | tilt None
+2026-10-10 17:30:43,514 INFO account 105252.13 | EV outcome 112603.68 | realised 3.01 | worst case 84176 (corr 19580) | priced 225/237 | resting 0 | tilt None
+2026-10-10 17:31:13,607 INFO account 105252.15 | EV outcome 112603.68 | realised 3.01 | worst case 84176 (corr 19580) | priced 225/237 | resting 0 | tilt None
+2026-10-10 17:31:43,498 INFO account 105256.33 | EV outcome 112605.31 | realised 3.01 | worst case 84176 (corr 19580) | priced 225/237 | resting 0 | tilt None
+2026-10-10 17:32:13,507 INFO account 105259.85 | EV outcome 112605.29 | realised 3.01 | worst case 84176 (corr 19580) | priced 225/237 | resting 0 | tilt None
+2026-10-10 17:32:43,694 INFO account 105259.84 | EV outcome 112585.97 | realised 3.01 | worst case 84156 (corr 19611) | priced 225/237 | resting 0 | tilt None
+2026-10-10 17:33:13,520 INFO account 105260.0 | EV outcome 112585.96 | realised 3.01 | worst case 84156 (corr 19611) | priced 225/237 | resting 0 | tilt None
+2026-10-10 17:33:43,505 INFO account 105260.63 | EV outcome 112585.97 | realised 3.01 | worst case 84156 (corr 19611) | priced 225/237 | resting 0 | tilt None
+2026-10-10 17:34:13,501 INFO account 105260.63 | EV outcome 112585.97 | realised 3.01 | worst case 84156 (corr 19611) | priced 225/237 | resting 0 | tilt None
+2026-10-10 17:34:43,506 INFO account 105260.65 | EV outcome 112585.96 | realised 3.01 | worst case 84156 (corr 19611) | priced 225/237 | resting 0 | tilt None
+2026-10-10 17:35:13,510 INFO account 105260.65 | EV outcome 112585.96 | realised 3.01 | worst case 84156 (corr 19611) | priced 225/237 | resting 0 | tilt None
+2026-10-10 17:35:43,596 INFO account 105260.96 | EV outcome 112585.97 | realised 3.01 | worst case 84156 (corr 19611) | priced 225/237 | resting 0 | tilt None
+2026-10-10 17:36:13,512 INFO account 105260.96 | EV outcome 112585.97 | realised 3.01 | worst case 84156 (corr 19611) | priced 225/237 | resting 0 | tilt None
+2026-10-10 17:36:43,520 INFO account 105261.75 | EV outcome 112587.0 | realised 3.01 | worst case 84156 (corr 19611) | priced 225/237 | resting 0 | tilt None
+2026-10-10 17:37:13,523 INFO account 105261.79 | EV outcome 112586.99 | realised 3.01 | worst case 84156 (corr 19611) | priced 225/237 | resting 0 | tilt None
+2026-10-10 17:37:43,541 INFO account 105261.57 | EV outcome 112601.17 | realised 3.01 | worst case 84171 (corr 19584) | priced 224/237 | resting 0 | tilt None
+2026-10-10 17:38:13,559 INFO account 105261.36 | EV outcome 112600.62 | realised 3.01 | worst case 84171 (corr 19584) | priced 224/237 | resting 0 | tilt None
+2026-10-10 17:38:43,518 INFO account 105260.05 | EV outcome 112601.17 | realised 3.01 | worst case 84171 (corr 19584) | priced 224/237 | resting 0 | tilt None
+2026-10-10 17:39:13,525 INFO account 105259.54 | EV outcome 112601.16 | realised 3.01 | worst case 84171 (corr 19584) | priced 224/237 | resting 0 | tilt None
+2026-10-10 17:39:43,512 INFO account 105259.4 | EV outcome 112601.17 | realised 3.01 | worst case 84171 (corr 19584) | priced 224/237 | resting 0 | tilt None
+2026-10-10 17:40:13,532 INFO account 105259.51 | EV outcome 112601.17 | realised 3.01 | worst case 84171 (corr 19584) | priced 224/237 | resting 0 | tilt None
+2026-10-10 17:40:40,619 INFO FILL Rep Kansas Senate bought 0.615 x150 [?]
+2026-10-10 17:40:40,619 INFO FILL Dem WA-03 House race bought 0.860 x300 [?]
+2026-10-10 17:40:40,619 INFO FILL Dem WA-03 House race bought 0.860 x150 [?]
+2026-10-10 17:40:40,619 INFO FILL Dem WA-03 House race bought 0.860 x20 [?]
+2026-10-10 17:40:40,619 INFO FILL Dem WA-03 House race bought 0.860 x465 [?]
+2026-10-10 17:40:40,619 INFO FILL Rep WI-03 House race sold 0.290 x20 [?]
+2026-10-10 17:41:11,533 INFO account 105260.54 | EV outcome 112567.29 | realised 3.01 | worst case 83226 (corr 19195) | priced 224/237 | resting 0 | tilt None
+2026-10-10 17:41:27,561 INFO account 105260.67 | EV outcome 112567.28 | realised 3.01 | worst case 83226 (corr 19195) | priced 224/237 | resting 0 | tilt None
+2026-10-10 17:41:55,088 INFO account 105260.97 | EV outcome 112567.28 | realised 3.01 | worst case 83226 (corr 19195) | priced 224/237 | resting 0 | tilt None
+2026-10-10 17:42:25,168 INFO account 105260.92 | EV outcome 112567.28 | realised 3.01 | worst case 83226 (corr 19195) | priced 224/237 | resting 0 | tilt None
+2026-10-10 17:42:55,106 INFO account 105260.92 | EV outcome 112573.6 | realised 3.01 | worst case 83234 (corr 19186) | priced 224/237 | resting 0 | tilt None
+2026-10-10 17:43:25,520 INFO account 105267.69 | EV outcome 112582.33 | realised 3.01 | worst case 83234 (corr 19186) | priced 224/237 | resting 0 | tilt None
+2026-10-10 17:43:37,054 ERROR WebSocket connection closed with code: 1006, reason: 
+2026-10-10 17:43:37,055 ERROR Auto-reconnect disabled, terminating connection
+2026-10-10 17:43:37,547 WARNING realtime feed down (socket closed): polling, reconnecting in 1 s
+2026-10-10 17:43:38,695 INFO realtime: subscribed to tournament - full resync next cycle
+2026-10-10 17:43:38,714 INFO realtime: subscribed to user - full resync next cycle
+2026-10-10 17:43:40,168 INFO tracking 237 markets in 117 races
+2026-10-10 17:43:55,088 INFO account 105267.62 | EV outcome 112582.34 | realised 3.01 | worst case 83234 (corr 19186) | priced 224/237 | resting 0 | tilt None
+2026-10-10 17:44:22,797 INFO tracking 237 markets in 117 races
+2026-10-10 17:44:39,611 INFO account 105267.43 | EV outcome 112582.34 | realised 3.01 | worst case 83234 (corr 19186) | priced 224/237 | resting 0 | tilt None
+2026-10-10 17:44:54,739 INFO account 105267.43 | EV outcome 112582.34 | realised 3.01 | worst case 83234 (corr 19186) | priced 224/237 | resting 0 | tilt None
+2026-10-10 17:45:24,589 INFO account 105267.39 | EV outcome 112582.34 | realised 3.01 | worst case 83234 (corr 19186) | priced 224/237 | resting 0 | tilt None
+2026-10-10 17:45:52,611 INFO account 105267.4 | EV outcome 112582.34 | realised 3.01 | worst case 83234 (corr 19186) | priced 224/237 | resting 0 | tilt None
+2026-10-10 17:46:22,632 INFO account 105267.4 | EV outcome 112582.34 | realised 3.01 | worst case 83234 (corr 19186) | priced 224/237 | resting 0 | tilt None
+2026-10-10 17:46:23,637 INFO FILL Dem ME-02 House race sold 0.385 x6 [?]
+2026-10-10 17:46:56,329 INFO account 105266.8 | EV outcome 112582.39 | realised 3.01 | worst case 83237 (corr 19185) | priced 224/237 | resting 0 | tilt None
+2026-10-10 17:47:26,191 INFO account 105266.57 | EV outcome 112582.39 | realised 3.01 | worst case 83237 (corr 19185) | priced 224/237 | resting 0 | tilt None
+2026-10-10 17:47:56,271 INFO account 105274.73 | EV outcome 112582.57 | realised 3.01 | worst case 83237 (corr 19185) | priced 224/237 | resting 0 | tilt None
+2026-10-10 17:48:26,191 INFO account 105274.73 | EV outcome 112582.74 | realised 3.01 | worst case 83238 (corr 19184) | priced 224/237 | resting 0 | tilt None
+2026-10-10 17:48:56,186 INFO account 105272.38 | EV outcome 112582.74 | realised 3.01 | worst case 83238 (corr 19184) | priced 224/237 | resting 0 | tilt None
+2026-10-10 17:49:27,274 INFO account 105272.38 | EV outcome 112582.74 | realised 3.01 | worst case 83238 (corr 19184) | priced 224/237 | resting 0 | tilt None
+2026-10-10 17:49:56,241 INFO account 105272.38 | EV outcome 112582.74 | realised 3.01 | worst case 83238 (corr 19184) | priced 224/237 | resting 0 | tilt None
+2026-10-10 17:50:26,305 INFO account 105272.38 | EV outcome 112582.74 | realised 3.01 | worst case 83238 (corr 19184) | priced 224/237 | resting 0 | tilt None
+2026-10-10 17:50:56,261 INFO account 105272.41 | EV outcome 112582.74 | realised 3.01 | worst case 83238 (corr 19184) | priced 224/237 | resting 0 | tilt None
+2026-10-10 17:51:26,181 INFO account 105272.41 | EV outcome 112582.74 | realised 3.01 | worst case 83238 (corr 19184) | priced 224/237 | resting 0 | tilt None
+2026-10-10 17:51:56,204 INFO account 105272.41 | EV outcome 112582.74 | realised 3.01 | worst case 83238 (corr 19184) | priced 224/237 | resting 0 | tilt None
+2026-10-10 17:52:26,191 INFO account 105272.41 | EV outcome 112582.74 | realised 3.01 | worst case 83238 (corr 19184) | priced 224/237 | resting 0 | tilt None
+2026-10-10 17:52:56,192 INFO account 105272.37 | EV outcome 112582.74 | realised 3.01 | worst case 83238 (corr 19184) | priced 225/237 | resting 0 | tilt None
+2026-10-10 17:53:27,225 INFO account 105272.39 | EV outcome 112581.55 | realised 3.01 | worst case 83236 (corr 19185) | priced 225/237 | resting 0 | tilt None
+2026-10-10 17:53:56,251 INFO account 105274.1 | EV outcome 112581.55 | realised 3.01 | worst case 83236 (corr 19185) | priced 225/237 | resting 0 | tilt None
+2026-10-10 17:54:26,248 INFO account 105274.36 | EV outcome 112581.55 | realised 3.01 | worst case 83236 (corr 19185) | priced 225/237 | resting 0 | tilt None
+2026-10-10 17:54:56,244 INFO account 105274.36 | EV outcome 112581.55 | realised 3.01 | worst case 83236 (corr 19185) | priced 225/237 | resting 0 | tilt None
+2026-10-10 17:55:26,295 INFO account 105274.36 | EV outcome 112581.55 | realised 3.01 | worst case 83236 (corr 19185) | priced 225/237 | resting 0 | tilt None
+2026-10-10 17:55:56,211 INFO account 105274.36 | EV outcome 112581.55 | realised 3.01 | worst case 83236 (corr 19185) | priced 225/237 | resting 0 | tilt None
+2026-10-10 17:56:26,247 INFO account 105274.35 | EV outcome 112581.55 | realised 3.01 | worst case 83236 (corr 19185) | priced 225/237 | resting 0 | tilt None
+2026-10-10 17:56:56,214 INFO account 105271.13 | EV outcome 112581.55 | realised 3.01 | worst case 83236 (corr 19185) | priced 225/237 | resting 0 | tilt None
+2026-10-10 17:57:26,269 INFO account 105271.13 | EV outcome 112581.55 | realised 3.01 | worst case 83236 (corr 19185) | priced 225/237 | resting 0 | tilt None
+2026-10-10 17:57:56,207 INFO account 105271.13 | EV outcome 112581.55 | realised 3.01 | worst case 83236 (corr 19185) | priced 225/237 | resting 0 | tilt None
+2026-10-10 17:58:26,211 INFO account 105271.11 | EV outcome 112617.7 | realised 3.01 | worst case 83273 (corr 19076) | priced 225/237 | resting 0 | tilt None
+2026-10-10 17:58:56,266 INFO account 105276.87 | EV outcome 112617.69 | realised 3.01 | worst case 83273 (corr 19076) | priced 225/237 | resting 0 | tilt None
+2026-10-10 17:59:26,202 INFO account 105276.87 | EV outcome 112617.69 | realised 3.01 | worst case 83273 (corr 19076) | priced 225/237 | resting 0 | tilt None
+2026-10-10 17:59:56,202 INFO account 105276.89 | EV outcome 112617.7 | realised 3.01 | worst case 83273 (corr 19076) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:00:26,260 INFO account 105276.89 | EV outcome 112617.7 | realised 3.01 | worst case 83273 (corr 19076) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:00:56,223 INFO account 105276.89 | EV outcome 112617.7 | realised 3.01 | worst case 83273 (corr 19076) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:01:26,348 INFO account 105279.68 | EV outcome 112620.47 | realised 3.01 | worst case 83273 (corr 19076) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:01:56,278 INFO account 105279.68 | EV outcome 112620.47 | realised 3.01 | worst case 83273 (corr 19076) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:02:26,320 INFO account 105279.68 | EV outcome 112620.47 | realised 3.01 | worst case 83273 (corr 19076) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:02:56,264 INFO account 105279.68 | EV outcome 112620.47 | realised 3.01 | worst case 83273 (corr 19076) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:03:15,241 INFO FILL Rep Wisconsin Governor sold 0.210 x80 [?]
+2026-10-10 18:03:28,217 INFO account 105279.87 | EV outcome 112628.42 | realised 3.01 | worst case 83344 (corr 19082) | priced 224/237 | resting 0 | tilt None
+2026-10-10 18:03:58,310 INFO account 105279.87 | EV outcome 112628.42 | realised 3.01 | worst case 83344 (corr 19082) | priced 224/237 | resting 0 | tilt None
+2026-10-10 18:04:28,229 INFO account 105280.55 | EV outcome 112628.41 | realised 3.01 | worst case 83344 (corr 19082) | priced 224/237 | resting 0 | tilt None
+2026-10-10 18:04:58,296 INFO account 105280.55 | EV outcome 112628.42 | realised 3.01 | worst case 83344 (corr 19082) | priced 224/237 | resting 0 | tilt None
+2026-10-10 18:05:28,297 INFO account 105280.55 | EV outcome 112628.42 | realised 3.01 | worst case 83344 (corr 19082) | priced 224/237 | resting 0 | tilt None
+2026-10-10 18:05:58,295 INFO account 105280.42 | EV outcome 112628.41 | realised 3.01 | worst case 83344 (corr 19082) | priced 224/237 | resting 0 | tilt None
+2026-10-10 18:06:17,262 INFO FILL Rep ME-02 House race bought 0.630 x4 [?]
+2026-10-10 18:06:30,225 INFO account 105280.42 | EV outcome 112628.4 | realised 3.02 | worst case 83346 (corr 19082) | priced 224/237 | resting 0 | tilt None
+2026-10-10 18:07:00,287 INFO account 105280.42 | EV outcome 112628.4 | realised 3.02 | worst case 83346 (corr 19082) | priced 224/237 | resting 0 | tilt None
+2026-10-10 18:07:30,315 INFO account 105280.66 | EV outcome 112628.27 | realised 3.02 | worst case 83346 (corr 19082) | priced 224/237 | resting 0 | tilt None
+2026-10-10 18:08:00,336 INFO account 105280.48 | EV outcome 112627.9 | realised 3.02 | worst case 83346 (corr 19082) | priced 224/237 | resting 0 | tilt None
+2026-10-10 18:08:30,308 INFO account 105280.5 | EV outcome 112627.85 | realised 3.02 | worst case 83346 (corr 19082) | priced 224/237 | resting 0 | tilt None
+2026-10-10 18:09:00,467 INFO account 105280.0 | EV outcome 112627.85 | realised 3.02 | worst case 83346 (corr 19082) | priced 224/237 | resting 0 | tilt None
+2026-10-10 18:09:30,223 INFO account 105278.95 | EV outcome 112626.8 | realised 3.02 | worst case 83346 (corr 19082) | priced 224/237 | resting 0 | tilt None
+2026-10-10 18:10:00,278 INFO account 105277.1 | EV outcome 112626.79 | realised 3.02 | worst case 83346 (corr 19082) | priced 224/237 | resting 0 | tilt None
+2026-10-10 18:10:30,330 INFO account 105276.61 | EV outcome 112626.79 | realised 3.02 | worst case 83346 (corr 19082) | priced 224/237 | resting 0 | tilt None
+2026-10-10 18:11:00,345 INFO account 105276.67 | EV outcome 112626.88 | realised 3.02 | worst case 83346 (corr 19082) | priced 224/237 | resting 0 | tilt None
+2026-10-10 18:11:30,259 INFO account 105276.44 | EV outcome 112626.79 | realised 3.02 | worst case 83346 (corr 19082) | priced 224/237 | resting 0 | tilt None
+2026-10-10 18:12:00,293 INFO account 105276.33 | EV outcome 112626.82 | realised 3.02 | worst case 83346 (corr 19082) | priced 224/237 | resting 0 | tilt None
+2026-10-10 18:12:30,277 INFO account 105275.54 | EV outcome 112626.72 | realised 3.02 | worst case 83346 (corr 19082) | priced 224/237 | resting 0 | tilt None
+2026-10-10 18:13:00,300 INFO account 105274.04 | EV outcome 112626.62 | realised 3.02 | worst case 83346 (corr 19082) | priced 223/237 | resting 0 | tilt None
+2026-10-10 18:13:30,367 INFO account 105271.97 | EV outcome 112626.25 | realised 3.02 | worst case 83346 (corr 19082) | priced 223/237 | resting 0 | tilt None
+2026-10-10 18:14:00,438 INFO account 105271.97 | EV outcome 112626.25 | realised 3.02 | worst case 83346 (corr 19082) | priced 223/237 | resting 0 | tilt None
+2026-10-10 18:14:30,321 INFO account 105271.99 | EV outcome 112626.25 | realised 3.02 | worst case 83346 (corr 19082) | priced 223/237 | resting 0 | tilt None
+2026-10-10 18:15:00,299 INFO account 105271.51 | EV outcome 112626.25 | realised 3.02 | worst case 83346 (corr 19082) | priced 223/237 | resting 0 | tilt None
+2026-10-10 18:15:30,310 INFO account 105271.6 | EV outcome 112626.26 | realised 3.02 | worst case 83346 (corr 19082) | priced 223/237 | resting 0 | tilt None
+2026-10-10 18:16:00,330 INFO account 105271.61 | EV outcome 112626.25 | realised 3.02 | worst case 83346 (corr 19082) | priced 223/237 | resting 0 | tilt None
+2026-10-10 18:16:30,340 INFO account 105271.61 | EV outcome 112626.25 | realised 3.02 | worst case 83346 (corr 19082) | priced 223/237 | resting 0 | tilt None
+2026-10-10 18:17:00,256 INFO account 105274.21 | EV outcome 112626.25 | realised 3.02 | worst case 83346 (corr 19082) | priced 223/237 | resting 0 | tilt None
+2026-10-10 18:17:30,314 INFO account 105273.54 | EV outcome 112626.08 | realised 3.02 | worst case 83371 (corr 19075) | priced 223/237 | resting 0 | tilt None
+2026-10-10 18:17:31,245 INFO FILL Dem Alaska Senate sold 0.700 x50 [?]
+2026-10-10 18:18:03,943 INFO account 105273.68 | EV outcome 112618.41 | realised 3.02 | worst case 83363 (corr 19084) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:18:33,985 INFO account 105273.68 | EV outcome 112618.72 | realised 3.02 | worst case 83363 (corr 19084) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:18:42,887 INFO FILL Dem Alaska Governor sold 0.765 x50 [?]
+2026-10-10 18:19:05,882 INFO account 105268.87 | EV outcome 112613.91 | realised 3.02 | worst case 83388 (corr 19077) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:19:35,903 INFO account 105268.92 | EV outcome 112613.9 | realised 3.02 | worst case 83388 (corr 19077) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:20:05,984 INFO account 105268.93 | EV outcome 112613.91 | realised 3.02 | worst case 83388 (corr 19077) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:20:35,955 INFO account 105268.99 | EV outcome 112613.92 | realised 3.02 | worst case 83388 (corr 19077) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:21:05,943 INFO account 105268.99 | EV outcome 112613.92 | realised 3.02 | worst case 83388 (corr 19077) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:21:35,957 INFO account 105269.03 | EV outcome 112613.96 | realised 3.02 | worst case 83388 (corr 19077) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:22:05,888 INFO account 105269.03 | EV outcome 112613.96 | realised 3.02 | worst case 83388 (corr 19077) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:22:35,882 INFO account 105269.03 | EV outcome 112613.96 | realised 3.02 | worst case 83388 (corr 19077) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:23:05,888 INFO account 105269.03 | EV outcome 112617.55 | realised 3.02 | worst case 83392 (corr 19070) | priced 226/237 | resting 0 | tilt None
+2026-10-10 18:23:35,882 INFO account 105269.08 | EV outcome 112619.05 | realised 3.02 | worst case 83393 (corr 19069) | priced 226/237 | resting 0 | tilt None
+2026-10-10 18:24:06,952 INFO account 105269.08 | EV outcome 112619.05 | realised 3.02 | worst case 83393 (corr 19069) | priced 226/237 | resting 0 | tilt None
+2026-10-10 18:24:35,909 INFO account 105253.04 | EV outcome 112603.21 | realised 3.02 | worst case 83393 (corr 19069) | priced 226/237 | resting 0 | tilt None
+2026-10-10 18:25:05,888 INFO account 105174.17 | EV outcome 112603.2 | realised 3.02 | worst case 83393 (corr 19069) | priced 226/237 | resting 0 | tilt None
+2026-10-10 18:25:35,874 INFO account 105041.92 | EV outcome 112606.19 | realised 3.02 | worst case 83393 (corr 19069) | priced 226/237 | resting 0 | tilt None
+2026-10-10 18:26:05,928 INFO account 105054.4 | EV outcome 112606.03 | realised 3.02 | worst case 83393 (corr 19069) | priced 226/237 | resting 0 | tilt None
+2026-10-10 18:26:35,913 INFO account 105052.62 | EV outcome 112606.03 | realised 3.02 | worst case 83393 (corr 19069) | priced 226/237 | resting 0 | tilt None
+2026-10-10 18:27:05,901 INFO account 105051.55 | EV outcome 112605.7 | realised 3.02 | worst case 83393 (corr 19069) | priced 226/237 | resting 0 | tilt None
+2026-10-10 18:27:35,936 INFO account 105057.85 | EV outcome 112606.38 | realised 3.02 | worst case 83393 (corr 19069) | priced 226/237 | resting 0 | tilt None
+2026-10-10 18:28:05,985 INFO account 105059.45 | EV outcome 112605.96 | realised 3.02 | worst case 83393 (corr 19069) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:28:35,928 INFO account 105058.11 | EV outcome 112608.83 | realised 3.02 | worst case 83396 (corr 19067) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:29:05,900 INFO account 105057.56 | EV outcome 112608.81 | realised 3.02 | worst case 83396 (corr 19067) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:29:35,887 INFO account 105046.2 | EV outcome 112605.58 | realised 3.02 | worst case 83396 (corr 19067) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:30:05,929 INFO account 105046.34 | EV outcome 112609.11 | realised 3.02 | worst case 83396 (corr 19067) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:30:35,898 INFO account 105047.07 | EV outcome 112609.11 | realised 3.02 | worst case 83396 (corr 19067) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:31:05,895 INFO account 105046.89 | EV outcome 112609.11 | realised 3.02 | worst case 83396 (corr 19067) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:31:30,227 INFO FILL Dem Maine Senate sold 0.590 x86 [?]
+2026-10-10 18:31:32,907 INFO FILL Dem Maine Senate sold 0.590 x154 [?]
+2026-10-10 18:32:03,913 INFO account 105047.01 | EV outcome 112610.31 | realised 3.02 | worst case 83496 (corr 19036) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:32:31,218 INFO account 105046.32 | EV outcome 112610.32 | realised 3.02 | worst case 83496 (corr 19036) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:32:54,878 INFO account 105046.55 | EV outcome 112611.19 | realised 3.02 | worst case 83496 (corr 19036) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:33:24,771 INFO account 105038.05 | EV outcome 112613.35 | realised 3.02 | worst case 83536 (corr 19045) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:33:30,319 INFO FILL Rep PA-10 House race sold 0.230 x50 [?]
+2026-10-10 18:33:58,448 INFO account 105042.96 | EV outcome 112610.53 | realised 3.02 | worst case 83536 (corr 19045) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:34:28,393 INFO account 105039.17 | EV outcome 112613.51 | realised 3.02 | worst case 83536 (corr 19045) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:34:58,431 INFO account 105041.1 | EV outcome 112613.73 | realised 3.02 | worst case 83536 (corr 19045) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:35:28,355 INFO account 105038.3 | EV outcome 112613.73 | realised 3.02 | worst case 83536 (corr 19045) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:35:58,463 INFO account 105038.29 | EV outcome 112613.73 | realised 3.02 | worst case 83536 (corr 19045) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:36:28,351 INFO account 105035.88 | EV outcome 112613.73 | realised 3.02 | worst case 83536 (corr 19045) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:36:58,332 INFO account 105037.06 | EV outcome 112613.72 | realised 3.02 | worst case 83536 (corr 19045) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:37:28,388 INFO account 105036.81 | EV outcome 112613.86 | realised 3.02 | worst case 83536 (corr 19045) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:37:58,369 INFO account 105034.0 | EV outcome 112613.87 | realised 3.02 | worst case 83536 (corr 19045) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:38:28,323 INFO account 105034.1 | EV outcome 112613.86 | realised 3.02 | worst case 83536 (corr 19045) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:38:58,396 INFO account 105033.66 | EV outcome 112617.81 | realised 3.02 | worst case 83540 (corr 19040) | priced 226/237 | resting 0 | tilt None
+2026-10-10 18:39:14,720 INFO FILL Rep FL-09 House race bought 0.670 x4 [?]
+2026-10-10 18:39:38,581 INFO account 105033.69 | EV outcome 112617.96 | realised 3.02 | worst case 83543 (corr 19040) | priced 226/237 | resting 0 | tilt None
+2026-10-10 18:40:07,698 INFO account 105032.99 | EV outcome 112618.36 | realised 3.02 | worst case 83543 (corr 19040) | priced 226/237 | resting 0 | tilt None
+2026-10-10 18:40:37,706 INFO account 105032.99 | EV outcome 112618.36 | realised 3.02 | worst case 83543 (corr 19040) | priced 226/237 | resting 0 | tilt None
+2026-10-10 18:40:52,580 INFO FILL Dem Maine Senate sold 0.590 x278 [?]
+2026-10-10 18:41:04,736 INFO FILL Rep Wisconsin Governor sold 0.210 x80 [?]
+2026-10-10 18:41:04,736 INFO FILL Dem WA-03 House race bought 0.860 x600 [?]
+2026-10-10 18:41:04,736 INFO FILL Dem WA-03 House race bought 0.860 x300 [?]
+2026-10-10 18:41:04,736 INFO FILL Dem WA-03 House race bought 0.860 x150 [?]
+2026-10-10 18:41:04,736 INFO FILL Dem WA-03 House race bought 0.860 x465 [?]
+2026-10-10 18:41:04,736 INFO FILL Dem WA-03 House race bought 0.860 x581 [?]
+2026-10-10 18:41:04,736 INFO FILL Rep WI-03 House race sold 0.290 x20 [?]
+2026-10-10 18:41:04,736 INFO FILL Rep WI-03 House race sold 0.290 x20 [?]
+2026-10-10 18:41:04,736 INFO FILL Rep WI-03 House race sold 0.290 x139 [?]
+2026-10-10 18:41:35,709 INFO account 105034.53 | EV outcome 112538.17 | realised 3.02 | worst case 81356 (corr 18298) | priced 226/237 | resting 0 | tilt None
+2026-10-10 18:41:53,504 INFO account 105034.52 | EV outcome 112538.17 | realised 3.02 | worst case 81356 (corr 18298) | priced 226/237 | resting 0 | tilt None
+2026-10-10 18:42:19,268 INFO account 105034.52 | EV outcome 112538.17 | realised 3.02 | worst case 81356 (corr 18298) | priced 226/237 | resting 0 | tilt None
+2026-10-10 18:42:49,604 INFO account 105034.52 | EV outcome 112538.17 | realised 3.02 | worst case 81356 (corr 18298) | priced 226/237 | resting 0 | tilt None
+2026-10-10 18:43:19,281 INFO account 105025.15 | EV outcome 112538.17 | realised 3.02 | worst case 81356 (corr 18298) | priced 226/237 | resting 0 | tilt None
+2026-10-10 18:43:39,538 INFO realtime: renewing the session
+2026-10-10 18:43:40,666 INFO realtime: subscribed to tournament - full resync next cycle
+2026-10-10 18:43:40,682 INFO realtime: subscribed to user - full resync next cycle
+2026-10-10 18:43:42,133 INFO tracking 237 markets in 117 races
+2026-10-10 18:43:49,505 INFO account 105031.49 | EV outcome 112547.41 | realised 3.02 | worst case 81359 (corr 18296) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:44:16,850 INFO tracking 237 markets in 117 races
+2026-10-10 18:44:41,670 INFO account 105026.87 | EV outcome 112547.3 | realised 3.02 | worst case 81359 (corr 18296) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:44:48,981 INFO account 105027.33 | EV outcome 112547.41 | realised 3.02 | worst case 81359 (corr 18296) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:45:18,769 INFO account 105027.16 | EV outcome 112547.24 | realised 3.02 | worst case 81359 (corr 18296) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:45:46,772 INFO account 105027.14 | EV outcome 112547.41 | realised 3.02 | worst case 81359 (corr 18296) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:46:16,783 INFO account 105026.64 | EV outcome 112547.45 | realised 3.02 | worst case 81359 (corr 18296) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:46:45,225 INFO account 105026.54 | EV outcome 112547.35 | realised 3.02 | worst case 81359 (corr 18296) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:47:15,225 INFO account 105026.52 | EV outcome 112547.35 | realised 3.02 | worst case 81359 (corr 18296) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:47:45,239 INFO account 105026.55 | EV outcome 112547.35 | realised 3.02 | worst case 81359 (corr 18296) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:48:15,234 INFO account 105028.09 | EV outcome 112549.8 | realised 3.02 | worst case 81359 (corr 18296) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:48:45,235 INFO account 105027.69 | EV outcome 112560.03 | realised 3.02 | worst case 81370 (corr 18293) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:49:15,307 INFO account 105028.04 | EV outcome 112560.03 | realised 3.02 | worst case 81370 (corr 18293) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:49:45,232 INFO account 105027.96 | EV outcome 112560.03 | realised 3.02 | worst case 81370 (corr 18293) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:50:15,230 INFO account 105028.16 | EV outcome 112560.03 | realised 3.02 | worst case 81370 (corr 18293) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:50:45,274 INFO account 105027.85 | EV outcome 112560.04 | realised 3.02 | worst case 81370 (corr 18293) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:51:15,236 INFO account 105027.88 | EV outcome 112560.03 | realised 3.02 | worst case 81370 (corr 18293) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:51:45,238 INFO account 105027.92 | EV outcome 112560.04 | realised 3.02 | worst case 81370 (corr 18293) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:52:15,321 INFO account 105027.97 | EV outcome 112560.04 | realised 3.02 | worst case 81370 (corr 18293) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:52:45,257 INFO account 105027.9 | EV outcome 112560.04 | realised 3.02 | worst case 81370 (corr 18293) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:53:15,286 INFO account 105027.91 | EV outcome 112560.04 | realised 3.02 | worst case 81370 (corr 18293) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:53:45,236 INFO account 105027.82 | EV outcome 112534.23 | realised 3.02 | worst case 81344 (corr 18313) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:54:15,246 INFO account 105027.86 | EV outcome 112534.2 | realised 3.02 | worst case 81344 (corr 18313) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:54:45,293 INFO account 105027.81 | EV outcome 112534.21 | realised 3.02 | worst case 81344 (corr 18313) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:55:15,241 INFO account 105027.8 | EV outcome 112534.21 | realised 3.02 | worst case 81344 (corr 18313) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:55:45,247 INFO account 105027.71 | EV outcome 112534.21 | realised 3.02 | worst case 81344 (corr 18313) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:56:15,427 INFO account 105027.51 | EV outcome 112534.2 | realised 3.02 | worst case 81344 (corr 18313) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:56:45,257 INFO account 105027.33 | EV outcome 112534.21 | realised 3.02 | worst case 81344 (corr 18313) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:57:15,294 INFO account 105027.18 | EV outcome 112534.23 | realised 3.02 | worst case 81344 (corr 18313) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:57:45,241 INFO account 105027.11 | EV outcome 112534.22 | realised 3.02 | worst case 81344 (corr 18313) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:58:15,363 INFO account 105026.6 | EV outcome 112534.22 | realised 3.02 | worst case 81344 (corr 18313) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:58:45,249 INFO account 105027.28 | EV outcome 112540.15 | realised 3.02 | worst case 81350 (corr 18298) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:59:15,300 INFO account 105026.92 | EV outcome 112547.62 | realised 3.02 | worst case 81357 (corr 18292) | priced 225/237 | resting 0 | tilt None
+2026-10-10 18:59:45,241 INFO account 105027.01 | EV outcome 112547.65 | realised 3.02 | worst case 81357 (corr 18292) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:00:15,347 INFO account 105026.67 | EV outcome 112547.66 | realised 3.02 | worst case 81357 (corr 18292) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:00:45,242 INFO account 105023.1 | EV outcome 112547.66 | realised 3.02 | worst case 81357 (corr 18292) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:01:15,239 INFO account 105023.73 | EV outcome 112548.29 | realised 3.02 | worst case 81357 (corr 18292) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:01:45,263 INFO account 105023.72 | EV outcome 112548.29 | realised 3.02 | worst case 81357 (corr 18292) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:02:15,270 INFO account 105023.72 | EV outcome 112548.29 | realised 3.02 | worst case 81357 (corr 18292) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:02:45,246 INFO account 105023.76 | EV outcome 112548.29 | realised 3.02 | worst case 81357 (corr 18292) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:03:15,298 INFO account 105024.45 | EV outcome 112548.54 | realised 3.02 | worst case 81357 (corr 18292) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:03:45,269 INFO account 105025.0 | EV outcome 112550.99 | realised 3.02 | worst case 81360 (corr 18289) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:04:15,262 INFO account 105025.05 | EV outcome 112555.49 | realised 3.02 | worst case 81364 (corr 18277) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:04:45,264 INFO account 105025.03 | EV outcome 112555.49 | realised 3.02 | worst case 81364 (corr 18277) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:05:15,257 INFO account 105023.89 | EV outcome 112555.5 | realised 3.02 | worst case 81364 (corr 18277) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:05:45,275 INFO account 105023.66 | EV outcome 112555.5 | realised 3.02 | worst case 81364 (corr 18277) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:06:15,263 INFO account 105023.44 | EV outcome 112555.51 | realised 3.02 | worst case 81364 (corr 18277) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:06:45,945 INFO account 105023.42 | EV outcome 112555.5 | realised 3.02 | worst case 81364 (corr 18277) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:07:15,269 INFO account 105022.48 | EV outcome 112555.5 | realised 3.02 | worst case 81364 (corr 18277) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:07:45,335 INFO account 105020.94 | EV outcome 112555.51 | realised 3.02 | worst case 81364 (corr 18277) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:08:15,252 INFO account 105020.79 | EV outcome 112555.5 | realised 3.02 | worst case 81364 (corr 18277) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:08:45,279 INFO account 105017.27 | EV outcome 112555.5 | realised 3.02 | worst case 81364 (corr 18277) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:09:15,266 INFO account 105014.98 | EV outcome 112557.31 | realised 3.02 | worst case 81366 (corr 18276) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:09:45,265 INFO account 105014.7 | EV outcome 112557.03 | realised 3.02 | worst case 81366 (corr 18276) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:10:15,328 INFO account 105014.71 | EV outcome 112557.04 | realised 3.02 | worst case 81366 (corr 18276) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:10:45,354 INFO account 105014.52 | EV outcome 112557.05 | realised 3.02 | worst case 81366 (corr 18276) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:10:54,338 INFO FILL Dem Vermont Governor sold 0.285 x75 [?]
+2026-10-10 19:11:17,282 INFO account 105014.82 | EV outcome 112559.54 | realised 3.02 | worst case 81422 (corr 18265) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:11:48,329 INFO account 105014.74 | EV outcome 112559.54 | realised 3.02 | worst case 81422 (corr 18265) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:12:17,293 INFO account 105014.74 | EV outcome 112559.55 | realised 3.02 | worst case 81422 (corr 18265) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:12:47,281 INFO account 105014.45 | EV outcome 112559.54 | realised 3.02 | worst case 81422 (corr 18265) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:13:17,275 INFO account 105014.49 | EV outcome 112559.55 | realised 3.02 | worst case 81422 (corr 18265) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:13:47,282 INFO account 105009.44 | EV outcome 112559.54 | realised 3.02 | worst case 81422 (corr 18265) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:14:17,300 INFO account 105005.84 | EV outcome 112557.98 | realised 3.02 | worst case 81421 (corr 18264) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:14:47,281 INFO account 105004.46 | EV outcome 112558.0 | realised 3.02 | worst case 81421 (corr 18264) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:15:17,319 INFO account 105004.19 | EV outcome 112558.09 | realised 3.02 | worst case 81421 (corr 18264) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:15:47,339 INFO account 105003.12 | EV outcome 112558.09 | realised 3.02 | worst case 81421 (corr 18264) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:16:17,432 INFO account 105004.15 | EV outcome 112558.09 | realised 3.02 | worst case 81421 (corr 18264) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:16:47,361 INFO account 105003.99 | EV outcome 112558.09 | realised 3.02 | worst case 81421 (corr 18264) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:17:17,289 INFO account 105003.97 | EV outcome 112558.08 | realised 3.02 | worst case 81421 (corr 18264) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:17:47,283 INFO account 105003.97 | EV outcome 112558.08 | realised 3.02 | worst case 81421 (corr 18264) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:18:17,289 INFO account 105002.56 | EV outcome 112558.09 | realised 3.02 | worst case 81421 (corr 18264) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:18:47,284 INFO account 105001.17 | EV outcome 112558.0 | realised 3.02 | worst case 81421 (corr 18264) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:19:17,324 INFO account 105001.07 | EV outcome 112550.25 | realised 3.02 | worst case 81413 (corr 18284) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:19:47,351 INFO account 105001.07 | EV outcome 112550.25 | realised 3.02 | worst case 81413 (corr 18284) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:20:17,379 INFO account 104999.81 | EV outcome 112550.25 | realised 3.02 | worst case 81413 (corr 18284) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:20:47,292 INFO account 104999.98 | EV outcome 112550.24 | realised 3.02 | worst case 81413 (corr 18284) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:21:17,311 INFO account 104998.98 | EV outcome 112552.6 | realised 3.02 | worst case 81413 (corr 18284) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:21:47,363 INFO account 104999.0 | EV outcome 112551.9 | realised 3.02 | worst case 81413 (corr 18284) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:22:17,374 INFO account 104998.41 | EV outcome 112551.26 | realised 3.02 | worst case 81413 (corr 18284) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:22:47,291 INFO account 104995.67 | EV outcome 112551.78 | realised 3.02 | worst case 81413 (corr 18284) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:23:17,316 INFO account 104995.63 | EV outcome 112551.74 | realised 3.02 | worst case 81413 (corr 18284) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:23:47,308 INFO account 104995.46 | EV outcome 112551.74 | realised 3.02 | worst case 81413 (corr 18284) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:24:17,480 INFO account 104993.36 | EV outcome 112546.63 | realised 3.02 | worst case 81408 (corr 18279) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:24:47,297 INFO account 104971.23 | EV outcome 112546.63 | realised 3.02 | worst case 81408 (corr 18279) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:25:17,303 INFO account 104971.35 | EV outcome 112546.76 | realised 3.02 | worst case 81408 (corr 18279) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:25:47,303 INFO account 104971.03 | EV outcome 112546.75 | realised 3.02 | worst case 81408 (corr 18279) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:26:17,297 INFO account 104969.42 | EV outcome 112546.52 | realised 3.02 | worst case 81408 (corr 18279) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:26:47,297 INFO account 104970.5 | EV outcome 112546.75 | realised 3.02 | worst case 81408 (corr 18279) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:27:17,337 INFO account 104970.5 | EV outcome 112546.75 | realised 3.02 | worst case 81408 (corr 18279) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:27:47,338 INFO account 104970.41 | EV outcome 112546.76 | realised 3.02 | worst case 81408 (corr 18279) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:28:17,299 INFO account 104967.6 | EV outcome 112546.75 | realised 3.02 | worst case 81408 (corr 18279) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:28:47,308 INFO account 104966.51 | EV outcome 112546.75 | realised 3.02 | worst case 81408 (corr 18279) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:29:17,301 INFO account 104965.78 | EV outcome 112545.67 | realised 3.02 | worst case 81407 (corr 18284) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:29:47,317 INFO account 104965.78 | EV outcome 112545.67 | realised 3.02 | worst case 81407 (corr 18284) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:30:17,350 INFO account 104964.82 | EV outcome 112545.7 | realised 3.02 | worst case 81407 (corr 18284) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:30:47,454 INFO account 104964.64 | EV outcome 112545.69 | realised 3.02 | worst case 81407 (corr 18284) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:31:17,411 INFO account 104963.43 | EV outcome 112545.7 | realised 3.02 | worst case 81407 (corr 18284) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:31:47,304 INFO account 104962.12 | EV outcome 112544.82 | realised 3.02 | worst case 81407 (corr 18284) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:32:17,351 INFO account 104961.53 | EV outcome 112544.67 | realised 3.02 | worst case 81407 (corr 18284) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:32:47,324 INFO account 104961.38 | EV outcome 112545.18 | realised 3.02 | worst case 81407 (corr 18284) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:33:17,310 INFO account 104959.96 | EV outcome 112545.19 | realised 3.02 | worst case 81407 (corr 18284) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:33:47,322 INFO account 104959.96 | EV outcome 112545.19 | realised 3.02 | worst case 81407 (corr 18284) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:34:17,310 INFO account 104959.87 | EV outcome 112555.21 | realised 3.02 | worst case 81417 (corr 18263) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:34:47,320 INFO account 104959.86 | EV outcome 112553.74 | realised 3.02 | worst case 81416 (corr 18265) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:35:17,335 INFO account 104959.71 | EV outcome 112553.74 | realised 3.02 | worst case 81416 (corr 18265) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:35:47,315 INFO account 104959.69 | EV outcome 112553.74 | realised 3.02 | worst case 81416 (corr 18265) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:36:17,338 INFO account 104959.71 | EV outcome 112553.74 | realised 3.02 | worst case 81416 (corr 18265) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:36:47,421 INFO account 104959.72 | EV outcome 112553.74 | realised 3.02 | worst case 81416 (corr 18265) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:37:17,321 INFO account 104959.9 | EV outcome 112553.92 | realised 3.02 | worst case 81416 (corr 18265) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:37:47,318 INFO account 104959.86 | EV outcome 112553.92 | realised 3.02 | worst case 81416 (corr 18265) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:38:17,321 INFO account 104959.78 | EV outcome 112553.84 | realised 3.02 | worst case 81416 (corr 18265) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:38:47,332 INFO account 104959.78 | EV outcome 112553.84 | realised 3.02 | worst case 81416 (corr 18265) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:39:17,326 INFO account 104959.77 | EV outcome 112543.28 | realised 3.02 | worst case 81405 (corr 18286) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:39:47,477 INFO account 104959.66 | EV outcome 112545.41 | realised 3.02 | worst case 81407 (corr 18294) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:40:17,323 INFO account 104961.21 | EV outcome 112545.41 | realised 3.02 | worst case 81407 (corr 18294) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:40:31,162 INFO FILL Dem WA-03 House race bought 0.860 x1307 [?]
+2026-10-10 19:40:31,163 INFO FILL Dem WA-03 House race bought 0.860 x20 [?]
+2026-10-10 19:40:31,163 INFO FILL Dem WA-03 House race bought 0.860 x300 [?]
+2026-10-10 19:40:31,163 INFO FILL Dem WA-03 House race bought 0.860 x150 [?]
+2026-10-10 19:40:31,163 INFO FILL Dem WA-03 House race bought 0.860 x465 [?]
+2026-10-10 19:40:31,163 INFO FILL Dem WA-03 House race bought 0.860 x20 [?]
+2026-10-10 19:40:31,163 INFO FILL Dem WA-03 House race bought 0.860 x20 [?]
+2026-10-10 19:40:31,163 INFO FILL Dem WA-03 House race bought 0.860 x214 [?]
+2026-10-10 19:40:44,330 INFO FILL Dem Vermont Governor sold 0.285 x20 [?]
+2026-10-10 19:40:44,330 INFO FILL Dem Vermont Governor sold 0.285 x55 [?]
+2026-10-10 19:41:15,322 INFO account 104963.71 | EV outcome 112458.19 | realised 3.02 | worst case 79120 (corr 17738) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:41:32,229 INFO account 104963.41 | EV outcome 112457.93 | realised 3.02 | worst case 79120 (corr 17738) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:41:44,333 INFO FILL Rep Texas Governor bought 0.740 x322 [?]
+2026-10-10 19:42:15,330 INFO account 104957.23 | EV outcome 112447.04 | realised 3.02 | worst case 78871 (corr 17768) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:42:38,938 INFO account 104956.96 | EV outcome 112447.04 | realised 3.02 | worst case 78871 (corr 17768) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:43:08,887 INFO account 104961.77 | EV outcome 112447.04 | realised 3.02 | worst case 78871 (corr 17768) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:43:38,880 INFO account 104951.36 | EV outcome 112447.04 | realised 3.02 | worst case 78871 (corr 17768) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:43:41,586 INFO realtime: renewing the session
+2026-10-10 19:43:42,733 INFO realtime: subscribed to tournament - full resync next cycle
+2026-10-10 19:43:42,751 INFO realtime: subscribed to user - full resync next cycle
+2026-10-10 19:43:44,361 INFO tracking 237 markets in 117 races
+2026-10-10 19:44:08,990 INFO account 104950.89 | EV outcome 112447.04 | realised 3.02 | worst case 78871 (corr 17768) | priced 225/237 | resting 0 | tilt None
+2026-10-10 19:44:36,413 INFO tracking 237 markets in 117 races
+2026-10-10 19:44:43,655 INFO account 104951.3 | EV outcome 112458.7 | realised 3.02 | worst case 78882 (corr 17755) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:45:08,491 INFO account 104955.76 | EV outcome 112463.16 | realised 3.02 | worst case 78882 (corr 17755) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:45:38,399 INFO account 104955.82 | EV outcome 112458.76 | realised 3.02 | worst case 78882 (corr 17755) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:46:06,502 INFO account 104955.83 | EV outcome 112458.76 | realised 3.02 | worst case 78882 (corr 17755) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:46:36,434 INFO account 104955.92 | EV outcome 112458.86 | realised 3.02 | worst case 78882 (corr 17755) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:47:01,943 INFO account 104947.6 | EV outcome 112452.88 | realised 3.02 | worst case 78882 (corr 17755) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:47:31,949 INFO account 104946.9 | EV outcome 112452.64 | realised 3.02 | worst case 78882 (corr 17755) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:48:01,958 INFO account 104946.75 | EV outcome 112452.49 | realised 3.02 | worst case 78882 (corr 17755) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:48:31,961 INFO account 104946.65 | EV outcome 112452.63 | realised 3.02 | worst case 78882 (corr 17755) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:48:37,940 INFO FILL Rep ME-02 House race sold 0.640 x49 [?]
+2026-10-10 19:49:10,947 INFO account 104946.77 | EV outcome 112453.16 | realised 3.02 | worst case 78875 (corr 17762) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:49:40,938 INFO account 104946.73 | EV outcome 112453.49 | realised 3.02 | worst case 78875 (corr 17762) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:50:11,154 INFO account 104946.91 | EV outcome 112453.5 | realised 3.02 | worst case 78875 (corr 17762) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:50:40,934 INFO account 104946.91 | EV outcome 112453.5 | realised 3.02 | worst case 78875 (corr 17762) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:51:10,932 INFO account 104946.51 | EV outcome 112453.5 | realised 3.02 | worst case 78875 (corr 17762) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:51:40,943 INFO account 104946.3 | EV outcome 112453.49 | realised 3.02 | worst case 78875 (corr 17762) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:52:10,933 INFO account 104946.3 | EV outcome 112453.49 | realised 3.02 | worst case 78875 (corr 17762) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:52:41,568 INFO FILL Rep FL-22 House race sold 0.475 x48 [?]
+2026-10-10 19:52:44,554 INFO account 104946.36 | EV outcome 112454.2 | realised 3.02 | worst case 78901 (corr 17770) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:53:14,599 INFO account 104945.71 | EV outcome 112454.19 | realised 3.02 | worst case 78901 (corr 17770) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:53:44,559 INFO account 104945.48 | EV outcome 112454.2 | realised 3.02 | worst case 78901 (corr 17770) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:54:14,540 INFO account 104945.54 | EV outcome 112454.19 | realised 3.02 | worst case 78901 (corr 17770) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:54:44,584 INFO account 104944.38 | EV outcome 112453.74 | realised 3.02 | worst case 78902 (corr 17769) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:55:14,607 INFO account 104943.9 | EV outcome 112454.32 | realised 3.02 | worst case 78902 (corr 17769) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:55:44,541 INFO account 104943.9 | EV outcome 112454.32 | realised 3.02 | worst case 78902 (corr 17769) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:56:15,237 INFO account 104949.61 | EV outcome 112454.01 | realised 3.02 | worst case 78902 (corr 17769) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:56:44,560 INFO account 104947.7 | EV outcome 112454.0 | realised 3.02 | worst case 78902 (corr 17769) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:57:14,651 INFO account 104947.19 | EV outcome 112453.24 | realised 3.02 | worst case 78902 (corr 17769) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:57:44,654 INFO account 104948.18 | EV outcome 112454.06 | realised 3.02 | worst case 78902 (corr 17769) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:58:14,593 INFO account 104948.67 | EV outcome 112453.24 | realised 3.02 | worst case 78902 (corr 17769) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:58:44,561 INFO account 104950.15 | EV outcome 112453.25 | realised 3.02 | worst case 78902 (corr 17769) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:59:14,550 INFO account 104951.93 | EV outcome 112453.24 | realised 3.02 | worst case 78902 (corr 17769) | priced 226/237 | resting 0 | tilt None
+2026-10-10 19:59:44,545 INFO account 104951.98 | EV outcome 112452.95 | realised 3.02 | worst case 78902 (corr 17769) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:00:14,574 INFO account 104953.44 | EV outcome 112452.94 | realised 3.02 | worst case 78902 (corr 17769) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:00:44,566 INFO account 104953.5 | EV outcome 112452.95 | realised 3.02 | worst case 78902 (corr 17769) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:01:14,570 INFO account 104953.6 | EV outcome 112452.95 | realised 3.02 | worst case 78902 (corr 17769) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:01:44,571 INFO account 104953.65 | EV outcome 112452.95 | realised 3.02 | worst case 78902 (corr 17769) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:02:14,562 INFO account 104953.48 | EV outcome 112452.78 | realised 3.02 | worst case 78902 (corr 17769) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:02:27,597 INFO realtime: missed message(s) on user:6c996168-fbca-415e-bb62-04b8bcaa95f3 - full resync next cycle
+2026-10-10 20:02:28,723 INFO tracking 237 markets in 117 races
+2026-10-10 20:02:44,134 INFO account 104954.62 | EV outcome 112453.92 | realised 3.02 | worst case 78902 (corr 17769) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:03:14,250 INFO account 104954.6 | EV outcome 112452.79 | realised 3.02 | worst case 78902 (corr 17769) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:03:42,128 INFO account 104955.76 | EV outcome 112452.79 | realised 3.02 | worst case 78902 (corr 17769) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:04:12,154 INFO account 104955.69 | EV outcome 112452.78 | realised 3.02 | worst case 78902 (corr 17769) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:04:37,864 INFO account 104955.64 | EV outcome 112452.48 | realised 3.02 | worst case 78901 (corr 17769) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:05:07,806 INFO account 104955.54 | EV outcome 112452.48 | realised 3.02 | worst case 78901 (corr 17769) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:05:37,807 INFO account 104956.3 | EV outcome 112452.48 | realised 3.02 | worst case 78901 (corr 17769) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:06:07,816 INFO account 104956.99 | EV outcome 112452.49 | realised 3.02 | worst case 78901 (corr 17769) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:06:37,843 INFO account 104956.99 | EV outcome 112452.49 | realised 3.02 | worst case 78901 (corr 17769) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:07:07,871 INFO account 104956.92 | EV outcome 112452.48 | realised 3.02 | worst case 78901 (corr 17769) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:07:38,755 INFO account 104956.72 | EV outcome 112452.48 | realised 3.02 | worst case 78901 (corr 17769) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:08:07,822 INFO account 104940.77 | EV outcome 112452.49 | realised 3.02 | worst case 78901 (corr 17769) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:08:37,915 INFO account 104940.68 | EV outcome 112452.48 | realised 3.02 | worst case 78901 (corr 17769) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:09:07,836 INFO account 104940.68 | EV outcome 112452.48 | realised 3.02 | worst case 78901 (corr 17769) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:09:37,824 INFO account 104940.4 | EV outcome 112445.52 | realised 3.02 | worst case 78894 (corr 17784) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:10:07,822 INFO account 104940.53 | EV outcome 112440.04 | realised 3.02 | worst case 78889 (corr 17785) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:10:37,832 INFO account 104940.23 | EV outcome 112440.04 | realised 3.02 | worst case 78889 (corr 17785) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:11:09,522 INFO account 104955.47 | EV outcome 112504.98 | realised 3.02 | worst case 80812 (corr 18863) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:11:17,047 INFO FILL Dem U.S. Senate bought 0.610 x3047 [?]
+2026-10-10 20:11:40,111 INFO account 104889.29 | EV outcome 112504.98 | realised 3.02 | worst case 80812 (corr 18863) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:12:10,083 INFO account 104889.27 | EV outcome 112504.98 | realised 3.02 | worst case 80812 (corr 18863) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:12:40,578 INFO account 104890.05 | EV outcome 112504.98 | realised 3.02 | worst case 80812 (corr 18863) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:13:10,083 INFO account 104891.92 | EV outcome 112504.98 | realised 3.02 | worst case 80812 (corr 18863) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:13:40,120 INFO account 104893.47 | EV outcome 112506.21 | realised 3.02 | worst case 80812 (corr 18863) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:13:59,067 INFO FILL Rep U.S. Senate sold 0.395 x4982 [?]
+2026-10-10 20:14:12,092 INFO account 104822.35 | EV outcome 112637.71 | realised 3.02 | worst case 83958 (corr 22895) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:14:42,160 INFO account 104821.07 | EV outcome 112636.94 | realised 3.02 | worst case 83957 (corr 22895) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:15:12,221 INFO account 104820.71 | EV outcome 112637.58 | realised 3.02 | worst case 83958 (corr 22895) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:15:42,116 INFO account 104820.7 | EV outcome 112637.46 | realised 3.02 | worst case 83958 (corr 22895) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:16:12,182 INFO account 104818.49 | EV outcome 112637.47 | realised 3.02 | worst case 83958 (corr 22895) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:16:42,094 INFO account 104818.33 | EV outcome 112637.25 | realised 3.02 | worst case 83958 (corr 22895) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:17:12,197 INFO account 104818.47 | EV outcome 112637.5 | realised 3.02 | worst case 83958 (corr 22895) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:17:42,171 INFO account 104818.5 | EV outcome 112637.5 | realised 3.02 | worst case 83958 (corr 22895) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:18:12,184 INFO account 104818.38 | EV outcome 112637.5 | realised 3.02 | worst case 83958 (corr 22895) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:18:42,100 INFO account 104818.38 | EV outcome 112637.5 | realised 3.02 | worst case 83958 (corr 22895) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:19:12,187 INFO account 104820.24 | EV outcome 112637.49 | realised 3.02 | worst case 83958 (corr 22895) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:19:42,173 INFO account 104820.23 | EV outcome 112637.5 | realised 3.02 | worst case 83958 (corr 22895) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:20:12,081 INFO account 104820.85 | EV outcome 112635.42 | realised 3.02 | worst case 83956 (corr 22905) | priced 227/237 | resting 0 | tilt None
+2026-10-10 20:20:42,143 INFO account 104820.85 | EV outcome 112635.42 | realised 3.02 | worst case 83956 (corr 22905) | priced 227/237 | resting 0 | tilt None
+2026-10-10 20:21:12,109 INFO account 104820.89 | EV outcome 112635.43 | realised 3.02 | worst case 83956 (corr 22905) | priced 227/237 | resting 0 | tilt None
+2026-10-10 20:21:42,135 INFO account 104820.86 | EV outcome 112635.42 | realised 3.02 | worst case 83956 (corr 22905) | priced 227/237 | resting 0 | tilt None
+2026-10-10 20:22:12,124 INFO account 104819.06 | EV outcome 112635.42 | realised 3.02 | worst case 83956 (corr 22905) | priced 227/237 | resting 0 | tilt None
+2026-10-10 20:22:42,183 INFO account 104819.09 | EV outcome 112635.42 | realised 3.02 | worst case 83956 (corr 22905) | priced 227/237 | resting 0 | tilt None
+2026-10-10 20:23:12,109 INFO account 104819.1 | EV outcome 112635.42 | realised 3.02 | worst case 83956 (corr 22905) | priced 227/237 | resting 0 | tilt None
+2026-10-10 20:23:42,131 INFO account 104819.1 | EV outcome 112635.42 | realised 3.02 | worst case 83956 (corr 22905) | priced 227/237 | resting 0 | tilt None
+2026-10-10 20:24:12,215 INFO account 104819.12 | EV outcome 112635.42 | realised 3.02 | worst case 83956 (corr 22905) | priced 227/237 | resting 0 | tilt None
+2026-10-10 20:24:42,264 INFO account 104819.14 | EV outcome 112635.42 | realised 3.02 | worst case 83956 (corr 22905) | priced 227/237 | resting 0 | tilt None
+2026-10-10 20:25:12,109 INFO account 104819.17 | EV outcome 112650.12 | realised 3.02 | worst case 83970 (corr 22882) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:25:42,175 INFO account 104825.14 | EV outcome 112650.12 | realised 3.02 | worst case 83970 (corr 22882) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:26:12,133 INFO account 104825.12 | EV outcome 112650.12 | realised 3.02 | worst case 83970 (corr 22882) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:26:42,130 INFO account 104825.09 | EV outcome 112650.12 | realised 3.02 | worst case 83970 (corr 22882) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:27:12,199 INFO account 104825.16 | EV outcome 112650.12 | realised 3.02 | worst case 83970 (corr 22882) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:27:42,095 INFO account 104825.17 | EV outcome 112650.12 | realised 3.02 | worst case 83970 (corr 22882) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:28:12,286 INFO account 104825.23 | EV outcome 112650.12 | realised 3.02 | worst case 83970 (corr 22882) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:28:42,113 INFO account 104825.23 | EV outcome 112650.12 | realised 3.02 | worst case 83970 (corr 22882) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:29:12,121 INFO account 104825.24 | EV outcome 112650.12 | realised 3.02 | worst case 83970 (corr 22882) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:29:42,115 INFO account 104825.19 | EV outcome 112650.07 | realised 3.02 | worst case 83970 (corr 22882) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:30:12,125 INFO account 104825.35 | EV outcome 112650.35 | realised 3.02 | worst case 83971 (corr 22867) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:30:42,126 INFO account 104825.35 | EV outcome 112650.35 | realised 3.02 | worst case 83971 (corr 22867) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:31:12,116 INFO account 104825.35 | EV outcome 112650.35 | realised 3.02 | worst case 83971 (corr 22867) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:31:42,130 INFO account 104824.3 | EV outcome 112649.3 | realised 3.02 | worst case 83971 (corr 22867) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:32:12,147 INFO account 104824.19 | EV outcome 112650.35 | realised 3.02 | worst case 83971 (corr 22867) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:32:42,195 INFO account 104824.18 | EV outcome 112650.34 | realised 3.02 | worst case 83971 (corr 22867) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:33:12,173 INFO account 104824.18 | EV outcome 112650.35 | realised 3.02 | worst case 83971 (corr 22867) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:33:42,135 INFO account 104824.13 | EV outcome 112650.35 | realised 3.02 | worst case 83971 (corr 22867) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:34:12,148 INFO account 104824.55 | EV outcome 112650.35 | realised 3.02 | worst case 83971 (corr 22867) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:34:42,130 INFO account 104823.59 | EV outcome 112650.35 | realised 3.02 | worst case 83971 (corr 22867) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:35:12,142 INFO account 104823.54 | EV outcome 112639.39 | realised 3.02 | worst case 83960 (corr 22884) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:35:42,188 INFO account 104823.54 | EV outcome 112639.39 | realised 3.02 | worst case 83960 (corr 22884) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:36:12,129 INFO account 104823.65 | EV outcome 112639.39 | realised 3.02 | worst case 83960 (corr 22884) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:36:42,151 INFO account 104823.9 | EV outcome 112639.39 | realised 3.02 | worst case 83960 (corr 22884) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:37:12,190 INFO account 104824.09 | EV outcome 112639.39 | realised 3.02 | worst case 83960 (corr 22884) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:37:42,131 INFO account 104823.93 | EV outcome 112639.23 | realised 3.02 | worst case 83960 (corr 22884) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:38:12,348 INFO account 104823.93 | EV outcome 112639.39 | realised 3.02 | worst case 83960 (corr 22884) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:38:42,222 INFO account 104823.37 | EV outcome 112639.38 | realised 3.02 | worst case 83960 (corr 22884) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:39:12,202 INFO account 104823.32 | EV outcome 112639.39 | realised 3.02 | worst case 83960 (corr 22884) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:39:42,151 INFO account 104823.79 | EV outcome 112639.39 | realised 3.02 | worst case 83960 (corr 22884) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:40:12,290 INFO account 104821.9 | EV outcome 112638.42 | realised 3.02 | worst case 83959 (corr 22884) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:40:36,088 INFO FILL Rep FL-22 House race sold 0.470 x48 [?]
+2026-10-10 20:40:42,101 INFO FILL Dem WA-03 House race bought 0.860 x130 [?]
+2026-10-10 20:40:42,101 INFO FILL Dem WA-03 House race bought 0.860 x15 [?]
+2026-10-10 20:40:45,152 INFO account 104822.11 | EV outcome 112633.04 | realised 2.78 | worst case 83803 (corr 22854) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:41:15,111 INFO account 104822.03 | EV outcome 112633.04 | realised 2.78 | worst case 83803 (corr 22854) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:41:45,108 INFO account 104821.97 | EV outcome 112632.91 | realised 2.78 | worst case 83803 (corr 22854) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:42:15,163 INFO account 104822.0 | EV outcome 112633.04 | realised 2.78 | worst case 83803 (corr 22854) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:42:45,099 INFO account 104822.08 | EV outcome 112633.04 | realised 2.78 | worst case 83803 (corr 22854) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:43:15,100 INFO account 104822.01 | EV outcome 112633.04 | realised 2.78 | worst case 83803 (corr 22854) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:43:43,551 INFO realtime: renewing the session
+2026-10-10 20:43:45,153 INFO realtime: subscribed to tournament - full resync next cycle
+2026-10-10 20:43:45,168 INFO realtime: subscribed to user - full resync next cycle
+2026-10-10 20:43:45,597 INFO account 104821.87 | EV outcome 112633.04 | realised 2.78 | worst case 83803 (corr 22854) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:43:47,127 INFO tracking 237 markets in 117 races
+2026-10-10 20:44:15,098 INFO account 104822.17 | EV outcome 112633.04 | realised 2.78 | worst case 83803 (corr 22854) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:44:45,114 INFO account 104822.22 | EV outcome 112633.05 | realised 2.78 | worst case 83803 (corr 22854) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:45:13,120 INFO account 104822.22 | EV outcome 112643.61 | realised 2.78 | worst case 83814 (corr 22837) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:45:43,130 INFO account 104822.15 | EV outcome 112632.71 | realised 2.78 | worst case 83803 (corr 22844) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:46:06,708 INFO account 104822.28 | EV outcome 112632.71 | realised 2.78 | worst case 83803 (corr 22844) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:46:36,703 INFO account 104822.28 | EV outcome 112632.71 | realised 2.78 | worst case 83803 (corr 22844) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:47:06,690 INFO account 104822.28 | EV outcome 112632.71 | realised 2.78 | worst case 83803 (corr 22844) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:47:36,687 INFO account 104822.89 | EV outcome 112632.71 | realised 2.78 | worst case 83803 (corr 22844) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:48:06,740 INFO account 104823.78 | EV outcome 112632.71 | realised 2.78 | worst case 83803 (corr 22844) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:48:36,705 INFO account 104824.98 | EV outcome 112632.35 | realised 2.78 | worst case 83803 (corr 22844) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:48:45,702 INFO FILL Rep Alaska Senate sold 0.315 x601 [?]
+2026-10-10 20:48:45,702 INFO FILL Rep Alaska Senate sold 0.315 x399 [?]
+2026-10-10 20:49:05,723 INFO FILL Dem Alaska Senate sold 0.700 x147 [?]
+2026-10-10 20:49:05,723 INFO FILL Dem Alaska Senate sold 0.700 x20 [?]
+2026-10-10 20:49:05,723 INFO FILL Dem Alaska Senate sold 0.700 x833 [?]
+2026-10-10 20:49:08,704 INFO account 104827.28 | EV outcome 112637.58 | realised 2.78 | worst case 83803 (corr 22844) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:49:33,689 INFO FILL Rep Alaska Senate sold 0.315 x201 [?]
+2026-10-10 20:49:33,689 INFO FILL Rep Alaska Senate sold 0.315 x129 [?]
+2026-10-10 20:49:33,689 INFO FILL Rep Alaska Senate sold 0.315 x670 [?]
+2026-10-10 20:49:33,689 INFO FILL Dem Alaska Senate sold 0.700 x20 [?]
+2026-10-10 20:49:33,689 INFO FILL Dem Alaska Senate sold 0.700 x980 [?]
+2026-10-10 20:49:48,282 INFO account 104834.11 | EV outcome 112644.3 | realised 2.78 | worst case 83803 (corr 22844) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:50:05,694 INFO FILL Rep Alaska Senate sold 0.315 x530 [?]
+2026-10-10 20:50:05,694 INFO FILL Rep Alaska Senate sold 0.315 x20 [?]
+2026-10-10 20:50:05,694 INFO FILL Rep Alaska Senate sold 0.315 x416 [?]
+2026-10-10 20:50:05,695 INFO FILL Dem Alaska Senate sold 0.700 x966 [?]
+2026-10-10 20:50:34,699 INFO account 104834.04 | EV outcome 112644.02 | realised 2.69 | worst case 83803 (corr 22835) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:50:58,348 INFO account 104834.5 | EV outcome 112644.12 | realised 2.69 | worst case 83803 (corr 22835) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:51:28,287 INFO account 104834.54 | EV outcome 112644.12 | realised 2.69 | worst case 83803 (corr 22835) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:51:58,394 INFO account 104834.54 | EV outcome 112644.12 | realised 2.69 | worst case 83803 (corr 22835) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:52:28,292 INFO account 104834.54 | EV outcome 112644.11 | realised 2.69 | worst case 83803 (corr 22835) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:52:58,259 INFO account 104835.44 | EV outcome 112644.12 | realised 2.69 | worst case 83803 (corr 22835) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:53:28,383 INFO account 104835.39 | EV outcome 112644.12 | realised 2.69 | worst case 83803 (corr 22835) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:53:59,059 INFO account 104834.99 | EV outcome 112644.11 | realised 2.69 | worst case 83803 (corr 22835) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:54:28,270 INFO account 104834.35 | EV outcome 112644.12 | realised 2.69 | worst case 83803 (corr 22835) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:54:58,296 INFO account 104834.35 | EV outcome 112644.12 | realised 2.69 | worst case 83803 (corr 22835) | priced 226/237 | resting 0 | tilt None
+2026-10-10 20:55:28,262 INFO account 104834.35 | EV outcome 112644.12 | realised 2.69 | worst case 83803 (corr 22835) | priced 225/237 | resting 0 | tilt None
+2026-10-10 20:55:58,342 INFO account 104834.4 | EV outcome 112665.82 | realised 2.69 | worst case 83824 (corr 22822) | priced 225/237 | resting 0 | tilt None
+2026-10-10 20:56:28,266 INFO account 104834.82 | EV outcome 112665.82 | realised 2.69 | worst case 83824 (corr 22822) | priced 225/237 | resting 0 | tilt None
+2026-10-10 20:56:58,279 INFO account 104834.82 | EV outcome 112665.82 | realised 2.69 | worst case 83824 (corr 22822) | priced 225/237 | resting 0 | tilt None
+2026-10-10 20:57:28,265 INFO account 104834.74 | EV outcome 112665.82 | realised 2.69 | worst case 83824 (corr 22822) | priced 225/237 | resting 0 | tilt None
+2026-10-10 20:57:58,309 INFO account 104834.74 | EV outcome 112665.82 | realised 2.69 | worst case 83824 (corr 22822) | priced 225/237 | resting 0 | tilt None
+2026-10-10 20:58:28,267 INFO account 104834.57 | EV outcome 112665.82 | realised 2.69 | worst case 83824 (corr 22822) | priced 225/237 | resting 0 | tilt None
+2026-10-10 20:58:58,264 INFO account 104834.32 | EV outcome 112665.82 | realised 2.69 | worst case 83824 (corr 22822) | priced 225/237 | resting 0 | tilt None
+2026-10-10 20:59:28,273 INFO account 104834.01 | EV outcome 112665.79 | realised 2.69 | worst case 83824 (corr 22822) | priced 225/237 | resting 0 | tilt None
+2026-10-10 20:59:58,355 INFO account 104833.06 | EV outcome 112665.82 | realised 2.69 | worst case 83824 (corr 22822) | priced 225/237 | resting 0 | tilt None
+2026-10-10 21:00:28,265 INFO account 104833.56 | EV outcome 112665.82 | realised 2.69 | worst case 83824 (corr 22822) | priced 226/237 | resting 0 | tilt None
+2026-10-10 21:00:58,354 INFO account 104834.09 | EV outcome 112661.86 | realised 2.69 | worst case 83820 (corr 22825) | priced 226/237 | resting 0 | tilt None
+2026-10-10 21:01:32,235 INFO FILL Dem Alaska Senate sold 0.700 x50 [?]
+2026-10-10 21:01:35,244 INFO account 104833.6 | EV outcome 112661.37 | realised 2.69 | worst case 83870 (corr 22811) | priced 226/237 | resting 0 | tilt None
+2026-10-10 21:02:02,216 INFO FILL Dem Alaska Senate sold 0.705 x50 [?]
+2026-10-10 21:02:02,217 INFO FILL Dem Alaska Senate sold 0.705 x50 [?]
+2026-10-10 21:02:06,200 INFO account 104833.62 | EV outcome 112661.39 | realised 2.69 | worst case 83895 (corr 22804) | priced 226/237 | resting 0 | tilt None
+2026-10-10 21:02:35,246 INFO account 104833.62 | EV outcome 112661.39 | realised 2.69 | worst case 83895 (corr 22804) | priced 226/237 | resting 0 | tilt None
+2026-10-10 21:02:45,033 INFO realtime: missed message(s) on user:6c996168-fbca-415e-bb62-04b8bcaa95f3 - full resync next cycle
+2026-10-10 21:02:46,153 INFO tracking 237 markets in 117 races
+2026-10-10 21:03:04,720 INFO account 104833.62 | EV outcome 112661.39 | realised 2.69 | worst case 83895 (corr 22804) | priced 226/237 | resting 0 | tilt None
+2026-10-10 21:03:34,720 INFO account 104833.62 | EV outcome 112661.39 | realised 2.69 | worst case 83895 (corr 22804) | priced 226/237 | resting 0 | tilt None
+2026-10-10 21:04:02,720 INFO account 104833.62 | EV outcome 112661.39 | realised 2.69 | worst case 83895 (corr 22804) | priced 226/237 | resting 0 | tilt None
+2026-10-10 21:04:32,706 INFO account 104833.62 | EV outcome 112661.39 | realised 2.69 | worst case 83895 (corr 22804) | priced 226/237 | resting 0 | tilt None
+2026-10-10 21:04:58,304 INFO account 104832.92 | EV outcome 112661.38 | realised 2.69 | worst case 83895 (corr 22804) | priced 226/237 | resting 0 | tilt None
+2026-10-10 21:05:28,313 INFO account 104823.62 | EV outcome 112661.39 | realised 2.69 | worst case 83895 (corr 22804) | priced 226/237 | resting 0 | tilt None
+2026-10-10 21:05:58,367 INFO account 104823.41 | EV outcome 112652.71 | realised 2.69 | worst case 83887 (corr 22810) | priced 226/237 | resting 0 | tilt None
+2026-10-10 21:06:28,361 INFO account 104821.35 | EV outcome 112652.71 | realised 2.69 | worst case 83887 (corr 22810) | priced 226/237 | resting 0 | tilt None
+2026-10-10 21:06:58,412 INFO account 104821.45 | EV outcome 112652.71 | realised 2.69 | worst case 83887 (corr 22810) | priced 226/237 | resting 0 | tilt None
+2026-10-10 21:07:28,277 INFO account 104820.96 | EV outcome 112652.71 | realised 2.69 | worst case 83887 (corr 22810) | priced 226/237 | resting 0 | tilt None
+2026-10-10 21:07:58,279 INFO account 104802.25 | EV outcome 112649.87 | realised 2.69 | worst case 83887 (corr 22810) | priced 226/237 | resting 0 | tilt None
+2026-10-10 21:08:28,352 INFO account 104802.25 | EV outcome 112652.71 | realised 2.69 | worst case 83887 (corr 22810) | priced 226/237 | resting 0 | tilt None
+2026-10-10 21:08:58,291 INFO account 104802.22 | EV outcome 112652.71 | realised 2.69 | worst case 83887 (corr 22810) | priced 226/237 | resting 0 | tilt None
+2026-10-10 21:09:28,337 INFO account 104802.34 | EV outcome 112652.99 | realised 2.69 | worst case 83887 (corr 22810) | priced 226/237 | resting 0 | tilt None
+2026-10-10 21:09:58,290 INFO account 104802.3 | EV outcome 112652.72 | realised 2.69 | worst case 83887 (corr 22810) | priced 226/237 | resting 0 | tilt None
+2026-10-10 21:10:28,395 INFO account 104802.32 | EV outcome 112652.71 | realised 2.69 | worst case 83887 (corr 22810) | priced 226/237 | resting 0 | tilt None
+2026-10-10 21:10:58,276 INFO account 104802.32 | EV outcome 112658.36 | realised 2.69 | worst case 83892 (corr 22806) | priced 226/237 | resting 0 | tilt None
+2026-10-10 21:11:28,371 INFO account 104802.07 | EV outcome 112658.12 | realised 2.69 | worst case 83892 (corr 22806) | priced 226/237 | resting 0 | tilt None
+2026-10-10 21:11:58,297 INFO account 104802.07 | EV outcome 112658.36 | realised 2.69 | worst case 83892 (corr 22806) | priced 226/237 | resting 0 | tilt None
+2026-10-10 21:12:22,458 INFO FILL Rep Maine Senate bought 0.415 x52 [?]
+2026-10-10 21:12:35,421 INFO account 104801.93 | EV outcome 112658.36 | realised 2.69 | worst case 83914 (corr 22799) | priced 226/237 | resting 0 | tilt None
+2026-10-10 21:13:05,436 INFO account 104801.89 | EV outcome 112658.36 | realised 2.69 | worst case 83914 (corr 22799) | priced 226/237 | resting 0 | tilt None
+2026-10-10 21:13:35,422 INFO account 104801.9 | EV outcome 112658.37 | realised 2.69 | worst case 83914 (corr 22799) | priced 226/237 | resting 0 | tilt None
+2026-10-10 21:14:05,456 INFO account 104801.91 | EV outcome 112658.37 | realised 2.69 | worst case 83914 (corr 22799) | priced 226/237 | resting 0 | tilt None
+2026-10-10 21:14:35,507 INFO account 104801.29 | EV outcome 112658.36 | realised 2.69 | worst case 83914 (corr 22799) | priced 226/237 | resting 0 | tilt None
+2026-10-10 21:15:05,560 INFO account 104801.29 | EV outcome 112658.36 | realised 2.69 | worst case 83914 (corr 22799) | priced 226/237 | resting 0 | tilt None
