@@ -1,1268 +1,543 @@
 """
-ValueMixin: the allocator (alloc_*: plan, buy, sell, tick, journal), the set ladder (sl_*) and the
-value-floor helpers.
+The value book: the floor every reducing order respects, the value quotes in the tails, and the allocator that
+moves cash from the holdings with the least edge left to the levels on the book with the most.
 
-Methods only: all state lives on the Bot instance (self); no __init__ here. Never imports bot.py.
+OWNS     the value floor (apply_floor); the tail quotes behind the hurdle (tail_quotes); the Allocator: once an
+         interval, swaps (sell the lowest edge-held, buy the highest-edge level, both IOC at the touch, the buy only
+         after a cash read shows the sale's money), buys from spare cash above mm_reserve_usd, and the refill (sales
+         with no buy, sized to what market making and the ladder were refused for cash last cycle).
+NEVER    sells below the floor (a swap sale below p - alloc_swap_sell_margin), flips a position, sells a pinned
+         label, trades the party-control races, or sells for cash no buyer has asked for.
+ORIGIN   The 3.7k morning (selling below value to raise cash) gave the floor. RETURNS_ATTRIBUTION.md gave the rest:
+         the allocator's buys earned ~11% per unit of cash, the refill sold 110k of value for 43k of buying; so a
+         sale happens only when a buy can use the cash. While the reserve pauses value adds, only swaps adding no
+         collateral and no national-swing exposure go (release 14.1's room netting; their buys are tagged "swap").
+         Old code: mmbot/value.py (alloc_*), mmbot/mm.py (swap_floor_ok), mmbot/quoting.py (value_side_prices).
+         Left behind: NO+NO set unwinds (the 4 Oct book holds one set, worth 1.0), the set ladder, the momentum sleeve.
+OPEN     A swap in flight is not saved: after a restart its cash waits for the next run. The bot does not say if an
+         IOC was sent or deferred, so each is offered once (a deferred one is lost, never sent twice).
 """
-import json
 import math
-from collections import defaultdict, deque
-from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+import time
+from collections import deque
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 
-from mmbot import util
-from mmbot import config
-from mmbot import exchange
 from mmbot import pricing
-from mmbot.util import FATAL_API_CODES, PMAX, PMIN, TICK, bot_path, iso, log, rnd
-from mmbot.config import LADDER_MAX_LEVELS, MAX_ORDER_TTL
-from mmbot.exchange import ApiError, busy
-from mmbot.pricing import floor_tick, strip_own
+from mmbot.risk import CASH_MARGIN
+from mmbot.state import PMAX, PMIN, TICK, Order, adds, ceil_tick, floor_tick, held_usd
+
+MIN_USD = 20.0            # no pair or refill sale below this many dollars (old ALLOC_MIN_USD)
+LEVELS_DEEP = 3           # the allocator buys from the top 3 levels of a book (old alloc_plan)
+LEVEL_TOL = 0.005         # a planned level still counts while the touch is within a tick of it (old ALLOC_LEVEL_TOL)
+BOOK_FRESH_S = 120.0      # the allocator trades only on a book read this recently (the bot re-reads every 120 s)
+CASH_FRESH_S = 300.0      # no allocator action without a cash read this recent (the gate's own limit)
+BUY_WAIT_S = 900.0        # a sold swap's buy waits at most this long for the money (old ALLOC_BUY_WAIT)
+MAX_ORDERS = 4            # allocator orders per cycle (old alloc_max_orders_per_cycle): the writes are shared
+MAX_ORDER_CASH_FRAC = 0.01   # one tail quote ties up at most 1% of the account (old max_order_cash_frac)
+HOUR_S, DAY_S = 3600.0, 86400.0
+EPS = 1e-9
 
 
-class ValueMixin:
+# --------------------------------------------------------------------------- the floor (README §4.3)
 
-    ALLOC_REF_MAX_AGE = 30.0      # a Polymarket price downloaded longer ago than this (s) is not ranked
-    ALLOC_LEVEL_TOL = 0.005       # a paired level still counts while the fresh touch is within this of it
-    ALLOC_BUY_WAIT = 900.0        # a sold pair's buy waits at most this long (s) for a cash read showing the money
-    ALLOC_SET_WAIT = 900.0        # a registered NO+NO set unwind waits at most this long (s) for take_arbitrage
-    ALLOC_MIN_USD = 20.0          # no pair or reserve refill below this many $
-    ALLOC_CASH_FRESH = 300.0      # no allocator action without a cash read younger than this (the gate's own limit)
-    ALLOC_DONE = ("bought", "done", "gone", "dropped", "expired", "skipped")
+def floor_prices(qty, p, margin):
+    """(highest bid, lowest ask) an order reducing a position of qty may take: a long is never offered below
+    p - margin, a short never bought back above p + margin (selling below p gives value away at the result).
+    None = no limit on that side. A bid limit below the grid is returned as is (the order cannot exist)."""
+    if qty >= 1:
+        return None, ceil_tick(p - margin)
+    if qty <= -1:
+        return round(min(PMAX, math.floor(round((p + margin) / TICK, 6)) * TICK), 3), None
+    return None, None
 
-    def load_status_key(self, key):
-        """Package 10 B: status.json[key] the previous run left ({} if none)."""
-        try:
-            with open(bot_path(self.cfg.status_file)) as f:
-                d = json.load(f).get(key)
-            return d if isinstance(d, dict) else {}
-        except (OSError, ValueError, TypeError, AttributeError):
-            return {}
 
-    def alloc_init(self, d=None):
-        """Package 10 B state, restored from status.json "alloc" (d): the last run's wall time (the hourly clock) and
-        the $ rotated in the last hour (turnover cap). Pairs in flight are NOT restored: after a restart their cash
-        simply stays (never a buy without its own fresh sale and cash read)."""
-        d = d if isinstance(d, dict) else {}
+def apply_floor(orders, view, s):
+    """The orders with every reducing one moved back to the floor. Only ever moves a price away from the other
+    side, so it never makes an order trade. Swap sales (tag alloc) have their own, wider margin (release 14.2)."""
+    out = []
+    for o in orders:
+        p, qty = view.p.get(o.eid), view.positions.get(o.eid, 0.0)
+        if p is None or adds(o, qty):
+            out.append(o)
+            continue
+        margin = s.alloc_swap_sell_margin if o.tag == "alloc" else s.value_sell_margin
+        max_bid, min_ask = floor_prices(qty, p, margin)
+        if o.is_bid and max_bid is not None and o.price > max_bid + EPS:
+            if max_bid < PMIN - EPS:
+                continue
+            o = replace(o, price=max_bid)
+        elif not o.is_bid and min_ask is not None and o.price < min_ask - EPS:
+            o = replace(o, price=min_ask)
+        out.append(o)
+    return out
 
-        def num(x, default=None):
-            return float(x) if isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) else default
-        self.alloc_last_run_wall = num(d.get("last_run_wall"))
-        self.alloc_flows = deque()                # (wall, $ rotated) of the last hour
-        for x in (d.get("flows") if isinstance(d.get("flows"), list) else ()):
-            if isinstance(x, (list, tuple)) and len(x) == 2 and num(x[0]) is not None and num(x[1]) is not None:
-                self.alloc_flows.append((num(x[0]), num(x[1])))
-        self.alloc_totals = {k: num(d.get(k), 0.0) for k in ("sold_total", "bought_total", "runs_total")}
-        self.alloc_pairs = []                     # this run's pairs (dicts, see alloc_plan), until each is finished
-        self.alloc_set_races = {}                 # race -> {"cost", "until", "sets_before", "free"} (B3; arb_plan)
-        self.alloc_sells_stopped = False          # a sold pair's level was gone: no more sales this run
-        self.alloc_state = "off"
-        self.alloc_info = {}                      # the latest tick's figures (status.json "alloc")
-        self.alloc_run = {}                       # this run's tallies
-        self.alloc_bloc_logged = False
-        self.alloc_ages = {}
-        self.alloc_ladder = {}                    # Package 12 L1: race -> the resting rich-leg ladder's state
-        self.alloc_ladder_info = {}               # its status (alloc.set_ladder), absent while never used
-        self.alloc_ladder_refused = {}            # race -> when the exchange last refused its whole ladder (RT12-3)
-        self.alloc_targets = {}                   # Package 12 M2: the latest plan's intended holdings {eid: shares}
-        self.p142_last_run = []                   # P14.2: the latest run's swap records (alloc.swaps.last_run)
-        self.p142_events = deque()                # P14.2: (wall, kind, $, est, realised) of the last 24 h
-        sw = d.get("swaps") if isinstance(d.get("swaps"), dict) else {}
-        for x in (sw.get("events") if isinstance(sw.get("events"), list) else ()):   # (restored after a restart)
-            if (isinstance(x, (list, tuple)) and len(x) == 5 and isinstance(x[1], str)
-                    and all(num(x[i]) is not None for i in (0, 2, 3, 4))):
-                self.p142_events.append((num(x[0]), x[1], num(x[2]), num(x[3]), num(x[4])))
 
-    def alloc_persist_needed(self):
-        return bool(self.alloc_info) or bool(self.alloc_pairs) or self.alloc_last_run_wall is not None
+def floor_ok(long, px, p, margin):
+    """True if selling a long at px (buying back a short at px) is at or beyond the floor."""
+    return px >= p - margin - EPS if long else px <= p + margin + EPS
 
-    def p141_alloc_report(self, now_w=None):
-        """P14.1 7: the allocator's swap report (absent while every P14.1 setting is off): swaps planned / done in the
-        last 24 h, the $ moved, the EV gain estimated when planned vs realised from the IOC fills (a sale's (price - p)
-        given up counts against the buy's (p - price) gained), and the latest run's refill blockers."""
-        if not self.p141_on():
-            return {}
-        s = self.p141_sums(now_w)
-        pl, sl, bl, rf = (s.get(k) or [0, 0.0, 0.0, 0.0] for k in ("swap_plan", "swap_sell", "swap_buy", "refill"))
-        return {"swaps_planned": self.alloc_run.get("swaps_planned", 0),
-                "swaps_planned_24h": pl[0], "swaps_usd_planned_24h": round(pl[1], 2),
-                "swaps_done_24h": bl[0], "swaps_usd_24h": round(bl[1], 2),
-                "ev_gain_est_24h": round(pl[2], 2), "ev_gain_realised_24h": round(bl[3] + sl[3], 2),
-                "refill_sold_usd_24h": round(rf[1], 2), "refill_ev_given_24h": round(-rf[3], 2),
-                "refill_blocked_by": dict(self.mmf_refill.get("blocked_by") or {})}
 
-    def alloc_status(self):
-        """status.json "alloc": the latest figures plus what a restart restores (last_run_wall, flows). P14.1: the
-        swap report (p141_alloc_report) while a P14.1 setting is on."""
-        now_w = util.time.time()
-        return {**self.alloc_info, **self.p141_alloc_report(now_w),
-                **({"swaps": self.swap_report(now_w)} if self.p142_on() else {}),   # P14.2
-                "state": self.alloc_state, "last_run_wall": self.alloc_last_run_wall,
-                "last_run": (iso(datetime.fromtimestamp(self.alloc_last_run_wall, timezone.utc))
-                             if self.alloc_last_run_wall is not None else None),
-                **({"set_ladder": dict(self.alloc_ladder_info)} if self.alloc_ladder_info else {}),   # P12 L1
-                "pending": len(self.alloc_pairs), "turnover_hour": round(self.alloc_turnover(now_w), 2),
-                "flows": [list(x) for x in self.alloc_flows if now_w - x[0] < 3600],
-                **{k: round(v, 2) for k, v in self.alloc_totals.items()}}
+# --------------------------------------------------------------------------- tail quotes (README §4.3)
 
-    def alloc_turnover(self, now_w):
-        """$ rotated in the last hour (sales, buys from spare cash, NO+NO sets freed)."""
-        while self.alloc_flows and self.alloc_flows[0][0] < now_w - 3600:
-            self.alloc_flows.popleft()
-        return sum(u for _, u in self.alloc_flows)
+def hurdle_price(p, is_bid, h):
+    """The worst price an adding quote may rest at: a YES bid b earns (p - b) / b >= h iff b <= p / (1 + h);
+    an ask is the same rule in NO terms. In the tails this puts favourite bids and longshot asks near the book
+    and the other side far out of reach, which is the point (the book is tilted)."""
+    return p / (1 + h) if is_bid else 1 - (1 - p) / (1 + h)
 
-    def alloc_pins(self):
-        return {x.strip() for x in str(self.cfg.alloc_pin or "").split(",") if x.strip()}
 
-    def alloc_p(self, ex, now_m=None):
-        """The outcome value of one YES share for the allocator: the race-scaled Polymarket price, only when liquid
-        and downloaded within ALLOC_REF_MAX_AGE seconds (refs.ages, where the reference feed reports it); else None."""
-        if ex.eid not in (self.cur_liquid or ()) or (self.cur_refs or {}).get(ex.eid) is None:
+def guard_blocks(p, book, s):
+    """(no_bid, no_ask): Polymarket far above the book says don't sell here (they probably know); far below,
+    don't buy. Compared with the book's own depth-checked price."""
+    base = pricing.book_price(book)
+    if base is None:
+        return False, False
+    return base - p > s.ref_guard_gap, p - base > s.ref_guard_gap
+
+
+def tail_price(p, is_bid, book, s):
+    """One tick better than the best other order, never beyond the hurdle price nor within mm_min_edge of p (the
+    old quote engine's band), never crossing; None if no such price is on the grid."""
+    h = s.value_quote_hurdle
+    if is_bid:
+        cap = min(hurdle_price(p, True, h), p - s.mm_min_edge)
+        if cap < PMIN - EPS:
             return None
-        age = (self.alloc_ages or {}).get(f"{ex.group}|{ex.party}")
-        if age is not None and age > self.ALLOC_REF_MAX_AGE:
+        price = floor_tick(cap)
+        if book is not None and book.best_bid is not None:
+            price = min(price, floor_tick(book.best_bid + TICK))
+        ok = book is None or book.best_ask is None or price < book.best_ask - EPS
+    else:
+        flo = max(hurdle_price(p, False, h), p + s.mm_min_edge)
+        if flo > PMAX + EPS:
             return None
-        return self.scaled_ref(ex)
+        price = ceil_tick(flo)
+        if book is not None and book.best_ask is not None:
+            price = max(price, ceil_tick(book.best_ask - TICK))
+        ok = book is None or book.best_bid is None or price > book.best_bid + EPS
+    return price if ok else None
 
-    def alloc_market_ok(self, ex, skip=()):
-        """A market the allocator may trade at all: not headline (unless alloc_headline), not one
-        another feature traded this cycle (skip: exchanges and races), not inside the pre-close window that stops
-        takes and arbitrage (close_window: at least the stop window, P10 red team RT-3)."""
-        return not (ex.eid in skip or ex.group in skip
-                    or ex.group in self.cfg.headline_races
-                    or self.hours_to_close(ex) <= self.close_window("flatten_hours_before_close"))
 
-    def alloc_fresh_book(self, ex, now_m):
-        """The cached book (our own orders already stripped) if confirmed within book_stale, else None."""
-        return ex.book if ex.book is not None and now_m - ex.verified < self.cfg.book_stale else None
+def tail_size(p, price, is_bid, qty, bankroll, s):
+    """Shares: what quarter Kelly still allows beyond what is held on this side, at most MAX_ORDER_CASH_FRAC of
+    the account in cash. The old activity-based quote size is not carried over (it never bound in the tails)."""
+    held = max(0.0, qty if is_bid else -qty)
+    unit = price if is_bid else 1 - price
+    room = pricing.kelly_shares(p, price, is_bid, bankroll, s) - held
+    return int(max(0.0, min(room, MAX_ORDER_CASH_FRAC * bankroll / max(unit, TICK))))
 
-    @staticmethod
-    def alloc_held_usd(q, p):
-        """$ at p held to the outcome in one market (a long q x p, a short |q| x (1 - p))."""
-        return q * p if q > 0 else -q * (1 - p)
 
-    def alloc_lone_no(self, e, q):
-        """NO shares a short's buy-back may sell as a covered "sell NO": the NO held less its NO+NO set part (always:
-        a set is only ever unwound whole, B3), within cover_no_qty (0 when covered NO sales are not in effect)."""
-        if q > -1:
-            return 0
-        return int(max(0.0, min(-q - self.nono_set_part(e, q), self.cover_no_qty(e, q, sets_ok=True))) + 1e-9)
+def tail_quotes(view, risk, s):
+    """Resting value quotes (tag value) outside [band_low, band_high], on the side that adds to the position only:
+    reducing there is the allocator's and the ladder's job. Nothing while risk says adds must wait."""
+    if risk.reduce_only or risk.adds_paused:
+        return []
+    out, bankroll = [], view.account.value or view.account.start
+    for eid in sorted(view.p):
+        p = view.p[eid]
+        if eid not in view.markets or s.band_low <= p <= s.band_high:
+            continue
+        qty, book = view.positions.get(eid, 0.0), view.books.get(eid)
+        if book is None:
+            continue                                   # no fresh book: a price could cross other traders unseen
+        no_bid, no_ask = guard_blocks(p, book, s)
+        # tail_high / tail_low: near 1 a YES bid (near 0 a YES ask) risks ~1 to earn ~1c
+        for is_bid, allowed in ((True, qty > -1 and p <= s.tail_high and not no_bid),
+                                (False, qty < 1 and p >= s.tail_low and not no_ask)):
+            price = tail_price(p, is_bid, book, s) if allowed else None
+            size = tail_size(p, price, is_bid, qty, bankroll, s) if price is not None else 0
+            if size >= 1:
+                out.append(Order(eid, is_bid, price, size, "value"))
+    return out
 
-    def alloc_best_other_bid(self, ex, book):
-        """(price, size) of the best bid on a fresh book that is another trader's (a price we bid at skipped whole,
-        as arb_levels), or None."""
-        mine = self.own_prices(ex.eid)
-        return next(((x["price"], x["quantity"]) for x in (book or {}).get("bids") or []
-                     if (True, rnd(x["price"])) not in mine), None)
 
-    def alloc_prefer_short_legs(self, inv, now_m, skip=()):
-        """Package 12 L2 (alloc_prefer_short): {eid: the other leg} - the 2-leg races' legs whose YES the allocator
-        does not BUY because the race's best bids (fresh books, other traders only) sum above 1 and the other leg can
-        be shorted instead at an edge >= alloc_min_edge_buy (we hold no YES there, it may be traded, p liquid, room
-        under alloc_max_contract_usd): 1 - bid_other < bid_this <= ask_this, the same exposure for less cash."""
-        cfg, out = self.cfg, {}
-        for race, members in sorted(self.groups.items()):
-            if len(members) != 2 or any(m not in self.ex for m in members) or race in skip:
-                continue
-            exs = [self.ex[m] for m in members]
-            bids = [self.alloc_best_other_bid(x, self.alloc_fresh_book(x, now_m)) for x in exs]
-            if any(b_ is None for b_ in bids) or bids[0][0] + bids[1][0] <= 1 + 1e-9:
-                continue
-            for i in (0, 1):
-                a, o, bid = exs[i], exs[1 - i], bids[1 - i][0]
-                q_o, p_o = float(inv.get(o.eid, 0.0)), self.alloc_p(o, now_m)
-                if q_o > 0 or p_o is None or not self.alloc_market_ok(o, skip):
-                    continue
-                room = cfg.alloc_max_contract_usd - self.alloc_held_usd(q_o, p_o)
-                if (bid - p_o) / max(1 - bid, TICK) >= cfg.alloc_min_edge_buy - 1e-9 and room >= self.ALLOC_MIN_USD:
-                    out[a.eid] = o.eid
-        return out
+# --------------------------------------------------------------------------- the allocator's candidates
 
-    @staticmethod
-    def alloc_plan_targets(inv, pairs):
-        """Package 12 M2: {eid: the holding the plan intends} for every market a planned pair sells or buys (a long
-        sale lowers it, a short's buy-back / a set unwind raises it, a buy raises it, a short sale lowers it)."""
-        out = {}
-        for pr in pairs:
-            s, b = pr.get("sell"), pr.get("buy")
-            moves = []
-            if s is not None and s.get("kind") in ("long", "short"):
-                moves.append((s["eid"], -s["qty"] if s["kind"] == "long" else s["qty"]))
-            if s is not None and s.get("kind") == "set":
-                moves += [(m, s["qty"]) for m in s.get("members") or ()]
-            if b is not None:
-                moves.append((b["eid"], -b["qty"] if b["short"] else b["qty"]))
-            for e, d in moves:
-                out[e] = out.get(e, float(inv.get(e, 0.0))) + d
-        return out
+@dataclass
+class Holding:
+    eid: str | None           # the market sold, or None for spare cash
+    long: bool                # True: sell YES at the bid; False: buy back a short at the ask
+    px: float                 # the touch it sells into
+    edge: float               # edge left in it (pricing.edge_held); 0 for cash
+    p: float                  # fair value when planned
+    unit: float               # cash one share frees: px for a long, 1 - px for a short
+    avail: float              # dollars it can still free at that touch
 
-    def alloc_edge_held(self, ex, q, now_m=None):
-        """Package 12 M2: the edge-held of a holding of q shares here, alloc_plan's own measure - a long (p - bid) /
-        bid at the best bid, a short (ask - p) / (1 - ask) at the best ask (p = alloc_p, the book fresh, our own
-        orders stripped) - or None (no position, no liquid p, no fresh book or no level on that side)."""
-        now_m = util.time.monotonic() if now_m is None else now_m
-        if abs(q) < 1:
-            return None
-        p, book = self.alloc_p(ex, now_m), self.alloc_fresh_book(ex, now_m)
-        if p is None or book is None:
-            return None
-        if q > 0:
-            lv = (book.get("bids") or [None])[0]
-            return None if lv is None or lv["price"] <= 0 else (p - lv["price"]) / lv["price"]
-        lv = (book.get("asks") or [None])[0]
-        return None if lv is None else (lv["price"] - p) / max(1 - lv["price"], TICK)
 
-    def alloc_target_for(self, eid, inv=None, now_m=None):
-        """Package 12 M2: the holding (signed YES shares) the bot WANTS in this market, for the target-inventory
-        skew: the allocator's latest plan's intended holding (alloc_enabled and the plan touched the market), else
-        the current holding when its edge-held > 0 in value_mode (a +EV position held to the outcome), else 0.
-        None = no such market. inv = the positions dict (None: the market's last known ex.inv)."""
-        ex = self.ex.get(eid)
-        if ex is None:
-            return None
-        cfg = self.cfg
-        if cfg.alloc_enabled and eid in (getattr(self, "alloc_targets", None) or {}):
-            return float(self.alloc_targets[eid])
-        q = float(inv.get(eid, 0.0)) if inv is not None else float(getattr(ex, "inv", 0.0) or 0.0)
-        if getattr(cfg, "value_mode", False) and abs(q) >= 1:
-            edge = self.alloc_edge_held(ex, q, now_m)
-            if edge is not None and edge > 0:
-                return q
-        return 0.0
+@dataclass
+class Level:
+    eid: str
+    short: bool               # True: sell YES short at a bid; False: buy YES at an ask
+    px: float
+    edge: float               # edge of buying it (pricing.edge_buy / edge_short)
+    unit: float               # cash one share costs: px, or 1 - px for a short
+    avail: float              # dollars of depth at this level
 
-    def skew_target_inputs(self, ex, inv, inv_for_quote, per_market, cfg=None, now_m=None):
-        """Package 12 M2 (skew_target_inventory): compute_quote's (skew_inv, age_off). skew_inv = the quoted
-        inventory less the target netted the same way: per market (flatten_per_market window) inv - target, else
-        eff_inv - (target - mean of the race's other targets), i.e. effective_inventory of (inv - target). age_off =
-        value_mode on and this holding's edge-held > 0 (no age skew on a +EV holding)."""
-        cfg = cfg or self.cfg
-        t = self.alloc_target_for(ex.eid, inv, now_m) or 0.0
-        if not per_market:
-            others = [self.alloc_target_for(o, inv, now_m) or 0.0 for o in self.groups.get(ex.group, ())
-                      if o != ex.eid]
-            t = t - (sum(others) / len(others) if others else 0.0)
-        age_off = False
-        if getattr(cfg, "value_mode", False):
-            q = float(inv.get(ex.eid, 0.0))
-            edge = self.alloc_edge_held(ex, q, now_m)
-            age_off = edge is not None and edge > 0
-        return inv_for_quote - t, age_off
 
-    def alloc_plan(self, inv, now_m, cash, skip=(), turnover_left=None, refill_only=False):
-        """THE PURE PLANNER (no request, no state change but the once-only bloc log): ([pair], {"blocked_by",
-        "ev_gain_est"}). pair = {"sell": {"kind": "long" | "short" | "set" | "cash", "eid" / "race", "label", "qty",
-        "px", "edge", "usd"}, "buy": None | {"eid", "label", "short", "px", "qty", "edge", "usd"}, "usd", "status"}.
-        Reserve refills first (cash below alloc_mm_reserve: sales with no buy, lowest edge first), then pairs: lowest
-        edge-held with highest-edge level while the gain >= alloc_min_improvement, inside alloc_max_contract_usd per
-        market, the turnover left and (bloc_delta_enabled) the bloc cap.
-        P14 mm_refill_fast: the refills sell the stale MM inventory first (mm_refill_held; its legs carry "mm"),
-        then the lowest edge-held, every refill sale at or beyond the value floor (mm_floor_ok); a market a refill
-        IOC sold whose sale the positions read does not show yet is skipped (RT13-3). refill_only: no pairs."""
-        cfg = self.cfg
-        blocked = defaultdict(int)
-        pins = self.alloc_pins()
-        cash = cash + self.hv_carve_used()        # P15: the ladder's resting carve-out is part of the reserve
-        fast = bool(getattr(cfg, "mm_refill_fast", False))
-        rank_all = self.p141("alloc_rank_all_markets")   # P14.1 2: every holding ranked for the refill
-        swap_m = self.p142_on()                   # P14.2: swaps have their own floor and the stricter hurdle
-        held, levels = [], []
-        for e, q in sorted(inv.items()):
-            ex = self.ex.get(e)
-            if ex is None or abs(q) < 1 or not self.alloc_market_ok(ex, skip) or ex.label in pins:
-                continue
-            if fast and self.mm_sale_lagging(e, q, now_m):   # P14 (RT13-3): its sale not in the positions read yet
-                blocked["in_flight"] += 1
-                continue
-            p = self.alloc_p(ex, now_m)
-            book = self.alloc_fresh_book(ex, now_m)
-            if book is None and rank_all:         # P14.1 2: the cached book ranks it (alloc_sell downloads a fresh
-                book = ex.book                    #  one before the sale anyway); None = never downloaded
-            if p is None or book is None:
-                continue
-            if q > 0 and book.get("bids"):
-                px, depth = book["bids"][0]["price"], book["bids"][0]["quantity"]
-                qty, edge, unit = min(q, depth), (p - px) / px, px
-            elif q < 0 and book.get("asks"):
-                px, depth = book["asks"][0]["price"], book["asks"][0]["quantity"]
-                qty, edge, unit = min(self.alloc_lone_no(e, q), depth), (px - p) / max(1 - px, TICK), 1 - px
-            else:
-                continue
-            qty = int(qty + 1e-9)
-            rich = edge > cfg.alloc_max_edge_sell + 1e-9   # P14.1 2: a REFILL may sell it, a swap may not
-            if qty >= 1 and (not rich or rank_all) and qty * unit >= self.ALLOC_MIN_USD:
-                held.append({"kind": "long" if q > 0 else "short", "eid": e, "label": ex.label, "px": px, "edge": edge,
-                             "unit": unit, "avail": qty * unit,
-                             **({"refill_only": True} if rich else {}),                           # P14.1 2
-                             **({"p": p} if swap_m else {}),                                      # P14.2
-                             **({"floor_ok": self.mm_floor_ok(q > 0, px, p)} if fast else {})})      # P14
-        if cfg.alloc_set_cost_per_usd > 0 and cfg.pair_unwind_enabled and self.pair_no_unwind_on():
-            for race, members in sorted(self.groups.items()):
-                if len(members) < 2 or any(m not in self.ex for m in members):
-                    continue
-                sets = min(-float(inv.get(m, 0.0)) for m in members)
-                exs = [self.ex[m] for m in members]
-                books = [self.alloc_fresh_book(x, now_m) for x in exs]
-                if (sets < 1 or race in skip or any(not self.alloc_market_ok(x, skip) or x.label in pins for x in exs)
-                        or any(b is None or not b.get("asks") for b in books)
-                        or (cfg.alloc_set_rich_leg and race in self.alloc_ladder)):   # (P12 L1: laddered instead)
-                    continue
-                asks = [b["asks"][0]["price"] for b in books]
-                free = len(members) - sum(asks)           # cash freed per set (covered NO sales at 1 - ask)
-                if free <= 0:
-                    continue
-                if getattr(cfg, "pair_no_unwind_asks_le1", False) and self.nono_unwind_gated(members, sum(asks),
-                                                                                           sum(asks) - 1):
-                    blocked["set_bids_gt_1"] += 1         # (red team RT12-2: arb_plan's L3 gate would refuse it,
-                    continue                              #  the pair waiting ALLOC_SET_WAIT with the allocator stalled)
-                cpu = (sum(asks) - 1) / free             # the set's EV given up per $ freed
-                n = int(min([sets] + [b["asks"][0]["quantity"] for b in books]) + 1e-9)
-                if cpu <= cfg.alloc_set_cost_per_usd + 1e-9 and n * free >= self.ALLOC_MIN_USD:
-                    held.append({"kind": "set", "race": race, "label": f"{race} NO+NO set", "px": sum(asks),
-                                 "edge": max(0.0, cpu), "unit": free, "avail": n * free, "members": list(members)})
-        spare = cash - cfg.alloc_mm_reserve
-        if spare >= self.ALLOC_MIN_USD:
-            held.append({"kind": "cash", "label": "spare cash", "px": 1.0, "edge": 0.0, "unit": 1.0, "avail": spare})
-        if fast:                                  # P14 2: the stale MM inventory is sold first (its value entry out)
-            mm = self.mm_refill_held(inv, now_m, skip, pins, blocked)
-            mm_e = {h["eid"] for h in mm}
-            held = mm + [h for h in held if h.get("eid") not in mm_e]
-            held.sort(key=lambda h: (0 if h.get("mm") else 1, h["edge"], h.get("eid") or h.get("race") or ""))
-        else:
-            held.sort(key=lambda h: (h["edge"], h.get("eid") or h.get("race") or ""))
-        room = {}
-        # P14.1 4: a refill plan while cash is below half the target does not scan buy levels at all (nothing it
-        # plans has a buy): the L2 prefer-short count and the pause count then stay out of the refill's blocked_by.
-        no_levels = refill_only and self.p141("alloc_refill_ignore_prefer_short") and self.mm_cash_low()
-        no_buy = ({} if no_levels or not getattr(cfg, "alloc_prefer_short", False)
-                  else self.alloc_prefer_short_legs(inv, now_m, skip))
-        for e, ex in sorted(self.ex.items()):
-            if not self.alloc_market_ok(ex, skip):
-                continue
-            p, book = self.alloc_p(ex, now_m), self.alloc_fresh_book(ex, now_m)
-            if p is None or book is None:
-                continue
-            q = float(inv.get(e, 0.0))
-            room[e] = max(0.0, cfg.alloc_max_contract_usd - self.alloc_held_usd(q, p))
-            if no_levels:                         # P14.1 4: a short-cash refill plan needs no buy level
-                continue
-            if q >= 0 and e in no_buy:            # Package 12 L2: the other leg is shorted instead (bids sum > 1)
-                blocked["prefer_short"] += 1
-            elif q >= 0:                          # (buying YES on a short would be a close: the held list's job)
-                for lv in (book.get("asks") or [])[:3]:
-                    px = lv["price"]
-                    edge = (p - px) / px
-                    if edge >= cfg.alloc_min_edge_buy - 1e-9:
-                        levels.append({"eid": e, "label": ex.label, "short": False, "px": px, "edge": edge, "unit": px,
-                                       "avail": lv["quantity"] * px, **({"p": p} if swap_m else {}), "pv": p})
-            if q <= 0:
-                for lv in (book.get("bids") or [])[:3]:
-                    px = lv["price"]
-                    edge = (px - p) / max(1 - px, TICK)
-                    if edge >= cfg.alloc_min_edge_buy - 1e-9:
-                        levels.append({"eid": e, "label": ex.label, "short": True, "px": px, "edge": edge,
-                                       "unit": 1 - px, "avail": lv["quantity"] * (1 - px),
-                                       **({"p": p} if swap_m else {}), "pv": p})
-        levels.sort(key=lambda o: (-o["edge"], o["eid"], o["px"]))
-        if getattr(self, "global_reduce", False) and levels:   # (red team RT-2: no buy while in reduce-only;
-            blocked["risk"] += 1                                #  reserve refills, which only reduce, still run)
-            levels = []
-        net = self.alloc_netting()                             # P14.1 5: swaps go on, each checked against the rooms
-        if getattr(self, "mmr_paused", False) and levels and not net:   # P12 ops mm_risk_reserve_*: value adds paused
-            blocked["mm_risk_reserve"] += 1                     #  (the same: no buy; reserve refills still run)
-            levels = []
-        rfloor = self.alloc_room_floor() if net else None       # a swap may not take a room below this
-        st_room = self.st_rooms(inv, now_m) if self.st_on() else None   # P15 state_max_usd: {state: $ room}
-        left = float("inf") if turnover_left is None else max(0.0, turnover_left)
-        pairs, gain = [], 0.0
-        hyp = {e: float(q) for e, q in inv.items()}
-        bloc_fn = getattr(self, "bloc_delta_now", None) if getattr(cfg, "bloc_delta_enabled", False) else None
-        cap = self.bloc_cap() if bloc_fn is not None else None
+@dataclass
+class Pair:
+    tag: str                  # "alloc" (a swap or a spare-cash buy; a swap's buy goes out as "swap") or "refill"
+    sell: Holding
+    qty: int                  # shares to sell (0 for spare cash)
+    buy: Level | None         # None for a refill
+    buy_qty: int              # shares to buy as planned
+    usd: float                # cash the pair moves
+    planned_at: float         # monotonic
+    status: str = "pending"   # pending -> sold -> done (or dropped / gone / expired)
+    sent_at: float = -1e18    # monotonic: the sale was handed over; the buy needs a cash read after it
+    proceeds: float = 0.0     # cash the sale's fills raised (spare cash: the cash itself)
 
-        def sell_leg(h, usd):
-            if h["kind"] == "cash":
-                return {"kind": "cash", "label": h["label"], "usd": usd, "edge": 0.0, "qty": 0, "px": 1.0}
-            n = int(usd / h["unit"] + 1e-9)
-            if n < 1:
-                return None
-            leg = {"kind": h["kind"], "label": h["label"], "qty": n, "px": h["px"], "edge": h["edge"],
-                   "usd": n * h["unit"]}
-            if h["kind"] == "set":
-                leg.update(race=h["race"], members=h["members"])
-            else:
-                leg["eid"] = h["eid"]
-            if h.get("mm"):
-                leg["mm"] = True                  # P14 2: stale MM inventory (alloc_sell checks fair / floor instead)
-            return leg
 
-        def apply(inv_, s, b, sign=1):
-            if s is not None and s["kind"] in ("long", "short"):
-                inv_[s["eid"]] = inv_.get(s["eid"], 0.0) + sign * (-s["qty"] if s["kind"] == "long" else s["qty"])
-            if s is not None and s["kind"] == "set":
-                for m in s["members"]:
-                    inv_[m] = inv_.get(m, 0.0) + sign * s["qty"]
-            if b is not None:
-                inv_[b["eid"]] = inv_.get(b["eid"], 0.0) + sign * (-b["qty"] if b["short"] else b["qty"])
-        # B2: refill the reserve first (sales with no buy; the bloc check as the pairs', red team RT-5)
-        deficit = cfg.alloc_mm_reserve - cash
-        hi = 0
-        bloc = bloc_fn(hyp) if bloc_fn is not None else 0.0
-        while deficit >= self.ALLOC_MIN_USD and hi < len(held) and left >= self.ALLOC_MIN_USD:
-            h = held[hi]
-            if not h.get("floor_ok", True):       # P14 mm_refill_fast: no refill sale below the value floor
-                blocked["floor"] += 1
-                hi += 1
-                continue
-            s = sell_leg(h, min(h["avail"], deficit, left)) if h["kind"] != "cash" else None
-            if s is None:
-                hi += 1
-                continue
-            apply(hyp, s, None)
-            if bloc_fn is not None:
-                new = bloc_fn(hyp)
-                if abs(new) > cap + 1e-9 and abs(new) > abs(bloc) + 1e-9:
-                    apply(hyp, s, None, sign=-1)
-                    blocked["bloc"] += 1
-                    hi += 1                       # this sale would push the bloc delta past the cap: the next holding
-                    continue
-                bloc = new
-            pairs.append({"sell": s, "buy": None, "usd": s["usd"], "status": "pending", "proceeds": 0.0,
-                          "sold_at": None})
-            h["avail"] -= s["usd"]
-            deficit -= s["usd"]
-            left -= s["usd"]
-            if h["avail"] < self.ALLOC_MIN_USD:
-                hi += 1
-        bloc = bloc_fn(hyp) if bloc_fn is not None else 0.0
-        # B1: pairs (sell lowest edge-held, buy highest edge)
-        sq = [h for h in held if h["avail"] >= self.ALLOC_MIN_USD and not h.get("mm")   # (P14: MM legs refill only;
-              and not h.get("refill_only")]                                             # P14.1: and edge-rich ones)
-        if refill_only:                           # P14 mm_refill_fast: the fast refill plans no pairs
-            sq = []
-        hurdle = cfg.alloc_min_improvement
-        if swap_m:                                # P14.2: a long / short beyond p -+ alloc_swap_sell_margin is no swap
-            hurdle = self.swap_hurdle()           #  candidate; swaps need the stricter of the two hurdles
-            keep = [h for h in sq if h["kind"] not in ("long", "short")
-                    or self.swap_floor_ok(h["kind"] == "long", h["px"], h["p"])]
-            if len(keep) < len(sq):
-                blocked["swap_floor"] += len(sq) - len(keep)
-            sq = keep
-        si = bi = 0
-        while si < len(sq) and bi < len(levels) and left >= self.ALLOC_MIN_USD and len(pairs) < 200:
-            h, o = sq[si], levels[bi]
-            if o["edge"] - h["edge"] < cfg.alloc_min_improvement - 1e-9:
+def trade_book(view, eid):
+    """The market's book if the allocator may trade it now: priced, fresh, not a party-control race (the old
+    allocator never touched them), else None."""
+    m, book = view.markets.get(eid), view.books.get(eid)
+    if m is None or eid not in view.p or book is None or view.mono - book.at > BOOK_FRESH_S:
+        return None
+    return None if m.race in pricing.HEADLINE_RACES else book
+
+
+def pinned(s):
+    return {x.strip() for x in s.alloc_pin.split(",") if x.strip()}
+
+
+def holdings(view, s):
+    """Every holding the allocator may sell, lowest edge left first, sized to the depth at the touch."""
+    out, pins = [], pinned(s)
+    for eid, qty in sorted(view.positions.items()):
+        book = trade_book(view, eid)
+        if abs(qty) < 1 or book is None or view.markets[eid].label in pins:
+            continue
+        p = view.p[eid]
+        edge = pricing.edge_held(qty, p, book)
+        if edge is None:
+            continue
+        px, depth = (book.bids if qty > 0 else book.asks)[0]
+        unit = px if qty > 0 else 1 - px
+        out.append(Holding(eid, qty > 0, px, edge, p, unit, int(min(abs(qty), depth) + EPS) * unit))
+    return sorted(out, key=lambda h: (h.edge, h.eid))
+
+
+def prefer_short_blocked(view, s):
+    """{eid}: two-leg race legs whose YES is not bought because the race's best bids sum above 1, so shorting the
+    other leg at its bid gives the same exposure for less cash (old alloc_prefer_short_legs)."""
+    races, out = {}, set()
+    for e, m in view.markets.items():
+        races.setdefault(m.race, []).append(e)
+    for legs in races.values():
+        books = [trade_book(view, e) for e in legs]
+        if len(legs) != 2 or any(b is None or b.best_bid is None for b in books):
+            continue
+        if books[0].best_bid + books[1].best_bid <= 1 + EPS:
+            continue
+        for i in (0, 1):
+            other, bid = legs[1 - i], books[1 - i].best_bid
+            q, p = view.positions.get(other, 0.0), view.p[other]
+            if (q <= 0 and pricing.edge_short(p, bid) >= s.alloc_min_edge_buy - EPS
+                    and s.market_max_usd - held_usd(q, p) >= MIN_USD):
+                out.add(legs[i])
+    return out
+
+
+def levels(view, s):
+    """Every level worth buying (edge >= alloc_min_edge_buy), highest edge first. Never against a position: YES is
+    bought only where we are not short, shorted only where we are not long (a position is never flipped)."""
+    no_yes = prefer_short_blocked(view, s) if s.alloc_prefer_short else set()
+    out = []
+    for eid in sorted(view.markets):
+        book = trade_book(view, eid)
+        if book is None:
+            continue
+        p, qty = view.p[eid], view.positions.get(eid, 0.0)
+        if qty >= 0 and eid not in no_yes:
+            out += [Level(eid, False, px, pricing.edge_buy(p, px), px, n * px) for px, n in book.asks[:LEVELS_DEEP]]
+        if qty <= 0:
+            out += [Level(eid, True, px, pricing.edge_short(p, px), 1 - px, n * (1 - px))
+                    for px, n in book.bids[:LEVELS_DEEP]]
+    return sorted([o for o in out if o.edge >= s.alloc_min_edge_buy - EPS], key=lambda o: (-o.edge, o.eid, o.px))
+
+
+def buy_room_usd(view, risk, o, used, s):
+    """Cash the per-market and per-state caps leave for buying level o, counting what this plan already buys
+    (used: eid or state -> collateral at p). Checked here so no sale is made for a buy the gate would refuse."""
+    p, qty = view.p[o.eid], view.positions.get(o.eid, 0.0)
+    per = max(1 - p if o.short else p, TICK)              # collateral at the result per share, as the gate counts
+    room = s.market_max_usd - held_usd(qty, p) - used.get(o.eid, 0.0)
+    state = view.markets[o.eid].state
+    if state is not None:
+        room = min(room, s.state_max_usd - risk.state_usd.get(state, 0.0) - used.get(state, 0.0))
+    return max(0.0, room) / per * o.unit
+
+
+# --------------------------------------------------------------------------- the allocator's plans
+
+def plan_refill(held, need, left, s):
+    """[(holding, shares)]: the lowest-edge holdings sold at the touch, never below the ordinary floor, until need
+    (the cash the buyers were refused, less free cash) or the turnover left runs out."""
+    out = []
+    for h in held:
+        usd = min(h.avail, need, left)
+        if usd < MIN_USD or not floor_ok(h.long, h.px, h.p, s.value_sell_margin):
+            continue
+        n = int(usd / h.unit + EPS)
+        if n >= 1:
+            out.append((h, n))
+            h.avail, need, left = h.avail - n * h.unit, need - n * h.unit, left - n * h.unit
+    return out
+
+
+def swap_sellers(held, spare, s):
+    """What a swap may sell, lowest edge first: holdings with little edge left whose touch is within the swap
+    margin, and the spare cash as a holding of edge 0."""
+    out = [h for h in held if h.avail >= MIN_USD and h.edge <= s.alloc_max_edge_sell + EPS
+           and floor_ok(h.long, h.px, h.p, s.alloc_swap_sell_margin)]
+    if spare >= MIN_USD:
+        out.append(Holding(None, True, 1.0, 0.0, 1.0, 1.0, spare))
+    return sorted(out, key=lambda h: (h.edge, h.eid or ""))
+
+
+def plan_swaps(sellers, lvls, view, risk, left, s):
+    """[(holding, shares sold, level, shares bought, usd)]: the lowest-edge seller paired with the highest-edge
+    level while the gain is at least alloc_swap_min_gain, within the caps and the turnover left."""
+    out, used, si, bi = [], {}, 0, 0
+    while si < len(sellers) and bi < len(lvls) and left >= MIN_USD:
+        h, o = sellers[si], lvls[bi]
+        if o.edge - h.edge < s.alloc_swap_min_gain - EPS:
+            break                             # sellers only get richer and levels poorer from here
+        sold, bought = {p[0].eid for p in out} | {h.eid}, {p[2].eid for p in out}
+        if o.eid in sold or h.eid in bought:  # never buy and sell one market in one run
+            si, bi = (si + 1, bi) if h.eid in bought else (si, bi + 1)
+            continue
+        room = buy_room_usd(view, risk, o, used, s)
+        x = min(h.avail, o.avail, room, left)
+        nb = int(x / o.unit + EPS)
+        ns = 0 if h.eid is None else int(nb * o.unit / h.unit + EPS)
+        if x < MIN_USD or nb < 1 or (h.eid is not None and ns < 1):
+            si, bi = (si, bi + 1) if min(room, o.avail) < MIN_USD else (si + 1, bi)
+            continue
+        x = nb * o.unit
+        out.append((h, ns, o, nb, x))
+        p = view.p[o.eid]
+        state, per = view.markets[o.eid].state, max(1 - p if o.short else p, TICK) / o.unit
+        used[o.eid] = used.get(o.eid, 0.0) + x * per
+        if state is not None:
+            used[state] = used.get(state, 0.0) + x * per
+        h.avail, o.avail, left = h.avail - x, o.avail - x, left - x
+        si, bi = si + (h.avail < MIN_USD), bi + (o.avail < MIN_USD)
+    return out
+
+
+def risk_neutral(swap, view, risk):
+    """The swap trimmed so its buy adds no more collateral (at p) than its sale frees and does not grow the national
+    swing exposure, or None. Collateral at p is the per-position worst case risk.py sums."""
+    h, ns, o, nb, x = swap
+    if h.eid is None:
+        return None
+    p_s, p_b = view.p[h.eid], view.p[o.eid]
+    per_buy = (1 - p_b) if o.short else p_b
+    nb = min(nb, int(ns * (p_s if h.long else 1 - p_s) / max(per_buy, TICK) + EPS))
+    sens = risk.bloc_sens
+    d = sens.get(o.eid, 0.0) * (-nb if o.short else nb) - sens.get(h.eid, 0.0) * (ns if h.long else -ns)
+    if nb < 1 or abs(risk.bloc_delta + d) > abs(risk.bloc_delta) + EPS:
+        return None
+    return h, ns, o, nb, nb * o.unit
+
+
+def level_now(view, lv, s):
+    """(touch, edge, depth) of a planned level on the book now, or None if it has moved away by more than a tick
+    or no longer pays alloc_min_edge_buy."""
+    book, p = view.books[lv.eid], view.p[lv.eid]
+    side = book.bids if lv.short else book.asks
+    if not side:
+        return None
+    px, depth = side[0]
+    if (px < lv.px - LEVEL_TOL - EPS) if lv.short else (px > lv.px + LEVEL_TOL + EPS):
+        return None
+    edge = pricing.edge_short(p, px) if lv.short else pricing.edge_buy(p, px)
+    return (px, edge, depth) if edge >= s.alloc_min_edge_buy - EPS else None
+
+
+def iso(wall):
+    return None if wall is None else datetime.fromtimestamp(wall, timezone.utc).isoformat()
+
+
+# --------------------------------------------------------------------------- the allocator
+
+class Allocator:
+    """Plans once an interval, then carries the plan out over the next cycles: sales first, each buy only after
+    a cash read taken after its sale shows the money. Its orders are IOC: they trade at the touch or not at all."""
+
+    def __init__(self, saved=None):
+        d = saved if isinstance(saved, dict) else {}
+        self.pairs = []                                  # the plan in flight
+        self.last_run = d.get("last_run_wall")           # wall seconds of the last swap run (survives a restart)
+        self.last_refill = d.get("last_refill_wall")     # wall seconds of the last refill plan
+        self.flows = deque(tuple(x) for x in d.get("flows", []))      # (wall, usd) rotated: the hourly cap
+        self.refills = deque(tuple(x) for x in d.get("refills", []))  # (wall, usd) refill sales filled: 24 h
+        self.totals = {k: float(d.get("totals", {}).get(k, 0.0)) for k in ("runs_total", "sold_usd", "bought_usd")}
+        self.state, self.info, self.sells_stopped = "idle", {}, False
+        self.demand, self.raised, self.refill_runs = 0.0, 0.0, int(d.get("refill_runs", 0))
+
+    def turnover(self, wall):
+        """Dollars rotated in the last hour (sales and spare-cash buys)."""
+        while self.flows and self.flows[0][0] < wall - HOUR_S:
+            self.flows.popleft()
+        return sum(u for _, u in self.flows)
+
+    def step(self, view, risk, demand_usd, s):
+        """This cycle's allocator orders (IOC, tags alloc and refill): a new plan when one is due, then the buys
+        whose money has arrived, then the sales. Nothing at all without a fresh cash read."""
+        acct, wall = view.account, view.now.timestamp()
+        if acct.cash is None or view.mono - acct.read_at > CASH_FRESH_S:
+            self.state = "waiting (no fresh cash read)"
+            return []
+        if not self.pairs:
+            self.plan(view, risk, demand_usd, s, wall)
+        cash, orders = acct.cash - CASH_MARGIN, []
+        for pr in [p for p in self.pairs if p.status == "sold"] + [p for p in self.pairs if p.status == "pending"]:
+            if len(orders) >= MAX_ORDERS:
                 break
-            swap = swap_m and h["kind"] in ("long", "short")
-            if swap and o["edge"] - h["edge"] < hurdle - 1e-9:   # P14.2: below the swap hurdle against the best
-                blocked["swap_gain"] += 1                         #  level left - so against every level left
-                si += 1
-                continue
-            x = min(h["avail"], o["avail"], room.get(o["eid"], 0.0), left)
-            sk = per = None
-            if st_room is not None:               # P15 state_max_usd: the buy's collateral at p within its state's room
-                sk = self.st_key(o["eid"])
-                if sk is not None:
-                    per = ((1 - o["pv"]) / max(1 - o["px"], TICK)) if o["short"] else o["pv"] / max(o["px"], TICK)
-                    lim = max(0.0, st_room.get(sk, cfg.state_max_usd)) / max(per, 1e-9)
-                    if lim < x - 1e-9:
-                        x = lim
-                        blocked["state_cap"] += 1
-                        self.st_blocked[sk] += 1
-                        if x < self.ALLOC_MIN_USD:
-                            bi += 1
-                            continue
-            if x < self.ALLOC_MIN_USD:
-                if room.get(o["eid"], 0.0) < self.ALLOC_MIN_USD or o["avail"] < self.ALLOC_MIN_USD:
-                    bi += 1
+            was = pr.status
+            o = self.buy_order(pr, view, risk, s, cash) if was == "sold" else self.sale_order(pr, view, s)
+            if o is not None:
+                orders.append(o)
+                cash -= o.size * (o.price if o.is_bid else 1 - o.price) if was == "sold" else 0.0
+                if was == "pending" or pr.sell.eid is None:      # what counts against the hourly turnover
+                    self.flows.append((wall, o.size * (o.price if o.is_bid else 1 - o.price)))
+        self.pairs = [p for p in self.pairs if p.status in ("pending", "sold")]
+        self.state = "running" if self.pairs else "idle"
+        return orders
+
+    def plan(self, view, risk, demand_usd, s, wall):
+        """Start a run if one is due: the refill (at most once an interval, only for demand free cash cannot meet),
+        then the swaps and spare-cash buys (once an interval)."""
+        need = demand_usd - max(0.0, view.account.cash)
+        refill_due = need >= MIN_USD and (self.last_refill is None or wall - self.last_refill >= s.alloc_interval_s)
+        swap_due = self.last_run is None or wall - self.last_run >= s.alloc_interval_s
+        if not (refill_due or swap_due):
+            return
+        left, held, mono = s.alloc_max_turnover_usd - self.turnover(wall), holdings(view, s), view.mono
+        refills = plan_refill(held, need, left, s) if refill_due else []
+        self.pairs = [Pair("refill", h, n, None, 0, n * h.unit, mono) for h, n in refills]
+        if refill_due:
+            self.last_refill, self.demand, self.raised, self.refill_runs = wall, demand_usd, 0.0, self.refill_runs + 1
+        swaps, why = [], "no level"
+        if swap_due:
+            self.last_run, self.sells_stopped = wall, False
+            self.totals["runs_total"] += 1
+            sold = {p.sell.eid for p in self.pairs}
+            # reduce-only: no buys at all. Paused: only swaps that leave the risk no larger (release 14.1's room
+            # netting), so a sale never raises cash its buy may not spend; spare cash waits for the room.
+            lvls = [] if risk.reduce_only else [o for o in levels(view, s) if o.eid not in sold]
+            why = "risk" if risk.reduce_only else why
+            spare = 0.0 if risk.adds_paused else view.account.cash - CASH_MARGIN - s.mm_reserve_usd
+            swaps = plan_swaps(swap_sellers(held, spare, s), lvls, view, risk,
+                               left - sum(p.usd for p in self.pairs), s)
+            if risk.adds_paused:
+                swaps = [x for x in (risk_neutral(sw, view, risk) for sw in swaps) if x is not None]
+        for h, ns, o, nb, x in swaps:
+            pr = Pair("alloc", h, ns, o, nb, x, mono)
+            if h.eid is None:                    # spare cash is already there: the buy may go now
+                pr.status, pr.proceeds = "sold", x
+            self.pairs.append(pr)
+        self.info = {"pairs_planned": len(swaps), "refills_planned": len(refills), "cash_before": view.account.cash,
+                     "demand_usd": round(demand_usd, 2), "blocked_by": why if swap_due and not swaps else None,
+                     "ev_gain_est": round(sum(x * (o.edge - h.edge) for h, _, o, _, x in swaps), 2)}
+
+    def sale_order(self, pr, view, s):
+        """The IOC sale of a pending pair at the touch, if it still pays on a fresh book; for a swap, only while
+        its buy level is still there. Sized to the planned shares, the position (never a flip) and the depth."""
+        h, book = pr.sell, trade_book(view, pr.sell.eid)
+        if view.mono - pr.planned_at > s.alloc_interval_s or (pr.buy is not None and self.sells_stopped):
+            pr.status = "expired"
+            return None
+        if book is None or (pr.buy is not None and trade_book(view, pr.buy.eid) is None):
+            return None                          # wait for fresh books
+        qty, p = view.positions.get(h.eid, 0.0), view.p[h.eid]
+        side = book.bids if h.long else book.asks
+        still_held = qty >= 1 if h.long else qty <= -1
+        if not still_held or not side:
+            pr.status = "dropped"
+            return None
+        px, depth = side[0]
+        margin = s.value_sell_margin if pr.buy is None else s.alloc_swap_sell_margin
+        lv, edge = (None if pr.buy is None else level_now(view, pr.buy, s)), pricing.edge_held(qty, p, book)
+        pays = pr.buy is None or (lv is not None and edge <= s.alloc_max_edge_sell + EPS
+                                  and lv[1] - edge >= s.alloc_swap_min_gain - EPS)
+        n = int(min(pr.qty, abs(qty), depth) + EPS)
+        if not pays or not floor_ok(h.long, px, p, margin) or n < 1:
+            pr.status = "gone"
+            return None
+        pr.status, pr.sent_at = "sold", max(view.mono, view.account.read_at)
+        return Order(h.eid, not h.long, px, n, pr.tag, ioc=True)
+
+    def buy_order(self, pr, view, risk, s, cash):
+        """The IOC buy of a sold pair, once a cash read taken after the sale shows the money (a refill is done once
+        sold). The level is re-checked on a fresh book; gone -> the cash stays and no more swap sales this run."""
+        if pr.buy is None:
+            pr.status = "done"
+            return None
+        if view.mono - max(pr.sent_at, pr.planned_at) > BUY_WAIT_S:
+            pr.status = "expired"
+            return None
+        lv = pr.buy
+        paused = risk.adds_paused and pr.sell.eid is None     # a real swap was planned risk-neutral: it may go
+        if (view.account.read_at <= pr.sent_at or pr.proceeds < lv.unit or risk.reduce_only or paused
+                or trade_book(view, lv.eid) is None):
+            return None                          # not yet: wait for the money, the room and a fresh book
+        qty = view.positions.get(lv.eid, 0.0)
+        if (qty > 0 and lv.short) or (qty < 0 and not lv.short):
+            pr.status = "dropped"                # never flip a position: the cash stays
+            return None
+        now = level_now(view, lv, s)
+        if now is None:
+            pr.status, self.sells_stopped = "gone", True
+            return None
+        px, _, depth = now
+        unit = 1 - px if lv.short else px
+        n = int(min(pr.buy_qty, depth, min(pr.proceeds, cash) / unit) + EPS)
+        if n < 1:
+            return None                          # the cash read does not show the money (yet)
+        pr.status = "done"
+        return Order(lv.eid, not lv.short, px, n, "alloc" if pr.sell.eid is None else "swap", ioc=True)
+
+    def note_fills(self, fills):
+        """Credit the fills of our IOC orders: a swap's sale raises the cash its buy may spend; refill sales are
+        counted for mm_funding."""
+        for f in fills:
+            usd = f.size * (f.price if not f.is_bid else 1 - f.price)
+            if f.tag == "refill":
+                self.refills.append((f.at.timestamp(), usd))
+                self.raised += usd
+                self.totals["sold_usd"] += usd
+            elif f.tag == "swap":
+                self.totals["bought_usd"] += f.size * (f.price if f.is_bid else 1 - f.price)
+            elif f.tag == "alloc":
+                sale = next((p for p in self.pairs if p.status == "sold" and p.sell.eid == f.eid
+                             and f.is_bid != p.sell.long), None)
+                if sale is not None:
+                    sale.proceeds += usd
+                    self.totals["sold_usd"] += usd
                 else:
-                    si += 1
-                continue
-            nb = int(x / o["unit"] + 1e-9)
-            x = nb * o["unit"]
-            s = sell_leg(h, x)
-            if s is None or nb < 1:
-                bi += 1
-                continue
-            b = {"eid": o["eid"], "label": o["label"], "short": o["short"], "px": o["px"], "qty": nb,
-                 "edge": o["edge"], "usd": x}
-            apply(hyp, s, b)
-            if net:                               # P14.1 5: ~risk-neutral, but never a room below its own floor
-                after = self.alloc_rooms(hyp)
-                if after is None or not self.alloc_room_ok(after, rfloor):
-                    apply(hyp, s, b, sign=-1)
-                    blocked["mm_risk_reserve"] += 1
-                    self.mm_risk_count("alloc")
-                    bi += 1                       # this pair would eat into the MM room: the next level
-                    continue
-            if bloc_fn is not None:
-                new = bloc_fn(hyp)
-                if abs(new) > cap + 1e-9 and abs(new) > abs(bloc) + 1e-9:
-                    apply(hyp, s, b, sign=-1)
-                    blocked["bloc"] += 1
-                    bi += 1                       # this level would push the bloc delta past the cap: the next one
-                    continue
-                bloc = new
-            cash_sell = h["kind"] == "cash"
-            pairs.append({"sell": s, "buy": b, "usd": x, "status": "sold" if cash_sell else "pending",
-                          "proceeds": x if cash_sell else 0.0, "sold_at": -1e18 if cash_sell else None,
-                          **({"netting": True, "rfloor": tuple(rfloor)} if net else {}),   # P14.1 5 (re-checked
-                          #                                                                  before each leg)
-                          **({"swap": self.swap_record(s, h["p"], b, o["p"], x)} if swap else {})})   # P14.2
-            gain += x * (o["edge"] - h["edge"])
-            if sk is not None:                    # P15: the state's room shrinks by this buy's collateral at p
-                st_room[sk] = st_room.get(sk, cfg.state_max_usd) - x * per
-            h["avail"] -= x if cash_sell else s["usd"]
-            o["avail"] -= x
-            room[o["eid"]] = room.get(o["eid"], 0.0) - x
-            left -= x
-            if h["avail"] < self.ALLOC_MIN_USD:
-                si += 1
-            if o["avail"] < self.ALLOC_MIN_USD or room[o["eid"]] < self.ALLOC_MIN_USD:
-                bi += 1
-        if bloc_fn is None and pairs and not self.alloc_bloc_logged:
-            self.alloc_bloc_logged = True
-            log.info("ALLOC bloc check skipped: bloc_delta_enabled is off (Part A's bloc_delta_now / bloc_cap)")
-        if left < self.ALLOC_MIN_USD and si < len(sq) and bi < len(levels):
-            blocked["turnover"] += 1
-        return pairs, {"blocked_by": dict(blocked), "ev_gain_est": round(gain, 2)}
+                    self.totals["bought_usd"] += f.size * (f.price if f.is_bid else 1 - f.price)
 
-    def alloc_journal(self, pr):
-        """The journal line of a planned pair: "ALLOC sell <label> <qty> @ <px> (edge-held x%) -> buy <label> <qty>
-        @ <px> (edge y%)"."""
-        s, b = pr["sell"], pr["buy"]
-        if s["kind"] == "cash":
-            left = f"spare cash ${pr['usd']:.0f}"
-        elif s["kind"] == "set":
-            left = f"unwind {s['label']} {s['qty']} sets @ asks sum {s['px']:.3f} (cost {100 * s['edge']:.1f}% per $)"
-        elif s.get("mm"):                         # P14 2: stale market-making inventory
-            left = (f"sell {s['label']} {'NO ' if s['kind'] == 'short' else ''}{s['qty']} @ {s['px']:.3f} "
-                    f"(stale MM inventory, edge-held {100 * s['edge']:.1f}%)")
-        else:
-            left = (f"sell {s['label']} {'NO ' if s['kind'] == 'short' else ''}{s['qty']} @ {s['px']:.3f} "
-                    f"(edge-held {100 * s['edge']:.1f}%)")
-        right = (f"buy {b['label']} {'short YES ' if b['short'] else ''}{b['qty']} @ {b['px']:.3f} "
-                 f"(edge {100 * b['edge']:.1f}%)" if b else "the reserve")
-        return f"ALLOC {left} -> {right}"
+    def status(self):
+        """status.json "alloc"."""
+        return {"state": self.state, "last_run": iso(self.last_run), "last_run_wall": self.last_run,
+                "pending": len(self.pairs), "turnover_hour": round(self.turnover(time.time()), 2),
+                "sells_stopped": self.sells_stopped, **self.info, **{k: round(v, 2) for k, v in self.totals.items()}}
 
-    def alloc_block(self, why):
-        bb = self.alloc_run.setdefault("blocked_by", {})
-        bb[why] = bb.get(why, 0) + 1
+    def funding(self):
+        """The refill's part of status.json "mm_funding": what it sold for the buyers and why."""
+        now = time.time()
+        while self.refills and self.refills[0][0] < now - DAY_S:
+            self.refills.popleft()
+        return {"refill_runs": self.refill_runs, "refill_last": iso(self.last_refill),
+                "refill_sold_24h": round(sum(u for _, u in self.refills), 2),
+                "refill_demand": round(self.demand, 2), "refill_raised": round(self.raised, 2)}
 
-    def alloc_tick(self, now, inv, mine_real, now_m=None, skip=()):
-        """Package 10 B, once a cycle (see Config): finish the run in flight (set unwinds seen, buys after a cash
-        read, sales), or start a new run once alloc_interval_s has passed since the last. Returns the exchanges
-        traded (not quoted this cycle)."""
-        cfg = self.cfg
-        now_w = now.timestamp()
-        now_m = util.time.monotonic() if now_m is None else now_m
-        if not cfg.alloc_enabled:
-            touched = set()
-            if self.alloc_ladder or (self.api.live and self.sl_orders()):   # Package 12 L1: every ladder pulled
-                touched = self.alloc_ladder_tick(inv, now_m, now, skip)
-            for pr in self.alloc_pairs:           # P14.2: swaps in flight end here (the cash stays)
-                if pr.get("swap") is not None:
-                    self.swap_close(pr, now_w, "allocator off")
-            if self.alloc_pairs or self.alloc_set_races:
-                log.warning("ALLOC off: %d pair(s) dropped, %d set unwind registration(s) withdrawn (nothing forced; "
-                            "the cash stays)", len(self.alloc_pairs), len(self.alloc_set_races))
-            self.alloc_pairs, self.alloc_set_races, self.alloc_state = [], {}, "off"
-            self.alloc_targets = {}
-            if self.alloc_info:
-                self.alloc_info["state"] = "off"
-            return touched
-        self.alloc_ages = self.refs.ages() if self.refs is not None and hasattr(self.refs, "ages") else {}
-        inv = dict(inv)                           # (kept current with this tick's own trades: never an oversale)
-        turnover = self.alloc_turnover(now_w)
-        due = not self.alloc_pairs and (self.alloc_last_run_wall is None
-                                         or now_w - self.alloc_last_run_wall >= cfg.alloc_interval_s)
-        lad_touched = set()
-        if cfg.alloc_set_rich_leg or self.alloc_ladder or (self.api.live and self.sl_orders()):   # Package 12 L1
-            fresh = (not self.api.live or (self.cash_gate_on() and getattr(self, "cg_cash", None) is not None
-                                           and self.cash_read_age() is not None
-                                           and self.cash_read_age() < self.ALLOC_CASH_FRESH))
-            lad_touched = self.alloc_ladder_tick(inv, now_m, now, skip, place=fresh)
-        if not self.api.live:                     # dry run: the plan is logged, nothing sent
-            if due:
-                pairs, info = self.alloc_plan(inv, now_m, cfg.alloc_mm_reserve, skip,
-                                              cfg.alloc_max_turnover_per_hour - turnover)
-                self.alloc_last_run_wall = now_w
-                self.alloc_targets = self.alloc_plan_targets(inv, pairs)   # Package 12 M2
-                self.mm_risk_count("alloc", info["blocked_by"].get("mm_risk_reserve", 0))   # P12 ops
-                for pr in pairs:
-                    log.info("[dry] %s", self.alloc_journal(pr))
-                if self.p142_on():                # P14.2: the swaps planned, one line each
-                    self.swap_plan_log(pairs, now_w)
-                self.alloc_state = "dry run"
-                self.alloc_info = {"pairs_planned": len(pairs), **info, "reserve": cfg.alloc_mm_reserve}
-            return lad_touched
-        age = self.cash_read_age()
-        if not (self.cash_gate_on() and getattr(self, "cg_cash", None) is not None and age is not None
-                and age < self.ALLOC_CASH_FRESH):        # no action at all without a fresh cash read
-            self.alloc_state = "waiting (no fresh cash read)"
-            self.alloc_block("cash")
-            self.alloc_info = {**self.alloc_info, "state": self.alloc_state,
-                               "blocked_by": dict(self.alloc_run.get("blocked_by", {}))}
-            return lad_touched
-        traded = set(lad_touched)
-        if due:
-            cash = self.cash_left()
-            pairs, info = self.alloc_plan(inv, now_m, cash, skip, cfg.alloc_max_turnover_per_hour - turnover)
-            self.alloc_last_run_wall = now_w
-            self.alloc_totals["runs_total"] += 1
-            self.alloc_pairs, self.alloc_sells_stopped = pairs, False
-            self.alloc_targets = self.alloc_plan_targets(inv, pairs)       # Package 12 M2
-            self.mm_risk_count("alloc", info["blocked_by"].get("mm_risk_reserve", 0))   # P12 ops
-            for pr in pairs:
-                pr["planned_at"] = now_m
-            self.alloc_run = {"blocked_by": dict(info["blocked_by"]), "pairs_planned": len(pairs), "sold": 0.0,
-                              "bought": 0.0, "cash_before": round(cash, 2), "ev_gain_est": info["ev_gain_est"]}
-            for pr in (pairs if self.p141_on() else ()):   # P14.1 7: the swaps planned this run (the 24-h report)
-                if pr.get("buy") is not None:
-                    self.alloc_run["swaps_planned"] = self.alloc_run.get("swaps_planned", 0) + 1
-                    self.p141_log("swap_plan", pr["usd"],
-                                  est=pr["usd"] * (pr["buy"]["edge"] - pr["sell"]["edge"]), now_w=now_w)
-            log.warning("ALLOC run: %d pair(s) planned (cash %.0f, reserve %.0f, turnover left %.0f, est. gain %.0f)",
-                        len(pairs), cash, cfg.alloc_mm_reserve, cfg.alloc_max_turnover_per_hour - turnover,
-                        info["ev_gain_est"])
-            for pr in pairs:
-                log.warning("%s", self.alloc_journal(pr))
-            if self.p142_on():                    # P14.2: the swaps planned, one line each
-                self.swap_plan_log(pairs, now_w)
-        elif (getattr(cfg, "mm_refill_fast", False)                            # P14 2: the reserve refilled NOW
-              # P14.1 2: every cycle while the cash is short, and also while an hourly run's pairs are still in
-              # flight (their markets are skipped); 4ff7d91: only with no pairs in flight, at most every 60 s
-              and (self.p141("alloc_rank_all_markets")
-                   or (not self.alloc_pairs and now_m - self.mmf_refill_last_m >= self.MM_REFILL_GAP))
-              and self.cash_left() + self.hv_carve_used() < cfg.alloc_mm_reserve - self.ALLOC_MIN_USD):
-            self.mm_refill_tick(inv, now_m, now, skip, turnover)
-        writes = getattr(self.api, "writes_left", lambda: 10 ** 6)()
-        n_left = int(min(cfg.alloc_max_orders_per_cycle, math.floor(cfg.alloc_writes_frac * max(0, writes) / 3 + 1e-9)))
-        # 1. registered NO+NO set unwinds (B3): done by take_arbitrage, or expired
-        for pr in self.alloc_pairs:
-            if pr["status"] == "set_wait":
-                self.alloc_set_check(pr, inv, now_m, now_w)
-        # 2. buys: pairs sold BEFORE the latest cash read (spare-cash pairs: the run's own fresh read)
-        read_at = getattr(self, "cg_read_at", None)
-        for pr in self.alloc_pairs:
-            if pr["status"] != "sold" or pr["buy"] is None or read_at is None or pr["sold_at"] >= read_at:
-                continue
-            if pr["sold_at"] > -1e17 and now_m - pr["sold_at"] > self.ALLOC_BUY_WAIT:
-                pr["status"] = "expired"
-                log.warning("ALLOC buy %s expired: no cash read showed the money within %.0f s (the cash stays)",
-                            pr["buy"]["label"], self.ALLOC_BUY_WAIT)
-                continue
-            if n_left < 1:
-                self.alloc_block("writes")
-                break
-            if self.alloc_buy(pr, inv, mine_real, now_m, now_w, skip):
-                n_left -= 1
-                traded.add(pr["buy"]["eid"])
-        # 3. sales (and set registrations)
-        for pr in self.alloc_pairs:
-            if pr["status"] != "pending":
-                continue
-            if self.alloc_sells_stopped and not (pr.get("fast")       # P14.1 2: a paired level gone stops the PAIRED
-                                                 and self.p141("alloc_rank_all_markets")):   # sales, not the refills
-                pr["status"] = "skipped"
-                continue
-            if now_m - pr.get("planned_at", now_m) > (self.MM_FAST_EXPIRE if pr.get("fast") else cfg.alloc_interval_s):
-                pr["status"] = "expired"          # a sale still not sent after a whole interval: re-planned afresh
-                continue
-            if pr["sell"]["kind"] != "set" and n_left < 1:
-                self.alloc_block("writes")
-                break
-            if self.alloc_sell(pr, inv, mine_real, now_m, now_w, skip):
-                n_left -= 1
-                traded.add(pr["sell"]["eid"])
-        for pr in self.alloc_pairs:               # a refill (no buy) is finished once sold
-            if pr["status"] == "sold" and pr["buy"] is None:
-                pr["status"] = "done"
-        for pr in self.alloc_pairs:               # P14.2: a finished swap's outcome (done / buy failed / not sold)
-            if pr.get("swap") is not None and pr["status"] in self.ALLOC_DONE:
-                self.swap_close(pr, now_w)
-        self.alloc_pairs = [pr for pr in self.alloc_pairs if pr["status"] not in self.ALLOC_DONE]
-        self.alloc_state = "running" if self.alloc_pairs else "idle"
-        self.alloc_info = {**self.alloc_run, "state": self.alloc_state, "cash_after": round(self.cash_left(), 2),
-                           "reserve": cfg.alloc_mm_reserve, "sells_stopped": self.alloc_sells_stopped,
-                           "set_unwinds_registered": sorted(self.alloc_set_races)}
-        return traded
-
-    def alloc_level_ok(self, b, book, p):
-        """(ok, touch, edge): the fresh book still shows the planned buy level (within ALLOC_LEVEL_TOL) at an edge >=
-        alloc_min_edge_buy."""
-        key = "bids" if b["short"] else "asks"
-        lv = (book or {}).get(key)
-        if not lv or p is None:
-            return False, None, None
-        best = lv[0]["price"]
-        if b["short"]:
-            near, edge = best >= b["px"] - self.ALLOC_LEVEL_TOL - 1e-9, (best - p) / max(1 - best, TICK)
-        else:
-            near, edge = best <= b["px"] + self.ALLOC_LEVEL_TOL + 1e-9, (p - best) / best
-        return near and edge >= self.cfg.alloc_min_edge_buy - 1e-9, best, edge
-
-    def alloc_download(self, ex, mine_real):
-        """A fresh book of ex, our own orders stripped (cached on ex), or None on a failed download."""
-        try:
-            ex.book = strip_own(self.api.book(ex.eid, self.tid), mine_real.get(ex.eid, []))
-            ex.book_time = ex.verified = util.time.monotonic()
-            return ex.book
-        except ApiError as err:
-            log.warning("ALLOC %s: book download failed (%s)", ex.label, err)
-            return None
-
-    def alloc_buy(self, pr, inv, mine_real, now_m, now_w, skip):
-        """The buy of a sold pair (after a cash read showing the money above the reserve): True if an order was
-        sent. The level gone -> the pair ends, its cash stays, no more sales this run."""
-        cfg, b = self.cfg, pr["buy"]
-        ex = self.ex.get(b["eid"])
-        if getattr(self, "global_reduce", False):     # (red team RT-2: no buy in reduce-only; the pair waits, then
-            self.alloc_block("risk")                  #  expires after ALLOC_BUY_WAIT with its cash kept)
-            return False
-        if getattr(self, "mmr_paused", False) and not pr.get("netting"):   # P12 ops: value adds paused (as RT-2;
-            self.alloc_block("mm_risk_reserve")                             #  P14.1 5: a netted swap goes on)
-            self.mm_risk_count("alloc")
-            return False
-        if ex is None or not self.alloc_market_ok(ex, skip) or busy(ex, now_m):
-            return False                          # (traded by another feature / a write in flight: next cycle)
-        q = float(inv.get(b["eid"], 0.0))
-        if (q < 0 and not b["short"]) or (q > 0 and b["short"]):
-            pr["status"] = "dropped"              # never flip a position: the cash stays
-            return False
-        if pr.get("netting") and not self.alloc_buy_room_ok(b, q, inv, pr):   # P14.1 5: re-checked before the buy
-            return False
-        # P14.1 5: a netted swap's buy may spend the proceeds of its OWN sale even below the reserve (the cash the MM
-        # reserve held before that sale is never touched); every other buy keeps to the cash above alloc_mm_reserve.
-        avail = self.cash_left() + self.hv_carve_used() - cfg.alloc_mm_reserve   # (P15: the ladder's carve-out
-        if pr.get("netting"):                                                    #  resting counts as reserve)
-            avail = max(avail, min(pr.get("proceeds", 0.0), self.cash_left()))
-        if avail < (b["px"] if not b["short"] else 1 - b["px"]):
-            self.alloc_block("cash")              # the cash read does not show the money (yet)
-            return False
-        if not self.writes_ready(3):
-            self.alloc_block("writes")
-            return False
-        book = self.alloc_download(ex, mine_real)
-        if book is None:
-            return False
-        p = self.alloc_p(ex, now_m)
-        ok, best, edge = self.alloc_level_ok(b, book, p)
-        if not ok:
-            pr["status"] = "gone"
-            self.alloc_sells_stopped = True
-            self.alloc_block("depth")
-            log.warning("ALLOC buy %s skipped: the level is gone (touch %s, planned %.3f) - the cash stays, no more "
-                        "sales this run", b["label"], "none" if best is None else f"{best:.3f}", b["px"])
-            return False
-        unit = best if not b["short"] else 1 - best
-        key = "bids" if b["short"] else "asks"
-        room = cfg.alloc_max_contract_usd - self.alloc_held_usd(q, p)
-        qty = int(min(self.depth_within({key: book[key][:1]}, key, best), min(pr["proceeds"], avail, room) / unit)
-                  + 1e-9)
-        if qty < 1:
-            pr["status"] = "dropped"
-            return False
-        if self.st_on():                          # P15 state_max_usd: the buy only within its state's room (it waits,
-            n_ok = self.st_add_room(ex, not b["short"], qty, p=p, commit=False)   # then expires: the cash stays)
-            if n_ok < qty:
-                self.alloc_block("state_cap")
-                self.st_count(ex, "alloc")
-                if n_ok < 1:
-                    return False
-                qty = n_ok
-        order = {"exchangeId": b["eid"], "side": "yes", "action": "sell" if b["short"] else "buy", "quantity": qty,
-                 "price": best, "tournamentId": self.tid,
-                 "expirationDate": iso(util.utcnow() + timedelta(seconds=cfg.take_order_ttl))}
-        if self.cash_gate_blocks([order]):
-            self.alloc_block("cash")
-            return False
-        done = self.alloc_send(ex, order, now_m, "buy")
-        if done is None:
-            return False
-        usd = done * unit
-        self.alloc_run["bought"] = round(self.alloc_run.get("bought", 0.0) + usd, 2)
-        self.alloc_totals["bought_total"] += usd
-        if pr["sell"]["kind"] == "cash" and usd > 0:
-            self.alloc_flows.append((now_w, usd))
-        inv[b["eid"]] = q + (-done if b["short"] else done)
-        if done >= 1 and self.st_on():            # P15: the state's collateral grows by this buy (this cycle)
-            self.st_add_room(ex, not b["short"], done, p=p, commit=True, force=True)
-        if done >= 1:
-            pr["status"] = "bought"
-            got = done * ((p - best) if not b["short"] else (best - p))   # P14.1 7: EV bought (realised, at p)
-            self.p141_log("swap_buy", usd, real=got, now_w=now_w)
-            if pr.get("swap") is not None:        # P14.2: the swap complete, journaled realised at p
-                self.swap_bought(pr["swap"], done, best, p, edge, usd, now_w)
-            log.warning("ALLOC bought %s %s%.0f @ %.3f (edge %.1f%%, $%.0f)", b["label"],
-                        "short YES " if b["short"] else "", done, best, 100 * edge, usd)
-        else:
-            pr["status"] = "gone"
-            self.alloc_sells_stopped = True
-            log.warning("ALLOC buy %s: nothing traded - the cash stays, no more sales this run", b["label"])
-        return True
-
-    def alloc_sell(self, pr, inv, mine_real, now_m, now_w, skip):
-        """A pending pair's sale (or B3 set registration): True if an order was sent. Paired: only while a fresh book
-        of the buy market still shows its level, and the edges still pass on both fresh books."""
-        cfg, s, b = self.cfg, pr["sell"], pr["buy"]
-        pins = self.alloc_pins()
-        if s["kind"] == "set":
-            exs = [self.ex.get(m) for m in s["members"]]
-            if any(x is None or x.label in pins for x in exs):
-                pr["status"] = "dropped"
-                return False
-            if any(not self.alloc_market_ok(x, skip) or busy(x, now_m) for x in exs):
-                return False
-        else:
-            ex = self.ex.get(s["eid"])
-            if ex is None or ex.label in pins:
-                pr["status"] = "dropped"
-                return False
-            if not self.alloc_market_ok(ex, skip) or busy(ex, now_m):
-                return False
-            q = float(inv.get(s["eid"], 0.0))
-            if (s["kind"] == "long" and q < 1) or (s["kind"] == "short" and q > -1):
-                pr["status"] = "dropped"
-                return False
-        if not self.writes_ready(3):
-            self.alloc_block("writes")
-            return False
-        bedge = None
-        if b is not None and getattr(self, "global_reduce", False):   # (red team RT-2: its buy could not follow)
-            self.alloc_block("risk")
-            return False
-        if b is not None and getattr(self, "mmr_paused", False) and not pr.get("netting"):   # P12 ops: nor while
-            self.alloc_block("mm_risk_reserve")                      #  paused (P14.1 5: a netted swap goes on)
-            self.mm_risk_count("alloc")
-            return False
-        if b is not None and pr.get("netting"):   # P14.1 5: the rooms the whole pair would leave, re-checked now
-            hyp = {e: float(v) for e, v in inv.items()}
-            if s["kind"] in ("long", "short"):
-                hyp[s["eid"]] = float(inv.get(s["eid"], 0.0)) + (-s["qty"] if s["kind"] == "long" else s["qty"])
-            hyp[b["eid"]] = float(inv.get(b["eid"], 0.0)) + (-b["qty"] if b["short"] else b["qty"])
-            after = self.alloc_rooms(hyp)
-            if after is None or not self.alloc_room_ok(after, tuple(pr.get("rfloor") or self.alloc_room_floor())):
-                self.alloc_block("mm_risk_reserve")
-                self.mm_risk_count("alloc")
-                log.info("ALLOC %s not sold: the swap's room check (mm_risk_reserve net of the sale) no longer passes",
-                         s["label"])
-                return False
-        if b is not None:                         # the paired level first: no sale without it on a fresh book
-            bx = self.ex.get(b["eid"])
-            if bx is None or not self.alloc_market_ok(bx, skip):
-                return False
-            bbook = self.alloc_download(bx, mine_real)
-            if bbook is None:
-                return False
-            ok, _, bedge = self.alloc_level_ok(b, bbook, self.alloc_p(bx, now_m))
-            if not ok:
-                pr["status"] = "gone"
-                self.alloc_block("depth")
-                log.info("ALLOC %s not sold: its paired level (%s @ %.3f) is gone", s["label"], b["label"], b["px"])
-                return False
-        if s["kind"] == "set":
-            sets = min(-float(inv.get(m, 0.0)) for m in s["members"])
-            if sets < 1:
-                pr["status"] = "dropped"
-                return False
-            # "sets": what the plan needs - take_arbitrage unwinds no more at the allocator's cost (red team RT-1;
-            # several pairs of one race add up)
-            reg = self.alloc_set_races.get(s["race"]) or {}
-            self.alloc_set_races[s["race"]] = {"cost": max(s["px"] - 1 + 1e-9, reg.get("cost", -1.0)),
-                                               "until": now_m + self.ALLOC_SET_WAIT,
-                                               "sets_before": reg.get("sets_before", sets),
-                                               "free": len(s["members"]) - s["px"],
-                                               "sets": reg.get("sets", 0) + s["qty"]}
-            pr["status"] = "set_wait"
-            log.warning("ALLOC %s: registered for the short-set unwind at asks sum <= %.3f (%.0f sets held)",
-                        s["label"], s["px"], sets)
-            return False
-        book = self.alloc_download(ex, mine_real)
-        if book is None:
-            return False
-        key = "bids" if s["kind"] == "long" else "asks"
-        lv = book.get(key)
-        p = self.alloc_p(ex, now_m)
-        if not lv or p is None:
-            pr["status"] = "gone"
-            return False
-        best = lv[0]["price"]
-        edge = (p - best) / best if s["kind"] == "long" else (best - p) / max(1 - best, TICK)
-        fast = bool(getattr(cfg, "mm_refill_fast", False))
-        if s.get("mm"):                           # P14 2: stale MM inventory - near fair and the floor, not the edge
-            fair = ex.last_fv if ex.last_fv is not None else p
-            gap = fair - best if s["kind"] == "long" else best - fair
-            conc_ok = gap <= cfg.mm_recycle_concession + 1e-9 or self.p141("alloc_cancel_mm_first")   # P14.1 1
-            if not conc_ok or not self.mm_floor_ok(s["kind"] == "long", best, p):
-                pr["status"] = "gone"
-                log.info("ALLOC %s not sold: %.3f is %.3f from fair %.3f (> concession %.3f) or past the value floor - "
-                         "it rests through the recycler", s["label"], best, gap, fair, cfg.mm_recycle_concession)
-                return False
-        elif edge > cfg.alloc_max_edge_sell + 1e-9 or (bedge is not None
-                                                       and bedge - edge < cfg.alloc_min_improvement - 1e-9):
-            pr["status"] = "gone"
-            log.info("ALLOC %s not sold: edge-held now %.1f%% at %.3f (the pair no longer pays)", s["label"],
-                     100 * edge, best)
-            return False
-        if (pr.get("swap") is not None and b is not None and self.p142_on()   # P14.2: the swap's own floor and
-                and s["kind"] in ("long", "short")):                          #  hurdle, on the fresh book (the IOC
-            why = None                                                        #  goes out at this very touch)
-            if not self.swap_floor_ok(s["kind"] == "long", best, p):
-                why = ("swap_floor", f"{best:.3f} is past the swap floor (p {p:.3f} -+ alloc_swap_sell_margin "
-                                     f"{cfg.alloc_swap_sell_margin:.3f})")
-            elif bedge is not None and bedge - edge < self.swap_hurdle() - 1e-9:
-                why = ("swap_gain", f"the gain {100 * (bedge - edge):.1f}% per $ is below the swap hurdle "
-                                    f"{100 * self.swap_hurdle():.1f}%")
-            if why is not None:
-                pr["status"] = "gone"
-                self.alloc_block(why[0])
-                log.info("ALLOC %s not sold (swap): %s", s["label"], why[1])
-                return False
-        if fast and b is None and not self.mm_floor_ok(s["kind"] == "long", best, p):   # P14 2: refills >= floor
-            pr["status"] = "gone"
-            self.alloc_block("floor")
-            log.info("ALLOC %s not sold: %.3f is past the value floor (p %.3f -+ %.3f)", s["label"], best, p,
-                     cfg.value_sell_margin)
-            return False
-        if fast and self.mm_sale_lagging(s["eid"], q, now_m):   # P14 (RT13-3): an earlier IOC's sale not read yet
-            self.alloc_block("in_flight")
-            return False
-        unit = best if s["kind"] == "long" else 1 - best
-        cap_q = q if s["kind"] == "long" else self.alloc_lone_no(s["eid"], q)
-        qty = int(min(s["qty"], lv[0]["quantity"], cap_q) + 1e-9)
-        if qty < 1:
-            pr["status"] = "gone"
-            return False
-        order = {"exchangeId": s["eid"], "side": "yes", "action": "sell" if s["kind"] == "long" else "buy",
-                 "quantity": qty, "price": best, "tournamentId": self.tid,
-                 "expirationDate": iso(util.utcnow() + timedelta(seconds=cfg.take_order_ttl))}
-        if s["kind"] == "short":                  # a short's buy-back only as a covered "sell NO" (needs no cash)
-            order = self.no_sell_order(order, q)
-            if order is None or not order.get("_no_sell"):
-                pr["status"] = "dropped"
-                log.info("ALLOC %s not sold: its NO cannot go out as a covered sale", s["label"])
-                return False
-            order["quantity"] = min(int(order["quantity"]), qty)
-        if b is not None:
-            order["_alloc_paired"] = True          # (Part A1 v: an allocator sale, never a resting quote)
-        if self.cash_gate_blocks([order]):
-            self.alloc_block("cash")
-            return False
-        done = self.alloc_send(ex, order, now_m, "sell")
-        if done is None:
-            return False
-        if done < 1:
-            pr["status"] = "skipped"
-            return True
-        usd = done * unit
-        inv[s["eid"]] = q + (-done if s["kind"] == "long" else done)
-        pr.update(status="sold", proceeds=usd, sold_at=now_m)
-        self.alloc_flows.append((now_w, usd))
-        self.alloc_run["sold"] = round(self.alloc_run.get("sold", 0.0) + usd, 2)
-        self.alloc_totals["sold_total"] += usd
-        log.warning("ALLOC sold %s %.0f @ %.3f (edge-held %.1f%%, $%.0f freed)%s", s["label"], done, best, 100 * edge,
-                    usd, f" -> buy {b['label']} after the next cash read" if b else
-                    " (reserve refill)")
-        if self.p141("alloc_cancel_mm_first"):    # P14.1 1: the sale cancelled our quotes there (alloc_send) - the
-            self.mmf_hold[s["eid"]] = now_m       #  REDUCING side stays off until the positions read shows the sale
-        gave = done * ((p - best) if s["kind"] == "long" else (best - p))   # P14.1 7: EV given up (< 0: above p)
-        self.p141_log("swap_sell" if b is not None else "refill", usd, real=-gave, now_w=now_w)
-        if pr.get("swap") is not None:            # P14.2: the sale as traded (realised at p)
-            self.swap_sold(pr["swap"], done, best, p, usd)
-        if fast or self.p141("alloc_cancel_mm_first"):   # P14: not planned / sold again until the read shows it
-            self.mmf_sent[s["eid"]] = (now_m, abs(q), float(done))
-            if pr.get("fast"):
-                self.mmf_refill["sold_usd"] = round(self.mmf_refill["sold_usd"] + usd, 2)
-            if s.get("mm"):
-                self.mmf_refill["mm_sold_usd"] = round(self.mmf_refill["mm_sold_usd"] + usd, 2)
-                log.warning("MM RECYCLE %s: %.0f stale MM shares sold by IOC @ %.3f ($%.0f to the reserve)", s["label"],
-                            done, best, usd)
-        return True
-
-    def alloc_set_check(self, pr, inv, now_m, now_w):
-        """B3: a registered set race - its sets fell (take_arbitrage unwound some) -> sold (cash freed at the planned
-        asks sum); past ALLOC_SET_WAIT -> withdrawn, expired."""
-        s = pr["sell"]
-        reg = self.alloc_set_races.get(s["race"])
-        sets = min(-float(inv.get(m, 0.0)) for m in s["members"])
-        if reg is not None and sets <= reg["sets_before"] - 1:
-            n = reg["sets_before"] - max(0.0, sets)
-            usd = n * reg["free"]
-            self.alloc_set_races.pop(s["race"], None)
-            pr.update(status="sold", proceeds=usd, sold_at=now_m)
-            self.alloc_flows.append((now_w, usd))
-            self.alloc_run["sold"] = round(self.alloc_run.get("sold", 0.0) + usd, 2)
-            self.alloc_totals["sold_total"] += usd
-            log.warning("ALLOC %s: %.0f sets unwound (~$%.0f freed)", s["label"], n, usd)
-        elif reg is None or now_m > reg["until"]:
-            self.alloc_set_races.pop(s["race"], None)
-            pr["status"] = "expired"
-            log.info("ALLOC %s: no unwind within %.0f s - registration withdrawn", s["label"], self.ALLOC_SET_WAIT)
-
-    def alloc_send(self, ex, order, now_m, what):
-        """One immediate-or-cancel allocator order: our orders on ex cancelled first (refused if that
-        cannot be confirmed: never a price crossing our own order), the order (alive take_order_ttl), its leftover
-        cancelled at once. Returns the shares traded (quantityTraded; 0 if refused), or None if not sent."""
-        cfg, e = self.cfg, ex.eid
-        if not self.cancel(e, [], whole_exchange=True):
-            log.warning("ALLOC %s %s skipped: could not confirm our own orders there are cancelled", what, ex.label)
-            return None
-        self.orders_stale = True
-        try:
-            results = self.place_orders([order])
-        except ApiError as err:
-            if err.code == "WRITE_BUDGET_WAIT":
-                self.alloc_block("writes")
-                return None
-            ex.pending_until = now_m + cfg.pending_seconds
-            util.alert(f"allocator order on {ex.label} failed ({err}) - check positions")
-            if err.code in FATAL_API_CODES:
-                util.fatal(f"orders rejected with {err.code}")
-            return None
-        res = results[0] if results else {}
-        data = res.get("data") or {}
-        if res.get("ok"):
-            self.remember_order(order, data, now_m)
-        self.cancel(e, [], whole_exchange=True, quiet=True)     # the leftover, at once
-        if data.get("orderId") is not None:
-            self.order_meta[data["orderId"]] = {"our_side": "bid" if order["action"] == "buy" else "ask",
-                                                "price": order["price"], "take": True, "alloc": True, "eid": e,
-                                                "t": util.time.time(), **({"no_sell": True} if order.get("_no_sell") else {})}
-            self.notes_dirty = True
-        if not res.get("ok"):
-            log.info("ALLOC %s %s refused: %s", what, ex.label, (data.get("error") or {}).get("message", "?"))
-            return 0.0
-        return float(data.get("quantityTraded") or 0)
-
-    # ------------------------------------------------------------------------------ Package 12 L1: rich-leg ladder
-    ALLOC_LADDER_REQUOTE = 3600.0  # a race's resting rich-leg ladder is re-quoted at most this often (s)
-    ALLOC_LADDER_KEEP = 3000.0     # at a re-quote, an order exactly at its target stays with at least this life left (s)
-    ALLOC_LADDER_REFUSED_WAIT = 900.0   # the exchange refused a race's whole ladder: not re-sent before this (s)
-
-    def sl_orders(self, eid=None):
-        """Package 12 L1: our resting rich-leg ladder orders (order_meta "set_ladder"), on eid or everywhere."""
-        meta = self.order_meta
-        return [o for o in list(self.my_orders.values()) if (eid is None or o.eid == eid)
-                and (meta.get(o.order_id) or {}).get("set_ladder")]
-
-    def alloc_ladder_plan(self, inv, now_m, skip=()):
-        """L1, THE PURE PLANNER: ({race: plan}, {race: why}) - plan = {"eid", "label", "p", "edge", "best_bid", "avail",
-        "cap", "levels": [(YES bid price, shares)]} for each NO+NO race whose favourite leg is rich (see Config); why =
-        "soft" (cannot be judged now: no fresh book / liquid p, traded by another feature this cycle, a write in
-        flight - a resting ladder stays) or the reason the race has no ladder (resting orders there are pulled)."""
-        cfg = self.cfg
-        plans, why = {}, {}
-        on = cfg.alloc_enabled and cfg.alloc_set_rich_leg and self.reduce_no_on()
-        pins = self.alloc_pins()
-        offs = [float(x) for x in (cfg.alloc_set_ladder or ())][:LADDER_MAX_LEVELS]
-        is_lad = (lambda o: bool((self.order_meta.get(o.order_id) or {}).get("set_ladder")))
-        for race, members in sorted(self.groups.items()):
-            if len(members) < 2 or any(m not in self.ex for m in members):
-                continue
-            if min(-float(inv.get(m, 0.0)) for m in members) < 1:
-                why[race] = "not a set"
-                continue
-            if not on or not offs:
-                why[race] = "off"
-                continue
-            exs = [self.ex[m] for m in members]
-            if race in skip or any(x.eid in skip for x in exs) or any(busy(x, now_m) for x in exs):
-                why[race] = "soft"
-                continue
-            if any(not self.alloc_market_ok(x) for x in exs):
-                why[race] = "window"              # (pre-close window / headline)
-                continue
-            ps = [self.alloc_p(x, now_m) for x in exs]
-            if any(p_ is None for p_ in ps):
-                why[race] = "soft"
-                continue
-            p = max(ps)
-            if sum(1 for p_ in ps if p_ >= p - 1e-12) != 1:
-                why[race] = "no favourite"        # a tie: no rich leg to tell
-                continue
-            fav = exs[ps.index(p)]                # the rich leg: NO on the favourite (the longshots' NO: never)
-            if fav.label in pins:
-                why[race] = "pinned"
-                continue
-            book = self.alloc_fresh_book(fav, now_m)
-            if book is None:
-                why[race] = "soft"
-                continue
-            if not book.get("asks") or not book.get("bids"):   # (the cached book: our own orders' size stripped,
-                why[race] = "soft"                              #  so the ladder joins other traders' best bid)
-                continue
-            ask, bb = book["asks"][0]["price"], (book["bids"][0]["price"], book["bids"][0]["quantity"])
-            edge = (ask - p) / max(1 - ask, TICK)          # the favourite NO's edge-held (a short's, as alloc_plan)
-            if edge > cfg.alloc_max_edge_sell + 1e-9:
-                why[race] = "not rich"
-                continue
-            free = self.cash_free(fav.eid, skip=is_lad)    # (less our OTHER covered NO sales resting there)
-            avail = int(min(self.nono_set_part(fav.eid, float(inv.get(fav.eid, 0.0))), free["set"]) + 1e-9)
-            per = int(avail / len(offs) + 1e-9)
-            own_asks = [o.price for o in list(self.my_orders.values()) if o.eid == fav.eid and not o.is_bid]
-            if fav.quote is not None and getattr(fav.quote, "ask", None) is not None:
-                own_asks.append(fav.quote.ask)
-            cap = min([p + cfg.value_sell_margin, ask - TICK] + [a - TICK for a in own_asks])
-            levels = {}
-            for off in offs:
-                raw = min(bb[0] + off, cap)
-                if raw < PMIN - 1e-9 or per < 1:
-                    continue
-                px = floor_tick(raw)
-                levels[px] = levels.get(px, 0) + per
-            if not levels:
-                why[race] = "too small"
-                continue
-            plans[race] = {"eid": fav.eid, "label": fav.label, "p": p, "edge": edge, "best_bid": bb[0],
-                           "avail": avail, "cap": cap, "levels": sorted(levels.items(), reverse=True)}
-        return plans, why
-
-    def alloc_ladder_tick(self, inv, now_m, now, skip=(), place=True):
-        """L1, once a cycle from alloc_tick (also while ladder orders rest with the allocator off): pull what is
-        unsafe at once; re-quote a race's ladder at most once per ALLOC_LADDER_REQUOTE (orders exactly at target with
-        life left keep their queue spot); place through the cash gate (refused: the race waits, retried next cycle).
-        Returns the exchanges where orders were placed or cancelled (not quoted this cycle)."""
-        cfg = self.cfg
-        plans, why = self.alloc_ladder_plan(inv, now_m, skip)
-        touched = set()
-        rest = defaultdict(list)
-        for o in self.sl_orders():
-            rest[(self.order_meta.get(o.order_id) or {}).get("sl_race")].append(o)
-        # 1. pulls: orphans, races with no ladder (unless only "soft"), unsafe orders, more on sale than the set part
-        for race, os_ in sorted(rest.items(), key=lambda kv: str(kv[0])):
-            plan = plans.get(race)
-            if plan is None:
-                bad = list(os_)
-                if why.get(race) == "soft" and race in self.alloc_ladder:
-                    e = os_[0].eid
-                    p_e = self.alloc_p(self.ex[e], now_m) if e in self.ex else None   # (red team RT12-1: the
-                    if (all(o.eid == e for o in os_) and p_e is not None              #  ladder's own p known, every
-                            and all(o.price <= p_e + cfg.value_sell_margin + 1e-9 for o in os_)   # bid within it)
-                            and sum(o.qty for o in os_) <= self.nono_set_part(e, float(inv.get(e, 0.0))) + 1e-9):
-                        bad = []                  # (cannot be judged now, still within the set part: it stays)
-            else:
-                bad = [o for o in os_ if o.eid != plan["eid"] or o.price > plan["cap"] + 1e-9]
-                if sum(o.qty for o in os_) > plan["avail"] + 1e-9:
-                    bad = list(os_)               # never more NO on sale than the set part: all of it re-planned
-            by_e = defaultdict(list)
-            for o in bad:
-                by_e[o.eid].append(o)
-            for e, lst in sorted(by_e.items()):
-                if not self.writes_ready(len(lst)):
-                    self.alloc_block("writes")
-                    continue
-                if self.cancel(e, lst, whole_exchange=False):
-                    touched.add(e)
-                    self.orders_stale = True
-                    log.warning("ALLOC LADDER %s: %d order(s) pulled (%s)", race, len(lst),
-                                "unsafe" if plan is not None or why.get(race) == "soft"
-                                else why.get(race, "no ladder"))
-                    self.alloc_ladder.pop(race, None)     # (re-planned as soon as it can be, within the set part)
-        for race in [r for r in self.alloc_ladder if r not in plans and why.get(r) != "soft"]:
-            self.alloc_ladder.pop(race, None)
-        # 2. re-quotes (at most once per ALLOC_LADDER_REQUOTE a race) and new ladders (only with a fresh cash read)
-        for race, plan in sorted(plans.items()) if place else ():
-            st = self.alloc_ladder.get(race)
-            if st is not None and now_m - st["at"] < self.ALLOC_LADDER_REQUOTE:
-                continue
-            refused = getattr(self, "alloc_ladder_refused", {})
-            if st is None and now_m - refused.get(race, -1e18) < self.ALLOC_LADDER_REFUSED_WAIT:
-                continue                          # (red team RT12-3: never one batch write a cycle into refusals)
-            e = plan["eid"]
-            ex = self.ex[e]
-            cur = [o for o in self.sl_orders(e) if (self.order_meta.get(o.order_id) or {}).get("sl_race") == race]
-            want, keep = list(plan["levels"]), []
-            for o in sorted(cur, key=lambda o: -o.price):
-                hit = next((w for w in want if abs(w[0] - o.price) < 1e-9 and abs(w[1] - o.qty) < 1e-9), None)
-                life = (o.expires - now).total_seconds() if o.expires else 0.0
-                if hit is not None and life >= self.ALLOC_LADDER_KEEP:
-                    want.remove(hit)
-                    keep.append(o)
-            gone = [o for o in cur if o not in keep]
-            if not self.api.live:                 # dry run: planned and logged, nothing sent
-                self.alloc_ladder[race] = {"at": now_m, "eid": e, "no_at": -float(inv.get(e, 0.0)), "sent": 0.0}
-                log.info("[dry] ALLOC LADDER %s: sell NO %s (p %.3f, edge-held %.1f%%): %s", race, plan["label"],
-                         plan["p"], 100 * plan["edge"], " ".join(f"{n}@{1 - px:.3f}" for px, n in plan["levels"]))
-                continue
-            if not self.writes_ready(len(gone) + (1 if want else 0)):
-                self.alloc_block("writes")
-                continue
-            if gone:
-                if not self.cancel(e, gone, whole_exchange=False):
-                    continue                      # (never a new ladder on top of one not confirmed gone)
-                touched.add(e)
-                self.orders_stale = True
-            sent, n_refused = 0.0, 0
-            if want:
-                orders = [{"exchangeId": e, "side": "yes", "action": "buy", "quantity": int(n), "price": px,
-                           "tournamentId": self.tid, "expirationDate": iso(now + timedelta(seconds=MAX_ORDER_TTL)),
-                           "_no_sell": True} for px, n in want]
-                try:
-                    results = self.place_orders(orders)     # (the cash gate trims / refuses each level here)
-                except ApiError as err:
-                    if err.code == "WRITE_BUDGET_WAIT":
-                        self.alloc_block("writes")
-                        continue
-                    ex.pending_until = now_m + cfg.pending_seconds
-                    refused[race] = now_m
-                    util.alert(f"set ladder order on {ex.label} failed ({err}) - check positions")
-                    if err.code in FATAL_API_CODES:
-                        util.fatal(f"orders rejected with {err.code}")
-                    continue
-                touched.add(e)
-                self.orders_stale = True
-                by_index = {r.get("index", k): r for k, r in enumerate(results or []) if isinstance(r, dict)}
-                prices = [px for px, _ in plan["levels"]]
-                for k, o in enumerate(orders):
-                    res = by_index.get(k) or {}
-                    data = res.get("data") or {}
-                    if not res.get("ok"):
-                        self.alloc_block("cash" if res.get("cash_gated") else "refused")
-                        n_refused += 0 if res.get("cash_gated") else 1
-                        continue
-                    self.remember_order(o, data, now_m)
-                    sent += float(o["quantity"])
-                    if data.get("orderId") is not None:
-                        self.order_meta[data["orderId"]] = {"our_side": "bid", "price": o["price"], "alloc": True,
-                                                            "set_ladder": 1 + prices.index(o["price"]),
-                                                            "sl_race": race, "no_sell": True, "eid": e,
-                                                            "t": util.time.time()}
-                        self.notes_dirty = True
-            if keep or sent > 0:
-                self.alloc_ladder[race] = {"at": now_m, "eid": e, "no_at": -float(inv.get(e, 0.0)),
-                                           "sent": sent + sum(o.qty for o in keep)}
-                log.warning("ALLOC LADDER %s: sell NO %s (p %.3f, edge-held %.1f%%, best bid %.3f): %s%s", race,
-                            plan["label"], plan["p"], 100 * plan["edge"], plan["best_bid"],
-                            " ".join(f"{n}@{1 - px:.3f}" for px, n in plan["levels"]),
-                            f" ({len(keep)} kept)" if keep else "")
-            else:
-                self.alloc_ladder.pop(race, None)     # (the gate refused it all: the race waits, tried next cycle)
-                if want and n_refused:                # (the EXCHANGE refused it: tried again after the wait)
-                    refused[race] = now_m
-                    log.warning("ALLOC LADDER %s: the exchange refused every level - not re-sent for %.0f s", race,
-                                self.ALLOC_LADDER_REFUSED_WAIT)
-        self.alloc_ladder_status(inv)
-        return touched
-
-    def alloc_ladder_status(self, inv):
-        """status.json alloc.set_ladder: races laddered, shares resting, shares filled since each race's last
-        re-quote (estimate: the rich leg's NO held then less now, within what was put on sale)."""
-        filled = sum(max(0.0, min(st.get("sent", 0.0), st.get("no_at", 0.0) + float(inv.get(st["eid"], 0.0))))
-                     for st in self.alloc_ladder.values())
-        self.alloc_ladder_info = {"races": len(self.alloc_ladder),
-                                  "shares_resting": int(sum(o.qty for o in self.sl_orders()) + 1e-9),
-                                  "filled": int(filled + 1e-9)}
-
-    def sl_guard_quote(self, ex, q, lad):
-        """L1: the quote's ask on a market where our ladder bids rest stays at least a tick above the highest of
-        them (and a kept resting ask at / below it is replaced): never a self-cross. None if that is off the grid."""
-        top = round(max(o.price for o in lad), 3)
-        lo = round(top + TICK, 3)
-        if q.ask is None:
-            return q
-        if q.ask > top + 1e-9:
-            if q.ask_limit is not None and q.ask_limit < lo - 1e-9:
-                return replace(q, ask_limit=lo)     # (a resting ask at / below the ladder is never kept)
-            return q
-        if lo > PMAX + 1e-9:
-            return replace(q, ask=None, ask_size=0, ask_limit=None, ask_max=None)
-        return replace(q, ask=lo, ask_limit=max(lo, q.ask_limit) if q.ask_limit is not None else lo)
+    def to_dict(self):
+        """What survives a restart: the clocks, the hour's turnover, the day's refills, the totals."""
+        return {"last_run_wall": self.last_run, "last_refill_wall": self.last_refill, "flows": list(self.flows),
+                "refills": list(self.refills), "totals": dict(self.totals), "refill_runs": self.refill_runs}

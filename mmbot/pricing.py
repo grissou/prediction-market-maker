@@ -1,331 +1,229 @@
 """
-Pure pricing maths: our resting orders (Resting, parse_order, wire_order), clean books (strip_own,
-predicted_top, others_top, depth_price), fair_value, tilted_ref / blend_fv, TiltEstimator and the
-race / bloc risk maths (bloc_slope, race_variance, worst_case_loss).
+Pricing: what a share is worth at the result, and what an action earns per unit of cash it ties up.
 
-Pure functions only: no I/O, no bot state, never imports the bot or the mixins.
+OWNS     fair value p from Polymarket (liquid prices only, wrong matches dropped, a race's legs scaled to sum to
+         1), the four edge formulas of README §4.2 and the edge of keeping a holding, quarter-Kelly sizes, and
+         the cross-sectional estimate of the favourite-longshot tilt s (README §3.1).
+NEVER    talks to the network (the bot hands in ref_prices.ReferencePrices.get() and .spreads()), keeps state
+         other than the tilt estimate, or prices a market from its own book: no usable Polymarket price = unpriced.
+ORIGIN   Finding 3.2 (settlement at the result): a share is worth p whatever the leaderboard marks say, so every
+         decision is scored as expected gain at the result per unit of cash. Finding 3.1 (the tilt): the book sits
+         at m ~ c + (1 - s)(r - c); s is estimated from the whole cross-section every cycle and reported only
+         (status, ladder context): quoting on a tilted reference was tried and never ran live. Old code:
+         mmbot/pricing.py (TiltEstimator, normalise), mmbot/bot.py (reference_prices, scaled_ref, value_p,
+         update_tilt), mmbot/value.py (alloc_edge_held), mmbot/quoting.py (kelly_position).
+OPEN     The estimator compares RAW Polymarket r with the race-normalised book mid (as live); scaling one side
+         and not the other moves s by ~0.004 (TILT_ESTIMATOR.md §1 row c). Kept as live; is that intended?
 """
-import math
-import statistics
-from collections import defaultdict
-from dataclasses import dataclass
-from datetime import datetime
+from mmbot.state import TICK
 
-from mmbot import util
-from mmbot import config
-from mmbot.util import PMAX, PMIN, TICK, parse_ts, rnd
-from mmbot.config import CFG
+# The book price the wrong-match filter and the tilt estimator compare Polymarket with (old fair_value): a mid
+# of the levels where 200 shares have accumulated, so a 1-share order at a silly price cannot move it.
+BOOK_MIN_DEPTH = 200          # shares (old fv_min_depth)
+BOOK_MAX_SPREAD = 0.30        # a book wider than this has no price (old max_spread_for_fv)
 
-
-# =============================================================================================
-# PRICING - our resting orders, clean books, fair value, race risk maths
-# =============================================================================================
-
-def clamp(p): return min(PMAX, max(PMIN, p))
-def floor_tick(p): return round(clamp(math.floor(round(p / TICK, 6)) * TICK), 3)   # round down onto the grid
-def ceil_tick(p): return round(clamp(math.ceil(round(p / TICK, 6)) * TICK), 3)     # round up onto the grid
+# The tilt estimator's knobs, at the old defaults (none was ever changed live).
+TILT_WINSOR = 0.08            # each market's gap r - m is clipped to +-8c, so one stale tail book cannot drag s
+TILT_MIN_MARKETS = 50         # fewer usable markets than this (of ~237): hold the last estimate
+TILT_HALFLIFE_MIN = 30.0      # EMA half-life: s moves over days (0.046 -> 0.128 in two), not minutes
+# The party-control races are priced by far the most actively and do not follow the cross-section's tilt.
+HEADLINE_RACES = ("U.S. House", "U.S. Senate")
 
 
-@dataclass
-class Resting:
-    """One of our orders on the book, described in YES terms."""
-    order_id: int
-    eid: str
-    is_bid: bool              # True = buys YES (or sells NO). False = sells YES (or buys NO)
-    price: float              # YES price
-    qty: float                # shares still open
-    expires: datetime | None
+def ref_key(market):
+    """The key ref_prices.py uses for this market: 'Ohio Senate|Republican'."""
+    return f"{market.race}|{market.party}"
 
 
-def parse_order(o):
-    """API order -> Resting, or None if it isn't really resting any more.
-
-    The engine turns "sell YES @ p" into "buy NO @ 1-p" when we don't hold the YES shares, and
-    reports orders in that converted form, so a NO order is flipped back into YES terms here.
-    """
-    if not o.get("open", True) or o.get("priceLimit") is None:
-        return None
-    exp = parse_ts(o.get("expirationDate"))
-    if exp and exp <= util.utcnow():
-        return None           # past expiry: the engine ignores it even if it still says open
-    yes = str(o["side"]).lower() == "yes"
-    is_bid = yes == (str(o["action"]).lower() == "buy")
-    price = rnd(o["priceLimit"] if yes else 1 - o["priceLimit"])
-    return Resting(int(o["id"]), str(o["exchangeId"]), is_bid, price, float(o["quantity"]), exp)
-
-
-WIRE_PRIVATE = ("_no_sell", "_cash_need", "_alloc_paired")   # never sent
-
-
-def wire_order(o):
-    """Package 6 (reduce_no_as_sell): an order as the bot builds and tracks it (YES terms: "buy"/"sell" YES at a YES
-    price) -> the request body actually sent. Only an order marked "_no_sell" (a bid that buys back NO we hold, see
-    Bot.cover_no_qty) changes: "buy YES @ p" goes out as the covered sale "sell NO @ 1-p", which needs no cash. It
-    reads back through parse_order as our bid at p, so everything after the send keeps working in YES terms."""
-    if not any(k in o for k in WIRE_PRIVATE):
-        return o
-    w = {k: v for k, v in o.items()                  # _cash_need: Package 8 gate's note; _alloc_paired: Package 10 B
-         if k not in WIRE_PRIVATE}
-    if o.get("_no_sell"):
-        w.update(side="no", action="sell", price=round(1 - o["price"], 3))
-    return w
-
-
-def reserved_cash(raw_orders):
-    """Cash our open orders have locked up. A buy of `qty` shares at limit `p` can cost qty*p (p is
-    in that order's own side, so a "buy NO @ 0.825" locks 0.825 a share). Selling shares we already
-    hold locks no cash; the engine reports those as sells, so they're skipped."""
-    total = 0.0
-    for o in raw_orders:
-        if parse_order(o) and str(o.get("action")).lower() == "buy":
-            total += float(o["quantity"]) * float(o["priceLimit"])
-    return total
-
-
-def _num(x):
-    """float(x), or None if it isn't a number."""
-    try:
-        return float(x)
-    except (TypeError, ValueError):
-        return None
-
-
-def strip_own(book, mine):
-    """Remove our own size from a book so every later decision only sees OTHER traders.
-    Without this, once we're top of book the fair value would follow our own quotes and drift."""
-    if not mine:
-        return book
-    own = {"bids": defaultdict(float), "asks": defaultdict(float)}
-    for o in mine:
-        own["bids" if o.is_bid else "asks"][o.price] += o.qty
-    out = dict(book)
-    for key in ("bids", "asks"):
-        out[key] = [{"price": l["price"], "quantity": q} for l in book.get(key) or []
-                    if (q := l["quantity"] - own[key].get(rnd(l["price"]), 0.0)) > 1e-9]
-    return out
-
-
-def predicted_top(book, mine):
-    """The (best bid, best ask) the bulk-price endpoint SHOULD show if nothing changed since we
-    cached `book` (other traders only): the better of their best price and our own orders.
-    If the real top differs, somebody else touched the book and we re-download it."""
-    bids = [l["price"] for l in book.get("bids") or []] + [o.price for o in mine if o.is_bid]
-    asks = [l["price"] for l in book.get("asks") or []] + [o.price for o in mine if not o.is_bid]
-    return (rnd(max(bids)) if bids else None, rnd(min(asks)) if asks else None)
-
-
-def others_top(top, mine):
-    """Other traders' (best bid, best ask) from a bulk-price reading `top`, which includes our own orders.
-    A side is None when it is empty, or when one of our orders sits at or better than that price: then the
-    reading can't tell whether anybody else is there (and where), so nothing is assumed about it."""
-    bid, ask = top
-    if bid is not None and any(o.is_bid and o.price >= bid - 1e-9 for o in mine):
-        bid = None
-    if ask is not None and any(not o.is_bid and o.price <= ask + 1e-9 for o in mine):
-        ask = None
-    return bid, ask
-
+# --------------------------------------------------------------------------- fair value (README §4.1)
 
 def depth_price(levels, min_depth):
-    """Price of the level where the running total of shares first reaches `min_depth`.
-
-    This is the anti-spoofing step. A 1-share bid at a silly price is skipped, because moving
-    this number requires someone to put real size at risk. None = not enough size to trust.
-    """
+    """The price of the level where the running total of shares first reaches min_depth; None if it never does."""
     total = 0.0
-    for l in levels:
-        total += l["quantity"]
+    for price, shares in levels:
+        total += shares
         if total >= min_depth:
-            return l["price"]
+            return price
     return None
 
 
-def fair_value(book, cfg=CFG):
-    """Mid-point of the depth-filtered best bid and ask, or None if the book is too thin or wide.
-    (This replaced the size-weighted 'microprice', which one tiny order could move by 3.5c.)"""
-    if not book:
+def book_price(book):
+    """The book's own depth-checked mid (other traders only), or None if it is too thin or too wide."""
+    if book is None:
         return None
-    bid = depth_price(book.get("bids") or [], cfg.fv_min_depth)
-    ask = depth_price(book.get("asks") or [], cfg.fv_min_depth)
-    if bid is None or ask is None or ask <= bid or ask - bid > cfg.max_spread_for_fv:
+    bid, ask = depth_price(book.bids, BOOK_MIN_DEPTH), depth_price(book.asks, BOOK_MIN_DEPTH)
+    if bid is None or ask is None or ask <= bid or ask - bid > BOOK_MAX_SPREAD:
         return None
     return (bid + ask) / 2
 
 
-def tilted_ref(r, s, legs):
-    """Polymarket price r as the tournament's favourite-longshot tilt s would price it: c + (1 - s)(r - c), with
-    c = 1 / legs in the race (a lone market counts as two-sided: c = 0.5)."""
-    c = 1.0 / legs if legs and legs > 1 else 0.5
-    return c + (1 - s) * (r - c)
-
-
-def blend_fv(book_fv, r, cfg):
-    """The main loop's blend: book price leaned toward Polymarket by ref_weight."""
-    return (1 - cfg.ref_weight) * book_fv + cfg.ref_weight * r
-
-
-TILT_RATIO_MIN_X = 0.1   # T2.1 "median"/"wls" estimators: only markets with |r - c| above this give a ratio g / x
-
-
-class TiltEstimator:
-    """Cross-sectional estimate of the tilt s: least squares of the gap (r - book_fv, winsorised at
-    +-ref_tilt_winsor) on (r - c), through the origin (ref_tilt_estimator "slope"); or the median ("median") or
-    mean ("wls") of the per-market ratios gap / (r - c) over |r - c| > TILT_RATIO_MIN_X (fewer such markets than
-    ref_tilt_min_markets: hold). Fewer than ref_tilt_min_markets samples: hold the last value.
-    Smoothed by an EMA with half-life ref_tilt_halflife_min (time-based; the first estimate is taken as is) and
-    clipped to [0, ref_tilt_max]."""
-
-    def __init__(self, cfg=CFG):
-        self.cfg = cfg
-        self.s = 0.0          # current estimate
-        self.n = 0            # samples in the last update
-        self.ready = False    # a valid estimate has been taken (or restored)
-        self.t = None         # time of the last valid estimate (seconds; None after a restore)
-        self.diag = {}        # the last update's raw readings by every estimator (see update)
-
-    def update(self, samples, now):
-        """samples: [(r, book_fv, legs), ...]; now: seconds (any clock, as long as it is always the same one).
-        Also leaves self.diag: this cycle's raw (unclipped, unsmoothed) reading by every estimator, the sample
-        counts and the share of the slope's x^2 weight in markets whose gap is at the winsor (status tilt_diag)."""
-        cfg = self.cfg
-        self.n = len(samples)
-        w = cfg.ref_tilt_winsor
-        kind = getattr(cfg, "ref_tilt_estimator", "slope")
-        num = den = pinned = 0.0
-        ratios = []
-        for r, bfv, legs in samples:
-            x = r - (1.0 / legs if legs and legs > 1 else 0.5)
-            g = max(-w, min(w, r - bfv))
-            num += x * g
-            den += x * x
-            if abs(r - bfv) >= w - 1e-9:
-                pinned += x * x
-            if abs(x) > TILT_RATIO_MIN_X:
-                ratios.append(g / x)              # this market's own implied tilt
-        ratios.sort()
-        h = len(ratios) // 2
-        alt = {"slope": num / den if den > 1e-12 else None,
-               "median": (ratios[h] if len(ratios) % 2 else 0.5 * (ratios[h - 1] + ratios[h])) if ratios else None,
-               "wls": sum(ratios) / len(ratios) if ratios else None}
-        self.diag = {"n": self.n, "n_ratio": len(ratios),
-                     "pinned_weight": round(pinned / den, 3) if den > 1e-12 else None,
-                     **{k: (round(v, 4) if v is not None else None) for k, v in alt.items()}}
-        if self.n < max(1, cfg.ref_tilt_min_markets):
-            return self.s
-        if kind in ("median", "wls"):
-            if len(ratios) < max(1, cfg.ref_tilt_min_markets):
-                return self.s
-            est = alt[kind]
-        elif den <= 1e-12:
-            return self.s
-        else:                                     # "slope" (and any unknown value)
-            est = num / den
-        raw = max(0.0, min(cfg.ref_tilt_max, est))
-        if not self.ready:
-            self.s, self.ready = raw, True        # first valid estimate: taken as is
-        else:                                     # after a restore (t None) the first update only sets the clock
-            dt = max(0.0, now - self.t) if self.t is not None else 0.0
-            self.s += (1 - 0.5 ** (dt / (60.0 * max(1e-9, cfg.ref_tilt_halflife_min)))) * (raw - self.s)
-        self.s = max(0.0, min(cfg.ref_tilt_max, self.s))
-        self.t = now
-        return self.s
-
-    def to_dict(self):
-        return {"s": self.s, "ready": self.ready}
-
-    def from_dict(self, d):
-        """Restore a saved estimate (missing or bad = 0, not ready). The EMA continues from it."""
-        try:
-            d = d if isinstance(d, dict) else {}
-            self.s = max(0.0, min(self.cfg.ref_tilt_max, float(d.get("s") or 0.0)))
-            self.ready = bool(d.get("ready", self.s > 0))
-        except (TypeError, ValueError):
-            self.s, self.ready = 0.0, False
-        self.t = None
-        return self
-
-
-def normalise(fvs):
-    """Outcomes that exclude each other (one party wins a race) must add up to 1; scale them so
-    they do. Left alone if any member has no price, since we can't scale what we can't see."""
-    if not fvs or any(v is None for v in fvs.values()):
-        return fvs
-    total = sum(fvs.values())
-    return {k: v / total for k, v in fvs.items()} if total > 0 else fvs
-
-
-_STD_NORMAL = statistics.NormalDist()
-
-
-def bloc_slope(p_dem, rho, p_ind=0.0):
-    """Package 10 A2 (ideas_H.md H-2): d E[payout of one Dem-win share] / d F is -sqrt(rho) x phi(Phi^-1(p_dem)) x
-    (1 - p_ind) under the Gaussian copula (F = the national factor, + = Republican; p_dem conditional on no
-    independent winning). Returns the magnitude sqrt(rho) x phi(Phi^-1(p_dem)) x (1 - p_ind)."""
-    x = min(max(p_dem, 1e-5), 1 - 1e-5)
-    return math.sqrt(rho) * _STD_NORMAL.pdf(_STD_NORMAL.inv_cdf(x)) * (1 - p_ind)
-
-
-def bloc_sensitivities(races, cfg=CFG):
-    """Package 10 A2: {eid: $ per sd of the national factor per YES share} (+ Rep YES, - Dem YES, so a Republican-
-    leaning book is +, like party_delta). races = {race: [(eid, label, p or None, liquid), ...]}, p race-scaled.
-    A race needs a "Dem " and a "Rep " leg (labels), or is one partisan market alone; p_ind = the other legs' p;
-    p_dem = the Dem leg's p (else 1 - Rep p - p_ind) / (1 - p_ind). Only contracts with a liquid p get one; the
-    headline (control) races use bloc_rho_control."""
-    out = {}
-    for race, legs in races.items():
-        kind = {e: ("D" if (lab or "").startswith("Dem ") else "R" if (lab or "").startswith("Rep ") else "I")
-                for e, lab, _, _ in legs}
-        ps = {e: p for e, _, p, _ in legs}
-        dem = [e for e in kind if kind[e] == "D"]
-        rep = [e for e in kind if kind[e] == "R"]
-        if not ((dem and rep) or (len(legs) == 1 and (dem or rep))):
-            continue
-        p_ind = sum(ps[e] or 0.0 for e in kind if kind[e] == "I")
-        if dem and ps[dem[0]] is not None:
-            pd = ps[dem[0]]
-        elif rep and ps[rep[0]] is not None:
-            pd = 1 - ps[rep[0]] - p_ind
-        else:
-            continue
-        if p_ind >= 1 - 1e-9:
-            continue
-        rho = cfg.bloc_rho_control if race in cfg.headline_races else cfg.bloc_rho
-        slope = bloc_slope(pd / (1 - p_ind), rho, p_ind)
-        for e, _, p, liquid in legs:
-            if liquid and p is not None and kind[e] != "I":
-                out[e] = slope if kind[e] == "R" else -slope
+def race_scaled(markets, prices):
+    """{eid: price} with each race's legs divided by their sum, when every leg of the race has a price.
+    A race with an unpriced leg is left as it is: we cannot scale what we cannot see."""
+    races = {}
+    for eid, m in markets.items():
+        races.setdefault(m.race, []).append(eid)
+    out = dict(prices)
+    for legs in races.values():
+        if len(legs) > 1 and all(prices.get(e) is not None for e in legs):
+            total = sum(prices[e] for e in legs)
+            if total > 0:
+                out.update({e: prices[e] / total for e in legs})
     return out
 
 
-def race_variance(legs):
-    """Variance of one race's settlement payout. legs = [(net YES shares, probability), ...]; exactly one leg
-    wins in a race (probabilities scaled to sum to 1); a lone market wins with its own probability."""
-    if len(legs) == 1:
-        (x, p), = legs
-        return x * x * p * (1 - p)                   # YES or NO shares: payout differs by |x| between outcomes
-    tot = sum(p for _, p in legs) or 1.0
-    probs = [p / tot for _, p in legs]
-    pays = []
-    for i in range(len(legs)):
-        pays.append(sum((x if j == i else 0.0) if x > 0 else (0.0 if j == i else -x) for j, (x, _) in enumerate(legs)))
-    mean = sum(p * v for p, v in zip(probs, pays))
-    return sum(p * (v - mean) ** 2 for p, v in zip(probs, pays))
+def book_prices(markets, books):
+    """{eid: depth-checked mid} for the markets with a fresh, usable book, race-normalised as the live cycle did."""
+    mids = {e: book_price(books.get(e)) for e in markets}
+    return {e: v for e, v in race_scaled(markets, mids).items() if v is not None}
 
 
-def worst_case_loss(legs):
-    """How much the marked-to-market value of one race would fall in its worst outcome.
+def wrong_matches(markets, refs, books, s):
+    """{eid: (Polymarket, book mid)} where Polymarket is further than s.ref_max_book_gap from the book. That is
+    almost always a wrong entry in ref_map.json (a replaced candidate); the bot alerts once per market."""
+    mids, out = book_prices(markets, books), {}
+    for eid, m in markets.items():
+        r, mid = refs.get(ref_key(m)), mids.get(eid)
+        if r is not None and mid is not None and abs(r - mid) > s.ref_max_book_gap:
+            out[eid] = (r, mid)
+    return out
 
-    legs = [(net YES shares, fair value), ...] for exchanges that exclude each other.
-    Assumes exactly one leg wins (a race: one party wins). A lone market can win or lose.
-    Example: long 500 Rep @0.14 AND long 500 Dem @0.86 -> worth 500 now, pays 500 either way -> 0.
-    """
-    value = sum(x * fv if x > 0 else -x * (1 - fv) for x, fv in legs)      # NO shares are worth 1-fv each
-    if len(legs) == 1:
-        scenarios = [[True], [False]]
-    else:
-        scenarios = [[j == i for j in range(len(legs))] for i in range(len(legs))]
 
-    def payout(wins):   # YES shares pay 1 if their leg wins; NO shares pay 1 if it loses
-        return sum((x if w else 0.0) if x > 0 else (0.0 if w else -x) for (x, _), w in zip(legs, wins))
+def matched_refs(markets, refs, books, s):
+    """{eid: raw Polymarket price} for every market with one that is not a wrong match (liquid or not)."""
+    bad = wrong_matches(markets, refs, books, s)
+    return {e: refs[ref_key(m)] for e, m in markets.items() if ref_key(m) in refs and e not in bad}
 
-    return max(0.0, value - min(payout(s) for s in scenarios))
+
+def liquid_refs(markets, refs, spreads, books, s):
+    """{eid: raw Polymarket price} where Polymarket's own bid-ask is at most s.ref_max_spread: a thin or
+    last-trade-only price can be days old, so it never sets a value."""
+    return {e: r for e, r in matched_refs(markets, refs, books, s).items()
+            if spreads.get(ref_key(markets[e])) is not None and spreads[ref_key(markets[e])] <= s.ref_max_spread}
+
+
+def fair_values(markets, refs, spreads, books, s):
+    """{eid: p}: the liquid markets' Polymarket price, scaled over its race. The scaling uses every leg's matched
+    price, liquid or not (as live): an illiquid leg still says how much of the race is left. Unpriced = absent."""
+    scaled = race_scaled(markets, matched_refs(markets, refs, books, s))
+    return {e: scaled[e] for e in liquid_refs(markets, refs, spreads, books, s)}
+
+
+# --------------------------------------------------------------------------- edge per unit of cash (README §4.2)
+# Expected gain at the result divided by the cash the action ties up (or frees). A buy at a pays a; a short at b
+# is a NO purchase at 1 - b. The TICK floor on a denominator only matters at the edge of the price grid.
+
+def edge_buy(p, ask):
+    """Buying YES at the ask: (p - a) / a."""
+    return (p - ask) / max(ask, TICK)
+
+
+def edge_short(p, bid):
+    """Selling YES short at the bid: (b - p) / (1 - b)."""
+    return (bid - p) / max(1 - bid, TICK)
+
+
+def edge_keep_long(p, bid):
+    """Keeping a long rather than selling it at the bid: (p - b) / b."""
+    return (p - bid) / max(bid, TICK)
+
+
+def edge_keep_short(p, ask):
+    """Keeping a short rather than buying it back at the ask: (a - p) / (1 - a)."""
+    return (ask - p) / max(1 - ask, TICK)
+
+
+def edge_held(qty, p, book):
+    """The edge left in a holding, against the touch it would be sold into; None for no position (under one
+    share) or no other trader on that side. The allocator sells the holdings where this is lowest first."""
+    if abs(qty) < 1 or book is None:
+        return None
+    if qty > 0:
+        return None if book.best_bid is None else edge_keep_long(p, book.best_bid)
+    return None if book.best_ask is None else edge_keep_short(p, book.best_ask)
+
+
+# --------------------------------------------------------------------------- sizing
+
+# On a side where p sees no edge, market making may still show this small a size (100 shares at 100k), so it
+# stays two-sided without betting against Polymarket (old kelly_no_edge_frac, never changed live).
+NO_EDGE_FRAC = 0.001
+
+
+def kelly_shares(p, price, is_bid, bankroll, s):
+    """The most shares fractional Kelly allows on one side. A contract costing `cost` that pays 1 with chance
+    `win` has the Kelly stake f = (win - cost) / (1 - cost) of the bankroll; we bet s.kelly_fraction of it,
+    capped at s.kelly_max_market_frac. E.g. p 0.20, buy at 0.14: f = 0.06 / 0.86 = 7%, quarter Kelly 1.7%.
+    A bid buys YES at price; an ask sells YES, i.e. buys NO at 1 - price."""
+    allowance = float(int(NO_EDGE_FRAC * bankroll))
+    edge, cost = (p - price, price) if is_bid else (price - p, 1 - price)
+    if edge <= 0 or cost <= 0:
+        return allowance
+    stake = min(s.kelly_fraction * edge / (1 - cost), s.kelly_max_market_frac) * bankroll
+    return max(allowance, float(int(stake / cost)))
+
+
+# --------------------------------------------------------------------------- the tilt (README §3.1)
+
+class TiltEstimator:
+    """s from the cross-section: least squares through the origin of the gap g = r - m (winsorised) on
+    x = r - c, c = 1 / legs (a lone market counts as two-sided). Since m = c + (1 - s)(r - c), g = s x exactly.
+    The per-cycle reading is clipped to [0, s.tilt_max], smoothed by a time-based EMA, and clipped again.
+    The median and mean-ratio variants of the old code were never used live and are not carried over."""
+
+    def __init__(self):
+        self.s = 0.0              # current estimate
+        self.ready = False        # a valid estimate has been taken or restored
+        self.t = None             # monotonic seconds of the last valid estimate (None after a restore)
+        self.n = 0                # markets in the last cross-section
+        self.raw = None           # the last cross-section's unclipped, unsmoothed slope
+
+    def samples(self, markets, books, r, paused):
+        """[(r, m, legs)]: markets with a liquid Polymarket price and a book price, outside the headline races
+        and any market paused after a jump (its book has not caught up yet)."""
+        mids, legs = book_prices(markets, books), {}
+        for m in markets.values():
+            legs[m.race] = legs.get(m.race, 0) + 1
+        return [(r[e], mids[e], legs[m.race]) for e, m in markets.items()
+                if e in r and e in mids and e not in paused and m.race not in HEADLINE_RACES]
+
+    @staticmethod
+    def slope(samples):
+        """sum x g / sum x^2 over the samples, or None if they carry no weight."""
+        num = den = 0.0
+        for r, m, legs in samples:
+            x = r - (1.0 / legs if legs > 1 else 0.5)
+            num += x * max(-TILT_WINSOR, min(TILT_WINSOR, r - m))
+            den += x * x
+        return num / den if den > 1e-12 else None
+
+    def update(self, markets, books, r, now, s, paused=frozenset()):
+        """The smoothed s after this cycle's cross-section, or None until there has been one. r is
+        liquid_refs(...) (RAW Polymarket, not p); now is monotonic seconds. Too few markets: hold."""
+        cross = self.samples(markets, books, r, paused)
+        self.n, self.raw = len(cross), self.slope(cross)
+        if self.n < TILT_MIN_MARKETS or self.raw is None:
+            return self.s if self.ready else None
+        reading = max(0.0, min(s.tilt_max, self.raw))
+        if not self.ready:
+            self.s, self.ready = reading, True
+        else:                     # after a restore the first update only starts the clock
+            dt = max(0.0, now - self.t) if self.t is not None else 0.0
+            self.s += (1 - 0.5 ** (dt / (60.0 * TILT_HALFLIFE_MIN))) * (reading - self.s)
+        self.s, self.t = max(0.0, min(s.tilt_max, self.s)), now
+        return self.s
+
+    def to_dict(self):
+        return {"s": round(self.s, 4), "ready": self.ready, "n": self.n,
+                "raw": None if self.raw is None else round(self.raw, 4)}
+
+    @classmethod
+    def from_dict(cls, d):
+        """A saved estimate (missing or bad: 0, not ready). The EMA continues from it."""
+        est = cls()
+        try:
+            est.s = max(0.0, float(d.get("s") or 0.0))
+            est.ready = bool(d.get("ready", est.s > 0))
+        except (AttributeError, TypeError, ValueError):
+            est.s, est.ready = 0.0, False
+        return est

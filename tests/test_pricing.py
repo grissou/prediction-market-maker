@@ -1,18 +1,18 @@
 """
-Offline tests for mmbot2/pricing.py: the four edge formulas (README §4.2), edge_held, race scaling, the liquidity
+Offline tests for mmbot/pricing.py: the four edge formulas (README §4.2), edge_held, race scaling, the liquidity
 and wrong-match filters, quarter-Kelly sizes (the README example), and the tilt estimator recovering a known s
-from a synthetic cross-section m = c + (1 - s)(r - c). Inputs are mmbot2.state records; no exchange, no network.
+from a synthetic cross-section m = c + (1 - s)(r - c). Inputs are mmbot.state records; no exchange, no network.
 
-Run:  python3 tests2/test_pricing.py      (exit code 0 = all passed)
+Run:  python3 tests/test_pricing.py      (exit code 0 = all passed)
 """
 import os
 import random
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from mmbot2 import pricing as P                           # noqa: E402
-from mmbot2.config import Settings                        # noqa: E402
-from mmbot2.state import Book, Market                     # noqa: E402
+from mmbot import pricing as P                           # noqa: E402
+from mmbot.config import Settings                        # noqa: E402
+from mmbot.state import Book, Market                     # noqa: E402
 
 RESULTS = []
 S = Settings()

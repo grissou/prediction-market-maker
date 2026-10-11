@@ -14,13 +14,13 @@ import time
 
 import requests
 
-log = logging.getLogger("mm2")
+log = logging.getLogger("mmbot")
 
 SILENCE_S = 1800.0            # the same cause alerts at most once in 30 minutes
 
 
 class Notifier:
-    def __init__(self, url, title="mm_bot2"):
+    def __init__(self, url, title="mm_bot"):
         self.url, self.title, self.last = url, title, {}
 
     def send(self, msg, title=None):

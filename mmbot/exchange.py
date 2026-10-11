@@ -1,607 +1,158 @@
 """
-The exchange: ApiError, Api (HTTP, retries, rate limiting, one method per endpoint),
-_SocketErrorWatch and RealtimeFeed (the push feed on a background thread), plus the per-market state
-record Ex, the order-change records Change / Write, state_of and busy.
+The exchange: the REST client with its request and write budgets, the realtime feed, and the wire format.
 
-Must never decide prices or sizes and must never import the bot or the mixins.
+OWNS     ApiError; Client (one HTTP session, a sliding-minute request budget and a separate write budget, the 429
+         pause, retries under one idempotency key, one method per endpoint); Placed (what became of an order we
+         sent); Feed (Supabase realtime on its own thread); the YES-terms translation of orders, books and fills;
+         market parsing (race, party, state). Single-threaded but for the feed's thread.
+NEVER    decides a price or a size, keeps strategy state, or sends a write in a dry run.
+ORIGIN   Day one: the API's limit measured at about 100 requests a minute, and each 429 cost a silent pause; so every
+         request goes through one budget below it (80/min, 28 writes/min since the first penalties), and a 429 stops
+         EVERY request for Retry-After and cuts both budgets once per pause. The crowded book: other bots penny us,
+         so our own orders are stripped from every book before anyone prices from it, or fair value would follow
+         our quotes. The feed died silently for two days (29 Sep) while reporting "connected": hence the dead-socket
+         checks and the session renewal.
+FOREIGN  The client lists every order on the account; which are ours is the bot's (bot.py header: FOREIGN). It never
+         calls cancel-all while a foreign order rests; `cancel(oid, wait=True)` lets a stop wait for the budget.
+OPEN     A NO-side fill's price is read as the NO price (day one: an ask at 0.62 filled "at 0.38"); the old bot also
+         accepted the YES price there. The exchange's handling of a "sell NO" beyond the NO held is unknown, so a
+         covered sale is trimmed to the NO held.
 """
 import asyncio
-import bisect
 import json
-import logging.handlers
-import random
+import logging
 import re
-import requests
 import threading
+import time
 import uuid
-from collections import defaultdict, deque
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-from requests.adapters import HTTPAdapter
+from collections import deque
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
-from mmbot import util
-from mmbot import pricing
-from mmbot import quoting
-from mmbot.util import iso, log, parse_ts, rnd
-from mmbot.pricing import _num
-from mmbot.quoting import NO_QUOTE, Quote, fl_side
+import requests
 
+from mmbot.state import Account, Book, Fill, Market, Order
 
-# =============================================================================================
-# API - HTTP, retries, rate limiting, one method per endpoint we use
-# =============================================================================================
+log = logging.getLogger("mmbot")
+
+WINDOW_S = 60.0               # the budgets are per rolling minute, as the exchange measures them
+MIN_GAP_S = 0.5               # request starts at least this far apart: bursts drew the first 429s (old min gap)
+CUT_429 = 0.75                # a new 429 pause cuts each budget to three quarters...
+FLOOR_RPM, FLOOR_WPM = 20, 10 # ...never below these, or the bot could not even reconcile
+DEFAULT_PAUSE_S = 5.0         # a 429 without Retry-After pauses this long
+MAX_WRITE_WAIT_S = 5.0        # a write that would wait longer is not sent (the cycle never blocks on the budget)
+TIMEOUT_S = 15.0              # one HTTP request; day one's slow writes took 15-30 s
+MAX_RETRIES = 5
+RETRY_STATUS = (502, 503, 504)   # ORDER_STATUS_UNKNOWN, SERVICE_UNAVAILABLE / TX_CONFLICT, gateway: safe to resend
+FATAL_CODES = {"MISSING_API_KEY", "INVALID_API_KEY", "API_KEY_REVOKED", "API_KEY_EXPIRED",   # retrying never helps
+               "INSUFFICIENT_SCOPES", "ACCOUNT_BANNED", "TERMS_NOT_ACKNOWLEDGED"}
+BULK_MAX_IDS = 100            # /exchanges/prices takes at most 100 ids a request
+BOOK_DEPTH = 10               # levels per side; deeper levels never set a price
+BATCH_MAX = 10                # orders per POST /orders/batch: full 20-order batches timed out (273 of 417, 1-2 Oct)
+IOC_TTL_S = 10.0              # an immediate-or-cancel order lives this long even if its cancel is lost
+FILL_PAGES = 5                # pages of 200 fills read back per call: catches up on 1,000 fills
+CASH_NET_KEYS = ("availableBalance", "availableCash", "availableFunds", "available")   # net of what orders lock
+CASH_GROSS_KEYS = ("cashBalance", "cash", "balance", "myBalance")                      # locks still inside
+MARK_KEYS = ("currentPrice", "markPrice", "valuationPrice", "price")                   # a position's valuation
+TITLE = re.compile(r"^Will the (\w+) Party win the (.+)\?$")   # every race market's title
+
 
 class ApiError(Exception):
-    def __init__(self, status, code, msg, data=None):
-        super().__init__(f"{status} {code}: {msg}")
-        self.status, self.code, self.data = status, code, data
+    def __init__(self, status, code, message):
+        super().__init__(f"{status} {code}: {message}")
+        self.status, self.code, self.message = status, code, message
 
+    @property
+    def fatal(self):
+        return self.code in FATAL_CODES
 
-class Api:
-    def __init__(self, cfg, live):
-        if not cfg.api_key:
-            util.fatal("SUPERMARKET_API_KEY is not set (venv activate script or .env file)")
-        self.cfg, self.live = cfg, live
-        self.gap = cfg.min_request_gap    # current min gap between request starts; widens after a 429
-        self._next_start = 0.0            # earliest time the next request may start (shared by all threads)
-        self._lock = threading.Lock()     # several threads send requests at once (parallel_requests)
-        self._window = deque()            # start times of requests in the last BUDGET_WINDOW seconds
-        self.budget = float(cfg.requests_per_minute)   # current per-minute budget (self-tuning)
-        self.wbudget = float(cfg.writes_per_minute)    # ...and for order writes on their own (self-tuning)
-        self._wwindow = deque()           # start times of writes in the last BUDGET_WINDOW seconds
-        self.write_times = deque(maxlen=500)   # (time done, seconds on the wire, timed out) per write attempt
-        self.rate_limited = 0             # how many 429s we've had (shown in status.json - should stay 0)
-        self.paused_until = 0.0           # monotonic end of the exchange's 429 pause (Retry-After); 0 = none
-        self.pauses_total = 0             # 429 pauses started (several 429s inside one pause extend it)
-        self.write_budget_wait_total = 0  # main-thread writes not sent: they would have waited (WRITE_BUDGET_WAIT)
-        self.tl = threading.local()       # per thread: max_write_wait (the main thread's cap on a write's wait)
-        self.s = requests.Session()
-        self.s.headers.update({"Authorization": f"Bearer {cfg.api_key}", "Content-Type": "application/json"})
-        # Keep one open connection per thread that can talk to the exchange at once, so none has to open (and
-        # then throw away: "Connection pool is full, discarding connection", 2 Oct 08:08:57) a fresh TLS
-        # connection, which costs 0.2-0.5 s and inflates the write times burst mode watches.
-        self.s.mount("https://", HTTPAdapter(pool_connections=4, pool_maxsize=self.pool_size(cfg), pool_block=False))
-
-    @staticmethod
-    def pool_size(cfg):
-        """Connections to keep: book downloads (parallel_requests) + order writes (parallel_writes) + the main
-        thread + the self-test thread + the realtime token refresh + one spare."""
-        return max(1, cfg.parallel_requests) + max(1, cfg.parallel_writes) + 4
-
-    BUDGET_WINDOW = 60.0                  # seconds the per-minute budget is measured over
-
-    def throttle(self, write=False):
-        """Rate limiter for every request, across all threads:
-          1. never more than `self.budget` requests in any BUDGET_WINDOW seconds (hard cap), and
-          2. request starts at least `self.gap` apart (smooths bursts), and
-          3. nothing starts during the exchange's 429 pause (paused_until).
-        A request that would break a rule waits until it wouldn't (sleeping WITHOUT the lock). A write on a thread
-        with tl.max_write_wait set (the main thread, during a cycle) that would wait longer raises ApiError 429
-        WRITE_BUDGET_WAIT instead, unsent and unreserved: the main loop never blocks on the write budget."""
-        with self._lock:
-            now = util.time.monotonic()
-            while self._window and now - self._window[0] >= self.BUDGET_WINDOW:
-                self._window.popleft()
-            start = max(now, self._next_start, self.paused_until)
-            if len(self._window) >= int(self.budget):
-                start = max(start, self._window[-int(self.budget)] + self.BUDGET_WINDOW)
-            general = start
-            if write:
-                while self._wwindow and now - self._wwindow[0] >= self.BUDGET_WINDOW:
-                    self._wwindow.popleft()
-                if len(self._wwindow) >= int(self.wbudget):
-                    start = max(start, self._wwindow[-int(self.wbudget)] + self.BUDGET_WINDOW)
-                cap = getattr(self.tl, "max_write_wait", None)
-                if cap is not None and start - now > cap:
-                    self.write_budget_wait_total = getattr(self, "write_budget_wait_total", 0) + 1
-                    raise ApiError(429, "WRITE_BUDGET_WAIT", f"a write would wait {start - now:.0f} s for the write "
-                                   f"budget / rate-limit pause (main thread: at most {cap:.0f} s) - not sent")
-                bisect.insort(self._wwindow, start)
-            self._next_start = general + self.gap   # a write waiting on the WRITE budget never holds up reads
-            # Kept sorted: a write held back by the write budget starts later than reads throttled after it, and
-            # the clean-up above and the [-budget] lookup both assume oldest-first order.
-            bisect.insort(self._window, start)
-        while start > now:
-            util.time.sleep(start - now)
-            # A 429 pause that began while this request slept: wait it out too, instead of knocking during it
-            # (each such request earned another 429 and, before, another silent 60 s pause).
-            now = util.time.monotonic()
-            with self._lock:
-                start = self.paused_until
-
-    def pause_left(self):
-        """Seconds left of the exchange's 429 pause (0 = none)."""
-        return max(0.0, getattr(self, "paused_until", 0.0) - util.time.monotonic())
-
-    def write_wait(self):
-        """Seconds a write sent now would wait (write budget full, or a 429 pause)."""
-        if not hasattr(self, "_wwindow"):         # (test doubles without the limiter)
-            return 0.0
-        with self._lock:
-            now = util.time.monotonic()
-            wait_s = max(0.0, self.paused_until - now, self._next_start - now)
-            live = [t for t in self._wwindow if now - t < self.BUDGET_WINDOW]
-            if len(live) >= int(self.wbudget):
-                wait_s = max(wait_s, live[-int(self.wbudget)] + self.BUDGET_WINDOW - now)
-            return wait_s
-
-    def pause_state(self):
-        """For status.json: the 429 pause now, how many there were, the 429s."""
-        left = self.pause_left()
-        return {"paused_until": iso(util.utcnow() + timedelta(seconds=left)) if left > 0 else None,
-                "pause_seconds_left": round(left, 1), "pauses_total": getattr(self, "pauses_total", 0),
-                "rate_limited_total": getattr(self, "rate_limited", 0)}
-
-    def budget_left(self):
-        """How many more requests fit in the budget right now."""
-        with self._lock:
-            now = util.time.monotonic()
-            used = sum(1 for t in self._window if now - t < self.BUDGET_WINDOW)
-            return int(self.budget) - used
-
-    def write_ceiling(self):
-        """What the self-tuning write budget may grow to: writes_per_minute_max (never below the start value)."""
-        return float(max(self.cfg.writes_per_minute, getattr(self.cfg, "writes_per_minute_max", 0)))
-
-    def writes_left(self):
-        """How many more order writes fit in the write budget right now."""
-        with self._lock:
-            now = util.time.monotonic()
-            return int(self.wbudget) - sum(1 for t in self._wwindow if now - t < self.BUDGET_WINDOW)
-
-    def call(self, method, path, params=None, body=None, ok=(200, 201, 207), retry_sent=True):
-        """One HTTP request with rate limiting and retries.
-
-        Retried automatically (same body -> same idempotencyKey -> the server never places twice):
-          - network errors / timeouts
-          - 429 RATE_LIMITED (also slows down every later request)
-          - 502 ORDER_STATUS_UNKNOWN, 503 SERVICE_UNAVAILABLE / TX_CONFLICT, 504
-        Anything else raises ApiError straight away: a 4xx means we broke a rule, so retrying won't help.
-        409 REQUEST_IN_FLIGHT is deliberately NOT retried here (the API says wait 90 s); the bot
-        handles it by leaving that exchange alone for `pending_seconds` instead of blocking.
-        """
-        retries = self.cfg.max_retries
-        delay = 0.25                      # first back-off wait; doubles each retry up to 8 s
-        for attempt in range(retries + 1):
-            self.throttle(write=method != "GET")
-            t_sent = util.time.monotonic()
-            try:
-                r = self.s.request(method, self.cfg.base_url + path, timeout=self.cfg.request_timeout,
-                                   params={k: v for k, v in (params or {}).items() if v is not None},
-                                   data=json.dumps(body) if body is not None else None)
-                self.last_date = (r.headers.get("Date"), util.utcnow())   # server clock vs ours (see Bot.check_clock)
-            except requests.RequestException as e:
-                # A write that timed out AFTER it was sent is usually still running on the exchange: retrying it
-                # at once only earns 409 REQUEST_IN_FLIGHT (day one, every time) and costs a request. Hand it
-                # back as "outcome unknown" instead; the bot recovers it from the open-orders list.
-                sent = isinstance(e, requests.exceptions.ReadTimeout)
-                if method != "GET":
-                    self.write_times.append((util.time.monotonic(), util.time.monotonic() - t_sent, sent))
-                if attempt == retries or (sent and not retry_sent and self.cfg.write_fail_fast):
-                    raise ApiError(0, "NETWORK", str(e))
-                util.time.sleep(delay); delay = min(delay * 2, 8)
-                continue
-
-            if method != "GET":
-                self.write_times.append((util.time.monotonic(), util.time.monotonic() - t_sent, False))
-            # A proxy can answer with an HTML error page; never let that crash the bot.
-            try:
-                data = r.json() if r.content else {}
-            except ValueError:
-                data = {"error": {"code": "BAD_RESPONSE", "message": r.text[:200]}}
-
-            if r.status_code in ok:
-                self.gap = max(self.cfg.min_request_gap, self.gap * 0.99)   # drift back to normal speed
-                self.budget = min(self.cfg.requests_per_minute, self.budget + 1 / 60)   # ~+1 per 60 successes
-                if method != "GET":   # additive increase, up to writes_per_minute_max (AIMD; cut on a 429 below)
-                    self.wbudget = min(self.write_ceiling(), self.wbudget + 1 / 60)
-                return r.status_code, data
-
-            err = data.get("error") if isinstance(data, dict) else None
-            if not isinstance(err, dict):         # some errors are plain text: {"error": "Not found"} (2026-10-02 outage)
-                err = {"message": str(err)} if err else {}
-            ra = r.headers.get("Retry-After", "")
-            retry_after = float(ra) if ra.replace(".", "", 1).isdigit() else None
-            if r.status_code == 429:
-                # Rate limited. Don't just retry this one request: pause EVERY thread for as long as the
-                # server asks, and slow down for good, so we never keep knocking on a closed door.
-                # A 429 inside a pause EXTENDS it to Retry-After from now (never added up); the budgets are cut
-                # once per pause, not per 429. Every 429 is logged (2 Oct: 20 counted, none logged - the old
-                # "already paused" test was fooled by ordinary queued requests).
-                pause = retry_after if retry_after is not None else 5.0
-                with self._lock:
-                    now = util.time.monotonic()
-                    already_paused = self.paused_until > now
-                    left_before = max(0.0, self.paused_until - now)
-                    self.paused_until = max(self.paused_until, now + pause)
-                    self._next_start = max(self._next_start, self.paused_until)
-                    if not already_paused:        # the budget was too generous: cut it by a quarter
-                        self.pauses_total += 1
-                        self.gap = min(self.cfg.max_request_gap, self.gap * 2)
-                        self.budget = max(20.0, self.budget * 0.75)
-                        if method != "GET" or self.wbudget > self.cfg.writes_per_minute:
-                            # (a per-key limit 429s the more frequent reads first: a grown write budget is cut too)
-                            self.wbudget = max(10.0, self.wbudget * self.cfg.write_budget_cut)
-                    self.rate_limited += 1
-                    until = self.paused_until - now
-                log.warning("RATE LIMITED (429) %s %s: Retry-After %s; %s - all requests paused %.0f s; budget %.0f/min, "
-                            "writes %.0f/min (429 #%d, pause #%d)", method, path.split("?")[0], ra or "-",
-                            f"already paused ({left_before:.0f} s left): pause extended" if already_paused
-                            else "new pause", until, self.budget, self.wbudget, self.rate_limited, self.pauses_total)
-                if attempt < retries:
-                    continue                  # throttle() makes the retry wait until the pause is over
-            elif r.status_code in (502, 503, 504) and attempt < retries:
-                util.time.sleep(retry_after if retry_after is not None else delay + random.random() * delay)
-                delay = min(delay * 2, 8)
-                continue
-            raise ApiError(r.status_code, err.get("code", "?"), err.get("message", r.text[:200]), data)
-
-    def get(self, path, **params):
-        return self.call("GET", path, params=params)[1]
-
-    def paged(self, path, **params):
-        """GET every page of a cursor-paginated list endpoint."""
-        out, cursor = [], None
-        while True:
-            page = self.get(path, cursor=cursor, **params)
-            out += page.get("data", [])
-            if not page.get("pagination", {}).get("hasMore"):
-                return out
-            cursor = page["pagination"]["nextCursor"]
-
-    # --- reads ------------------------------------------------------------------------------
-    def tournament(self):
-        return self.get(f"/tournaments/{self.cfg.slug}")
-
-    def markets(self):
-        return self.paged(f"/tournaments/{self.cfg.slug}/markets", limit=100, status="open")
-
-    def positions(self):
-        return self.get(f"/tournaments/{self.cfg.slug}/portfolio/positions")
-
-    def pnl(self):
-        return self.get(f"/tournaments/{self.cfg.slug}/portfolio/pnl", period="all")
-
-    def leaderboard(self):
-        """Our rank: {"myRank": 3, "total": 120, ...} (period = all-time)."""
-        return self.get(f"/tournaments/{self.cfg.slug}/leaderboard", limit=1)
-
-    def smart_score(self):
-        """Our Smart Score entries ([] until we've been scored): smartScoreDecayed, rank, totalTraders,
-        isElite... per marketType. SIG's recruiting export ranks candidates by this score."""
-        return self.get(f"/tournaments/{self.cfg.slug}/me/smart-score")
-
-    def fills_page(self, cursor=None):
-        return self.get(f"/tournaments/{self.cfg.slug}/portfolio/fills", limit=200, cursor=cursor)
-
-    def open_orders(self, tid, eid=None):
-        return self.paged("/orders", status="open", tournamentId=tid, exchangeId=eid, limit=200)
-
-    def book(self, eid, tid):
-        return self.get(f"/exchanges/{eid}/orderbook", depth=self.cfg.book_depth, tournamentId=tid)
-
-    def bulk_prices(self, eids, tid):
-        """Best bid / best ask for up to BULK_MAX_IDS exchanges in one request: {eid: (bid, ask)}.
-        Includes our own orders. Exchanges the API doesn't recognise are simply missing."""
-        res = self.get("/exchanges/prices", ids=",".join(eids), tournamentId=tid)
-        return {str(p["exchangeId"]): (rnd(p.get("bestBid")), rnd(p.get("bestAsk"))) for p in res.get("data", [])}
-
-    # --- writes (no-ops in dry run) ---------------------------------------------------------
-    def cancel_all(self, tid, eid=None):
-        """Cancel all our orders in the tournament (or on one exchange). True = confirmed gone."""
-        if not self.live:
-            return True
-        body = {"tournamentId": tid, **({"exchangeId": eid} if eid else {})}
-        status, res = self.call("POST", "/orders/cancel-all", body=body, ok=(200, 207, 422), retry_sent=False)
-        if status == 200:
-            return True
-        log.warning("cancel-all partial: %s", res.get("errors"))
-        return not self.open_orders(tid, eid)   # API docs: confirm nothing rests before re-quoting
-
-    def cancel_order(self, order_id):
-        """Cancel one order. 404/409 mean it's already gone (filled or cancelled) - that's fine too."""
-        if not self.live:
-            return True
-        try:
-            self.call("DELETE", f"/orders/{order_id}", ok=(200,), retry_sent=False)
-        except ApiError as e:
-            if e.status in (404, 409):
-                return True
-            raise
-        return True
-
-    def place_batch(self, orders):
-        """POST /orders/batch -> one result per order: {"index", "ok", "status", "data"}.
-
-        Batch (not multi-leg) on purpose: each order succeeds or fails on its own, so one bad
-        exchange can't roll back the quotes for the other 19 in the request.
-        """
-        if not self.live:
-            return [{"index": k, "ok": True, "status": 200, "data": {}} for k in range(len(orders))]
-        body = {"idempotencyKey": str(uuid.uuid4()), "orders": orders}
-        _, res = self.call("POST", "/orders/batch", body=body, ok=(200, 207, 422), retry_sent=False)
-        return res.get("results", [])
-
-# =============================================================================================
-# REALTIME FEED - the exchange pushes changes to us (Supabase Realtime), on a background thread
-# =============================================================================================
-
-class _SocketErrorWatch(logging.Handler):
-    """Flags the feed when the `realtime` library logs that its socket closed. Needed because, with its
-    auto-reconnect off (we reconnect ourselves), the library only LOGS the closure: it keeps reporting
-    is_connected=True and keeps heartbeating into the dead socket. Seen live on 29 Sep: dead for 2 days."""
-    def __init__(self, feed):
-        super().__init__(logging.ERROR)
-        self.feed = feed
-
-    def emit(self, record):
-        text = record.getMessage().lower()
-        if "connection closed" in text or "terminating connection" in text:
-            self.feed.socket_error = True
-
-
-class RealtimeFeed:
-    """Listens to two private channels and tells the main loop what changed:
-
-      tournament:{id}   market_batch  -> which books changed (bookDirty), trades, settled markets
-      user:{profile}    account_batch -> our fills, order updates, settlements
-
-    It never trades or makes decisions. The main loop calls take() to collect what happened, and
-    `wake` lets it start a cycle straight away. The API says delivery is best-effort (no replay), so
-    after connecting, reconnecting, a token refresh or a missed message (revision gap) it asks the
-    main loop for a full resync from the REST API.
-    """
-
-    def __init__(self, api, tid, cfg):
-        self.api, self.tid, self.cfg = api, tid, cfg
-        self.lock = threading.Lock()      # the socket thread writes, the main loop reads
-        self.wake = threading.Event()     # set when something happened -> main loop cycles early
-        self.dirty = set()                # exchanges whose book changed since the last take()
-        self.account_changed = False      # fills / settlements since the last take()
-        self.settled = False              # a market settled -> the market list should be reloaded
-        self.resync = True                # the main loop should do a full check from REST
-        self.topics_joined = set()
-        self.connected = False
-        self.stopping = False
-        self.last_revision = {}           # topic -> last revision number accepted
-        self.events = 0                   # messages received (shown in status.json)
-        self.trade_counts = defaultdict(int)   # exchange -> tournament trades seen (all traders)
-        self.trade_log = deque(maxlen=20000)   # (unix time, trade item) for the recorder (see take_trades)
-        self.flow_log = deque(maxlen=20000)    # (unix time, exchange id, quantity) for turnover control (take_flow)
-        self.socket_error = False         # the library logged that the socket closed (see _SocketErrorWatch)
-        self.thread = threading.Thread(target=lambda: asyncio.run(self._run()), name="realtime", daemon=True)
-
-    # --- used by the main loop -------------------------------------------------------------
-    def start(self):
-        logging.getLogger("realtime").addHandler(_SocketErrorWatch(self))   # the library logs under "realtime.*"
-        self.thread.start()
-
-    def stop(self):
-        self.stopping = True
-
-    def healthy(self):
-        """Connected and joined to both channels, so pushed updates can be trusted to arrive."""
-        return self.connected and len(self.topics_joined) >= 2
-
-    def take_trades(self):
-        """Tournament trades reported since the last call: [(unix time received, trade item)]."""
-        with self.lock:
-            out = list(self.trade_log)
-            self.trade_log.clear()
-        return out
-
-    def take_flow(self):
-        """Tournament trades since the last call, for turnover control: [(unix time, exchange id, quantity)]."""
-        with self.lock:
-            out = list(self.flow_log)
-            self.flow_log.clear()
-        return out
-
-    def take(self):
-        """Everything reported since the last call: (dirty exchange ids, account changed?, resync?, settled?)."""
-        self.wake.clear()                 # cleared first: anything arriving after this wakes us again
-        with self.lock:
-            out = (self.dirty, self.account_changed, self.resync, self.settled)
-            self.dirty, self.account_changed, self.resync, self.settled = set(), False, False, False
-        return out
-
-    # --- message handlers (run on the socket thread) ----------------------------------------
-    @staticmethod
-    def _data(message):
-        """A broadcast arrives as {"event", "payload", "type"}; the useful part is the payload."""
-        return message.get("payload", message) if isinstance(message, dict) else {}
-
-    def _accept(self, topic, data):
-        """Revision check. The same revision twice = a duplicate (ignore it). previousRevision that
-        isn't the last one we saw = we missed a message, so ask for a full resync."""
-        delivery = data.get("delivery") or {}
-        rev, prev = delivery.get("revision"), delivery.get("previousRevision")
-        last = self.last_revision.get(topic)
-        if rev is not None:
-            if last is not None and rev == last:
-                return False
-            if last is not None and prev is not None and prev != last:
-                self._flag_resync(f"missed message(s) on {topic}")
-            self.last_revision[topic] = rev
-        return True
-
-    def _on_market(self, topic, message):
-        data = self._data(message)
-        if not self._accept(topic, data):
-            return
-        with self.lock:
-            self.events += 1
-            for item in (data.get("bookDirty") or []) + (data.get("trades") or []):
-                if item.get("exchangeId") is not None and item.get("tournamentId") in (None, self.tid):
-                    self.dirty.add(str(item["exchangeId"]))
-            for item in data.get("trades") or []:              # how busy each market is (sizes quotes by it)
-                if item.get("exchangeId") is not None and item.get("tournamentId") in (None, self.tid):
-                    self.trade_counts[str(item["exchangeId"])] += 1
-                    self.trade_log.append((util.time.time(), item))
-                    self.flow_log.append((util.time.time(), str(item["exchangeId"]), _num(item.get("quantity"))))
-            if data.get("marketSettled"):
-                self.settled = True
-        self.wake.set()
-
-    def _on_account(self, topic, message):
-        data = self._data(message)
-        if not self._accept(topic, data):
-            return
-        with self.lock:
-            self.events += 1
-            # Only fills / settlements change our positions. orderUpdates are mostly echoes of our own
-            # placements and cancels, which the bot already knows about: re-reading the account for each
-            # of those would spend most of the request budget (the 30 s full check catches anything else).
-            relevant = any(data.get(k) for k in ("fills", "settlements", "refunds"))
-            if relevant:
-                self.account_changed = True
-            for f in data.get("fills") or []:          # a fill changed that book too
-                if f.get("exchangeId") is not None:
-                    self.dirty.add(str(f["exchangeId"]))
-        if relevant:
-            self.wake.set()
-
-    def _on_state(self, topic, state, err):
-        name = getattr(state, "name", str(state))
-        with self.lock:
-            if name == "SUBSCRIBED":
-                self.topics_joined.add(topic)
-                self.last_revision.pop(topic, None)      # new subscription: revisions start afresh
-            else:
-                self.topics_joined.discard(topic)
-        if name == "SUBSCRIBED":
-            self._flag_resync(f"subscribed to {topic.split(':')[0]}")
-        else:
-            log.warning("realtime: %s -> %s %s", topic.split(":")[0], name, err or "")
-
-    def _flag_resync(self, why):
-        with self.lock:
-            self.resync = True
-        log.info("realtime: %s - full resync next cycle", why)
-        self.wake.set()
-
-    # --- connection management (socket thread) ----------------------------------------------
-    async def _run(self):
-        """Stay connected: on any problem, mark the feed down (the bot polls meanwhile), wait with
-        growing back-off, and connect again."""
-        backoff = 1.0
-        while not self.stopping:
-            self.session_connected_at = None
-            try:
-                await self._session()
-                backoff = 1.0
-            except Exception as e:
-                # A session that was healthy for a while ended unexpectedly: that's a fresh drop, not a
-                # repeat failure, so start again from the shortest wait (day one: 2, 4, 8, 16 s over 2 hours).
-                up = self.session_connected_at
-                if up is not None and util.time.monotonic() - up >= self.cfg.realtime_healthy_seconds:
-                    backoff = 1.0
-                if not self.stopping:
-                    log.warning("realtime feed down (%s) - polling meanwhile, reconnecting in %.0f s", e, backoff)
-            with self.lock:
-                self.connected = False
-                self.topics_joined.clear()
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, 60.0)
-
-    async def _mint_token(self):
-        """A 3-hour realtime login from the REST API (one request, through our rate limiter)."""
-        return (await asyncio.to_thread(self.api.call, "POST", "/realtime/token"))[1]
-
-    def _socket_dead(self, client):
-        """Is this session's socket gone? client.is_connected alone can't be trusted (see _SocketErrorWatch),
-        so also check the library's error log, the socket's close code and whether its listener stopped."""
-        if not client.is_connected or self.socket_error:
-            return True
-        ws = getattr(client, "_ws_connection", None)
-        if ws is not None and getattr(ws, "close_code", None) is not None:
-            return True
-        task = getattr(client, "_listen_task", None)
-        return bool(task is not None and task.done())
-
-    async def _session(self):
-        from realtime import AsyncRealtimeClient          # imported here: the package is optional
-        self.socket_error = False
-        tok = await self._mint_token()
-        client = AsyncRealtimeClient(f"{tok['supabaseUrl']}/realtime/v1", token=tok["anonKey"],
-                                     params={"apikey": tok["anonKey"]}, auto_reconnect=False)
-        await client.connect()
-        try:
-            await client.set_auth(tok["token"])
-            topics = [f"tournament:{self.tid}", tok["channels"]["user"]]
-            for topic in topics:
-                ch = client.channel(topic, {"config": {"private": True}})
-                ch.on_broadcast("market_batch", lambda m, t=topic: self._on_market(t, m))
-                ch.on_broadcast("account_batch", lambda m, t=topic: self._on_account(t, m))
-                await ch.subscribe(lambda state, err, t=topic: self._on_state(t, state, err))
-            self.connected = True
-            self.session_connected_at = util.time.monotonic()
-            log.info("realtime feed connected - reacting to pushed updates")
-            # The session ends (and a new one starts, with a fresh login and a full resync) before the token
-            # runs out, and at least every realtime_session_max_seconds anyway.
-            started, expires = util.time.monotonic(), parse_ts(tok.get("expiresAt"))
-            deadline = started + self.cfg.realtime_session_max_seconds
-            if expires:
-                deadline = min(deadline, started + (expires - util.utcnow()).total_seconds()
-                               - self.cfg.realtime_token_refresh_seconds)
-            while not self.stopping:
-                await asyncio.sleep(1)
-                if self._socket_dead(client):
-                    raise ConnectionError("socket closed")
-                if len(self.topics_joined) < len(topics) and util.time.monotonic() - started > 20:
-                    raise ConnectionError("a channel subscription failed or dropped")
-                if util.time.monotonic() >= deadline:
-                    log.info("realtime: renewing the session (fresh login, full resync)")
-                    return
-        finally:
-            self.connected = False
-            await client.close()
-
-# =============================================================================================
-# BOT - state, the cycle, risk, order management, main loop
-# =============================================================================================
 
 @dataclass
-class Ex:
-    """Everything the bot remembers about one exchange (one tradable YES contract)."""
-    eid: str
-    market_id: str
-    title: str
-    label: str                            # short name for logs, e.g. "Rep Ohio Senate"
-    group: str                            # race name; exchanges in one group exclude each other
-    party: str | None
-    close: datetime | None
-    book: dict | None = None              # latest order book with OUR orders removed
-    book_time: float = 0.0                # util.time.monotonic() when it was downloaded
-    verified: float = 0.0                 # when it was last confirmed current: downloaded, or a bulk check
-                                          #   showed the same best prices. Staleness is measured from this
-    last_fv: float | None = None
-    cooldown_until: float = 0.0           # jump guard
-    pending_until: float = 0.0            # placement outcome unknown: don't place again yet
-    pause_until: float = 0.0              # order was rejected: back off
-    unconfirmed_hold: float = -1.0        # the pending_until set for orders whose batch outcome was unknown
-    writes: int = 0                       # our writes (cancels / batches) touching it still in flight
-    reprices: dict = field(default_factory=dict)   # side -> times we repriced it lately (churn control)
-    ref_moved_at: float = -1e9            # last time its Polymarket price moved >= urgent_ref_move
-    ref_jump_at: float = -1e9             # last time its Polymarket price moved >= ref_jump_threshold (monotonic;
-                                          #   reduce_from_book pauses after it)
-    cancelling: bool = False              # ...one of them is a cancel
-    inv: float = 0.0                      # for logging / recording
-    eff: float = 0.0                      # for logging
-    age: float = 0.0                      # share-weighted age of the position, hours (age skew; logging)
-    ref: float | None = None              # outside reference price, if any (for logging / recording)
-    quote: Quote = NO_QUOTE               # what we decided this cycle (for recording)
-    take_dir: int = 0                     # +1 = Polymarket above the best ask, -1 = below the best bid, 0 = neither
-    take_since: float = 0.0               # since when every Polymarket reading has shown that same gap
-    take_until: float = 0.0               # after taking here, leave it alone until this time
-    fl_side: str | None = None            # favourite-longshot bias side last cycle (for its hysteresis)
-    fl_tag: str = ""                      # that bias for the quote log line ("" = none active)
-    turnover_dead: bool = False           # holding a position in a market with too little flow (health only)
-    ro_clip: str = ""                     # "bid" / "ask" / "bid ask": side(s) decide() left empty ONLY by the reduce-only
-                                          #   race-net clip this cycle (diagnostic)
-    mmr_tail: bool = False                # P12 ops: value adds paused and a tail market (decide; the ladder too)
-    st_caps: tuple | None = None          # P15 state_max_usd: decide's (bid, ask) adding caps in shares (the ladder)
+class Placed:
+    order: Order              # as sent (a covered NO sale is trimmed to the NO held)
+    oid: str | None           # the exchange's id, None if refused or not sent
+    traded: float             # shares that traded at once
+    error: str | None         # why it was refused or not sent, None if accepted
+    unknown: bool = False     # the outcome is unknown (timeout, 5xx): it may rest; read the open orders first
 
+
+def iso(dt):
+    return dt.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def parse_ts(s):
+    """Some API timestamps carry 7 decimals, which Python before 3.11 cannot read: cut them to 6."""
+    return datetime.fromisoformat(re.sub(r"(\.\d{6})\d+", r"\1", s.replace("Z", "+00:00"))) if s else None
+
+
+def utcnow():
+    return datetime.now(timezone.utc)
+
+
+# --- the wire format, in YES terms ---------------------------------------------------------------------------
+
+def parse_order(raw, now=None):
+    """API order -> Order in YES terms, or None if it no longer rests. The engine books "sell YES we do not hold"
+    as "buy NO @ 1 - p" and lists it so, and our covered sales go out as "sell NO": a NO order flips back."""
+    if not raw.get("open", True) or raw.get("priceLimit") is None:
+        return None
+    expires = parse_ts(raw.get("expirationDate"))
+    if expires and expires <= (now or utcnow()):
+        return None               # past expiry the engine ignores it even while it still says open
+    yes = str(raw["side"]).lower() == "yes"
+    is_bid = yes == (str(raw["action"]).lower() == "buy")
+    price = round(float(raw["priceLimit"]) if yes else 1 - float(raw["priceLimit"]), 3)
+    return Order(str(raw["exchangeId"]), is_bid, price, float(raw["quantity"]), "", oid=str(raw["id"]),
+                 expires=expires)
+
+
+def wire_order(order, covered, tid, expires):
+    """Order -> request body. A covered bid (buying back NO we hold) goes out as "sell NO @ 1 - p": a sale of
+    shares we hold needs no cash, where "buy YES" would lock the full price (release 6, 3 Oct refusals)."""
+    body = {"exchangeId": order.eid, "side": "yes", "action": "buy" if order.is_bid else "sell",
+            "quantity": int(order.size), "price": round(order.price, 3), "tournamentId": tid,
+            "expirationDate": iso(expires)}
+    if covered:
+        body.update(side="no", action="sell", price=round(1 - order.price, 3))
+    return body
+
+
+def locked_cash(raw_orders):
+    """Cash our open orders lock: a buy locks quantity x its own side's price; a sale of shares held locks none."""
+    return sum(float(o["quantity"]) * float(o["priceLimit"]) for o in raw_orders
+               if str(o.get("action")).lower() == "buy" and parse_order(o) is not None)
+
+
+def levels(raw):
+    return [(round(float(l["price"]), 3), float(l["quantity"])) for l in raw or []]
+
+
+def strip_own(raw_book, mine):
+    """Other traders' book: our own size taken off each level. Without this, once we are the touch, fair value
+    and every 'one tick better' rule would follow our own quotes."""
+    own = {}
+    for o in mine:
+        own[(o.is_bid, round(o.price, 3))] = own.get((o.is_bid, round(o.price, 3)), 0.0) + o.size
+    sides = []
+    for is_bid, key in ((True, "bids"), (False, "asks")):
+        left = [(p, q - own.get((is_bid, p), 0.0)) for p, q in levels(raw_book.get(key))]
+        sides.append(sorted([(p, q) for p, q in left if q > 1e-9], reverse=is_bid))
+    return Book(sides[0], sides[1], time.monotonic())
+
+
+def parse_fill(raw, known):
+    """API fill -> Fill in YES terms. The API signs quantity by side (+ YES, - NO) and prices a NO fill in NO
+    terms; the direction comes from our own order when we know it (a covered NO sale is a bid, a sale of YES held
+    an ask), else from the side."""
+    qty, price, oid = float(raw.get("quantity") or 0), float(raw.get("price") or 0), raw.get("orderId")
+    oid = None if oid is None else str(oid)
+    yes_price = round(price if qty > 0 else 1 - price, 3)
+    is_bid = known.get(oid, qty > 0)
+    return Fill(str(raw["exchangeId"]), is_bid, yes_price, abs(qty), oid,
+                parse_ts(raw.get("filledAt")) or utcnow(), fid=str(raw["id"]))
+
+
+# --- markets -------------------------------------------------------------------------------------------------
 
 US_STATES = {
     "Alabama": "AL", "Alaska": "AK", "Arizona": "AZ", "Arkansas": "AR", "California": "CA", "Colorado": "CO",
@@ -613,68 +164,577 @@ US_STATES = {
     "Oregon": "OR", "Pennsylvania": "PA", "Rhode Island": "RI", "South Carolina": "SC", "South Dakota": "SD",
     "Tennessee": "TN", "Texas": "TX", "Utah": "UT", "Vermont": "VT", "Virginia": "VA", "Washington": "WA",
     "West Virginia": "WV", "Wisconsin": "WI", "Wyoming": "WY", "District of Columbia": "DC"}
-_STATE_CODES = set(US_STATES.values())
-_STATE_NAMES = sorted(US_STATES, key=len, reverse=True)       # (longest first: "West Virginia" before "Virginia")
-_STATE_CODE_RE = re.compile(r"^([A-Z]{2})(?:-(?:\d{1,2}|AL))?(?=\s|$)")
+STATE_NAMES = sorted(US_STATES, key=len, reverse=True)    # longest first: "West Virginia" before "Virginia"
+STATE_CODE = re.compile(r"^([A-Z]{2})(?:-(?:\d{1,2}|AL))?(?=\s|$)")   # "RI", "RI-01", "AK-AL"
 
 
 def state_of(label):
-    """P15: the US state a market belongs to, as its postal code ("Rep Rhode Island Senate", "Dem Rhode Island
-    Governor", "Ind RI Governor", "Dem RI-01 House race" -> "RI"), or None (the headline "U.S. House" / "U.S. Senate"
-    markets, anything unrecognised). The label's first word (the party: "Rep", "Dem", "Ind", ...) is skipped when the
-    whole label does not start with a state."""
-    if not isinstance(label, str) or not label.strip():
-        return None
-    s = " ".join(label.split())
-    tries = [s]
-    if " " in s:
-        tries.append(s.split(" ", 1)[1])
-    for t in tries:
-        if t.startswith("U.S.") or t.startswith("US "):
+    """Postal code of a market's state ("Rep Rhode Island Senate", "Dem RI-01 House" -> "RI"); None for the
+    national markets ("U.S. Senate") and anything unrecognised. The per-state cap exists since Rhode Island alone
+    reached a quarter of the account through four markets (release 15)."""
+    words = " ".join((label or "").split())
+    for text in (words, words.split(" ", 1)[-1]):           # with and without the party word
+        if text.startswith(("U.S.", "US ")):
             return None
-        m = _STATE_CODE_RE.match(t)
-        if m and m.group(1) in _STATE_CODES:
+        m = STATE_CODE.match(text)
+        if m and m.group(1) in US_STATES.values():
             return m.group(1)
-        low = t.lower()
-        for name in _STATE_NAMES:
-            n = name.lower()
-            if low == n or low.startswith(n + " "):
+        for name in STATE_NAMES:
+            if text.lower() == name.lower() or text.lower().startswith(name.lower() + " "):
                 return US_STATES[name]
     return None
 
 
-def busy(ex, now_m):
-    """Don't place on this exchange: an earlier placement's outcome is unknown, or a write is still running."""
-    return now_m < ex.pending_until or ex.writes > 0
+def parse_markets(raw, t_end):
+    """API market -> its Markets. A race market ("Will the X Party win the RACE?", one exchange) joins RACE; any
+    other market is its own race, so no sum-to-one is forced on it. Composite markets are skipped: they are other
+    markets combined, and trading them would double the exposure the caps count once."""
+    if raw.get("isComposite"):
+        return []
+    closes = [d for d in (parse_ts(raw.get("settlementDate")), t_end) if d]
+    close = min(closes) if closes else None
+    exchanges, title = raw.get("exchanges") or [], raw.get("title", "")
+    m = TITLE.match(title)
+    out = []
+    for e in exchanges:
+        if m and len(exchanges) == 1:
+            party, race = m.group(1), m.group(2)
+            label = f"{party[:3]} {race}"
+        else:
+            party, race = None, f"market:{raw['id']}"
+            label = f"{title[:24]} {e.get('option') or ''}".strip()
+        out.append(Market(str(e["id"]), label, race, party, state_of(label), close))
+    return out
 
 
-class Change:
-    """What one exchange needs this cycle: orders to cancel first (all of them with whole=True), then new ones.
-    key orders the work: pulls first, then party-control markets, then the biggest quotes."""
-    __slots__ = ("ex", "doomed", "whole", "new", "key", "count", "unsafe")
+# --- the client ----------------------------------------------------------------------------------------------
 
-    def __init__(self, ex, doomed, whole, new, key, count=True, unsafe=False):
-        self.ex, self.doomed, self.whole, self.new, self.key = ex, doomed, whole, new, key
-        self.count = count            # its cancels count as reprices (churn control) once sent
-        self.unsafe = unsafe          # removes an order that must not stay (urgent_writes_per_cycle sends these first)
+class Client:
+    """Single-threaded REST client; the feed's token request is the only call from another thread (hence the
+    lock around the budgets)."""
 
-    def reprice_sides(self):
-        """The sides this change cancels resting orders on (what churn control counts as a reprice)."""
-        if not self.count:
+    def __init__(self, env, s, live, session=None):
+        self.base, self.slug, self.live = env.base_url, env.slug, live
+        self.covered_no = True            # buy-backs go out as covered "sell NO" (no cash); off if the self-test fails
+        self.rpm_max, self.wpm_max = float(s.requests_per_minute), float(s.writes_per_minute)
+        self.rpm, self.wpm = self.rpm_max, self.wpm_max
+        self.reqs, self.writes = deque(), deque()     # start times inside the last minute
+        self.next_start = 0.0
+        self.paused_until = 0.0                       # monotonic end of the 429 pause
+        self.rate_limited = 0                         # 429s received (status.json: should stay 0)
+        self.pauses = 0                               # 429 pauses begun (a 429 inside a pause extends it)
+        self.lock = threading.Lock()
+        self.tid = None                               # the tournament id, read by tournament()
+        self.t_end = None                             # the tournament's end: no market closes later
+        self.start_balance = None                     # initialBalance, for Account.start
+        self.marks = {}                               # eid -> the exchange's valuation price, from positions()
+        self.market_value = None                      # the positions' total at those marks
+        self.locked = 0.0                             # cash our open orders lock, from the last open_orders()
+        self.directions = {}                          # oid -> is_bid of our orders, to read fills' direction
+        self.ttl_s = s.order_ttl_s                    # an order sent without `expires` lives this long
+        self.session = session or requests.Session()
+        self.session.headers.update({"Authorization": f"Bearer {env.api_key}", "Content-Type": "application/json"})
+
+    # --- budgets ---
+    def set_budgets(self, rpm, wpm):
+        with self.lock:
+            self.rpm_max, self.wpm_max = float(rpm), float(wpm)
+            self.rpm, self.wpm = self.rpm_max, self.wpm_max
+
+    def used(self, window, now):
+        while window and now - window[0] >= WINDOW_S:
+            window.popleft()
+        return len(window)
+
+    def requests_left(self):
+        with self.lock:
+            return int(self.rpm) - self.used(self.reqs, time.monotonic())
+
+    def writes_left(self):
+        """A write spends from both budgets, so the smaller room is what is left."""
+        with self.lock:
+            now = time.monotonic()
+            return min(int(self.wpm) - self.used(self.writes, now), int(self.rpm) - self.used(self.reqs, now))
+
+    def pause_left(self):
+        return max(0.0, self.paused_until - time.monotonic())
+
+    def start_at(self, write, wait):
+        """When the next request may start: after the pause, the gap, and the oldest start that leaves the
+        minute's budget room. A write too far off is refused unsent (WRITE_BUDGET_WAIT) unless it may wait: the
+        cycle never blocks on the budget."""
+        with self.lock:
+            now = time.monotonic()
+            start = max(now, self.next_start, self.paused_until)
+            if self.used(self.reqs, now) >= int(self.rpm):
+                start = max(start, self.reqs[-int(self.rpm)] + WINDOW_S)
+            if write:
+                if self.used(self.writes, now) >= int(self.wpm):
+                    start = max(start, self.writes[-int(self.wpm)] + WINDOW_S)
+                if start - now > MAX_WRITE_WAIT_S and not wait:
+                    raise ApiError(429, "WRITE_BUDGET_WAIT", f"a write would wait {start - now:.0f} s: not sent")
+                self.writes.append(start)
+            self.reqs.append(start)
+            self.next_start = start + MIN_GAP_S
+            return start
+
+    def throttle(self, write, wait):
+        start = self.start_at(write, wait)
+        while time.monotonic() < start:
+            time.sleep(start - time.monotonic())
+            start = max(start, self.paused_until)      # a pause begun while we slept: wait it out too
+
+    def note_429(self, retry_after):
+        """Pause every request for Retry-After: knocking during the pause only earns more 429s. The first 429 of
+        a pause cuts both budgets; a later one in the same pause extends it to Retry-After from now, never adds up
+        (2 Oct: twenty 429s, each of which had been costing another silent pause)."""
+        with self.lock:
+            now = time.monotonic()
+            new_pause = self.paused_until <= now
+            self.paused_until = max(self.paused_until, now + (retry_after or DEFAULT_PAUSE_S))
+            self.rate_limited += 1
+            if new_pause:
+                self.pauses += 1
+                self.rpm = max(FLOOR_RPM, self.rpm * CUT_429)
+                self.wpm = max(FLOOR_WPM, self.wpm * CUT_429)
+        log.warning("RATE LIMITED (429): all requests paused %.0f s; budget %.0f/min, writes %.0f/min (429 #%d)",
+                    self.pause_left(), self.rpm, self.wpm, self.rate_limited)
+
+    def note_ok(self, write):
+        """Each success wins back 1/60 of a request a minute, up to the settings: an hour of calm undoes a cut."""
+        with self.lock:
+            self.rpm = min(self.rpm_max, self.rpm + 1 / 60)
+            if write:
+                self.wpm = min(self.wpm_max, self.wpm + 1 / 60)
+
+    # --- one request ---
+    def call(self, method, path, params=None, body=None, ok=(200, 201, 207), write=False, wait=False):
+        """One request with budgets and retries. A write also spends the write budget and is refused rather than
+        wait long, unless `wait`. A resend carries the same body, so the same idempotency key: the server never
+        places twice. A write that timed out after it was sent is NOT resent (day one: every resend earned 409
+        REQUEST_IN_FLIGHT, which is not retried either); the caller reads the outcome from the open orders."""
+        delay = 0.25                  # back-off, doubling to 8 s
+        for attempt in range(MAX_RETRIES + 1):
+            last = attempt == MAX_RETRIES
+            self.throttle(write, wait)
+            try:
+                r = self.session.request(method, self.base + path, timeout=TIMEOUT_S,
+                                         params={k: v for k, v in (params or {}).items() if v is not None},
+                                         data=json.dumps(body) if body is not None else None)
+            except requests.RequestException as e:
+                if last or (method != "GET" and isinstance(e, requests.exceptions.ReadTimeout)):
+                    raise ApiError(0, "NETWORK", str(e))
+                time.sleep(delay)
+                delay = min(delay * 2, 8.0)
+                continue
+            data = reply_json(r)
+            if r.status_code in ok:
+                self.note_ok(write)
+                return r.status_code, data
+            retry_after = seconds(r.headers.get("Retry-After", ""))
+            if r.status_code == 429:
+                self.note_429(retry_after)        # throttle() holds the resend until the pause is over
+            elif r.status_code in RETRY_STATUS and not last:
+                time.sleep(retry_after if retry_after is not None else delay)
+                delay = min(delay * 2, 8.0)
+            if last or r.status_code not in (429,) + RETRY_STATUS:
+                raise error_of(r, data)
+
+    def get(self, path, **params):
+        return self.call("GET", path, params=params)[1]
+
+    def paged(self, path, **params):
+        out, cursor = [], None
+        while True:
+            page = self.get(path, cursor=cursor, **params)
+            out += page.get("data", [])
+            if not (page.get("pagination") or {}).get("hasMore"):
+                return out
+            cursor = page["pagination"]["nextCursor"]
+
+    # --- reads ---
+    def tournament(self):
+        t = self.get(f"/tournaments/{self.slug}")
+        self.tid, self.t_end = t.get("id"), parse_ts(t.get("endDate"))
+        if t.get("initialBalance") is not None:
+            self.start_balance = float(t["initialBalance"])
+        return t
+
+    def markets(self):
+        if self.tid is None:
+            self.tournament()
+        raw = self.paged(f"/tournaments/{self.slug}/markets", limit=100, status="open")
+        return [m for r in raw for m in parse_markets(r, self.t_end)]
+
+    def positions(self):
+        """{eid: signed YES shares} of unsettled positions (the API signs them: + YES, - NO); sets `marks`."""
+        reply = self.get(f"/tournaments/{self.slug}/portfolio/positions")
+        rows = [p for p in reply.get("positions", []) if not p.get("settled")]
+        self.marks = {}
+        for p in rows:
+            mark = next((number(p[k]) for k in MARK_KEYS if number(p.get(k)) is not None), None)
+            if mark is not None:
+                self.marks[str(p["exchangeId"])] = mark
+        self.market_value = number((reply.get("summary") or {}).get("totalMarketValue"))
+        return {str(p["exchangeId"]): float(p.get("quantity") or 0) for p in rows if float(p.get("quantity") or 0)}
+
+    def account(self):
+        """Value and free cash from /portfolio/pnl. Value falls back to balance + positions; cash prefers a
+        figure already net of our orders' locks, else takes them off (from the last open_orders read)."""
+        try:
+            reply = self.get(f"/tournaments/{self.slug}/portfolio/pnl", period="all")
+        except ApiError as e:
+            log.warning("P&L read failed (%s): balance + positions instead", e)
+            reply = {}
+        value, net, gross = (number(reply.get("totalAccountValue")), first_number(reply, CASH_NET_KEYS),
+                             first_number(reply, CASH_GROSS_KEYS))
+        cash = net if net is not None else (gross - self.locked if gross is not None else None)
+        if value is None or cash is None:
+            balance = number(self.tournament().get("myBalance"))
+            if value is None and balance is not None and self.market_value is not None:
+                value = balance + self.market_value
+            if cash is None and balance is not None:
+                cash = balance - self.locked
+        account = Account(value=value, cash=cash, read_at=time.monotonic())
+        if self.start_balance is not None:
+            account.start = self.start_balance
+        return account
+
+    def leaderboard(self):
+        """{"myRank": 156, "total": 1396, ...} (all time): for the phone summary only."""
+        return self.get(f"/tournaments/{self.slug}/leaderboard", limit=1)
+
+    def smart_score(self):
+        """[{"marketType": "global", "smartScoreDecayed": 25.1, "rank": 174, ...}] ([] until scored)."""
+        return self.get(f"/tournaments/{self.slug}/me/smart-score")
+
+    def open_orders(self):
+        raw = self.paged("/orders", status="open", tournamentId=self.tid, limit=200)
+        self.locked = locked_cash(raw)
+        orders = [o for o in (parse_order(r) for r in raw) if o is not None]
+        self.directions.update({o.oid: o.is_bid for o in orders})
+        return orders
+
+    def book(self, eid, mine):
+        raw = self.get(f"/exchanges/{eid}/orderbook", depth=BOOK_DEPTH, tournamentId=self.tid)
+        return strip_own(raw, mine)
+
+    def tops(self, eids):
+        """{eid: (best bid, best ask)} including our own orders; ids the API does not know are absent."""
+        out, eids = {}, list(eids)
+        for i in range(0, len(eids), BULK_MAX_IDS):
+            res = self.get("/exchanges/prices", ids=",".join(eids[i:i + BULK_MAX_IDS]), tournamentId=self.tid)
+            for p in res.get("data", []):
+                out[str(p["exchangeId"])] = (number(p.get("bestBid")), number(p.get("bestAsk")))
+        return out
+
+    def fills(self, after_id):
+        """Fills newer than after_id, oldest first, each with its `fid` (the API pages newest first). With after_id
+        None: the newest page only, so a fresh start does not replay the history."""
+        raw, cursor = [], None
+        for _ in range(FILL_PAGES):
+            page = self.get(f"/tournaments/{self.slug}/portfolio/fills", limit=200, cursor=cursor)
+            batch = page.get("data", [])
+            ids = [str(f["id"]) for f in batch]
+            if after_id is not None and str(after_id) in ids:
+                return [parse_fill(f, self.directions) for f in reversed(raw + batch[:ids.index(str(after_id))])]
+            raw += batch
+            if after_id is None or not (page.get("pagination") or {}).get("hasMore"):
+                break
+            cursor = page["pagination"]["nextCursor"]
+        return [parse_fill(f, self.directions) for f in reversed(raw)]
+
+    # --- writes ---
+    def place(self, orders, positions):
+        """Send orders in batches of BATCH_MAX (each order succeeds or fails alone: one bad market cannot roll
+        back the rest). An ioc order's unfilled rest is cancelled at once."""
+        if not self.live:
+            return [Placed(o, None, 0.0, "dry run") for o in orders]
+        out, covered_left = [], ({e: max(0.0, -q) for e, q in positions.items()} if self.covered_no else {})
+        for i in range(0, len(orders), BATCH_MAX):
+            chunk = orders[i:i + BATCH_MAX]
+            try:
+                out += self.place_batch(chunk, covered_left)
+            except ApiError as e:
+                if e.fatal:
+                    raise
+                unsent = e.code == "WRITE_BUDGET_WAIT" or 400 <= e.status < 500 and e.status != 429
+                out += [Placed(o, None, 0.0, str(e), unknown=not unsent) for o in chunk]
+        for p in out:
+            if p.order.ioc and p.oid and p.traded < p.order.size:
+                self.cancel_rest(p)
+        return out
+
+    def cancel_rest(self, placed):
+        try:
+            self.cancel(placed.oid)
+        except ApiError as e:             # it dies on its own within IOC_TTL_S
+            log.warning("ioc rest of %s not cancelled (%s): it expires in %.0f s", placed.oid, e, IOC_TTL_S)
+
+    def place_batch(self, orders, covered_left):
+        """One POST /orders/batch. A bid while short NO goes out as a covered "sell NO", trimmed to the NO held
+        (the old bot's rule: the add beyond it waits for a later cycle)."""
+        sent, bodies, now = [], [], utcnow()
+        for o in orders:
+            cover = covered_left.get(o.eid, 0.0) if o.is_bid else 0.0
+            size = min(int(o.size), int(cover)) if cover >= 1 else int(o.size)
+            if size < 1:
+                continue
+            covered_left[o.eid] = cover - size if cover >= 1 else covered_left.get(o.eid, 0.0)
+            if o.ioc:
+                expires = now + timedelta(seconds=IOC_TTL_S)
+            else:
+                expires = o.expires or now + timedelta(seconds=self.ttl_s)
+            sent.append(Order(o.eid, o.is_bid, o.price, size, o.tag, o.ioc, None, expires))
+            bodies.append(wire_order(sent[-1], cover >= 1, self.tid, expires))
+        if not bodies:
             return []
-        return [side for side, is_bid in (("bid", True), ("ask", False))
-                if any(o.is_bid == is_bid for o in self.doomed)]
+        body = {"idempotencyKey": str(uuid.uuid4()), "orders": bodies}
+        _, res = self.call("POST", "/orders/batch", body=body, ok=(200, 207, 422), write=True)
+        results = {r.get("index"): r for r in res.get("results", [])}
+        return [self.placed(o, results.get(k, {})) for k, o in enumerate(sent)]
+
+    def placed(self, order, result):
+        data = result.get("data") or {}
+        if not result:
+            return Placed(order, None, 0.0, "no result for this order", unknown=True)
+        if not result.get("ok"):
+            err = data.get("error") or {}
+            return Placed(order, None, 0.0, (err.get("message") if isinstance(err, dict) else str(err)) or "refused")
+        oid = None if data.get("orderId") is None else str(data["orderId"])
+        self.directions[oid] = order.is_bid
+        return Placed(Order(order.eid, order.is_bid, order.price, order.size, order.tag, order.ioc, oid,
+                            order.expires), oid, float(data.get("quantityTraded") or 0), None)
+
+    def cancel(self, oid, wait=False):
+        """True once the order is gone; 404 / 409 mean it already is (filled, expired or cancelled). `wait`: a stop
+        waits for the write budget rather than be refused."""
+        if not self.live:
+            return True
+        try:
+            self.call("DELETE", f"/orders/{oid}", ok=(200,), write=True, wait=wait)
+        except ApiError as e:
+            if e.status not in (404, 409):
+                raise
+        return True
+
+    def cancel_all(self, eid=None):
+        """Every order of ours (or on one market) cancelled; True only when confirmed. It waits for the write
+        budget rather than be refused: pulling everything is the one write that must go out."""
+        if not self.live:
+            return True
+        body = {"tournamentId": self.tid, **({"exchangeId": eid} if eid else {})}
+        status, res = self.call("POST", "/orders/cancel-all", body=body, ok=(200, 207, 422), write=True, wait=True)
+        if status == 200:
+            return True
+        log.warning("cancel-all partial: %s", res.get("errors"))
+        return not [o for o in self.open_orders() if eid is None or o.eid == eid]   # the API: confirm before re-quoting
+
+    def realtime_token(self):
+        return self.call("POST", "/realtime/token")[1]
 
 
-class Write:
-    """One order write running on a writer thread: kind "cancel" (eid, orders, whole) or "batch" (chunk)."""
-    __slots__ = ("kind", "eids", "payload", "future", "sent", "change", "payload_ok", "done_at", "cash_need")
-
-    def __init__(self, kind, eids, payload, sent, change=None):
-        self.kind, self.eids, self.payload, self.sent, self.change = kind, eids, payload, sent, change
-        self.future, self.payload_ok, self.done_at = None, False, None   # payload_ok: a cancel confirmed
-        self.cash_need = 0.0          # Package 8 cash gate: what this batch's orders need (counted as sent)
+def error_of(r, data):
+    """Some errors are plain text ({"error": "Not found"}, the 2 Oct outage): give them a message all the same."""
+    err = data.get("error") if isinstance(data, dict) else None
+    err = err if isinstance(err, dict) else {"message": str(err or r.text[:200])}
+    return ApiError(r.status_code, err.get("code", "?"), err.get("message", ""))
 
 
-def fmt(price, size):
-    return f"{price:.3f} x{size:<4d}" if price is not None else "   -       "
+def reply_json(r):
+    """A proxy can answer with an HTML page: never let that crash the bot."""
+    try:
+        return r.json() if r.content else {}
+    except ValueError:
+        return {"error": {"code": "BAD_RESPONSE", "message": r.text[:200]}}
+
+
+def seconds(header):
+    return float(header) if header.replace(".", "", 1).isdigit() else None
+
+
+def first_number(d, keys):
+    return next((number(d[k]) for k in keys if number(d.get(k)) is not None), None)
+
+
+def number(x):
+    try:
+        return None if x is None or isinstance(x, bool) else float(x)
+    except (TypeError, ValueError):
+        return None
+
+
+# --- the realtime feed ---------------------------------------------------------------------------------------
+
+SESSION_MAX_S = 3600.0        # a long-lived socket can die quietly: renew the session at least hourly...
+TOKEN_MARGIN_S = 600.0        # ...and 10 minutes before its 3-hour login runs out
+HEALTHY_S = 60.0              # a session up this long that drops is a fresh drop: reconnect after 1 s again
+JOIN_TIMEOUT_S = 20.0         # both channels not joined by then: start over
+BACKOFF_MAX_S = 60.0
+
+
+class SocketErrorWatch(logging.Handler):
+    """With its own reconnect off, the `realtime` library only LOGS that its socket closed and keeps reporting
+    is_connected (29 Sep: dead for two days). This handler turns that log line into a flag."""
+
+    def __init__(self, feed):
+        super().__init__(logging.ERROR)
+        self.feed = feed
+
+    def emit(self, record):
+        text = record.getMessage().lower()
+        if "connection closed" in text or "terminating connection" in text:
+            self.feed.socket_error = True
+
+
+class Feed:
+    """The two private channels (tournament:{id} market_batch: which books changed; user:{...} account_batch: our
+    fills). Delivery is best-effort with no replay, so after any (re)connect or a revision gap it asks the bot for
+    a full resync from REST. It never trades; `wake` lets the bot start a cycle at once."""
+
+    def __init__(self, client, tournament_id):
+        self.client, self.tid = client, tournament_id
+        self.lock = threading.Lock()                  # the socket thread writes, the bot reads
+        self.wake = threading.Event()
+        self.dirty, self.account_changed, self.resync = set(), False, True
+        self.joined, self.revisions = set(), {}       # topics joined; topic -> last revision accepted
+        self.connected, self.stopping, self.socket_error = False, False, False
+        self.thread = threading.Thread(target=lambda: asyncio.run(self.run()), name="realtime", daemon=True)
+
+    def start(self):
+        logging.getLogger("realtime").addHandler(SocketErrorWatch(self))
+        self.thread.start()
+
+    def stop(self):
+        self.stopping = True
+
+    def healthy(self):
+        return self.connected and len(self.joined) >= 2
+
+    def take(self):
+        """(dirty eids, account changed?, resync?) since the last take."""
+        self.wake.clear()                             # first: anything arriving after this wakes us again
+        with self.lock:
+            out = (self.dirty, self.account_changed, self.resync)
+            self.dirty, self.account_changed, self.resync = set(), False, False
+        return out
+
+    def accept(self, topic, data):
+        """A repeated revision is a duplicate; a previousRevision we did not see means we missed a message."""
+        delivery = data.get("delivery") or {}
+        rev, prev, last = delivery.get("revision"), delivery.get("previousRevision"), self.revisions.get(topic)
+        if rev is None:
+            return True
+        if last is not None and rev == last:
+            return False
+        if last is not None and prev is not None and prev != last:
+            self.flag_resync(f"missed message(s) on {topic}")
+        self.revisions[topic] = rev
+        return True
+
+    def on_market(self, topic, message):
+        data = message.get("payload", message) if isinstance(message, dict) else {}
+        if not self.accept(topic, data):
+            return
+        with self.lock:
+            for item in (data.get("bookDirty") or []) + (data.get("trades") or []):
+                if item.get("exchangeId") is not None and item.get("tournamentId") in (None, self.tid):
+                    self.dirty.add(str(item["exchangeId"]))
+            if data.get("marketSettled"):
+                self.resync = True                    # the market list must be read again
+        self.wake.set()
+
+    def on_account(self, topic, message):
+        """Only fills and settlements change positions; order updates are echoes of our own writes, and
+        re-reading the account for each would spend most of the budget (the full check catches the rest)."""
+        data = message.get("payload", message) if isinstance(message, dict) else {}
+        if not self.accept(topic, data) or not any(data.get(k) for k in ("fills", "settlements", "refunds")):
+            return
+        with self.lock:
+            self.account_changed = True
+            self.dirty |= {str(f["exchangeId"]) for f in data.get("fills") or [] if f.get("exchangeId") is not None}
+        self.wake.set()
+
+    def on_state(self, topic, state, err):
+        name = state.name if hasattr(state, "name") else str(state)   # the library passes an enum
+        with self.lock:
+            if name == "SUBSCRIBED":
+                self.joined.add(topic)
+                self.revisions.pop(topic, None)       # a new subscription numbers revisions afresh
+            else:
+                self.joined.discard(topic)
+        if name == "SUBSCRIBED":
+            self.flag_resync(f"subscribed to {topic.split(':')[0]}")
+        else:
+            log.warning("realtime: %s -> %s %s", topic.split(":")[0], name, err or "")
+
+    def flag_resync(self, why):
+        with self.lock:
+            self.resync = True
+        log.info("realtime: %s - full resync next cycle", why)
+        self.wake.set()
+
+    async def run(self):
+        """Stay connected; while down the bot polls. Back-off 1 s doubling to 60 s, reset after a healthy session
+        (day one: 2, 4, 8, 16 s waits stacked over two hours for drops that were each fresh)."""
+        backoff = 1.0
+        while not self.stopping:
+            began = time.monotonic()
+            try:
+                await self.session()
+                backoff = 1.0
+            except Exception as e:                    # any library or network failure: reconnect, never crash
+                if time.monotonic() - began >= HEALTHY_S:
+                    backoff = 1.0
+                if not self.stopping:
+                    log.warning("realtime feed down (%s): polling, reconnecting in %.0f s", e, backoff)
+            with self.lock:
+                self.connected = False
+                self.joined.clear()
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, BACKOFF_MAX_S)
+
+    def socket_dead(self, client):
+        """is_connected alone cannot be trusted (see SocketErrorWatch): also the close code and the listener task,
+        which are the library's private attributes, hence read defensively."""
+        if not client.is_connected or self.socket_error:
+            return True
+        ws, task = getattr(client, "_ws_connection", None), getattr(client, "_listen_task", None)
+        return (ws is not None and getattr(ws, "close_code", None) is not None) or bool(task and task.done())
+
+    async def session(self):
+        from realtime import AsyncRealtimeClient     # optional package: without it the bot polls
+        self.socket_error = False
+        tok = await asyncio.to_thread(self.client.realtime_token)
+        client = AsyncRealtimeClient(f"{tok['supabaseUrl']}/realtime/v1", token=tok["anonKey"],
+                                     params={"apikey": tok["anonKey"]}, auto_reconnect=False)
+        await client.connect()
+        try:
+            await client.set_auth(tok["token"])
+            topics = [f"tournament:{self.tid}", tok["channels"]["user"]]
+            for topic in topics:
+                ch = client.channel(topic, {"config": {"private": True}})
+                ch.on_broadcast("market_batch", lambda m, t=topic: self.on_market(t, m))
+                ch.on_broadcast("account_batch", lambda m, t=topic: self.on_account(t, m))
+                await ch.subscribe(lambda state, err, t=topic: self.on_state(t, state, err))
+            self.connected = True
+            await self.hold(client, topics, parse_ts(tok.get("expiresAt")))
+        finally:
+            self.connected = False
+            await client.close()
+
+    async def hold(self, client, topics, expires):
+        """Watch a live session until it dies (raise) or is due for renewal (return: fresh login, full resync)."""
+        started = time.monotonic()
+        deadline = started + SESSION_MAX_S
+        if expires:
+            deadline = min(deadline, started + (expires - utcnow()).total_seconds() - TOKEN_MARGIN_S)
+        while not self.stopping:
+            await asyncio.sleep(1)
+            if self.socket_dead(client):
+                raise ConnectionError("socket closed")
+            if len(self.joined) < len(topics) and time.monotonic() - started > JOIN_TIMEOUT_S:
+                raise ConnectionError("a channel subscription failed or dropped")
+            if time.monotonic() >= deadline:
+                log.info("realtime: renewing the session")
+                return

@@ -11,9 +11,9 @@ import logging
 import os
 import sqlite3
 
-from mmbot2 import pricing
+from mmbot import pricing
 
-log = logging.getLogger("mm2")
+log = logging.getLogger("mmbot")
 
 RECORD_FILE = "market_data.sqlite"
 RECORD_EVERY_S = 60.0

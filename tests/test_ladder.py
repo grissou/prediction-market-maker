@@ -1,9 +1,9 @@
 """
-Tests for mmbot2/ladder.py: level prices for longshots and favourites, the 8% edge filter, level sizes, the
+Tests for mmbot/ladder.py: level prices for longshots and favourites, the 8% edge filter, level sizes, the
 carve-out (best edges first, covered sales free), never crossing the book or our own orders, the re-quote
 throttle, fills into status, and the to_dict round trip.
 
-Run:  python3 tests2/test_ladder.py      (exit code 0 = all passed)
+Run:  python3 tests/test_ladder.py      (exit code 0 = all passed)
 """
 import os
 import sys
@@ -11,9 +11,9 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from mmbot2.config import Settings                                          # noqa: E402
-from mmbot2.state import Account, Book, Fill, Market, Order, View           # noqa: E402
-from mmbot2.ladder import Ladder                                            # noqa: E402
+from mmbot.config import Settings                                          # noqa: E402
+from mmbot.state import Account, Book, Fill, Market, Order, View           # noqa: E402
+from mmbot.ladder import Ladder                                            # noqa: E402
 
 RESULTS = []
 T0 = datetime(2026, 10, 10, 12, tzinfo=timezone.utc)

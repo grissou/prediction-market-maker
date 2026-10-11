@@ -3,12 +3,13 @@ Replay of a recorded snapshot: the old bot and the new one plan orders on the sa
 
 The state is the 4 October 15:56 ops snapshot (branch ops-snapshot-2026-10-04: market_data.sql.gz -> md.sqlite, plus
 status.json, order_notes.json, position_lots.json, settings_override.json): all 237 markets, other traders' books,
-Polymarket, positions, marks, cash. The OLD bot runs through tests/dryrun_harness.py (as tests/test_p15_dryrun.py
-does) with the live settings of 10 October; the NEW bot runs on tests2/fakes.FakeClient seeded with the same state and
-the rewrite's settings (the same values). Both send to a fake exchange for CYCLES cycles; every order is recorded and
-grouped by market and side. Writes analysis/rewrite/REPLAY.md (market, side, old shares, new shares, tags).
+Polymarket, positions, marks, cash. The OLD bot (retired 11 October 2026; tag legacy-2026-10-11, or $MM2_OLD_REF)
+is checked out of git into a temporary folder and run in a subprocess through its tests/dryrun_harness.py with its
+live settings of 10 October; the NEW bot runs here on tests/fakes.FakeClient seeded with the same state and the
+rewrite's settings (the same values). Both send to a fake exchange for CYCLES cycles; every order is recorded and
+grouped by market and side. Writes REPLAY.md next to the snapshot (market, side, old shares, new shares, tags).
 The snapshot is built in a temporary folder from git unless $MM2_SNAP points at one already built.
-Run:  python3 tests2/test_replay.py      (exit code 0 = all passed; SKIP without the snapshot branch)
+Run:  python3 tests/test_replay.py      (exit code 0 = all passed; SKIP without the snapshot branch or the old bot's ref)
 """
 import gzip
 import json
@@ -24,14 +25,30 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 BRANCH = "origin/ops-snapshot-2026-10-04"
 FILES = ("market_data.sql.gz", "status.json", "order_notes.json", "position_lots.json", "settings_override.json")
-LIVE_FILE = os.path.join(ROOT, "deploy", "settings_override.live_2026-10-10.json")
-REPORT = os.path.join(ROOT, "analysis", "rewrite", "REPLAY.md")
+OLD_REF = os.environ.get("MM2_OLD_REF", "legacy-2026-10-11")
+OLD_FILES = ("mm_bot.py", "mmbot", "tests", "ref_prices.py", "ref_map.json", "deploy/settings_override.live_2026-10-10.json")
+OLD_SCRIPT = """
+import json, os, sys
+from collections import defaultdict
+sys.path.insert(0, os.path.join(sys.argv[1], "tests"))
+import dryrun_harness as P
+S = P.load_snapshot(sys.argv[2])
+api, b = P.build(S, overrides=os.path.join(sys.argv[1], "deploy", "settings_override.live_2026-10-10.json"))
+P.cycles(b, int(sys.argv[3]), step=30.0)
+plan = defaultdict(lambda: [0.0, []])
+for o in P.orders(api):
+    key = o["label"] + "|" + ("bid" if o["yes_buy"] else "ask")
+    plan[key][0] += o["qty"]
+    plan[key][1].append(o["tag"])
+S["plan"] = plan
+json.dump(S, sys.stdout, default=list)
+"""
 CYCLES = 6
 RESULTS = []
 
 
 def fakes2():
-    """tests2/fakes.py under its own name: the old harness has already imported tests/fakes.py as `fakes`."""
+    """tests/fakes.py under its own name (the module name `fakes` is kept free for the old harness's copy)."""
     import importlib.util
     spec = importlib.util.spec_from_file_location("fakes2", os.path.join(HERE, "fakes.py"))
     mod = importlib.util.module_from_spec(spec)
@@ -61,26 +78,32 @@ def snapshot_dir():
 
 
 def old_plan(snap):
-    """{(label, "bid"/"ask"): [shares, {feature}]} the old bot sent in CYCLES cycles of 30 s."""
-    os.environ["P9_SNAP"] = snap
-    sys.path.insert(0, os.path.join(ROOT, "tests"))
-    import dryrun_harness as P
-    S = P.load_snapshot(snap)
-    api, b = P.build(S, overrides=LIVE_FILE)
-    P.cycles(b, CYCLES, step=30.0)
-    plan = defaultdict(lambda: [0.0, set()])
-    for o in P.orders(api):
-        key = (o["label"], "bid" if o["yes_buy"] else "ask")
-        plan[key][0] += o["qty"]
-        plan[key][1].add(o["tag"])
+    """The snapshot dict and {(label, "bid"/"ask"): [shares, {feature}]} the old bot sent in CYCLES cycles of 30 s,
+    computed by the old bot's own code (OLD_REF, extracted with git archive) in a subprocess; None without the ref."""
+    d = tempfile.mkdtemp(prefix="mm1")
+    r = subprocess.run(f"git archive {OLD_REF} {' '.join(OLD_FILES)} | tar -x -C {d}", shell=True, cwd=ROOT,
+                       capture_output=True)
+    if r.returncode or not os.path.exists(os.path.join(d, "tests", "dryrun_harness.py")):
+        return None, None
+    env = dict(os.environ, P9_SNAP=snap, SUPERMARKET_API_KEY="x", TOURNAMENT_SLUG="x")
+    r = subprocess.run([sys.executable, "-c", OLD_SCRIPT, d, snap, str(CYCLES)], cwd=d, env=env,
+                       capture_output=True, text=True)
+    if r.returncode:
+        print(r.stderr[-2000:], file=sys.stderr)
+        return None, None
+    S = json.loads(r.stdout)
+    plan = {}
+    for key, (shares, tags) in S.pop("plan").items():
+        label, side = key.rsplit("|", 1)
+        plan[(label, side)] = [shares, set(tags)]
     return S, plan
 
 
 def new_client(S):
     """FakeClient seeded with the snapshot: markets, other traders' books, positions, marks and cash."""
     FakeClient, raw_market = fakes2().FakeClient, fakes2().raw_market
-    from mmbot2.exchange import parse_markets
-    from mmbot2.state import held_usd
+    from mmbot.exchange import parse_markets
+    from mmbot.state import held_usd
     party = {"Rep": "Republican", "Dem": "Democratic", "Ind": "Independent"}
     markets = []
     for eid, (_, label, _) in sorted(S["snap"].items(), key=lambda kv: int(kv[0])):
@@ -101,8 +124,8 @@ def new_client(S):
 def new_plan(S):
     """{(label, side): [shares, {tag}]} the new bot sent in CYCLES cycles, and the bot."""
     FakeFeed, FakeRefs = fakes2().FakeFeed, fakes2().FakeRefs
-    from mmbot2 import config
-    from mmbot2.bot import Bot
+    from mmbot import config
+    from mmbot.bot import Bot
     client = new_client(S)
     refs = {}
     for eid, (_, label, r) in S["snap"].items():
@@ -142,14 +165,13 @@ def compare(old, new):
     return rows
 
 
-def write_report(rows):
-    os.makedirs(os.path.dirname(REPORT), exist_ok=True)
+def write_report(rows, report):
     counts = defaultdict(int)
     for r in rows:
         counts[r[6]] += 1
-    with open(REPORT, "w") as f:
+    with open(report, "w") as f:
         f.write(f"# Replay: old vs new bot on the 4 Oct snapshot ({CYCLES} cycles)\n\n"
-                f"Written by tests2/test_replay.py. {dict(counts)}\n\n"
+                f"Written by tests/test_replay.py (old bot: {OLD_REF}). {dict(counts)}\n\n"
                 "| Market | Side | Old shares | Old feature | New shares | New tag | Verdict |\n|---|---|---|---|---|---|---|\n")
         for r in rows:
             f.write(f"| {r[0]} | {r[1]} | {r[2]:.0f} | {r[3]} | {r[4]:.0f} | {r[5]} | {r[6]} |\n")
@@ -162,10 +184,14 @@ def main():
         print("SKIP: no snapshot branch")
         return 0
     S, old = old_plan(snap)
+    if S is None:
+        print(f"SKIP: the old bot's ref {OLD_REF} is not available (set MM2_OLD_REF)")
+        return 0
     logging.disable(logging.CRITICAL)
     new, bot, client = new_plan(S)
     rows = compare(old, new)
-    counts = write_report(rows)
+    report = os.path.join(snap, "REPLAY.md")
+    counts = write_report(rows, report)
     check("the new bot ran every cycle on the live state", bot.running and not bot.killed)
     check("the new bot planned orders", len(new) > 0)
     check("the new bot never crossed itself", client.self_crosses == 0)
@@ -173,7 +199,7 @@ def main():
     both = counts["same"] + counts["size"]
     check("most markets both bots traded agree within a factor of two", counts["same"] >= both / 2,
           str(dict(counts)))
-    print(f"report: {os.path.relpath(REPORT, ROOT)}  {dict(counts)}")
+    print(f"report: {report}  {dict(counts)}")
     print(f"\n{sum(RESULTS)}/{len(RESULTS)} passed")
     return 0 if all(RESULTS) else 1
 

@@ -12,7 +12,7 @@ Checks    within the first 10 minutes the dry run logs DRY PLACE lines; the coun
           market in 40 minutes; the tilt forms (near 8%); the minute's requests never pass the budget; status.json
           carries books_fresh and blocked_by; foreign orders are never cancelled, never counted as ours, never
           crossed, and do not stop us quoting; live, a stop cancels only our own orders.
-Run:  python3 tests2/test_shadow.py      (exit code 0 = all passed)
+Run:  python3 tests/test_shadow.py      (exit code 0 = all passed)
 """
 import json
 import logging
@@ -25,10 +25,10 @@ from datetime import datetime, timedelta, timezone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fakes                                                         # noqa: E402
 from fakes import FakeClient, FakeFeed, FakeRefs, raw_market         # noqa: E402
-from mmbot2 import bot as bot_module, config, exchange, value       # noqa: E402
-from mmbot2.bot import Bot, STATUS_FILE                              # noqa: E402
-from mmbot2.exchange import parse_markets                            # noqa: E402
-from mmbot2.state import Order                                       # noqa: E402
+from mmbot import bot as bot_module, config, exchange, value       # noqa: E402
+from mmbot.bot import Bot, STATUS_FILE                              # noqa: E402
+from mmbot.exchange import parse_markets                            # noqa: E402
+from mmbot.state import Order                                       # noqa: E402
 
 RESULTS = []
 
@@ -160,9 +160,9 @@ def test_dry_run_shadow():
     client, feed, refs = shadow_world()
     bot = make_bot(client, feed, refs, live=False)
     catcher = LogCatcher()
-    logging.getLogger("mm2").addHandler(catcher)
-    logging.getLogger("mm2").setLevel(logging.INFO)
-    logging.getLogger("mm2").propagate = False
+    logging.getLogger("mmbot").addHandler(catcher)
+    logging.getLogger("mmbot").setLevel(logging.INFO)
+    logging.getLogger("mmbot").propagate = False
     status = run(bot, client, feed, 10, catcher)
     first = [ln for ln in catcher.lines if ln.startswith("DRY PLACE")]
     check("the dry run plans and logs orders within 10 minutes (DRY PLACE lines)", len(first) > 0,
@@ -184,8 +184,8 @@ def test_dry_run_shadow():
     lines = [ln for ln in catcher.lines if ln.startswith("account ")]
     check("the status line shows fresh books and blocked_by", lines and "books" in lines[-1]
           and "blocked" in lines[-1], lines[-1:] if lines else None)
-    logging.getLogger("mm2").removeHandler(catcher)
-    logging.getLogger("mm2").propagate = True
+    logging.getLogger("mmbot").removeHandler(catcher)
+    logging.getLogger("mmbot").propagate = True
 
 
 def test_foreign_live():

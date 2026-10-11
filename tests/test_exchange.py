@@ -1,7 +1,7 @@
 """
 exchange.py offline: budgets and the 429 pause on a stubbed session and a fake clock, the wire format both ways,
 own-order stripping, market parsing, ioc, fills, account, and a sanity run of the FakeClient.
-Run: python3 tests2/test_exchange.py   (prints PASS/FAIL per check, then N/N passed; exit 0 iff all pass)
+Run: python3 tests/test_exchange.py   (prints PASS/FAIL per check, then N/N passed; exit 0 iff all pass)
 """
 import json
 import os
@@ -12,10 +12,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import requests                                                   # noqa: E402
 
-from mmbot2 import exchange as X                                  # noqa: E402
-from mmbot2.config import Env, Settings                           # noqa: E402
-from mmbot2.state import Order                                    # noqa: E402
-from tests2.fakes import two_race_world                           # noqa: E402
+from mmbot import exchange as X                                  # noqa: E402
+from mmbot.config import Env, Settings                           # noqa: E402
+from mmbot.state import Order                                    # noqa: E402
+from tests.fakes import two_race_world                           # noqa: E402
 
 results = []
 

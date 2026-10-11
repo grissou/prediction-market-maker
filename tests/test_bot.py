@@ -2,7 +2,7 @@
 The bot and the run loop on the fake exchange: one cycle end to end, a dry run sends nothing, a second cycle on an
 unchanged world sends nothing new, the bot never crosses itself, the kill switch, live settings, saved state,
 status.json, the handover file and the pull after failed cycles.
-Run:  python3 tests2/test_bot.py      (exit code 0 = all passed)
+Run:  python3 tests/test_bot.py      (exit code 0 = all passed)
 """
 import json
 import logging
@@ -12,9 +12,9 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from fakes import two_race_world                                     # noqa: E402
-from mmbot2 import config, ops                                       # noqa: E402
-from mmbot2.bot import Bot, KILL_FILE, STATE_FILE, STATUS_FILE       # noqa: E402
-from mmbot2.state import Order                                       # noqa: E402
+from mmbot import config, ops                                       # noqa: E402
+from mmbot.bot import Bot, KILL_FILE, STATE_FILE, STATUS_FILE       # noqa: E402
+from mmbot.state import Order                                       # noqa: E402
 
 logging.basicConfig(level=logging.CRITICAL)
 RESULTS, ALERTS = [], []
@@ -166,7 +166,7 @@ def test_recorder():
 
 def test_summary_and_alerts():
     from datetime import datetime, timezone
-    from mmbot2 import notify
+    from mmbot import notify
     st = {"account_value": 104812.0, "start_balance": 100000.0, "ev_outcome": 112703.0, "ev_change_24h": 2012.0,
           "mm_profit_24h": 83.4, "tilt_s": 0.082, "reduce_only": False, "rate_limits_period": 0, "errors_period": 0}
     lb, sc = {"myRank": 156, "total": 1396}, [{"marketType": "global", "smartScoreDecayed": 25.07, "rank": 174}]
@@ -184,7 +184,7 @@ def test_summary_and_alerts():
           notify.due(datetime(2026, 10, 10, 14, 0, 5, tzinfo=timezone.utc), 2, None) == "2026-10-10 14"
           and notify.due(datetime(2026, 10, 10, 14, 30, tzinfo=timezone.utc), 2, "2026-10-10 14") is None
           and notify.due(datetime(2026, 10, 10, 15, 0, tzinfo=timezone.utc), 2, "2026-10-10 14") is None)
-    from mmbot2 import mm
+    from mmbot import mm
     inv, t0 = mm.Inventory(), 1.791e9
     inv.add_fill("21", 50, 0.40, t0, True)
     inv.add_fill("21", -50, 0.45, t0 + 60, False)

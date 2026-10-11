@@ -1,9 +1,9 @@
 """
-Tests for mmbot2/mm.py: the band, a tick inside the best other trader, the minimum edge, never crossing, the ref
+Tests for mmbot/mm.py: the band, a tick inside the best other trader, the minimum edge, never crossing, the ref
 guard, the size lean, the market-making lots (FIFO, trimmed to the position), stale by age and by size, the
 recycler's prices and sizes, the hand-over to value, and the saved state.
 
-Run:  python3 tests2/test_mm.py      (exit code 0 = all passed)
+Run:  python3 tests/test_mm.py      (exit code 0 = all passed)
 """
 import os
 import sys
@@ -11,9 +11,9 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from mmbot2.config import Settings                                          # noqa: E402
-from mmbot2.state import Account, Book, Fill, Market, View                  # noqa: E402
-from mmbot2 import mm                                                       # noqa: E402
+from mmbot.config import Settings                                          # noqa: E402
+from mmbot.state import Account, Book, Fill, Market, View                  # noqa: E402
+from mmbot import mm                                                       # noqa: E402
 
 RESULTS = []
 NOW = datetime(2026, 10, 10, 12, tzinfo=timezone.utc)

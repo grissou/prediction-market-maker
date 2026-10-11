@@ -1,8 +1,8 @@
 """
-Tests for mmbot2/value.py: the value floor, the tail quotes' hurdle prices, and the allocator (swaps over two
+Tests for mmbot/value.py: the value floor, the tail quotes' hurdle prices, and the allocator (swaps over two
 steps, spare-cash buys, the refill bounded by demand, pins, no flip, the turnover cap, prefer-short).
 
-Run:  python3 tests2/test_value.py      (exit code 0 = all passed)
+Run:  python3 tests/test_value.py      (exit code 0 = all passed)
 """
 import os
 import sys
@@ -10,10 +10,10 @@ from dataclasses import replace
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from mmbot2.config import Settings                                          # noqa: E402
-from mmbot2.risk import RiskState                                           # noqa: E402
-from mmbot2.state import Account, Book, Fill, Market, Order, View           # noqa: E402
-from mmbot2 import value as V                                               # noqa: E402
+from mmbot.config import Settings                                          # noqa: E402
+from mmbot.risk import RiskState                                           # noqa: E402
+from mmbot.state import Account, Book, Fill, Market, Order, View           # noqa: E402
+from mmbot import value as V                                               # noqa: E402
 
 RESULTS = []
 NOW = datetime(2026, 10, 10, 12, tzinfo=timezone.utc)
