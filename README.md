@@ -2,8 +2,11 @@
 
 **A trading bot for the SIG Predictions Cup (US midterm elections, October–November 2026)**
 
-Adam Zerouali, University of Bristol. This repository holds the code, the tests and the analysis. The
-bot has traded live since the tournament opened on 1 October 2026.
+Adam Zerouali, University of Bristol. I wrote this bot for the Cup and it has traded live since the
+tournament opened on 1 October 2026. This repository is the code, the tests, the analysis and a short paper.
+It is a student project: the results are a few weeks of play money, not a track record.
+[![tests](https://github.com/grissou/prediction-market-maker/actions/workflows/tests.yml/badge.svg)](https://github.com/grissou/prediction-market-maker/actions/workflows/tests.yml)
+· MIT licence · Python 3.10, standard library plus `requests` (and optionally `realtime` for the pushed feed).
 
 ## 1. Summary
 
@@ -11,10 +14,9 @@ The SIG Predictions Cup is a month-long trading tournament. Participants start w
 units and trade 237 contracts on US midterm election races through an exchange with an order book and
 an API. There are no fees. Every contract pays out at the election result.
 
-This project is a Python bot that trades the whole tournament on its own. It began as a classical
-market maker: quote both sides of every market, earn the gap between bid and ask, stay close to flat,
-take no view on who wins. Within a week of live trading that approach had been overtaken by three
-findings (§3):
+The bot trades the whole tournament on its own. I started it as a classical market maker: quote both
+sides of every market, earn the gap between bid and ask, stay close to flat, take no view on who wins.
+That lasted about a week. Three things I found in the live data changed the plan (§3):
 
 - the tournament's prices are systematically biased: longshots are too dear and favourites too cheap;
 - because every contract pays out at the result, that bias is a source of profit rather than noise;
@@ -29,9 +31,10 @@ The bot runs four strategies side by side, each with its own capital:
 | **Market making** | Quote both sides in the middle of the probability range, with a reserve of cash the allocator keeps topped up |
 | **Harvest ladder** | Trade the bias itself: resting orders that sell it only at prices better than today's |
 
-On 7 October 2026, day 7 of 35, the account was worth 103.2k by the exchange's own prices, and 110.4k
+On 11 October 2026, day 11 of 35, the account was worth 104.2k by the exchange's own prices, and 112.6k
 if positions are valued at the real-money market's probabilities, which is what the payout at the result
-is expected to be (§6). Both numbers move every hour. Neither is a final result.
+is expected to be (§6). Both numbers move every hour. Neither is a final result; the one that matters
+arrives on 4 November.
 
 ### Key terms
 
