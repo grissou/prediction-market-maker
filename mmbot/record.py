@@ -5,7 +5,7 @@ OWNS     the sqlite file, in the old bot's schema (tag legacy-2026-10-11, mmbot/
          analyses and the paper read it unchanged: pd.read_sql("select * from snapshots", conn).
 NEVER    spends a request (it reads the cycle's View and the bulk tops already read), or stops a cycle: a write
          error is logged and the row is lost.
-ORIGIN   The rewrite dropped it (README §9); the fix brief of 10 Oct put it back, minimal: no book or trade tables.
+ORIGIN   The rewrite dropped it (README §10); the fix brief of 10 Oct put it back, minimal: no book or trade tables.
 """
 import logging
 import os

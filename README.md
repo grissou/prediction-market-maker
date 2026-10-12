@@ -207,7 +207,32 @@ earned about 11% of expected value per unit of cash deployed and the ladder abou
 hundred; a value refill that sold more than the buyers could place and a momentum rule that could never buy
 cost 4.4k between them and were changed or removed.
 
-## 7. Limitations
+## 7. What I learned
+
+**The momentum sleeve was greed.** It was a rash, last-minute addition: I wanted to catch up to the
+leaders of the tournament, and a rule that bought longshots while the tilt was rising would have made a
+lot of money in the first days. By the time I built it, it no longer worked, and it sold 12.9k of good
+positions to fund buys it never made. The lesson is that in a market it is usually a bad position to be
+responding to someone else making more and trying to copy them. The attribution table is what told me,
+and the sleeve was switched off two days after it went live.
+
+**The leaderboard number isn't the real one.** It clicked when the bot was suddenly losing money. I went
+and checked the P&L, it seemed to be losing a lot, and then I saw that some contracts the exchange was
+marking at 15% were trading at 5% on Polymarket. The marks were carrying the tilt, and so was my loss. That
+is where the distinction between value at the marks and value at settlement in this README comes from, and
+why the bot reports both.
+
+**How many market makers there were.** I didn't expect the quantity, because the Smart Score doesn't
+really reward it. Between all the bots quoting, the book became what was likely one of the most liquid in
+the whole of prediction markets: tighter than Polymarket's own. That is why market making ended up as a
+small sleeve and the money is made against the bias instead.
+
+**I should have anticipated the tilt.** It was obvious: a ranking on marks, a month with no settlement,
+and a crowd of people who want to look good on a leaderboard. Some reading in behavioural finance before
+the start would have put the value book in place on day one instead of day four. If I started again, that
+is the change.
+
+## 8. Limitations
 
 - Polymarket's price is taken as the true probability; where it is thin or mismatched, the bot trades its
   own error.
@@ -216,13 +241,13 @@ cost 4.4k between them and were changed or removed.
 - This is play money. Participants chase rank, which plausibly causes the bias; the result may not carry
   over to real-money markets.
 
-## 8. Fair play
+## 9. Fair play
 
 The bot only places orders it intends to fill, never trades with itself, runs on one account, and stays
 within the exchange's measured rate limit. No spoofing, wash trading, collusion, multiple accounts or
 exploitation of exchange bugs; these constraints were part of every design brief.
 
-## 9. The repository
+## 10. The repository
 
 | | |
 |---|---|

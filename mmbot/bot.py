@@ -422,7 +422,7 @@ class Bot:
 
     @staticmethod
     def crosses_own(order, ours):
-        """True if the order would trade against one of ours (never trade with ourselves, README §8)."""
+        """True if the order would trade against one of ours (never trade with ourselves, README §9)."""
         for r in ours:
             if r.is_bid != order.is_bid and (order.price >= r.price - PRICE_TOL if order.is_bid
                                              else order.price <= r.price + PRICE_TOL):
