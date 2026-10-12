@@ -31,10 +31,25 @@ The bot runs four strategies side by side, each with its own capital:
 | **Market making** | Quote both sides in the middle of the probability range, with a reserve of cash the allocator keeps topped up |
 | **Harvest ladder** | Trade the bias itself: resting orders that sell it only at prices better than today's |
 
-On 11 October 2026, day 11 of 35, the account was worth 104.2k by the exchange's own prices, and 112.6k
-if positions are valued at the real-money market's probabilities, which is what the payout at the result
-is expected to be (§6). Both numbers move every hour. Neither is a final result; the one that matters
-arrives on 4 November.
+### 1.1 Results so far (interim: 12 October 2026, day 12 of 35; the tournament ends 4 November)
+
+| | 12 Oct 2026, 12:48 UTC |
+|---|---|
+| Account at the exchange's marks | **104,298** (+4.3% from 100,000) |
+| Expected value at settlement (cash + positions at Polymarket *p*) | **112,946** (+12.9%) |
+| Leaderboard | **182nd of 1,455** entrants (top 12.5%) |
+| Lowest reading | 99,441 on 4 October (−0.56% below the start) |
+| Largest peak-to-trough fall | −2.6% (3–4 October: the mark-driven selling episode of §3) |
+| Edge per fill, 2–11 October, 12,981 fills | 5.3c a share; 10.9% of the cash each fill tied up; 69.5k in total |
+| Realised profit on closed trades | about 3k |
+
+![Account value at the marks, 2–12 October 2026](docs/equity.png)
+
+*Account value at the exchange's marks, one reading a minute. The first 37 hours are left out: with
+almost no trades in most books, the trade-based marks put the account anywhere between 100k and 150k.*
+
+Both numbers in the first two rows move every hour, and neither is a final result; the one that
+matters arrives on 4 November. §6 says what each row means and which strategy earned it.
 
 ### Key terms
 
@@ -119,8 +134,8 @@ and each strategy can apply a simple hurdle: 8% for the ladder, 5 points of net 
 
 **The value book and the value floor.** The bot never rests an order that would reduce a position at a
 worse price than its value: a long is never offered below *p* − *m*, a short is never bought back above
-*p* + *m*. The margin *m* is a live setting (0.5c by default; 4c on the live bot at the time of writing,
-to raise cash for the other strategies; §6.3 gives the cost). The floor applies in every mode, and it only
+*p* + *m*. The margin *m* is a live setting (0.5c by default; 3c on the live bot at the time of writing,
+to raise cash for the other strategies; §6 gives the cost of the 4 October episode). The floor applies in every mode, and it only
 ever moves a price away from the other side of the book, so it can never hit another trader. The two
 exception is deliberate and separately limited: allocator swaps.
 
@@ -176,27 +191,12 @@ the old one. `deploy/RELEASES.md` has the dates; `docs/ENGINEERING_NOTES.md` has
 The code was written with AI coding assistants (Claude Code) under the author's direction; every design
 decision, deployment and risk setting was the author's.
 
-## 6. Results (interim: as of 12 October 2026, day 12 of 35; the tournament ends 4 November)
+## 6. Results: what the numbers mean, and which strategy earned them
 
-These are the bot's own records (`analysis/report.py` on the recorder database) and the exchange's
-leaderboard. They will be replaced by the settlement figures after 4 November.
+The table in §1.1 comes from the bot's own records (`analysis/report.py` on the recorder database) and
+the exchange's leaderboard; it will be replaced by the settlement figures after 4 November.
 
-| | 12 Oct 2026, 12:48 UTC |
-|---|---|
-| Account at the exchange's marks | **104,298** (+4.3% from 100,000) |
-| Expected value at settlement (cash + positions at Polymarket *p*) | **112,946** (+12.9%) |
-| Leaderboard | **182nd of 1,455** entrants (top 12.5%) |
-| Lowest reading | 99,441 on 4 October (−0.56% below the start) |
-| Largest peak-to-trough fall | −2.6% (3–4 October: the mark-driven selling episode of §3) |
-| Edge per fill, 2–11 October, 12,981 fills | 5.3c a share; 10.9% of the cash each fill tied up; 69.5k in total |
-| Realised profit on closed trades | about 3k |
-
-![Account value at the marks, 2–12 October 2026](docs/equity.png)
-
-*Account value at the exchange's marks, one reading a minute. The first 37 hours are left out: with
-almost no trades in most books, the trade-based marks put the account anywhere between 100k and 150k.*
-
-The gap between the first two rows is the tilt (§3.1) applied to the bot's own book: it is what the
+The gap between its first two rows is the tilt (§3.1) applied to the bot's own book: it is what the
 positions would pay if Polymarket's probabilities are right, and it is the number the bot manages to.
 "Edge per fill" is the bot's own measure at the moment of each fill, not a realised return: a fill that
 bought at 20c when *p* was 25c counts 5c. It includes the 4 October morning, when the rule that sold the
@@ -224,58 +224,14 @@ exploitation of exchange bugs; these constraints were part of every design brief
 
 ## 9. The repository
 
-The bot is a small package. Each file owns one concern and says at its top what it owns, what it must never
-do, and which lesson of the first ten days it carries (`docs/DESIGN.md` is the contract between them).
-
-| File | Owns |
+| | |
 |---|---|
-| `mm_bot.py` | The entry point (`python mm_bot.py run --live`); it only imports the package and runs `main` |
-| `mmbot/config.py` | Every setting with its documentation and range, the list of settings that may be changed live, the settings-file reader, the environment |
-| `mmbot/state.py` | The records every module shares: markets, books, orders, fills, the account, the bot's view of a cycle; tick arithmetic |
-| `mmbot/exchange.py` | The API client, the realtime feed, request and write budgets, the 429 pause, order-change records |
-| `mmbot/pricing.py` | Fair value from Polymarket, race scaling, the tilt estimator, edge per unit of cash (the four formulas of §4.2) |
-| `mmbot/risk.py` | The worst case and its correlated measure, per-market and per-state caps, the cash gate, reduce-only, the kill switch |
-| `mmbot/value.py` | The value floor and the allocator: swaps, buys at the touch, the refill sized to what the buyers can use |
-| `mmbot/mm.py` | Market-making quotes in the middle band, inventory skew, the reserve, the recycler |
-| `mmbot/ladder.py` | The harvest ladder |
-| `mmbot/bot.py` | The `Bot`: the cycle (read, price, risk, decide, reconcile, send, report), order management, `status.json` |
-| `mmbot/ops.py` | Handover, watchdog, the start-up self-test, the run loop, the command line |
-| `mmbot/record.py` | The recorder: the books and the account once a minute into `market_data.sqlite` (the old schema, so the analysis tools read it) |
-| `mmbot/notify.py` | Phone alerts and the hourly summary (ntfy) |
+| `mm_bot.py`, `mmbot/` | The bot: 12 files, each owning one concern, with a map and the rules the code keeps in `mmbot/README.md` |
 | `ref_prices.py`, `ref_map.json` | Polymarket prices and the mapping from races to their markets |
-| `tests/` | 10 suites on a fake exchange (`tests/README.md`): one per module, the bot end to end, the stress test, the shadow run's conditions, and the replay of a recorded live state against the old bot |
-| `analysis/` | The seven reports the design rests on, and three tools that read the recorder |
-| `deploy/` | Service unit, server setup, the handover script, `RUNBOOK.md`, `RELEASES.md`, the live settings file as an example |
-| `docs/` | The module contract, the engineering notes on the exchange, the talk |
+| `tests/` | Eight offline suites on a fake exchange, one per module plus the bot end to end and a stress test (`tests/README.md`) |
+| `analysis/` | The five reports the design rests on and four tools that read the recorder, including `report.py` for §1.1 |
+| `deploy/` | Service unit, server setup, the live settings as an example, `RELEASES.md` (what went live when), `RUNBOOK.md` (installing, running, operating) |
+| `docs/` | The paper (`SIG_Predictions_Cup_paper.docx`), the engineering notes on the exchange, a 10-minute talk |
 
-The old bot was 16,600 lines in one file on 8 October, split into a package on 10 October and replaced by this
-rewrite on 11 October; it is the tag `legacy-2026-10-11`. The build's working material is on the branch
-`archive/build-notes-2026-10`.
-
-### Running it
-
-```bash
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt     # Python 3.10+
-printf 'SUPERMARKET_API_KEY=...\nTOURNAMENT_SLUG=midterm-elections\n' > .env
-source .venv/bin/activate
-python mm_bot.py status        # account, positions, open orders
-python mm_bot.py run           # dry run: live data, logs every order it would send, sends nothing
-python mm_bot.py run --live    # trade
-python mm_bot.py cancel        # cancel our open orders (--all: every order on the account)
-python ref_prices.py check     # tournament price vs Polymarket for every contract
-
-for t in tests/test_*.py; do python "$t" | tail -1; done      # the suites
-python tests/test_stress.py 5000 8                             # a longer stress run
-```
-
-`tests/test_replay.py` replays a recorded live state through the old bot and this one; it builds the state
-from the `ops-snapshot-2026-10-04` branch and the old bot from the tag `legacy-2026-10-11`, and skips
-without them (`tests/README.md`).
-
-On a server: `deploy/setup.sh` installs and hardens an Ubuntu host; `systemctl enable --now mmbot` runs
-the bot as a service that restarts on crashes and reboots; `journalctl -u mmbot -f` follows the log. An
-optional `ALERT_URL` (ntfy) sends phone alerts and a summary every two hours. Everything the bot writes
-while running goes under `run/` next to it (git-ignored): `settings_override.json`, `status.json`,
-`state.json`, `mm_bot.log`, the recorder's `market_data.sqlite`, the handover file and the kill-switch
-marker. The live settings file exists only on the server; `deploy/settings_override.json.example` is its
-copy at the values of 11 October, and `deploy/RELEASES.md` records what was switched on, and when.
+Installing and running it, locally or on a server, is in `deploy/RUNBOOK.md`. The bot before the rewrite,
+with its 35 test suites and the full analysis, is at the tag `legacy-2026-10-11`.

@@ -5,6 +5,28 @@ WorkingDirectory /opt/mmbot), phone alerts via ntfy (ALERT_URL in /opt/mmbot/.en
 under /opt/mmbot/run/: `settings_override.json`, `status.json` (health: account_value, resting, ev_outcome, alloc...),
 `state.json`, `handover.json`, `kill_switch.tripped`, `mm_bot.log` (rotated), the recorder's `market_data.sqlite`.
 
+## 0. Running it (locally or on a server)
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt     # Python 3.10+
+printf 'SUPERMARKET_API_KEY=...\nTOURNAMENT_SLUG=midterm-elections\n' > .env
+source .venv/bin/activate
+python mm_bot.py status        # account, positions, open orders
+python mm_bot.py run           # dry run: live data, logs every order it would send, sends nothing
+python mm_bot.py run --live    # trade
+python mm_bot.py cancel        # cancel our open orders (--all: every order on the account)
+python ref_prices.py check     # tournament price vs Polymarket for every contract
+
+for t in tests/test_*.py; do python "$t" | tail -1; done      # the suites
+python tests/test_stress.py 5000 8                             # a longer stress run
+```
+
+On a server: `deploy/setup.sh` installs and hardens an Ubuntu host; `systemctl enable --now mmbot` runs
+the bot as a service that restarts on crashes and reboots; `journalctl -u mmbot -f` follows the log. An
+optional `ALERT_URL` (ntfy) in `.env` sends phone alerts and an hourly summary. Everything the bot writes
+while running goes under `run/` next to it (git-ignored). The live settings file exists only on the server;
+`deploy/settings_override.json.example` is its copy at the values of 11 October.
+
 ## A. Settings (no restart)
 1. Edit /opt/mmbot/run/settings_override.json (one JSON object; start from `deploy/settings_override.json.example`).
    Only the names in `LIVE` in mmbot/config.py are accepted, each within its range; anything else is refused with
