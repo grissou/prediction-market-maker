@@ -176,16 +176,36 @@ the old one. `deploy/RELEASES.md` has the dates; `docs/ENGINEERING_NOTES.md` has
 The code was written with AI coding assistants (Claude Code) under the author's direction; every design
 decision, deployment and risk setting was the author's.
 
-## 6. Results
+## 6. Results (interim: as of 12 October 2026, day 12 of 35; the tournament ends 4 November)
 
-Live figures are in `run/status.json` and on the bot's 2-hourly message; the paper carries the analysis.
-After ten days (11 October 2026): account 104.2k at the exchange's marks from 100,000, 112.6k at expected
-settlement value, realised profit 3.0k, rank 178 of 1,419 participants. The gap between the two valuations
-is the tilt applied to the bot's own book. Attribution from the bot's trade lines over 5–10 October
-(`analysis/reports/RETURNS_ATTRIBUTION.md`): the allocator earned about 11% of expected value per unit of
-cash deployed and the ladder about 15%; market making a few hundred; a value refill that sold more than the
-buyers could place and a momentum rule that could never buy cost 4.4k between them and were changed or
-removed.
+These are the bot's own records (`analysis/report.py` on the recorder database) and the exchange's
+leaderboard. They will be replaced by the settlement figures after 4 November.
+
+| | 12 Oct 2026, 12:48 UTC |
+|---|---|
+| Account at the exchange's marks | **104,298** (+4.3% from 100,000) |
+| Expected value at settlement (cash + positions at Polymarket *p*) | **112,946** (+12.9%) |
+| Leaderboard | **182nd of 1,455** entrants (top 12.5%) |
+| Lowest reading | 99,441 on 4 October (−0.56% below the start) |
+| Largest peak-to-trough fall | −2.6% (3–4 October: the mark-driven selling episode of §3) |
+| Edge per fill, 2–11 October, 12,981 fills | 5.3c a share; 10.9% of the cash each fill tied up; 69.5k in total |
+| Realised profit on closed trades | about 3k |
+
+![Account value at the marks, 2–12 October 2026](docs/equity.png)
+
+*Account value at the exchange's marks, one reading a minute. The first 37 hours are left out: with
+almost no trades in most books, the trade-based marks put the account anywhere between 100k and 150k.*
+
+The gap between the first two rows is the tilt (§3.1) applied to the bot's own book: it is what the
+positions would pay if Polymarket's probabilities are right, and it is the number the bot manages to.
+"Edge per fill" is the bot's own measure at the moment of each fill, not a realised return: a fill that
+bought at 20c when *p* was 25c counts 5c. It includes the 4 October morning, when the rule that sold the
+value book at compressed marks cost 14.1k of it in a day.
+
+Attribution by strategy over 5–10 October (`analysis/reports/RETURNS_ATTRIBUTION.md`): the allocator
+earned about 11% of expected value per unit of cash deployed and the ladder about 15%; market making a few
+hundred; a value refill that sold more than the buyers could place and a momentum rule that could never buy
+cost 4.4k between them and were changed or removed.
 
 ## 7. Limitations
 
@@ -221,7 +241,7 @@ do, and which lesson of the first ten days it carries (`docs/DESIGN.md` is the c
 | `mmbot/bot.py` | The `Bot`: the cycle (read, price, risk, decide, reconcile, send, report), order management, `status.json` |
 | `mmbot/ops.py` | Handover, watchdog, the start-up self-test, the run loop, the command line |
 | `mmbot/record.py` | The recorder: the books and the account once a minute into `market_data.sqlite` (the old schema, so the analysis tools read it) |
-| `mmbot/notify.py` | Phone alerts and the 2-hourly summary (ntfy) |
+| `mmbot/notify.py` | Phone alerts and the hourly summary (ntfy) |
 | `ref_prices.py`, `ref_map.json` | Polymarket prices and the mapping from races to their markets |
 | `tests/` | 10 suites on a fake exchange (`tests/README.md`): one per module, the bot end to end, the stress test, the shadow run's conditions, and the replay of a recorded live state against the old bot |
 | `analysis/` | The seven reports the design rests on, and three tools that read the recorder |
