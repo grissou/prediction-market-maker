@@ -136,7 +136,7 @@ and each strategy can apply a simple hurdle: 8% for the ladder, 5 points of net 
 worse price than its value: a long is never offered below *p* − *m*, a short is never bought back above
 *p* + *m*. The margin *m* is a live setting (0.5c by default; 3c on the live bot at the time of writing,
 to raise cash for the other strategies; §6 gives the cost of the 4 October episode). The floor applies in every mode, and it only
-ever moves a price away from the other side of the book, so it can never hit another trader. The two
+ever moves a price away from the other side of the book, so it can never hit another trader. The one
 exception is deliberate and separately limited: allocator swaps.
 
 **The allocator.** Once an hour, on fresh books and a fresh reading of cash, it pairs the holdings with
@@ -199,8 +199,10 @@ the exchange's leaderboard; it will be replaced by the settlement figures after 
 The gap between its first two rows is the tilt (§3.1) applied to the bot's own book: it is what the
 positions would pay if Polymarket's probabilities are right, and it is the number the bot manages to.
 "Edge per fill" is the bot's own measure at the moment of each fill, not a realised return: a fill that
-bought at 20c when *p* was 25c counts 5c. It includes the 4 October morning, when the rule that sold the
-value book at compressed marks cost 14.1k of it in a day.
+bought at 20c when *p* was 25c counts 5c. It includes 4 October, the day of the mark-driven selling of §3.2:
+by this measure the day's 2,922 fills, across every strategy, summed to −14.1k. The 3.7k in §3.2 is a
+narrower figure, the expected value given up by that one selling rule in the four hours before it was
+stopped.
 
 Attribution by strategy over 5–10 October (`analysis/reports/RETURNS_ATTRIBUTION.md`): the allocator
 earned about 11% of expected value per unit of cash deployed and the ladder about 15%; market making a few
