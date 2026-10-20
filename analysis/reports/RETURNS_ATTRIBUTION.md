@@ -72,4 +72,4 @@ The 10 October update reversed one line: the harvest ladder, idle in the first w
 ## Details
 Settings changes proposed from the first window: `momentum_auto` false; `value_sell_margin` 0.04 → 0.01 (the wide floor existed to fund the sleeve and market making); `alloc_mm_reserve` 20000 → 2000 or 0 (the refill stops draining value positions and the 10k of free cash in the reserve goes to buys at about 10% edge). Expected effect: the refill's −400/day stops and the reallocation step returns to its 5 October pace of +290/day net.
 
-Expected value here means value at settlement with positions at *p*, as opposed to the exchange's marks. The momentum candidate filter is the function that lists momentum candidates in the old bot (tag `legacy-2026-10-11`). The parser is `analysis/returns_attribution.py`.
+Expected value here means value at settlement with positions at *p*, as opposed to the exchange's marks. The momentum candidate filter is the function that listed momentum candidates in the first bot.

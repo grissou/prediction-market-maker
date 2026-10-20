@@ -12,7 +12,6 @@ ORIGIN   The 3.7k morning (selling below value to raise cash) gave the floor. RE
          the allocator's buys earned ~11% per unit of cash, the refill sold 110k of value for 43k of buying; so a
          sale happens only when a buy can use the cash. While the reserve pauses value adds, only swaps adding no
          collateral and no national-swing exposure go (release 14.1's room netting; their buys are tagged "swap").
-         Old bot (tag legacy-2026-10-11): mmbot/value.py (alloc_*), mmbot/mm.py (swap_floor_ok), mmbot/quoting.py (value_side_prices).
          Left behind: NO+NO set unwinds (the 4 Oct book holds one set, worth 1.0), the set ladder, the momentum sleeve.
 OPEN     A swap in flight is not saved: after a restart its cash waits for the next run. The bot does not say if an
          IOC was sent or deferred, so each is offered once (a deferred one is lost, never sent twice).

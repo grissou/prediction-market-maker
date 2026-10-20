@@ -1,8 +1,7 @@
 # Engineering notes: what the exchange taught us
 
 Facts about The Super Market API learnt in the first days of trading (1–3 October 2026) that the bot is
-built around. Everything here is measured, not read from documentation. The longer original notes, with the
-scenarios and experiments behind each item, are at the tag `legacy-2026-10-11`.
+built around. Everything here is measured, not read from documentation.
 
 ## Rate limits
 
@@ -24,6 +23,12 @@ scenarios and experiments behind each item, are at the tag `legacy-2026-10-11`.
 - The realtime feed (Supabase WebSocket) flags that a book changed but carries no levels; the book is
   re-read over REST. The feed drops a few times a day with code 1006 and does not auto-reconnect: the bot
   detects a dead socket and reconnects; a full REST reconciliation every 30 s covers what the feed misses.
+- The realtime token names the channels a key may read. On 12 October the exchange stopped granting the
+  tournament channel (book changes); only the user channel (fills) remains. A bot that insists on both
+  reconnects every minute for days; the bot now subscribes to what the token grants and treats the rest as
+  optional.
+- A position whose Polymarket quote blinks out (a thin book losing one side for a minute) must keep its last
+  fair value: valued at the exchange mark instead, one Rhode Island leg moved the reported EV by 1k.
 - The exchange went unresponsive for about 20 minutes on 7 October. The watchdog (no cycle for 10 minutes
   → cancel everything, exit, systemd restarts) handled it.
 

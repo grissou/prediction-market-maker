@@ -31,19 +31,19 @@ The bot runs four strategies side by side, each with its own capital:
 | **Market making** | Quote both sides in the middle of the probability range, with a reserve of cash the allocator keeps topped up |
 | **Harvest ladder** | Trade the bias itself: resting orders that sell it only at prices better than today's |
 
-### 1.1 Results so far (interim: 12 October 2026, day 12 of 35; the tournament ends 4 November)
+### 1.1 Results so far (interim: 20 October 2026, day 20 of 35; the tournament ends 4 November)
 
-| | 12 Oct 2026, 12:48 UTC |
+| | 20 Oct 2026, 21:58 UTC |
 |---|---|
-| Account at the exchange's marks | **104,298** (+4.3% from 100,000) |
-| Expected value at settlement (cash + positions at Polymarket *p*) | **112,946** (+12.9%) |
-| Leaderboard | **182nd of 1,455** entrants (top 12.5%) |
+| Account at the exchange's marks | **104,786** (+4.8% from 100,000) |
+| Expected value at settlement (cash + positions at Polymarket *p*) | **114,487** (+14.5%) |
+| Leaderboard | **187th of 1,727** entrants (top 11%) |
 | Lowest reading | 99,441 on 4 October (−0.56% below the start) |
 | Largest peak-to-trough fall | −2.6% (3–4 October: the mark-driven selling episode of §3) |
 | Edge per fill, 2–11 October, 12,981 fills | 5.3c a share; 10.9% of the cash each fill tied up; 69.5k in total |
-| Realised profit on closed trades | about 3k |
+| Realised profit on closed trades | about 3k before the 11 October rewrite, 0.5k since |
 
-![Account value at the marks, 2–12 October 2026](docs/equity.png)
+![Account value at the marks, 2–20 October 2026](docs/equity.png)
 
 *Account value at the exchange's marks, one reading a minute. The first 37 hours are left out: with
 almost no trades in most books, the trade-based marks put the account anywhere between 100k and 150k.*
@@ -176,8 +176,9 @@ if it widens. It has its own 10k budget, carved out of the market-making reserve
 ## 5. Engineering
 
 The bot is about 4,400 lines of Python in 12 files, with 58 settings, run as a systemd service on a small
-server in the exchange's region. It is event-driven: book changes and fills arrive over a WebSocket, a cycle
-runs within 1–2 seconds, a full REST reconciliation every 30 seconds covers what the feed misses. Requests
+server in the exchange's region. It is event-driven: fills arrive over a WebSocket (book changes did too until 12 October, when the
+exchange stopped granting that channel), a cycle runs within 1–2 seconds, and a full REST reconciliation
+every 30 seconds covers what the feed misses. Requests
 are budgeted at 80 a minute and order writes at 28, below the exchange's measured limit, and an order that
 does not fit is deferred rather than dropped. Settings change through a JSON file re-read every 30 seconds;
 code changes use a handover restart that keeps the resting orders. Eight offline test suites run against a
@@ -260,5 +261,4 @@ exploitation of exchange bugs; these constraints were part of every design brief
 | `deploy/` | Service unit, server setup, the live settings as an example, `RELEASES.md` (what went live when), `RUNBOOK.md` (installing, running, operating) |
 | `docs/` | The paper (`SIG_Predictions_Cup_paper.docx`), the engineering notes on the exchange, a 10-minute talk |
 
-Installing and running it, locally or on a server, is in `deploy/RUNBOOK.md`. The bot before the rewrite,
-with its 35 test suites and the full analysis, is at the tag `legacy-2026-10-11`.
+Installing and running it, locally or on a server, is in `deploy/RUNBOOK.md`.

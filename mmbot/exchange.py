@@ -598,6 +598,7 @@ class Feed:
         self.wake = threading.Event()
         self.dirty, self.account_changed, self.resync = set(), False, True
         self.joined, self.revisions = set(), {}       # topics joined; topic -> last revision accepted
+        self.required, self.refused = set(), set()    # topics a session needs; optional topics refused (noted once)
         self.connected, self.stopping, self.socket_error = False, False, False
         self.thread = threading.Thread(target=lambda: asyncio.run(self.run()), name="realtime", daemon=True)
 
@@ -609,7 +610,7 @@ class Feed:
         self.stopping = True
 
     def healthy(self):
-        return self.connected and len(self.joined) >= 2
+        return self.connected and bool(self.required) and self.required <= self.joined
 
     def take(self):
         """(dirty eids, account changed?, resync?) since the last take."""
@@ -665,8 +666,11 @@ class Feed:
                 self.joined.discard(topic)
         if name == "SUBSCRIBED":
             self.flag_resync(f"subscribed to {topic.split(':')[0]}")
-        else:
+        elif topic in self.required:
             log.warning("realtime: %s -> %s %s", topic.split(":")[0], name, err or "")
+        elif topic not in self.refused:                # optional (not in the token's grant): say so once a session
+            self.refused.add(topic)
+            log.info("realtime: %s channel not granted (%s): books come from the 30 s check", topic.split(":")[0], name)
 
     def flag_resync(self, why):
         with self.lock:
@@ -711,7 +715,15 @@ class Feed:
         await client.connect()
         try:
             await client.set_auth(tok["token"])
-            topics = [f"tournament:{self.tid}", tok["channels"]["user"]]
+            # The token says which private channels this key may read. Since 12 Oct it grants only the user
+            # channel; the tournament channel (which books changed) is tried but a session lives without it.
+            granted = dict(tok.get("channels") or {})
+            topics = list(granted.values())
+            tournament = granted.get("tournament", f"tournament:{self.tid}")
+            if tournament not in topics:
+                topics.append(tournament)
+            with self.lock:
+                self.required, self.refused = set(granted.values()), set()
             for topic in topics:
                 ch = client.channel(topic, {"config": {"private": True}})
                 ch.on_broadcast("market_batch", lambda m, t=topic: self.on_market(t, m))
@@ -733,7 +745,7 @@ class Feed:
             await asyncio.sleep(1)
             if self.socket_dead(client):
                 raise ConnectionError("socket closed")
-            if len(self.joined) < len(topics) and time.monotonic() - started > JOIN_TIMEOUT_S:
+            if not self.required <= self.joined and time.monotonic() - started > JOIN_TIMEOUT_S:
                 raise ConnectionError("a channel subscription failed or dropped")
             if time.monotonic() >= deadline:
                 log.info("realtime: renewing the session")

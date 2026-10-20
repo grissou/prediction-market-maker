@@ -596,15 +596,18 @@ class Bot:
     # ------------------------------------------------------------------ report
     def ev_outcome(self, view):
         """(expected value at the result, held markets without a fair value): the account with every priced
-        position revalued from its mark to p (finding 3.2)."""
+        position revalued from its mark to p (finding 3.2). A position whose Polymarket quote has blinked out
+        (a thin book losing one side for a minute) keeps its last fair value rather than falling back to the
+        mark, which carries the tilt: that fallback moved the reported EV by about 1k on one Rhode Island leg."""
         ev, unpriced = view.account.value, 0
         if ev is None:
             return None, 0
         for e, q in view.positions.items():
             if not q:
                 continue
-            if e in view.p and e in self.ledger.marks:
-                ev += q * (view.p[e] - self.ledger.marks[e])
+            p = view.p.get(e, self.guard.last_p.get(e))
+            if p is not None and e in self.ledger.marks:
+                ev += q * (p - self.ledger.marks[e])
             else:
                 unpriced += 1
         return round(ev, 2), unpriced

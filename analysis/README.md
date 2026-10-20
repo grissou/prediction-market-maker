@@ -1,8 +1,6 @@
 # Analysis
 
-The research the bot's design rests on, and the four tools that read its recorder. Everything else from the
-build (dry runs, idea rounds, the old log-format tools, eight further reports including a literature review) is at the tag `legacy-2026-10-11`
-and on the branch `archive/build-notes-2026-10`.
+The research the bot's design rests on, and the four tools that read its recorder.
 
 | Report | What it answers |
 |---|---|

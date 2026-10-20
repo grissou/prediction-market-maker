@@ -9,9 +9,7 @@ NEVER    talks to the network (the bot hands in ref_prices.ReferencePrices.get()
 ORIGIN   Finding 3.2 (settlement at the result): a share is worth p whatever the leaderboard marks say, so every
          decision is scored as expected gain at the result per unit of cash. Finding 3.1 (the tilt): the book sits
          at m ~ c + (1 - s)(r - c); s is estimated from the whole cross-section every cycle and reported only
-         (status, ladder context): quoting on a tilted reference was tried and never ran live. Old bot (tag legacy-2026-10-11):
-         mmbot/pricing.py (TiltEstimator, normalise), mmbot/bot.py (reference_prices, scaled_ref, value_p,
-         update_tilt), mmbot/value.py (alloc_edge_held), mmbot/quoting.py (kelly_position).
+         (status, ladder context): quoting on a tilted reference was tried and never ran live.
 OPEN     The estimator compares RAW Polymarket r with the race-normalised book mid (as live); scaling one side
          and not the other moves s by ~0.004 (TILT_ESTIMATOR.md §1 row c). Kept as live; is that intended?
 """

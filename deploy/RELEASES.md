@@ -1,7 +1,7 @@
 # Releases
 
-What went live, when, and what it switched on. Every release shipped with its new settings OFF; the files
-`deploy/package<N>/` named below were the staged `settings_override.json` that switched them on, in stages (kept in git history: tag `legacy-2026-10-11`). A
+What went live, when, and what it switched on. Every release shipped with its new settings OFF; staged settings files
+switched them on, in stages. A
 "handover" is a SIGUSR1 stop (`systemctl kill -s USR1 mmbot`, then start): the new code adopts the resting orders. Rollback copies live on
 the server under `/opt/mmbot/backup-<date>/`. Times are UTC. The commit is the code that ran.
 
@@ -35,6 +35,17 @@ as 16).
 | 7 Oct 11:54 | `value_sell_margin` 0.01 → 0.04 | Nothing in the value book was sellable within 2c of fair; 4c raised about 14k of cash for the other layers at about 470 of expected value |
 | 7 Oct 13:53 | `mm_refill_fast` → false | The fast refill retried unfilled sales every cycle and used the whole request budget; the market maker was down to 19 orders |
 | 8 Oct 14:51 | `momentum_enabled`, `momentum_auto` → false | The sleeve sold 12.9k of value to fund itself and bought nothing: its candidate filter excludes every longshot the bot is short (`analysis/reports/RETURNS_ATTRIBUTION.md`) |
+| 12 Oct 11:19 | `value_sell_margin` 0.01 → 0.03 | Demand-sized refill: the floor raises cash only for buys that are waiting |
+| 13 Oct 09:15 | `alloc_swap_min_gain` 0.05 → 0.08 (`alloc_swap_sell_margin` 0.03 → 0.05, back to 0.03 at 10:38) | A wider swap margin was tried for a widening tilt; it was not the constraint |
+| 13 Oct 10:38 | `mm_risk_reserve_wc` 20000 → 5000 | The plain-sum worst case left 14.8k of room, under the 20k reserved for market making, so value adds were paused; EV growth went from ~100 to ~400 a day |
+| 20 Oct | `worst_case_backstop_frac` 1.0 → 1.2 | The plain sum reached 96% of the account (the correlated measure, the real cap, was 23% against 40%); at 100% the bot would have gone reduce-only |
+
+## Code after the rewrite
+
+| Live from | What changed |
+|---|---|
+| 11 Oct 18:02 | Start-up and the self-test wait out a down or busy exchange instead of exiting (the 17:30 outage left the bot stopped 25 minutes) |
+| 20 Oct | The feed subscribes to the channels the token grants (the tournament channel has not been granted since 12 Oct); EV keeps a position's last fair value when its Polymarket quote blinks out |
 
 ## Lessons the releases taught
 
