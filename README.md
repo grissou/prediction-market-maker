@@ -31,19 +31,19 @@ The bot runs four strategies side by side, each with its own capital:
 | **Market making** | Quote both sides in the middle of the probability range, with a reserve of cash the allocator keeps topped up |
 | **Harvest ladder** | Trade the bias itself: resting orders that sell it only at prices better than today's |
 
-### 1.1 Results so far (interim: 20 October 2026, day 20 of 35; the tournament ends 4 November)
+### 1.1 Results so far (interim: 25 October 2026, day 25 of 35; the tournament ends 4 November)
 
-| | 20 Oct 2026, 21:58 UTC |
+| | 25 Oct 2026, 14:24 UTC |
 |---|---|
-| Account at the exchange's marks | **104,786** (+4.8% from 100,000) |
-| Expected value at settlement (cash + positions at Polymarket *p*) | **114,487** (+14.5%) |
-| Leaderboard | **187th of 1,727** entrants (top 11%) |
+| Account at the exchange's marks | **109,661** (+9.7% from 100,000) |
+| Expected value at settlement (cash + positions at Polymarket *p*) | **115,067** (+15.1%) |
+| Leaderboard | **152nd of 1,782** entrants (top 8.5%) |
 | Lowest reading | 99,441 on 4 October (−0.56% below the start) |
 | Largest peak-to-trough fall | −2.6% (3–4 October: the mark-driven selling episode of §3) |
 | Edge per fill, 2–11 October, 12,981 fills | 5.3c a share; 10.9% of the cash each fill tied up; 69.5k in total |
-| Realised profit on closed trades | about 3k before the 11 October rewrite, 0.5k since |
+| Realised profit on closed trades | about 3k before the 11 October rewrite, 0.8k since |
 
-![Account value at the marks, 2–20 October 2026](docs/equity.png)
+![Account value at the marks, 2–25 October 2026](docs/equity.png)
 
 *Account value at the exchange's marks, one reading a minute. The first 37 hours are left out: with
 almost no trades in most books, the trade-based marks put the account anywhere between 100k and 150k.*
