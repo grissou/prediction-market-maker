@@ -14,7 +14,7 @@ The SIG Predictions Cup is a month-long trading tournament. Participants start w
 units and trade 237 contracts on US midterm election races through an exchange with an order book and
 an API. There are no fees. Every contract pays out at the election result.
 
-The bot trades the whole tournament on its own. I started it as a classical market maker: quote both
+The bot trades the whole tournament on its own. I started it as a  market maker: quote both
 sides of every market, earn the gap between bid and ask, stay close to flat, take no view on who wins.
 That lasted about a week. Three things I found in the live data changed the plan (§3):
 
