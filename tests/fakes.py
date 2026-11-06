@@ -28,6 +28,11 @@ from mmbot.state import Account, Fill, Order, held_usd                    # noqa
 UNLIMITED = 10 ** 6
 
 
+# The fake tournament ends a month from today: the bot reads the real clock, and a fixed date would put every
+# fake market past settlement once the real tournament (closed 4 Nov 2026) was over.
+END_DATE = (datetime.now(timezone.utc) + timedelta(days=30)).strftime("%Y-%m-%dT17:00:00Z")
+
+
 class FakeClient:
     def __init__(self, markets, books, cash=None, live=True, start=100000.0):
         self.market_list = list(markets)  # list[Market]
@@ -83,7 +88,7 @@ class FakeClient:
     # --- reads ---
     def tournament(self):
         self.call("tournament", "read")
-        return {"id": self.tid, "initialBalance": self.start, "status": "active", "endDate": "2026-11-04T17:00:00Z"}
+        return {"id": self.tid, "initialBalance": self.start, "status": "active", "endDate": END_DATE}
 
     def markets(self):
         self.call("markets", "read")
@@ -272,7 +277,7 @@ class FakeRefs:
 
 def raw_market(mid, eid, party, race):
     return {"id": mid, "title": f"Will the {party} Party win the {race}?", "isComposite": False,
-            "settlementDate": "2026-11-04T00:00:00Z", "exchanges": [{"id": eid, "option": "YES"}]}
+            "settlementDate": END_DATE, "exchanges": [{"id": eid, "option": "YES"}]}
 
 
 def two_race_world(cash=None, live=True, books=None):
