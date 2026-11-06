@@ -2,8 +2,8 @@
 
 **A trading bot for the SIG Predictions Cup (US midterm elections, October–November 2026)**
 
-Adam Zerouali, University of Bristol. I wrote this bot for the Cup and it has traded live since the
-tournament opened on 1 October 2026. This repository is the code, the tests, the analysis and a short paper.
+Adam Zerouali, University of Bristol. I wrote this bot for the Cup and it traded live, unattended, from the
+open on 1 October 2026 to the close on 4 November. This repository is the code, the tests, the analysis and a short paper.
 It is a student project: the results are a few weeks of play money, not a track record.
 [![tests](https://github.com/grissou/prediction-market-maker/actions/workflows/tests.yml/badge.svg)](https://github.com/grissou/prediction-market-maker/actions/workflows/tests.yml)
 · MIT licence · Python 3.10, standard library plus `requests` (and optionally `realtime` for the pushed feed).
@@ -31,25 +31,30 @@ The bot runs four strategies side by side, each with its own capital:
 | **Market making** | Quote both sides in the middle of the probability range, with a reserve of cash the allocator keeps topped up |
 | **Harvest ladder** | Trade the bias itself: resting orders that sell it only at prices better than today's |
 
-### 1.1 Results so far (interim: 25 October 2026, day 25 of 35; the tournament ends 4 November)
+### 1.1 Results (tournament closed 4 November 2026 17:00 UTC; figures at 6 November 10:00 UTC, settlement still paying out)
 
-| | 25 Oct 2026, 14:24 UTC |
+| | |
 |---|---|
-| Account at the exchange's marks | **109,661** (+9.7% from 100,000) |
-| Expected value at settlement (cash + positions at Polymarket *p*) | **115,067** (+15.1%) |
-| Leaderboard | **152nd of 1,782** entrants (top 8.5%) |
+| Account at the exchange's marks (cash 88.1k plus 28 unsettled positions at the exchange's price) | **118,187** (+18.2% from 100,000) |
+| Expected value at settlement (cash + unsettled positions at Polymarket *p*) | **122,385** (+22.4%) |
+| Leaderboard | **285th of 1,969** entrants (top 14.5%); best 148th on 27 October |
 | Lowest reading | 99,441 on 4 October (−0.56% below the start) |
-| Largest peak-to-trough fall | −2.6% (3–4 October: the mark-driven selling episode of §3) |
+| Largest peak-to-trough fall at the marks | −8.0% on 4 November, during the count (113.1k at 05:54 to 104.1k at 11:12); expected value rose 5.5k the same day |
 | Edge per fill, 2–11 October, 12,981 fills | 5.3c a share; 10.9% of the cash each fill tied up; 69.5k in total |
-| Realised profit on closed trades | about 3k before the 11 October rewrite, 0.8k since |
+| Fills since the 11 October rewrite | 1,337: market making 663, value book 259, refill 202, allocator and swaps 127, recycler 59, ladder 27 |
 
-![Account value at the marks, 2–25 October 2026](docs/equity.png)
+![The account, 2 October to 6 November 2026](docs/equity.png)
 
-*Account value at the exchange's marks, one reading a minute. The first 37 hours are left out: with
-almost no trades in most books, the trade-based marks put the account anywhere between 100k and 150k.*
+*Blue: account value at the exchange's marks, one reading a minute. Red: expected value at settlement
+from the hourly summaries, available from 11 October. The dotted line is the close. The first 37 hours are
+left out: with almost no trades in most books, the trade-based marks put the account anywhere between
+100k and 150k.*
 
-Both numbers in the first two rows move every hour, and neither is a final result; the one that
-matters arrives on 4 November. §6 says what each row means and which strategy earned it.
+The two lines are the whole argument. For five weeks the marks sat 5 to 10k below expected value, the
+tilt applied to the bot's own book; on election night they swung 8% on no change in the positions; once
+settlement began on 5 November the marked balance climbed to meet the red line. The gap that remains is
+28 positions in races not yet called (House control, Idaho Senate, the Alaska and Arizona governors,
+WA-03, VA-01), 30.1k at the exchange's prices. §6 says which strategy earned what.
 
 ### Key terms
 
@@ -86,7 +91,7 @@ m \approx c + (1 - s)(r - c), \qquad c = \frac{1}{\text{number of candidates in 
 In words: prices are pulled toward "every candidate equally likely" by a factor *s*. A candidate with a
 2% chance trades at 10–15c; one with a 97% chance trades at 85–88c. The bot estimates *s* every cycle
 from the whole cross-section of markets. It rose from 0.046 on 2 October to 0.128 on 4 October, fell to
-0.078 by 6 October, and was rising again at the time of writing (0.092). It moves over days, not minutes.
+0.078 by 6 October, peaked at 0.121 on 20 October and ended at 0.07. It moves over days, not minutes.
 
 This matters in two opposite ways. Shorting longshots and holding favourites to the result earns the
 tilt. But while those positions are held, a rising tilt marks them *down* on the leaderboard.
@@ -134,7 +139,7 @@ and each strategy can apply a simple hurdle: 8% for the ladder, 5 points of net 
 
 **The value book and the value floor.** The bot never rests an order that would reduce a position at a
 worse price than its value: a long is never offered below *p* − *m*, a short is never bought back above
-*p* + *m*. The margin *m* is a live setting (0.5c by default; 3c on the live bot at the time of writing,
+*p* + *m*. The margin *m* is a live setting (0.5c by default; 3c on the live bot from 12 October,
 to raise cash for the other strategies; §6 gives the cost of the 4 October episode). The floor applies in every mode, and it only
 ever moves a price away from the other side of the book, so it can never hit another trader. The one
 exception is deliberate and separately limited: allocator swaps.
@@ -195,7 +200,9 @@ decision, deployment and risk setting was the author's.
 ## 6. Results: what the numbers mean, and which strategy earned them
 
 The table in §1.1 comes from the bot's own records (`analysis/report.py` on the recorder database) and
-the exchange's leaderboard; it will be replaced by the settlement figures after 4 November.
+the exchange's leaderboard. Settlement was still paying out when they were taken: the final cash figure
+will land between the two rows, near the second if Polymarket's probabilities hold for the 28 races still
+to be called.
 
 The gap between its first two rows is the tilt (§3.1) applied to the bot's own book: it is what the
 positions would pay if Polymarket's probabilities are right, and it is the number the bot manages to.
