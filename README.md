@@ -5,8 +5,8 @@
 Adam Zerouali, University of Bristol. I wrote this bot for the Cup and it traded live, unattended, from the
 open on 1 October 2026 to the close on 4 November. This repository is the code, the tests, the analysis and a short paper.
 It is a student project: the results are a few weeks of play money, not a track record.
-[![tests](https://github.com/grissou/prediction-market-maker/actions/workflows/tests.yml/badge.svg)](https://github.com/grissou/prediction-market-maker/actions/workflows/tests.yml)
-· MIT licence · Python 3.10, standard library plus `requests` (and optionally `realtime` for the pushed feed).
+
+Python 3.10, standard library plus `requests` (and optionally `realtime` for the pushed feed).
 
 ## 1. Summary
 
@@ -31,19 +31,23 @@ The bot runs four strategies side by side, each with its own capital:
 | **Market making** | Quote both sides in the middle of the probability range, with a reserve of cash the allocator keeps topped up |
 | **Harvest ladder** | Trade the bias itself: resting orders that sell it only at prices better than today's |
 
-### 1.1 Results (tournament closed 4 November 2026 17:00 UTC; figures at 6 November 10:00 UTC, settlement still paying out)
+### 1.1 Results
+
+**Final figures.** The tournament closed on 4 November 2026 at 17:00 UTC. These are the figures at
+15 November, when the bot was switched off: 113 of the 117 races had been settled by the exchange and paid
+in cash. This is play money.
 
 | | |
 |---|---|
-| Account at the exchange's marks (cash 88.1k plus 28 unsettled positions at the exchange's price) | **118,187** (+18.2% from 100,000) |
-| Expected value at settlement (cash + unsettled positions at Polymarket *p*) | **122,385** (+22.4%) |
-| Leaderboard | **285th of 1,969** entrants (top 14.5%); best 148th on 27 October |
+| Account value (cash 106.4k, plus 13.3k of positions in the four races the exchange had not yet settled, at its own prices) | **119,645** (+19.6% from 100,000) |
+| Expected value once those four settle (cash + the remaining positions at Polymarket *p*) | **122,433** (+22.4%) |
+| Leaderboard | **276th of 1,969** entrants (top 14%); best 148th on 27 October |
 | Lowest reading | 99,441 on 4 October (−0.56% below the start) |
 | Largest peak-to-trough fall at the marks | −8.0% on 4 November, during the count (113.1k at 05:54 to 104.1k at 11:12); expected value rose 5.5k the same day |
 | Edge per fill, 2–11 October, 12,981 fills | 5.3c a share; 10.9% of the cash each fill tied up; 69.5k in total |
 | Fills since the 11 October rewrite | 1,337: market making 663, value book 259, refill 202, allocator and swaps 127, recycler 59, ladder 27 |
 
-![The account, 2 October to 6 November 2026](docs/equity.png)
+![The account, 2 October to 15 November 2026](docs/equity.png)
 
 *Blue: account value at the exchange's marks, one reading a minute. Red: expected value at settlement
 from the hourly summaries, available from 11 October. The dotted line is the close. The first 37 hours are
@@ -52,9 +56,9 @@ left out: with almost no trades in most books, the trade-based marks put the acc
 
 The two lines are the whole argument. For five weeks the marks sat 5 to 10k below expected value, the
 tilt applied to the bot's own book; on election night they swung 8% on no change in the positions; once
-settlement began on 5 November the marked balance climbed to meet the red line. The gap that remains is
-28 positions in races not yet called (House control, Idaho Senate, the Alaska and Arizona governors,
-WA-03, VA-01), 30.1k at the exchange's prices. §6 says which strategy earned what.
+settlement began on 5 November the account climbed in steps toward the red line as races were paid. The
+2.8k gap that remains is the four races the exchange had not settled by 15 November (control of the House
+and MN-01 among them). §6 says which strategy earned what.
 
 ### Key terms
 
@@ -200,9 +204,9 @@ decision, deployment and risk setting was the author's.
 ## 6. Results: what the numbers mean, and which strategy earned them
 
 The table in §1.1 comes from the bot's own records (`analysis/report.py` on the recorder database) and
-the exchange's leaderboard. Settlement was still paying out when they were taken: the final cash figure
-will land between the two rows, near the second if Polymarket's probabilities hold for the 28 races still
-to be called.
+the exchange's leaderboard. 106.4k of the first row is settled cash. The rest is four races the exchange
+had not settled by 15 November, so the fully settled figure will land between the two rows, near the second
+if Polymarket's probabilities hold for those four.
 
 The gap between its first two rows is the tilt (§3.1) applied to the bot's own book: it is what the
 positions would pay if Polymarket's probabilities are right, and it is the number the bot manages to.
@@ -266,6 +270,6 @@ exploitation of exchange bugs; these constraints were part of every design brief
 | `tests/` | Eight offline suites on a fake exchange, one per module plus the bot end to end and a stress test (`tests/README.md`) |
 | `analysis/` | The five reports the design rests on and four tools that read the recorder, including `report.py` for §1.1 |
 | `deploy/` | Service unit, server setup, the live settings as an example, `RELEASES.md` (what went live when), `RUNBOOK.md` (installing, running, operating) |
-| `docs/` | The paper (`SIG_Predictions_Cup_paper.docx`), the engineering notes on the exchange, a 10-minute talk |
+| `docs/` | The paper (`SIG_Predictions_Cup_paper.docx`) and the engineering notes on the exchange |
 
 Installing and running it, locally or on a server, is in `deploy/RUNBOOK.md`.

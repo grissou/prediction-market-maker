@@ -12,5 +12,5 @@ The research the bot's design rests on, and the four tools that read its recorde
 
 | Tool | What it does |
 |---|---|
-| `report.py` | The results table of README §6 and `docs/equity.png`: return, lowest reading, largest fall, daily closes, edge per fill |
+| `report.py` | The results table of README §1.1 and `docs/equity.png`: return, lowest reading, largest fall, daily closes, edge per fill |
 | `valuation.py`, `valuation_level.py`, `valuation_tape.py` | The account valued at the marks, at the book and at Polymarket, from `run/market_data.sqlite` |
