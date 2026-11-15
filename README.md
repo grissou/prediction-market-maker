@@ -34,8 +34,8 @@ The bot runs four strategies side by side, each with its own capital:
 ### 1.1 Results
 
 **Final figures.** The tournament closed on 4 November 2026 at 17:00 UTC. These are the figures at
-15 November, when the bot was switched off: 113 of the 117 races had been settled by the exchange and paid
-in cash. This is play money.
+15 November, when the bot was switched off: every position had been settled by the exchange and paid
+in cash except those in four races. This is play money.
 
 | | |
 |---|---|
